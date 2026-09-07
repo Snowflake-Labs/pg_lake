@@ -29,6 +29,7 @@
 #include "miscadmin.h"
 #include "storage/ipc.h"
 #include "utils/guc.h"
+#include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "pg_lake/http/http_client.h"
 
@@ -44,6 +45,38 @@
 
 /* 180 seconds */
 #define TOTAL_TIMEOUT_MS   180000
+
+/*
+ * Reusable libcurl handles, one per endpoint a backend talks to.
+ *
+ * Opening a connection costs a TCP round trip and a TLS handshake, which for a
+ * cross-region endpoint is more than the request itself: measured against a
+ * Snowflake account in another region, a small request took 0.56 s on a fresh
+ * connection and 0.26 s on one that was already open. libcurl keeps its
+ * connection, DNS and TLS session caches inside the easy handle, so keeping the
+ * handle is what keeps the connection.
+ *
+ * The cache is keyed by the origin of the request and by whether it may present
+ * the deployment's client certificate, so a connection established with that
+ * certificate is never handed to a request that must not offer it. libcurl
+ * compares its own TLS configuration before reusing a connection as well; the
+ * key states the intent rather than relying on that.
+ */
+#define CURL_ORIGIN_MAX_LENGTH 256
+
+typedef struct CurlHandleKey
+{
+	char		origin[CURL_ORIGIN_MAX_LENGTH];
+	HttpTlsClientAuth clientAuth;
+}			CurlHandleKey;
+
+typedef struct CurlHandleEntry
+{
+	CurlHandleKey key;
+	CURL	   *curl;
+}			CurlHandleEntry;
+
+static HTAB *CurlHandleCache = NULL;
 
 
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
@@ -64,8 +97,12 @@ static CURLcode CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 							   HttpTlsClientAuth clientAuth);
 static CURLcode CurlSetHeaders(CURL *curl, const List *headers, struct curl_slist **headerList);
 static void CurlGlobalCleanup(int code, Datum arg);
-static void CurlCleanup(CURL *curl, struct curl_slist *headerList);
-static HttpResult CurlReturnError(CURL *curl, struct curl_slist *headerList,
+static CurlHandleEntry * GetCurlHandle(const char *url, HttpTlsClientAuth clientAuth);
+static void ReleaseCurlHandle(CurlHandleEntry * entry, struct curl_slist *headerList);
+static void DiscardCurlHandle(CurlHandleEntry * entry, struct curl_slist *headerList);
+static void RequestOrigin(const char *url, char *origin, size_t originSize);
+static void CurlCleanupHandleCache(void);
+static HttpResult CurlReturnError(CurlHandleEntry * entry, struct curl_slist *headerList,
 								  CURLcode curlCode, const char *errorMsg);
 static const char *HttpRequestMethodToString(HttpMethod method);
 static char *StrCaseStr(char *haystack, const char *needle);
@@ -320,24 +357,160 @@ CurlSetHeaders(CURL *curl, const List *headers, struct curl_slist **headerList)
 static void
 CurlGlobalCleanup(int code, Datum arg)
 {
+	/* the handles hold the connections, so they go before the library does */
+	CurlCleanupHandleCache();
+
 	if (curlInitialized)
 		curl_global_cleanup();
 }
 
 
 /*
- * CurlCleanup cleans up given curl handle and headers.
+ * GetCurlHandle returns a handle to use for a request, reusing the one that
+ * already has a connection to this endpoint when there is one.
+ *
+ * The handle it returns carries no options from an earlier request: a handle is
+ * reset when it is released, which is also what drops its pointers into the
+ * memory of the request that used it.
+ */
+static CurlHandleEntry *
+GetCurlHandle(const char *url, HttpTlsClientAuth clientAuth)
+{
+	if (CurlHandleCache == NULL)
+	{
+		HASHCTL		hashInfo;
+
+		memset(&hashInfo, 0, sizeof(hashInfo));
+		hashInfo.keysize = sizeof(CurlHandleKey);
+		hashInfo.entrysize = sizeof(CurlHandleEntry);
+		hashInfo.hcxt = TopMemoryContext;
+
+		CurlHandleCache = hash_create("pg_lake http connections", 8, &hashInfo,
+									  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+	}
+
+	CurlHandleKey key;
+
+	memset(&key, 0, sizeof(key));
+	key.clientAuth = clientAuth;
+	RequestOrigin(url, key.origin, sizeof(key.origin));
+
+	bool		found = false;
+	CurlHandleEntry *entry = hash_search(CurlHandleCache, &key, HASH_ENTER, &found);
+
+	if (found && entry->curl != NULL)
+	{
+		ereport(DEBUG4, (errmsg("reusing libcurl handle for %s", key.origin)));
+
+		return entry;
+	}
+
+	ereport(DEBUG4, (errmsg("initializing libcurl handle")));
+
+	entry->curl = curl_easy_init();
+
+	return entry;
+}
+
+
+/*
+ * ReleaseCurlHandle finishes with a handle but keeps its connection.
+ *
+ * Resetting is what makes that safe: it returns every option to its default,
+ * including the error buffer and the response buffer that point into memory the
+ * request is about to release, while leaving the live connection and the TLS
+ * session in place.
  */
 static void
-CurlCleanup(CURL *curl, struct curl_slist *headerList)
+ReleaseCurlHandle(CurlHandleEntry * entry, struct curl_slist *headerList)
 {
-	ereport(DEBUG4, (errmsg("cleaning up libcurl")));
-
 	if (headerList)
 		curl_slist_free_all(headerList);
 
-	if (curl)
-		curl_easy_cleanup(curl);
+	if (entry != NULL && entry->curl != NULL)
+		curl_easy_reset(entry->curl);
+}
+
+
+/*
+ * DiscardCurlHandle throws a handle away, which is what a failed request gets:
+ * its connection is in a state we know nothing about, and one extra handshake is
+ * a small price for not reusing it.
+ */
+static void
+DiscardCurlHandle(CurlHandleEntry * entry, struct curl_slist *headerList)
+{
+	if (headerList)
+		curl_slist_free_all(headerList);
+
+	if (entry == NULL)
+		return;
+
+	if (entry->curl != NULL)
+		curl_easy_cleanup(entry->curl);
+
+	hash_search(CurlHandleCache, &entry->key, HASH_REMOVE, NULL);
+}
+
+
+/*
+ * RequestOrigin copies the scheme, host and port of a URL, which is what decides
+ * whether two requests can share a connection.
+ */
+static void
+RequestOrigin(const char *url, char *origin, size_t originSize)
+{
+	const char *hostStart = strstr(url, "://");
+	size_t		originLength = 0;
+
+	if (hostStart == NULL)
+	{
+		/*
+		 * not a URL we can take apart, so let it have a cache entry of its
+		 * own
+		 */
+		strlcpy(origin, url, originSize);
+		return;
+	}
+
+	hostStart += 3;
+
+	const char *pathStart = strchr(hostStart, '/');
+
+	originLength = pathStart != NULL ? (size_t) (pathStart - url) : strlen(url);
+
+	if (originLength >= originSize)
+		originLength = originSize - 1;
+
+	memcpy(origin, url, originLength);
+	origin[originLength] = '\0';
+}
+
+
+/*
+ * CurlCleanupHandleCache closes every connection a backend kept open.
+ */
+static void
+CurlCleanupHandleCache(void)
+{
+	if (CurlHandleCache == NULL)
+		return;
+
+	HASH_SEQ_STATUS scanStatus;
+	CurlHandleEntry *entry = NULL;
+
+	hash_seq_init(&scanStatus, CurlHandleCache);
+
+	while ((entry = (CurlHandleEntry *) hash_seq_search(&scanStatus)) != NULL)
+	{
+		if (entry->curl != NULL)
+			curl_easy_cleanup(entry->curl);
+
+		entry->curl = NULL;
+	}
+
+	hash_destroy(CurlHandleCache);
+	CurlHandleCache = NULL;
 }
 
 
@@ -346,12 +519,12 @@ CurlCleanup(CURL *curl, struct curl_slist *headerList)
  * with the error message.
  */
 static HttpResult
-CurlReturnError(CURL *curl, struct curl_slist *headerList,
+CurlReturnError(CurlHandleEntry * entry, struct curl_slist *headerList,
 				CURLcode curlCode, const char *errorMsg)
 {
 	CurlLogError(curlCode, errorMsg);
 
-	CurlCleanup(curl, headerList);
+	DiscardCurlHandle(entry, headerList);
 
 	HttpResult	errorRes = {0};
 
@@ -592,6 +765,7 @@ static HttpResult
 HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, const List *headers,
 				   HttpTlsClientAuth clientAuth)
 {
+	CurlHandleEntry *entry = NULL;
 	CURL	   *curl = NULL;
 	struct curl_slist *curlHeaders = NULL;
 	CURLcode	curlCode = CURLE_OK;
@@ -618,19 +792,18 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	}
 
 	if (!CheckMinCurlVersion(curl_version_info(CURLVERSION_NOW)))
-		return CurlReturnError(curl, curlHeaders, CURLE_FAILED_INIT, "pg_lake_iceberg requires Curl version 7.20.0 or higher");
+		return CurlReturnError(entry, curlHeaders, CURLE_FAILED_INIT, "pg_lake_iceberg requires Curl version 7.20.0 or higher");
 
 	curlCode = CurlGloballyInitIfNotInitialized();
 
 	if (curlCode != CURLE_OK)
-		return CurlReturnError(curl, curlHeaders, curlCode, "failed to globally initialize libcurl");
+		return CurlReturnError(entry, curlHeaders, curlCode, "failed to globally initialize libcurl");
 
-	ereport(DEBUG4, (errmsg("initializing libcurl handle")));
-
-	curl = curl_easy_init();
+	entry = GetCurlHandle(url, clientAuth);
+	curl = entry->curl;
 
 	if (!curl)
-		return CurlReturnError(curl, curlHeaders, CURLE_FAILED_INIT, "failed to initialize libcurl");
+		return CurlReturnError(entry, curlHeaders, CURLE_FAILED_INIT, "failed to initialize libcurl");
 
 	/* Set up the error buffer */
 	char	   *curlErrorBuffer = NULL;
@@ -638,7 +811,7 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	curlCode = CurlSetErrorBuffer(curl, &curlErrorBuffer);
 
 	if (curlCode != CURLE_OK)
-		return CurlReturnError(curl, curlHeaders, curlCode, "failed to set libcurl error buffer");
+		return CurlReturnError(entry, curlHeaders, curlCode, "failed to set libcurl error buffer");
 
 	Assert(curlErrorBuffer != NULL);
 
@@ -648,14 +821,14 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	curlCode = CurlSetOptions(curl, url, method, postData, &res, clientAuth);
 
 	if (curlCode != CURLE_OK)
-		return CurlReturnError(curl, curlHeaders, curlCode, curlErrorBuffer);
+		return CurlReturnError(entry, curlHeaders, curlCode, curlErrorBuffer);
 
 
 	/* set curl headers */
 	curlCode = CurlSetHeaders(curl, headers, &curlHeaders);
 
 	if (curlCode != CURLE_OK)
-		return CurlReturnError(curl, curlHeaders, curlCode, curlErrorBuffer);
+		return CurlReturnError(entry, curlHeaders, curlCode, curlErrorBuffer);
 
 	/* perform curl request */
 	ereport(DEBUG4, (errmsg("performing libcurl request")));
@@ -663,7 +836,7 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	curlCode = curl_easy_perform(curl);
 
 	if (curlCode != CURLE_OK)
-		return CurlReturnError(curl, curlHeaders, curlCode, curlErrorBuffer);
+		return CurlReturnError(entry, curlHeaders, curlCode, curlErrorBuffer);
 
 	/* fetch curl response code */
 	ereport(DEBUG4, (errmsg("fetching libcurl response status code")));
@@ -671,10 +844,10 @@ HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData, con
 	curlCode = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &res.status);
 
 	if (curlCode != CURLE_OK)
-		return CurlReturnError(curl, curlHeaders, curlCode, curlErrorBuffer);
+		return CurlReturnError(entry, curlHeaders, curlCode, curlErrorBuffer);
 
-	/* curl cleanup */
-	CurlCleanup(curl, curlHeaders);
+	/* keep the connection for the next request to this endpoint */
+	ReleaseCurlHandle(entry, curlHeaders);
 
 	ereport(DEBUG4, (errmsg("libcurl request completed successfully")));
 
