@@ -392,6 +392,10 @@ def create_to_hex_values_table(pg_conn, s3, extension):
             UNION ALL SELECT 0, 0
             UNION ALL SELECT 1, 1
             UNION ALL SELECT -1, -1
+            UNION ALL SELECT 15, 15
+            UNION ALL SELECT 16, 16
+            UNION ALL SELECT 255, 255
+            UNION ALL SELECT 256, 256
             UNION ALL SELECT -2147483648, -9223372036854775808
             UNION ALL SELECT 2147483647, 9223372036854775807
         ) TO '{url}' WITH (FORMAT 'parquet');
@@ -424,7 +428,8 @@ def create_to_hex_values_table(pg_conn, s3, extension):
 )
 def test_to_hex_specific_values(create_to_hex_values_table, pg_conn, col):
     """Verify to_hex(int4)/to_hex(int8) pushdown returns the same results as
-    Postgres for NULL, 0, 1, -1, and both the int4 and int8 extremes.
+    Postgres for NULL, 0, 1, -1, the values either side of the nibble and byte
+    boundaries (15/16, 255/256), and both the int4 and int8 extremes.
 
     Covers the two correctness fixes the pushdown rewrite applies: DuckDB's
     to_hex() is uppercase where Postgres's is lowercase, and DuckDB has no
