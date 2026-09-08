@@ -554,11 +554,13 @@ def test_initcap_on_pg_vs_duck(create_initcap_edge_case_tables, pg_conn):
 # strings where a naive implementation diverges -- trailing blanks (which
 # count for text but not for bpchar), multi-byte UTF-8, an emoji plus skin
 # tone modifier and a ZWJ sequence (multiple codepoints that render as one
-# grapheme), and a combining accent.
+# grapheme), and a combining accent. Plain "abc" is here for the translate
+# cases below, where it keeps the expected output readable.
 TEXT_EDGE_VALUES = [
     None,
     "",
     "     ",
+    "abc",
     "abc  ",
     "  abc",
     "h\u00e9llo",
@@ -649,12 +651,21 @@ def test_length_bpchar_is_not_pushed_down(create_text_edge_values_table, pg_conn
 # longer than to, extra to characters ignored, duplicate from characters
 # (first wins), no cascading replacement, and multi-byte characters on
 # either side.
+#
+# no_cascade_overlap is the important one: from and to overlap, so a
+# character produced by the mapping is itself in from.
+#
+#     SELECT translate('abc', 'ab', 'bc');  -- bcc, not ccc
+#
+# Both engines scan the input once, so the "b" that came from "a" is not
+# translated again. A second pass over the output would give "ccc".
 translate_cases = [
     ("delete_all", "abc", ""),
     ("delete_extra", "abcd", "AB"),
     ("to_longer_than_from", "ab", "ABCDEF"),
     ("duplicate_in_from", "aa", "XY"),
     ("no_cascade", "abc", "cba"),
+    ("no_cascade_overlap", "ab", "bc"),
     ("empty_from", "", "XY"),
     ("multibyte_from", "\u00e9\u65e5", "eX"),
     ("multibyte_to", "ab", "\u00e9\u65e5"),
