@@ -65,15 +65,17 @@ typedef struct PgClientThreadInitState
 				 (sockdir), (port))
 
 /*
- * When the OS refuses a new client thread (typically pthread_create returning
- * EAGAIN under thread or memory pressure) the accept loop pauses before it
- * accepts again.  The pause is deliberate backpressure: without it the loop
- * spins accept()->pthread_create()->EAGAIN, pinning the host and never letting
- * the detached client threads exit to free their resources.  The delay grows
- * on consecutive failures and resets as soon as a thread starts.
+ * When we cannot serve an accepted connection -- either the OS refuses a new
+ * client thread (typically pthread_create returning EAGAIN under thread or
+ * memory pressure) or we are already at the client limit -- the accept loop
+ * pauses before it accepts again.  The pause is deliberate backpressure:
+ * without it the loop hot-spins on accept(), pinning the host and (in the
+ * thread-creation case) never letting the detached client threads exit to free
+ * their resources.  The delay grows while we keep failing and resets as soon
+ * as a thread starts.
  */
-#define THREAD_CREATE_BACKOFF_MIN_US (10 * 1000)
-#define THREAD_CREATE_BACKOFF_MAX_US (1000 * 1000)
+#define ACCEPT_BACKOFF_MIN_US (10 * 1000)
+#define ACCEPT_BACKOFF_MAX_US (1000 * 1000)
 
 /*
  * Stack size for each client thread.  A client thread runs the wire protocol
@@ -441,6 +443,23 @@ enable_shutdown_signals(void)
 
 
 /*
+ * grow_accept_backoff advances the accept-loop backpressure delay one step and
+ * sleeps for the new duration, returning it so the caller can track the ramp.
+ * Callers must sleep with shutdown signals enabled so a SIGTERM interrupts it.
+ */
+static long
+grow_accept_backoff(long backoffUs)
+{
+	backoffUs = backoffUs == 0
+		? ACCEPT_BACKOFF_MIN_US
+		: Min(backoffUs * 2, ACCEPT_BACKOFF_MAX_US);
+
+	pg_usleep(backoffUs);
+
+	return backoffUs;
+}
+
+/*
  * pgserver_run is the main loop for the PostgreSQL wire compatible server.
  */
 int
@@ -449,8 +468,11 @@ pgserver_run(PGServer * pgServer)
 	if (install_shutdown_signal_handlers() != STATUS_OK)
 		return STATUS_ERROR;
 
-	/* current accept-loop backpressure delay after a failed thread creation */
-	long		threadCreateBackoffUs = 0;
+	/*
+	 * current accept-loop backpressure delay after a connection we could not
+	 * serve
+	 */
+	long		acceptBackoffUs = 0;
 
 	while (running)
 	{
@@ -507,11 +529,22 @@ pgserver_run(PGServer * pgServer)
 
 		if (threadIndex == InvalidThreadIndex)
 		{
-			PGDUCK_SERVER_LOG("A new client rejected as it exceeds %d clients", MaxAllowedClients);
+			/*
+			 * At capacity.  Log only when we first start rejecting so a
+			 * sustained burst does not fill the log with a line per
+			 * connection, and back off so the accept loop does not hot-spin
+			 * while clients keep arriving.  Shutdown signals are still
+			 * enabled here, so the sleep is interruptible by SIGTERM.
+			 */
+			if (acceptBackoffUs == 0)
+				PGDUCK_SERVER_LOG("new clients rejected: at the %d client limit",
+								  MaxAllowedClients);
 
 			/* TODO: send error message to the client */
 			close(client->clientSocket);
 			pg_free(client);
+
+			acceptBackoffUs = grow_accept_backoff(acceptBackoffUs);
 			continue;
 		}
 
@@ -553,7 +586,7 @@ pgserver_run(PGServer * pgServer)
 		if (threadCreated)
 		{
 			/* served a client, so drop any accumulated backpressure delay */
-			threadCreateBackoffUs = 0;
+			acceptBackoffUs = 0;
 		}
 		else
 		{
@@ -563,11 +596,7 @@ pgserver_run(PGServer * pgServer)
 			 * signals(), so a SIGTERM interrupts the sleep and exits
 			 * promptly.
 			 */
-			threadCreateBackoffUs = threadCreateBackoffUs == 0
-				? THREAD_CREATE_BACKOFF_MIN_US
-				: Min(threadCreateBackoffUs * 2, THREAD_CREATE_BACKOFF_MAX_US);
-
-			pg_usleep(threadCreateBackoffUs);
+			acceptBackoffUs = grow_accept_backoff(acceptBackoffUs);
 		}
 	}
 

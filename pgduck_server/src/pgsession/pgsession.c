@@ -1182,17 +1182,31 @@ pgsession_init_duckdb(PGSession * pgSession)
 
 /*
  * set_client_recv_timeout sets (seconds > 0) or clears (seconds == 0) a receive
- * timeout on the client socket.  Best effort: a missing timeout only weakens
- * the startup-read guard, so failure is logged and otherwise ignored.
+ * timeout on the client socket.
+ *
+ * Setting is best effort: a missing startup timeout only weakens the
+ * startup-read guard.  Clearing is not -- if it fails the established session
+ * keeps the startup timeout for its whole lifetime and starts dropping clients
+ * that sit idle longer than it, so that failure is logged at a higher level.
  */
 static void
 set_client_recv_timeout(int clientSocket, int seconds)
 {
 	struct timeval tv = {.tv_sec = seconds,.tv_usec = 0};
 
-	if (setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) != 0)
+	if (setsockopt(clientSocket, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0)
+		return;
+
+	if (seconds == 0)
+	{
+		PGDUCK_SERVER_WARN("could not clear receive timeout on connection %d; "
+						   "idle clients may be dropped: %m", clientSocket);
+	}
+	else
+	{
 		PGDUCK_SERVER_DEBUG("could not set receive timeout on connection %d: %m",
 							clientSocket);
+	}
 }
 
 
