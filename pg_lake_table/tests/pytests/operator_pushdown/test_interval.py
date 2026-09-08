@@ -362,3 +362,97 @@ def test_interval_const_deparse_ok_without_plus(create_interval_um_table, pg_con
     assert_query_pushdownable(query, pg_conn)
     fdw, heap = _um_tables()
     assert_query_results_on_tables(query, pg_conn, fdw, heap)
+
+
+# Parquet cannot store a negative interval, so the fixture above only has
+# non-negative values. Iceberg can, so negating an already-negative interval
+# and negating mixed-sign fields are only reachable through an iceberg table.
+interval_um_iceberg_rows = """
+    (1, NULL),
+    (2, INTERVAL '-1 day'),
+    (3, INTERVAL '1 mon -2 days'),
+    (4, INTERVAL '-1 year -6 months'),
+    (5, INTERVAL '-3 days -04:00:00'),
+    (6, INTERVAL '1 mon -2 days -03:04:05')
+"""
+
+
+@pytest.fixture(scope="module")
+def create_interval_um_iceberg_table(pg_conn, s3, extension):
+    url = f"s3://{TEST_BUCKET}/create_interval_um_iceberg_table"
+    run_command(
+        f"""
+        CREATE SCHEMA interval_um_iceberg;
+        CREATE TABLE interval_um_iceberg.tbl (id int, col_interval interval)
+        USING iceberg WITH (location = '{url}');
+        CREATE TABLE interval_um_iceberg.heap_tbl (id int, col_interval interval);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        INSERT INTO interval_um_iceberg.tbl VALUES {interval_um_iceberg_rows};
+        INSERT INTO interval_um_iceberg.heap_tbl VALUES {interval_um_iceberg_rows};
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    yield
+
+    run_command("DROP SCHEMA interval_um_iceberg CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def _um_iceberg_tables():
+    return ["interval_um_iceberg.tbl"], ["interval_um_iceberg.heap_tbl"]
+
+
+interval_um_iceberg_queries = [
+    (
+        "project_negative_and_mixed_sign",
+        "SELECT id, - col_interval FROM interval_um_iceberg.tbl",
+        '(- "col_interval")',
+    ),
+    (
+        "double_negation",
+        "SELECT id, - (- col_interval) FROM interval_um_iceberg.tbl",
+        '(- (- "col_interval"))',
+    ),
+    (
+        "negate_already_negative",
+        "SELECT id FROM interval_um_iceberg.tbl WHERE - col_interval = INTERVAL '1 day'",
+        '(- "col_interval")',
+    ),
+    (
+        "negate_already_negative_ym",
+        "SELECT id FROM interval_um_iceberg.tbl WHERE - col_interval = INTERVAL '1 year 6 months'",
+        '(- "col_interval")',
+    ),
+    (
+        "negate_already_negative_mixed_hms",
+        "SELECT id FROM interval_um_iceberg.tbl WHERE - col_interval = INTERVAL '3 days 04:00:00'",
+        '(- "col_interval")',
+    ),
+    (
+        "negated_column_is_positive",
+        "SELECT id FROM interval_um_iceberg.tbl WHERE - col_interval > INTERVAL '0 seconds'",
+        '(- "col_interval")',
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "test_id, query, expected_expression",
+    interval_um_iceberg_queries,
+    ids=[c[0] for c in interval_um_iceberg_queries],
+)
+def test_interval_um_pushdown_matches_heap_on_iceberg(
+    create_interval_um_iceberg_table, pg_conn, test_id, query, expected_expression
+):
+    assert_query_pushdownable(query, pg_conn)
+    assert_remote_query_contains_expression(query, expected_expression, pg_conn)
+    fdw, heap = _um_iceberg_tables()
+    assert_query_results_on_tables(query, pg_conn, fdw, heap)
