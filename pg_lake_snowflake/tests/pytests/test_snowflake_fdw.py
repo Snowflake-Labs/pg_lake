@@ -309,6 +309,38 @@ def test_aggregates_are_pushed_down(snowflake, sf_conn):
     assert str(rows[0]["sum"]) == "30.00"
 
 
+def test_a_filter_does_not_cost_the_aggregate_its_pushdown(snowflake, sf_conn):
+    """Both together, which is where a per-row cost that is too small shows up.
+
+    add_path treats paths within one percent of each other as equally cheap and
+    then prefers the better sort order, so if the rows a remote aggregate saves
+    are worth too little the local aggregate wins on its sortedness.
+    """
+    attach(
+        snowflake,
+        sf_conn,
+        [
+            column("ID", "fixed", precision=5, scale=0),
+            column("PRICE", "fixed", precision=12, scale=2),
+        ],
+        [[]],
+    )
+    run_command("ALTER FOREIGN TABLE t OPTIONS (ADD row_estimate '5000')", sf_conn)
+
+    plan = run_query(
+        """
+        EXPLAIN (VERBOSE, COSTS OFF)
+        SELECT id, count(*) FROM t WHERE id <= 3 GROUP BY id
+        """,
+        sf_conn,
+    )
+    plan_text = "\n".join(row[0] for row in plan)
+
+    assert "GROUP BY 1" in plan_text
+    assert '(("ID" <= 3))' in plan_text
+    assert "Aggregate" not in plan_text
+
+
 def test_avg_over_a_numeric_stays_local(snowflake, sf_conn):
     """Snowflake decides the scale of an AVG by its own rules."""
     attach(

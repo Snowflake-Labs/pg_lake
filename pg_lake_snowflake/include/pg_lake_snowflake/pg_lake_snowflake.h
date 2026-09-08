@@ -52,8 +52,23 @@ extern bool SnowflakeWarnOnWriteInTransactionBlock;
  */
 #define SNOWFLAKE_STARTUP_COST 10000.0
 
-/* per-row cost of parsing a JSON row and forming a tuple */
-#define SNOWFLAKE_PER_TUPLE_COST 0.01
+/*
+ * Cost of one row of a result set, which is the JSON it is encoded as, the
+ * network it crosses and the tuple it becomes.
+ *
+ * Calibrated against the startup cost rather than guessed: a statement costs
+ * around 0.45 s to submit and answer, which is what the 10000 above stands for,
+ * so a cost unit is roughly 0.05 ms. A 5000-row result took 0.7 s longer than an
+ * empty one, which is 0.14 ms per row, or about three units. One unit is the
+ * conservative end of that.
+ *
+ * It has to be this large to be visible at all. add_path treats two paths whose
+ * costs are within one percent as equally cheap and then prefers the one with
+ * the more useful sort order, so with a per-row cost of a hundredth the rows a
+ * pushed-down aggregate saves disappeared into the rounding and the local
+ * aggregate won.
+ */
+#define SNOWFLAKE_PER_TUPLE_COST 1.0
 
 /* interruptible sleep used while polling a running statement */
 extern void SnowflakeSleepMs(int milliseconds);
