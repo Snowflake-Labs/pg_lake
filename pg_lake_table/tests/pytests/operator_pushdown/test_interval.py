@@ -55,6 +55,11 @@ test_cases = [
         "WHERE col_interval - INTERVAL '1 day' = INTERVAL '1 day'",
         "WHERE ((\"col_interval\" - '1 day'::interval) = '1 day'::interval)",
     ),
+    (
+        "interval_um",
+        "WHERE - col_interval = INTERVAL '-1 day'",
+        "WHERE ((- \"col_interval\") = '-1 days'::interval)",
+    ),
 ]
 
 

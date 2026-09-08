@@ -454,6 +454,7 @@ static const PGDuckShippableOperator PGDuckShippableIntervalOperators[] = {
 	{">=", "pg_catalog", "interval_ge", 2, {"interval", "interval"}, NULL},
 	{"+", "pg_catalog", "interval_pl", 2, {"interval", "interval"}, NULL},
 	{"-", "pg_catalog", "interval_mi", 2, {"interval", "interval"}, NULL},
+	{"-", "pg_catalog", "interval_um", 1, {"interval"}, NULL},
 };
 
 /* UUID operators */
