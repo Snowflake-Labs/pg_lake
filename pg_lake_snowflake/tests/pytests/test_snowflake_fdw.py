@@ -369,6 +369,9 @@ def test_partitions_are_fetched_as_the_scan_reaches_them(snowflake, sf_conn):
 
     assert [row["id"] for row in rows] == [1, 2, 3, 4, 5]
 
+    # the partitions after the first arrive gzipped, as they do from Snowflake
+    assert snowflake.compressed_responses >= 2
+
 
 def test_an_error_carries_the_snowflake_code(snowflake, sf_conn):
     snowflake.route(

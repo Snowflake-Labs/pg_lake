@@ -272,6 +272,18 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 	}
 
 	/*
+	 * Accept every encoding libcurl can decode, and let it decode them.
+	 *
+	 * This is not only about saving bandwidth. A service may compress a
+	 * response whether or not the request said it could: the Snowflake SQL
+	 * API returns result partitions with Content-Encoding: gzip even when
+	 * nothing was negotiated, and libcurl only decodes a body when it
+	 * advertised the encoding itself. Without this the caller is handed gzip
+	 * bytes where it expects JSON.
+	 */
+	CURL_SETOPT(curl, CURLOPT_ACCEPT_ENCODING, "");
+
+	/*
 	 * These match libcurl's defaults, and are stated outright because peer
 	 * and host verification is the part of this setup worth being unambiguous
 	 * about: a future reader should not have to know the defaults to see that

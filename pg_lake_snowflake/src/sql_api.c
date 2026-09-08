@@ -784,14 +784,32 @@ ReportApiError(SnowflakeConnection * connection, HttpResult * result, const char
 {
 	if (result->body == NULL || result->body[0] != '{')
 	{
-		const char *transportError = result->errorMsg != NULL ? result->errorMsg :
-			"no response body";
+		/*
+		 * Say which of the two it is. A body that is not JSON is a different
+		 * problem from no body at all, and reporting them the same way sends
+		 * the reader looking for a network fault when the answer arrived
+		 * intact and was, for instance, still compressed.
+		 */
+		if (result->body == NULL)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
+					 errmsg("could not reach the Snowflake SQL API of server \"%s\"",
+							connection->serverName),
+					 errdetail("HTTP status %ld: %s", result->status,
+							   result->errorMsg != NULL ? result->errorMsg :
+							   "no response body"),
+					 errcontext("remote SQL: %s", sql)));
+		}
 
 		ereport(ERROR,
-				(errcode(ERRCODE_FDW_UNABLE_TO_ESTABLISH_CONNECTION),
-				 errmsg("could not reach the Snowflake SQL API of server \"%s\"",
-						connection->serverName),
-				 errdetail("HTTP status %ld: %s", result->status, transportError),
+				(errcode(ERRCODE_FDW_INVALID_STRING_FORMAT),
+				 errmsg("the Snowflake SQL API of server \"%s\" answered with "
+						"something other than JSON", connection->serverName),
+				 errdetail("HTTP status %ld, " UINT64_FORMAT " bytes, starting with "
+						   "byte 0x%02x.", result->status,
+						   (uint64) result->bodyLength,
+						   (unsigned char) result->body[0]),
 				 errcontext("remote SQL: %s", sql)));
 	}
 

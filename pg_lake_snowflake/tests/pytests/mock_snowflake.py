@@ -8,6 +8,7 @@ result partitions one at a time, cancelling, and failing with a Snowflake error
 body.
 """
 
+import gzip
 import json
 import socket
 import threading
@@ -52,6 +53,7 @@ class MockSnowflake:
         self.statements = []
         self.cancelled = []
         self.requests_without_authorization = 0
+        self.compressed_responses = 0
         self.routes = []
         self.default_route = Route([column("STATUS", "text")], [[["ok"]]])
         self._handles = {}
@@ -86,10 +88,17 @@ class MockSnowflake:
             def log_message(self, *args):
                 pass
 
-            def _respond(self, status, payload):
+            def _respond(self, status, payload, compress=False):
                 body = json.dumps(payload).encode()
+
+                if compress:
+                    body = gzip.compress(body)
+                    mock.compressed_responses += 1
+
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
+                if compress:
+                    self.send_header("Content-Encoding", "gzip")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
@@ -138,7 +147,11 @@ class MockSnowflake:
                     )
                     return
 
-                self._respond(200, mock.result_payload(route, handle, 0))
+                acceptsGzip = "gzip" in (self.headers.get("Accept-Encoding") or "")
+
+                self._respond(
+                    200, mock.result_payload(route, handle, 0), compress=acceptsGzip
+                )
 
             def do_GET(self):
                 self._check_authorization()
@@ -164,7 +177,16 @@ class MockSnowflake:
                     )
                     return
 
-                self._respond(200, mock.result_payload(route, handle, partition))
+                #
+                # Snowflake returns a result partition gzipped whether or not the
+                # request said it could take it that way, which is exactly the
+                # case that broke the wrapper once.
+                #
+                self._respond(
+                    200,
+                    mock.result_payload(route, handle, partition),
+                    compress=partition > 0,
+                )
 
         self._server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)

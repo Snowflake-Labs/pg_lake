@@ -360,3 +360,35 @@ def test_a_batched_load_sends_one_statement_per_batch(sf_account):
     assert run_query("SELECT count(*) AS c FROM e2e_loaded", sf_account)[0]["c"] == 1000
 
     run_command("DROP FOREIGN TABLE e2e_loaded", sf_account)
+
+
+def test_a_result_spanning_partitions_arrives_whole(sf_account):
+    """Snowflake splits a larger result into partitions, and gzips all but the first."""
+    execute(
+        sf_account,
+        f"""
+        CREATE OR REPLACE TABLE {TEST_SCHEMA}.WIDE AS
+        SELECT SEQ4() AS id, 'padding_' || SEQ4() AS name, SEQ4() / 7 AS amount
+        FROM TABLE(GENERATOR(ROWCOUNT => 20000))
+        """,
+    )
+    run_command(
+        "CREATE FOREIGN TABLE e2e_wide () SERVER e2e_sf OPTIONS (table_name 'WIDE')",
+        sf_account,
+    )
+
+    # summed locally, so every row has to arrive rather than being counted remotely
+    local = run_query(
+        """
+        SELECT count(*) AS rows, sum(amount) AS total, max(length(name)) AS widest
+        FROM (SELECT name, amount FROM e2e_wide) s
+        """,
+        sf_account,
+    )[0]
+
+    remote_total = execute(sf_account, f"SELECT SUM(amount) FROM {TEST_SCHEMA}.WIDE")
+
+    assert local["rows"] == 20000
+    assert float(local["total"]) == float(remote_total)
+
+    run_command("DROP FOREIGN TABLE e2e_wide", sf_account)
