@@ -91,6 +91,23 @@ test_cases += [
     )
     for ex in date_trunc_cases
 ]
+test_cases += [
+    (
+        "isfinite(date)",
+        "WHERE isfinite(col_date)",
+        "isfinite",
+    ),
+    (
+        "isfinite(timestamp)",
+        "WHERE isfinite(col_timestamp)",
+        "isfinite",
+    ),
+    (
+        "isfinite(timestamptz)",
+        "WHERE isfinite(col_timestamptz)",
+        "isfinite",
+    ),
+]
 
 
 # Use the first element of each tuple for the ids parameter by extracting it with a list comprehension
@@ -176,3 +193,205 @@ def create_time_function_pushdown_table(pg_conn, s3, extension):
 
     run_command("DROP SCHEMA time_function_pushdown CASCADE", pg_conn)
     pg_conn.commit()
+
+
+def _isfinite_tables():
+    return ["isfinite_fn.tbl"], ["isfinite_fn.heap_tbl"]
+
+
+@pytest.fixture(scope="module")
+def create_isfinite_table(pg_conn, s3, extension):
+    url = f"s3://{TEST_BUCKET}/create_isfinite_table/data.parquet"
+    run_command(
+        f"""
+			COPY (
+					SELECT NULL::date AS col_date,
+					       NULL::timestamp AS col_timestamp,
+					       NULL::timestamptz AS col_timestamptz
+					UNION ALL
+					SELECT '2024-01-01'::date,
+					       '2024-01-01 12:00:00'::timestamp,
+					       '2024-01-01 12:00:00+00'::timestamptz
+					UNION ALL
+					SELECT '1970-01-01'::date,
+					       '1970-01-01 00:00:00'::timestamp,
+					       '1970-01-01 00:00:00+00'::timestamptz
+				) TO '{url}' WITH (FORMAT 'parquet');
+		""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+	            CREATE SCHEMA isfinite_fn;
+	            CREATE FOREIGN TABLE isfinite_fn.tbl
+	            (
+	            	col_date date,
+	            	col_timestamp timestamp,
+	            	col_timestamptz timestamptz
+	            ) SERVER pg_lake OPTIONS (format 'parquet', path '{}');
+	            """.format(
+            url
+        ),
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        """
+	            CREATE TABLE isfinite_fn.heap_tbl (LIKE isfinite_fn.tbl);
+	            COPY isfinite_fn.heap_tbl FROM '{}';
+	            """.format(
+            url
+        ),
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    yield
+
+    run_command("DROP SCHEMA isfinite_fn CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+isfinite_match_queries = [
+    (
+        "col_date",
+        "SELECT isfinite(col_date) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "col_timestamp",
+        "SELECT isfinite(col_timestamp) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "col_timestamptz",
+        "SELECT isfinite(col_timestamptz) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "not_col_date",
+        "SELECT NOT isfinite(col_date) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "not_col_timestamp",
+        "SELECT NOT isfinite(col_timestamp) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "not_col_timestamptz",
+        "SELECT NOT isfinite(col_timestamptz) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "where_col_date",
+        "SELECT col_date FROM isfinite_fn.tbl WHERE isfinite(col_date)",
+        "isfinite",
+    ),
+    (
+        "where_col_timestamp",
+        "SELECT col_timestamp FROM isfinite_fn.tbl WHERE isfinite(col_timestamp)",
+        "isfinite",
+    ),
+    (
+        "where_col_timestamptz",
+        "SELECT col_timestamptz FROM isfinite_fn.tbl WHERE isfinite(col_timestamptz)",
+        "isfinite",
+    ),
+    (
+        "null_date",
+        "SELECT isfinite(NULL::date) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "null_timestamp",
+        "SELECT isfinite(NULL::timestamp) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "null_timestamptz",
+        "SELECT isfinite(NULL::timestamptz) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "inf_date",
+        "SELECT isfinite('infinity'::date) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "neg_inf_date",
+        "SELECT isfinite('-infinity'::date) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "inf_timestamp",
+        "SELECT isfinite('infinity'::timestamp) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "neg_inf_timestamp",
+        "SELECT isfinite('-infinity'::timestamp) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "inf_timestamptz",
+        "SELECT isfinite('infinity'::timestamptz) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "neg_inf_timestamptz",
+        "SELECT isfinite('-infinity'::timestamptz) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+    (
+        "in_range_timestamp",
+        "SELECT isfinite('294247-01-10 04:00:54.775806'::timestamp) FROM isfinite_fn.tbl",
+        "isfinite",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "test_id, query, expected_expression",
+    isfinite_match_queries,
+    ids=[c[0] for c in isfinite_match_queries],
+)
+def test_isfinite_pushdown_matches_heap(
+    create_isfinite_table, pg_conn, test_id, query, expected_expression
+):
+    assert_query_pushdownable(query, pg_conn)
+    assert_remote_query_contains_expression(query, expected_expression, pg_conn)
+    fdw, heap = _isfinite_tables()
+    assert_query_results_on_tables(query, pg_conn, fdw, heap)
+
+
+isfinite_range_overflow_queries = [
+    (
+        "pg_max_timestamp",
+        "SELECT isfinite('294276-12-31 23:59:59'::timestamp) FROM isfinite_fn.tbl",
+    ),
+    (
+        "pg_max_timestamptz",
+        "SELECT isfinite('294276-12-31 23:59:59+00'::timestamptz) FROM isfinite_fn.tbl",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "test_id, query",
+    isfinite_range_overflow_queries,
+    ids=[c[0] for c in isfinite_range_overflow_queries],
+)
+def test_isfinite_out_of_duckdb_range_errors_on_fdw(
+    create_isfinite_table, pg_conn, test_id, query
+):
+    # Postgres accepts a wider finite timestamp range than DuckDB.
+    with pytest.raises(Exception, match="out of range"):
+        run_query(query, pg_conn)
+    pg_conn.rollback()
+    heap_query = query.replace("isfinite_fn.tbl", "isfinite_fn.heap_tbl")
+    run_query(heap_query, pg_conn)
+    pg_conn.rollback()
