@@ -311,8 +311,8 @@ parse_arguments(int argc, char *argv[])
 		}
 	}
 
-	PGDUCK_SERVER_LOG("pgduck_server is listening on unix_socket_directory: %s with port %u",
-					  options.unix_socket_directory, options.port);
+	PGDUCK_SERVER_LOG("pgduck_server is listening on unix_socket_directory: %s with port %u, max_clients requested %d",
+					  options.unix_socket_directory, options.port, options.max_clients);
 
 	PGDUCK_SERVER_LOG("DuckDB is using database file path: %s",
 					  options.duckdb_database_file_path);

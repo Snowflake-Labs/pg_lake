@@ -163,15 +163,9 @@ pgclient_threadpool_init(int maxAllowedClients)
 	MaxThreads = MaxAllowedClients * 2;
 
 	if (MaxAllowedClients < maxAllowedClients)
-	{
 		PGDUCK_SERVER_LOG("max_clients lowered from %d to %d to stay within the "
 						  "host thread limit (RLIMIT_NPROC)",
 						  maxAllowedClients, MaxAllowedClients);
-	}
-	else
-	{
-		PGDUCK_SERVER_LOG("max_clients: %d", MaxAllowedClients);
-	}
 
 	/* pg_malloc0 exists the program in case cannot allocate */
 	ClientThreadPool = (PgClientThreadState *) pg_malloc0(sizeof(PgClientThreadState) * MaxThreads);
