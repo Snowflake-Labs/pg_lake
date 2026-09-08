@@ -216,6 +216,14 @@ def create_isfinite_table(pg_conn, s3, extension):
 					SELECT '1970-01-01'::date,
 					       '1970-01-01 00:00:00'::timestamp,
 					       '1970-01-01 00:00:00+00'::timestamptz
+					UNION ALL
+					SELECT 'infinity'::date,
+					       'infinity'::timestamp,
+					       'infinity'::timestamptz
+					UNION ALL
+					SELECT '-infinity'::date,
+					       '-infinity'::timestamp,
+					       '-infinity'::timestamptz
 				) TO '{url}' WITH (FORMAT 'parquet');
 		""",
         pg_conn,
@@ -366,6 +374,23 @@ def test_isfinite_pushdown_matches_heap(
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
     fdw, heap = _isfinite_tables()
     assert_query_results_on_tables(query, pg_conn, fdw, heap)
+
+
+# The fixture stores one 'infinity' and one '-infinity' row per column, so
+# isfinite() must return false for exactly two rows when read from parquet.
+isfinite_stored_infinity_columns = ["col_date", "col_timestamp", "col_timestamptz"]
+
+
+@pytest.mark.parametrize("column", isfinite_stored_infinity_columns)
+def test_isfinite_false_for_stored_infinity(create_isfinite_table, pg_conn, column):
+    query = f"SELECT count(*) FROM isfinite_fn.tbl WHERE NOT isfinite({column})"
+
+    assert_query_pushdownable(query, pg_conn)
+    assert_remote_query_contains_expression(query, "isfinite", pg_conn)
+
+    fdw, heap = _isfinite_tables()
+    assert_query_results_on_tables(query, pg_conn, fdw, heap)
+    assert run_query(query, pg_conn)[0][0] == 2
 
 
 isfinite_range_overflow_queries = [
