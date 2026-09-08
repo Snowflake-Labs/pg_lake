@@ -259,6 +259,13 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 
 	{"now", 'f', 0, {}, NULL},
 
+	/*
+	 * DuckDB has no isfinite(interval). Postgres does.
+	 */
+	{"isfinite", 'f', 1, {"date"}, NULL},
+	{"isfinite", 'f', 1, {"timestamp"}, NULL},
+	{"isfinite", 'f', 1, {"timestamptz"}, NULL},
+
 	{"to_char", 'f', 2, {"timestamp", "text"}, IsConvertibleToChar},
 	{"to_char", 'f', 2, {"timestamptz", "text"}, IsConvertibleToChar},
 
