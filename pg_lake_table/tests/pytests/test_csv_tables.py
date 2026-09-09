@@ -1019,3 +1019,33 @@ def test_s3_csv_null_padding_with_custom_null_and_padding(pg_conn, s3, extension
     assert null_count[0][0] == 3, "Expected 3 rows with NULL values"
 
     pg_conn.rollback()
+
+
+def test_csv_crlf_newlines_with_explicit_columns(pg_conn, s3, extension, tmp_path):
+    """CRLF line endings are handled without sniffing, which columns skip"""
+    csv_key = "test_csv_crlf_explicit_columns/data.csv"
+    csv_path = f"s3://{TEST_BUCKET}/{csv_key}"
+
+    local_csv_path = tmp_path / "crlf_data.csv"
+    with open(local_csv_path, "wb") as csv_file:
+        csv_file.write(b"id,name,value\r\n")
+        csv_file.write(b"1,alice,100\r\n")
+        csv_file.write(b"2,bob,200\r\n")
+        csv_file.write(b"3,charlie,300\r\n")
+
+    s3.upload_file(local_csv_path, TEST_BUCKET, csv_key)
+
+    # Spelling out the columns skips the sniffer, so nothing tells the engine
+    # what the line terminator is
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_crlf_csv_explicit (id int, name text, value int)
+        SERVER pg_lake OPTIONS (path '{csv_path}', format 'csv', header 'true');
+        """,
+        pg_conn,
+    )
+
+    result = run_query("SELECT * FROM test_crlf_csv_explicit ORDER BY id", pg_conn)
+    assert result == [[1, "alice", 100], [2, "bob", 200], [3, "charlie", 300]], result
+
+    pg_conn.rollback()
