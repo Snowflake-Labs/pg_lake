@@ -500,11 +500,16 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 	for (const string &path : paths)
 	{
 		/*
-		 * Only S3 has a bulk delete API. Everything else -- Azure, HTTP, local
-		 * -- goes through the ordinary per-file RemoveFile, which is one round
-		 * trip each and evicts the cache on the way out. Paths that opt out of
-		 * caching land here too: s3fs does not recognize the prefix, and the
-		 * virtual file system strips it.
+		 * The bulk delete API belongs to S3 and the services that reimplement
+		 * it, so only what s3fs claims can be batched. Everything else, Azure
+		 * and HTTP and local, goes through the ordinary per-file RemoveFile,
+		 * which is one round trip each and evicts the cache on the way out.
+		 * Paths that opt out of caching land here too: s3fs does not recognize
+		 * the prefix, and the virtual file system strips it.
+		 *
+		 * s3fs claiming a path is necessary but not sufficient. RemoveFiles
+		 * decides per scheme whether the service really answers the batch
+		 * request, and sends the rest back through RemoveFile itself.
 		 *
 		 * RemoveFile, not TryRemoveFile: the remote file systems are registered
 		 * wrapped in this class, so an object that is already gone is tolerated

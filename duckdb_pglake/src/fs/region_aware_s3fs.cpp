@@ -50,6 +50,7 @@ map<string, string> S3ExpressRegionShorthand = {
 static std::regex S3_EXPRESS_URL_PATTERN("s3://[a-z0-9-]+-([a-z0-9]+)-([a-z0-9]+)--x-s3/.*");
 
 static bool UrlHasQueryArgument(const string &url, const string &queryArgument);
+static bool SupportsBatchDelete(const string &url);
 static string AddQueryArgumentToUrl(const string &url, const string &name, const string &value);
 static string RemoveQueryArgumentFromUrl(string url, const string &name);
 static bool LooksLikeRegionMismatch(const ErrorData &error);
@@ -654,6 +655,28 @@ RegionAwareS3FileSystem::TryGetBucketRegionFromS3(const string &url, optional_pt
 
 
 /*
+ * SupportsBatchDelete returns whether the service behind url implements the S3
+ * DeleteObjects request, POST <bucket>/?delete.
+ *
+ * GCS does, on its XML API, with the same request body and the same 1000 key
+ * limit as S3: https://cloud.google.com/storage/docs/xml-api/post-bucket
+ *
+ * The other schemes s3fs claims (r2://, and the s3a:// / s3n:// aliases) stay
+ * on the per-object path until someone checks them against the real service.
+ * A service that does not implement the request answers with something that is
+ * not a DeleteResult, and PostDeleteObjects reports that as a failed delete
+ * rather than falling back.
+ */
+static bool
+SupportsBatchDelete(const string &url)
+{
+	return StringUtil::StartsWith(url, "s3://") ||
+		StringUtil::StartsWith(url, "gs://") ||
+		StringUtil::StartsWith(url, "gcs://");
+}
+
+
+/*
  * RemoveFiles deletes many files, using a batched DeleteObjects request per
  * bucket instead of one request per file.
  */
@@ -665,15 +688,20 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 	 * DeleteObjects targets one bucket at a time, and the region is a property
 	 * of the bucket, so group the paths by bucket URL.
 	 *
-	 * WithResolvedRegion adds s3_region and s3_endpoint, so we skip it for URLs
-	 * that set either one explicitly, and for anything that is not S3, and use
-	 * the simpler single-file path.
+	 * GetBucketUrl keeps only the scheme and the bucket, so a path that carries
+	 * s3_region or s3_endpoint would lose it on the way to the batch request
+	 * and we would POST to the wrong endpoint. Those go one file at a time.
+	 *
+	 * Scheme and region are separate questions. WithResolvedRegion below
+	 * already passes non-S3 URLs straight through, since bucket region lookup
+	 * only works on S3, so a bucket that supports the batch request but has no
+	 * region to resolve needs no special case here.
 	 */
 	map<string, vector<string>> pathsByBucket;
 
 	for (const string &path : paths)
 	{
-		if (!StringUtil::StartsWith(path, "s3://") ||
+		if (!SupportsBatchDelete(path) ||
 			UrlHasQueryArgument(path, "s3_region") ||
 			UrlHasQueryArgument(path, "s3_endpoint"))
 		{
