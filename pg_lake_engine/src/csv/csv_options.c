@@ -117,9 +117,16 @@ NormalizedExternalCSVOptions(List *inputOptions)
 		delimiter = ",";
 		quote = "\"";
 		escape = "\"";
-		newLineStr = "\\n";
 		nullStr = "";
 		forceQuote = NULL;
+
+		/*
+		 * No new_line default: PostgreSQL's COPY has no line-terminator
+		 * option and accepts \n, \r\n and \r alike, and DuckDB detects the
+		 * terminator itself even with auto_detect off. Pinning it to \n made
+		 * a CRLF file parse as one malformed line, which COPY consumed as the
+		 * header row and reported as "COPY 0" with no error.
+		 */
 
 		/* not exposed to user */
 		hasSkip = true;
