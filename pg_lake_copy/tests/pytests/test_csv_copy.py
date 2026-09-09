@@ -2,6 +2,7 @@ import pytest
 import psycopg2
 import time
 import duckdb
+import gzip
 import math
 from utils_pytest import *
 
@@ -1072,5 +1073,35 @@ def test_auto_detect(pg_conn, azure):
 
     # Currently disabled, we do not properly distinguish empty string and NULL with auto_detect
     # assert result_before == result_after
+
+    pg_conn.rollback()
+
+
+def test_line_terminators(pg_conn, s3):
+    """A CRLF or CR file must load every row, not silently report COPY 0"""
+    run_command("CREATE TABLE test_line_terminators (a int, b text)", pg_conn)
+
+    for name, terminator in [("lf", "\n"), ("crlf", "\r\n"), ("cr", "\r")]:
+        lines = ["a,b", "1,one", "2,two", "3,three"]
+        key = f"test_line_terminators/{name}.csv.gz"
+        s3.put_object(
+            Bucket=TEST_BUCKET,
+            Key=key,
+            Body=gzip.compress((terminator.join(lines) + terminator).encode()),
+        )
+
+        run_command("TRUNCATE test_line_terminators", pg_conn)
+        run_command(
+            f"COPY test_line_terminators FROM 's3://{TEST_BUCKET}/{key}' "
+            f"WITH (format csv, header true, compression 'gzip')",
+            pg_conn,
+        )
+
+        result = run_query("SELECT a, b FROM test_line_terminators ORDER BY a", pg_conn)
+        assert [tuple(row) for row in result] == [
+            (1, "one"),
+            (2, "two"),
+            (3, "three"),
+        ], f"{name} line terminator loaded {result}"
 
     pg_conn.rollback()
