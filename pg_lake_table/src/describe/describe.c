@@ -454,10 +454,9 @@ SniffCSVOptions(char *url, CopyDataCompression compression, List *options)
 	char	   *quote = NULL;
 	char	   *escape = NULL;
 	bool		header = NULL;
-	char	   *newLine = NULL;
 
 	SniffCSV(url, compression, options,
-			 &delimiter, &quote, &escape, &header, &newLine);
+			 &delimiter, &quote, &escape, &header);
 
 	if (!HasOption((List *) options, "delimiter") && *delimiter != '\0')
 	{
@@ -487,13 +486,14 @@ SniffCSVOptions(char *url, CopyDataCompression compression, List *options)
 											   -1));
 	}
 
-	if (!HasOption((List *) options, "new_line"))
-	{
-		options = lappend(options, makeDefElem("new_line",
-											   (Node *) makeString(newLine),
-											   -1));
-	}
-
+	/*
+	 * We deliberately do not store the sniffed new_line.  DuckDB works the
+	 * line terminator out per file, whereas we only sniff the first file of
+	 * the path, so persisting it would apply one file's terminator to every
+	 * file behind a glob and silently drop the rows of the others.  The other
+	 * sniffed options have to be stored because nothing can recover them once
+	 * auto_detect is off.
+	 */
 
 	return options;
 }
@@ -507,7 +507,6 @@ static bool
 HasAllSniffCSVOptions(List *options)
 {
 	return HasOption(options, "delimiter") &&
-		HasOption(options, "new_line") &&
 		HasOption(options, "quote") &&
 		HasOption(options, "escape") &&
 		HasOption(options, "header");
