@@ -344,6 +344,13 @@ DescribeColumnsQueryForURL(char *url,
 						 quote_literal_cstr(url),
 						 CopyOptionsToReadCSVParams(copyOptions));
 
+		/*
+		 * Match the scan, which reads a quoted "" as an empty string rather
+		 * than NULL.  Without this, DESCRIBE sees the NULLs and can infer a
+		 * numeric type for a column that the scan then fails to convert.
+		 */
+		appendStringInfoString(&command, ", allow_quoted_nulls=false");
+
 		if (compression != DATA_COMPRESSION_INVALID)
 			appendStringInfo(&command, ", compression=%s",
 							 quote_literal_cstr(CopyDataCompressionToName(compression)));
