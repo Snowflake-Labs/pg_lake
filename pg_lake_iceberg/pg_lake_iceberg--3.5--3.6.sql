@@ -1,0 +1,1 @@
+-- Upgrade script for pg_lake_iceberg from 3.5 to 3.6
