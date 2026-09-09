@@ -179,6 +179,41 @@ test_cases = [
     # initcap
     ("initcap_text", "WHERE initcap(col_text) = 'Test'", "initcap_pg", True),
     ("initcap_varchar", "WHERE initcap(col_varchar) = 'Test'", "initcap_pg", True),
+    # translate
+    (
+        "translate_text",
+        "WHERE translate(col_text, 'lo', 'LO') <> col_text",
+        "translate",
+        True,
+    ),
+    (
+        "translate_varchar",
+        "WHERE translate(col_varchar, 'lo', 'LO') <> col_varchar",
+        "translate",
+        True,
+    ),
+    # char_length / character_length. A varchar argument resolves to the same
+    # text overload (Postgres plans it as char_length(col_varchar::text)), so
+    # both are pushed down.
+    ("char_length_text", "WHERE char_length(col_text) >= 0", "char_length", True),
+    (
+        "char_length_varchar",
+        "WHERE char_length(col_varchar) >= 0",
+        "char_length",
+        True,
+    ),
+    (
+        "character_length_text",
+        "WHERE character_length(col_text) >= 0",
+        "character_length",
+        True,
+    ),
+    (
+        "character_length_varchar",
+        "WHERE character_length(col_varchar) >= 0",
+        "character_length",
+        True,
+    ),
 ]
 
 
@@ -512,4 +547,148 @@ def test_initcap_on_pg_vs_duck(create_initcap_edge_case_tables, pg_conn):
         pg_conn,
         ["initcap_pushdown.tbl"],
         ["initcap_pushdown.heap_tbl"],
+    )
+
+
+# Values chosen for the equivalence check below: NULL, the empty string, and
+# strings where a naive implementation diverges -- trailing blanks (which
+# count for text but not for bpchar), multi-byte UTF-8, an emoji plus skin
+# tone modifier and a ZWJ sequence (multiple codepoints that render as one
+# grapheme), and a combining accent. Plain "abc" is here for the translate
+# cases below, where it keeps the expected output readable.
+TEXT_EDGE_VALUES = [
+    None,
+    "",
+    "     ",
+    "abc",
+    "abc  ",
+    "  abc",
+    "h\u00e9llo",
+    "he\u0301llo",
+    "\u65e5\u672c\u8a9e",
+    "\U0001f44d",
+    "\U0001f44d\U0001f3fd",
+    "\U0001f468\u200d\U0001f469\u200d\U0001f467",
+]
+
+
+@pytest.fixture(scope="module")
+def create_text_edge_values_table(pg_conn, s3, extension):
+    """A table whose text, varchar and bpchar columns all hold TEXT_EDGE_VALUES.
+
+    The bpchar column is char(10) so Postgres blank-pads every value, which is
+    what makes the char_length(bpchar) negative test below meaningful.
+    """
+    url = f"s3://{TEST_BUCKET}/text_edge_values_test/data.parquet"
+    rows = " UNION ALL ".join(
+        "SELECT {v}::text AS col_text, {v}::varchar AS col_varchar, "
+        "{v}::char(10) AS col_bpchar".format(
+            v="NULL" if value is None else "'" + value + "'"
+        )
+        for value in TEXT_EDGE_VALUES
+    )
+    run_command(
+        f"COPY ({rows}) TO '{url}' WITH (FORMAT 'parquet');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""
+        CREATE SCHEMA text_edge_vals;
+        CREATE FOREIGN TABLE text_edge_vals.fdw_tbl
+            (col_text text, col_varchar varchar, col_bpchar char(10))
+        SERVER pg_lake OPTIONS (format 'parquet', path '{url}');
+        CREATE TABLE text_edge_vals.heap_tbl
+            (col_text text, col_varchar varchar, col_bpchar char(10));
+        COPY text_edge_vals.heap_tbl FROM '{url}';
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    yield
+
+    run_command("DROP SCHEMA text_edge_vals CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize("func", ["char_length", "character_length"])
+@pytest.mark.parametrize("col", ["col_text", "col_varchar"])
+def test_length_specific_values(create_text_edge_values_table, pg_conn, func, col):
+    """char_length/character_length pushdown agrees with Postgres on NULL, the
+    empty string, trailing blanks and multi-codepoint UTF-8 sequences."""
+    query = f"SELECT {func}({col}) FROM text_edge_vals.fdw_tbl"
+    assert_remote_query_contains_expression(query, func, pg_conn)
+    assert_table_contents_match(
+        pg_conn,
+        f"(SELECT {func}({col}) FROM text_edge_vals.fdw_tbl) fdw",
+        f"(SELECT {func}({col}) FROM text_edge_vals.heap_tbl) heap",
+    )
+
+
+@pytest.mark.parametrize("func", ["char_length", "character_length"])
+def test_length_bpchar_is_not_pushed_down(create_text_edge_values_table, pg_conn, func):
+    """char_length(bpchar) is a different function (bpcharlen) and has to stay
+    local. Postgres ignores the blank padding, DuckDB counts it:
+
+        SELECT char_length('abc'::char(10));  -- pg: 3, DuckDB: 10
+
+    Only the text overload is on the shippable list, so this is already what
+    happens. Pin it here, so that adding a bpchar entry later cannot silently
+    start returning the padded length.
+    """
+    query = f"SELECT {func}(col_bpchar) FROM text_edge_vals.fdw_tbl"
+    assert_remote_query_not_contains_expression(query, func, pg_conn)
+    assert_table_contents_match(
+        pg_conn,
+        f"(SELECT {func}(col_bpchar) FROM text_edge_vals.fdw_tbl) fdw",
+        f"(SELECT {func}(col_bpchar) FROM text_edge_vals.heap_tbl) heap",
+    )
+
+
+# from/to pairs where a naive translate() diverges: deletion when from is
+# longer than to, extra to characters ignored, duplicate from characters
+# (first wins), no cascading replacement, and multi-byte characters on
+# either side.
+#
+# no_cascade_overlap is the important one: from and to overlap, so a
+# character produced by the mapping is itself in from.
+#
+#     SELECT translate('abc', 'ab', 'bc');  -- bcc, not ccc
+#
+# Both engines scan the input once, so the "b" that came from "a" is not
+# translated again. A second pass over the output would give "ccc".
+translate_cases = [
+    ("delete_all", "abc", ""),
+    ("delete_extra", "abcd", "AB"),
+    ("to_longer_than_from", "ab", "ABCDEF"),
+    ("duplicate_in_from", "aa", "XY"),
+    ("no_cascade", "abc", "cba"),
+    ("no_cascade_overlap", "ab", "bc"),
+    ("empty_from", "", "XY"),
+    ("multibyte_from", "\u00e9\u65e5", "eX"),
+    ("multibyte_to", "ab", "\u00e9\u65e5"),
+    ("blanks", " ", ""),
+]
+
+
+@pytest.mark.parametrize("col", ["col_text", "col_varchar"])
+@pytest.mark.parametrize(
+    "test_id, from_chars, to_chars",
+    translate_cases,
+    ids=[case[0] for case in translate_cases],
+)
+def test_translate_specific_values(
+    create_text_edge_values_table, pg_conn, col, test_id, from_chars, to_chars
+):
+    """translate() pushdown agrees with Postgres for the character-set edge
+    cases, over NULL and multi-byte input."""
+    expr = f"translate({col}, '{from_chars}', '{to_chars}')"
+    query = f"SELECT {expr} FROM text_edge_vals.fdw_tbl"
+    assert_remote_query_contains_expression(query, "translate", pg_conn)
+    assert_table_contents_match(
+        pg_conn,
+        f"(SELECT {expr} FROM text_edge_vals.fdw_tbl) fdw",
+        f"(SELECT {expr} FROM text_edge_vals.heap_tbl) heap",
     )
