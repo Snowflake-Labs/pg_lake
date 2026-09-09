@@ -96,7 +96,13 @@ The connection above is to the pgduck_server on its port (default 5332), NOT to 
 
 #### Connecting `pg_lake` to s3 (or compatible)
 
-`pgduck_server` relies on the DuckDB [secrets manager](https://duckdb.org/docs/stable/configuration/secrets_manager) for credentials and it follows the credentials chain by default for AWS and GCP. Make sure your cloud credentials are configured properly — for example, by setting them in ~/.aws/credentials.  
+`pgduck_server` relies on the DuckDB [secrets manager](https://duckdb.org/docs/stable/configuration/secrets_manager) for credentials and it follows the AWS credentials chain by default. Make sure your cloud credentials are configured properly, for example by setting them in ~/.aws/credentials.
+
+There is no default credential chain for GCS. Create a secret with [HMAC interoperability keys](https://cloud.google.com/storage/docs/authentication/hmackeys):
+
+```sql
+CREATE SECRET gcs (TYPE GCS, KEY_ID 'my-hmac-access-id', SECRET 'my-hmac-secret');
+```
 
 Once you set up the credential chain, you should set the `pg_lake_iceberg.default_location_prefix`. This is the location where Iceberg tables are stored:
 
