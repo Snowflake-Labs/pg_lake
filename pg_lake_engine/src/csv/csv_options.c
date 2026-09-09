@@ -107,6 +107,7 @@ NormalizedExternalCSVOptions(List *inputOptions)
 	bool		hasEscape = false;
 	bool		hasSkip = false;
 	bool		hasNullPadding = false;
+	bool		hasAllowQuotedNulls = false;
 
 	if (!autoDetect)
 	{
@@ -127,6 +128,15 @@ NormalizedExternalCSVOptions(List *inputOptions)
 		 * a CRLF file parse as one malformed line, which COPY consumed as the
 		 * header row and reported as "COPY 0" with no error.
 		 */
+
+		/*
+		 * DuckDB's read_csv() defaults allow_quoted_nulls to true, which
+		 * collapses a quoted "" to SQL NULL.  PostgreSQL's COPY compares the
+		 * NULL string against the raw field only when it is unquoted, so ""
+		 * is an empty string and a bare empty field is NULL.  Quoting is the
+		 * only way a CSV can express that difference, so keep it.
+		 */
+		hasAllowQuotedNulls = true;
 
 		/* not exposed to user */
 		hasSkip = true;
@@ -223,6 +233,11 @@ NormalizedExternalCSVOptions(List *inputOptions)
 	if (newLineStr != NULL)
 		options = lappend(options,
 						  makeDefElem("new_line", (Node *) makeString(newLineStr), -1));
+
+	if (hasAllowQuotedNulls)
+		options = lappend(options,
+						  makeDefElem("allow_quoted_nulls",
+									  (Node *) makeBoolean(false), -1));
 
 	if (hasSkip)
 		options = lappend(options,

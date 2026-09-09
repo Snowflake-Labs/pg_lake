@@ -3,6 +3,7 @@ import psycopg2
 import time
 import duckdb
 import gzip
+import io
 import math
 from utils_pytest import *
 
@@ -1103,5 +1104,47 @@ def test_line_terminators(pg_conn, s3):
             (2, "two"),
             (3, "three"),
         ], f"{name} line terminator loaded {result}"
+
+    pg_conn.rollback()
+
+
+def test_quoted_empty_string_is_not_null(pg_conn, s3):
+    """A quoted "" is an empty string, only a bare empty field is NULL
+
+    DuckDB's read_csv() defaults allow_quoted_nulls to true and would report
+    both as NULL, so load the same bytes through PostgreSQL's own COPY and
+    require the two to agree.
+    """
+    csv = 'a,b\n"3.4","quoted"\n"","quoted empty"\n,bare empty\n'
+    key = "test_quoted_empty_string/data.csv"
+    s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=csv.encode())
+
+    run_command(
+        """
+        CREATE TABLE quoted_empty_native (a text, b text);
+        CREATE TABLE quoted_empty_lake (a text, b text);
+        """,
+        pg_conn,
+    )
+
+    with pg_conn.cursor() as cursor:
+        cursor.copy_expert(
+            "COPY quoted_empty_native FROM STDIN WITH (format csv, header true)",
+            io.StringIO(csv),
+        )
+
+    run_command(
+        f"COPY quoted_empty_lake FROM 's3://{TEST_BUCKET}/{key}' "
+        f"WITH (format csv, header true)",
+        pg_conn,
+    )
+
+    expected = [(None, "bare empty"), ("3.4", "quoted"), ("", "quoted empty")]
+
+    native = run_query("SELECT a, b FROM quoted_empty_native ORDER BY b", pg_conn)
+    assert [tuple(row) for row in native] == expected, native
+
+    lake = run_query("SELECT a, b FROM quoted_empty_lake ORDER BY b", pg_conn)
+    assert [tuple(row) for row in lake] == expected, lake
 
     pg_conn.rollback()
