@@ -64,6 +64,15 @@ typedef struct PgClientThreadInitState
 		snprintf(path, sizeof(path), "%s/.s.PGSQL.%d", \
 				 (sockdir), (port))
 
+/*
+ * How long the accept loop waits before re-checking whether it can serve
+ * another connection.  Only reached when the thread pool is full or the OS
+ * refused a thread, neither of which we expect to see in normal operation, so
+ * the value only needs to be short enough to not add noticeable latency and
+ * long enough to not busy-wait.
+ */
+#define ACCEPT_RETRY_WAIT_US (50 * 1000)
+
 static int	create_and_bind_unix_socket(PGServer * server, char *unixSocketPath,
 										char *unixSocketOwningGroup,
 										int unixSocketPermissions,
@@ -420,6 +429,18 @@ pgserver_run(PGServer * pgServer)
 
 	while (running)
 	{
+		/*
+		 * Wait for a free slot before accepting, so that a connection we
+		 * cannot serve stays in the listen backlog instead of being accepted
+		 * and closed.  pg_usleep is interrupted by SIGINT/SIGTERM, and we
+		 * re-check `running`, so this does not delay shutdown.
+		 */
+		while (running && pgclient_threadpool_at_capacity())
+			pg_usleep(ACCEPT_RETRY_WAIT_US);
+
+		if (!running)
+			break;
+
 		PGClient   *client = (PGClient *) pg_malloc0(sizeof(PGClient));
 		socklen_t	clientAddrLen = sizeof(client->clientAddress);
 
@@ -492,7 +513,9 @@ pgserver_run(PGServer * pgServer)
 		if (disable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		if (pgserver_create_client_thread(initState) != OK)
+		bool		threadCreated = pgserver_create_client_thread(initState) == OK;
+
+		if (!threadCreated)
 		{
 			PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
 
@@ -513,6 +536,17 @@ pgserver_run(PGServer * pgServer)
 
 		if (enable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
+
+		/*
+		 * The OS refused us a thread even though we had a slot for it, so the
+		 * capacity check at the top of the loop will not hold us back.  Pause
+		 * here instead, otherwise a sustained burst spins on
+		 * accept/create/close and keeps the host too busy for the detached
+		 * client threads to exit and release their resources.  We are past
+		 * enable_shutdown_signals(), so a SIGTERM interrupts the sleep.
+		 */
+		if (!threadCreated)
+			pg_usleep(ACCEPT_RETRY_WAIT_US);
 	}
 
 	return STATUS_OK;

@@ -127,6 +127,30 @@ pgclient_threadpool_init(int maxAllowedClients)
 
 
 /*
+ * pgclient_threadpool_at_capacity reports whether all client slots are in use.
+ *
+ * The accept loop consults this before accept() rather than relying on
+ * reserve_slot() to reject afterwards.  A connection we have already accepted
+ * can only be closed on the client, and the loop then goes straight back to
+ * accept() the next one, so a burst that outlasts the pool turns into a hot
+ * accept/close spin.  Waiting instead leaves the connection queued in the
+ * kernel's listen backlog, where it costs us nothing and gets served as soon
+ * as a client thread exits.
+ */
+bool
+pgclient_threadpool_at_capacity(void)
+{
+	pthread_rwlock_rdlock(&rwlock);
+
+	bool		atCapacity = ActiveClientThreadCount >= MaxAllowedClients;
+
+	pthread_rwlock_unlock(&rwlock);
+
+	return atCapacity;
+}
+
+
+/*
  * pgclient_threadpool_reserve_slot finds an available thread slot and assigns
  * the cancellation token from the given PGClient.
  *

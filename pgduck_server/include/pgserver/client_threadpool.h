@@ -32,6 +32,7 @@ extern int	MaxThreads;
 extern int	MaxAllowedClients;
 
 extern void pgclient_threadpool_init(int maxAllowedClients);
+extern bool pgclient_threadpool_at_capacity(void);
 extern int	pgclient_threadpool_reserve_slot(PGClient * client);
 extern void pgclient_threadpool_free_slot(int threadIndex);
 #if PG_VERSION_NUM >= 180000
