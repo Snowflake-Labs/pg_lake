@@ -46,7 +46,15 @@
 #define DEFAULT_UNIX_DOMAIN_GROUP ""
 #define DEFAULT_UNIX_DOMAIN_PERMISSIONS 0770
 #define DEFAULT_PORT 5332
-#define DEFAULT_MAX_CLIENTS 10000
+/*
+ * Every client, and every in-flight cancellation, occupies a slot in the
+ * client thread pool and runs on its own OS thread.  At 10000 the process hit
+ * the kernel's thread limit long before the cap engaged, so it protected
+ * nothing.  1000 leaves room above a Postgres max_connections of 500 (a
+ * backend can hold more than one connection, e.g. one per parallel worker)
+ * plus the cancellations that share the same count.
+ */
+#define DEFAULT_MAX_CLIENTS 1000
 #define DEFAULT_CACHE_ON_WRITE_MAX_SIZE 1024 * 1024 * 1024 // 1GB
 
 /*

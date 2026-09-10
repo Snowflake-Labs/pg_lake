@@ -64,6 +64,17 @@ typedef struct PgClientThreadInitState
 		snprintf(path, sizeof(path), "%s/.s.PGSQL.%d", \
 				 (sockdir), (port))
 
+/*
+ * How long the accept loop pauses after a connection it could not serve.
+ *
+ * The rejected client is closed first, so it still fails immediately; the
+ * pause only limits how fast we take on the next one.  Without it a burst
+ * that outlasts the pool becomes a hot accept/reject/close loop that keeps
+ * the host too busy for the detached client threads to exit and release
+ * their slots.
+ */
+#define ACCEPT_REJECT_PAUSE_US 1000
+
 static int	create_and_bind_unix_socket(PGServer * server, char *unixSocketPath,
 										char *unixSocketOwningGroup,
 										int unixSocketPermissions,
@@ -418,6 +429,9 @@ pgserver_run(PGServer * pgServer)
 	if (install_shutdown_signal_handlers() != STATUS_OK)
 		return STATUS_ERROR;
 
+	/* whether we are currently turning clients away, to log it only once */
+	bool		rejecting = false;
+
 	while (running)
 	{
 		PGClient   *client = (PGClient *) pg_malloc0(sizeof(PGClient));
@@ -473,13 +487,27 @@ pgserver_run(PGServer * pgServer)
 
 		if (threadIndex == InvalidThreadIndex)
 		{
-			PGDUCK_SERVER_LOG("A new client rejected as it exceeds %d clients", MaxAllowedClients);
+			/*
+			 * Log only when we start rejecting, so a sustained burst does not
+			 * write a line per connection.  Reset once we serve someone
+			 * again.
+			 */
+			if (!rejecting)
+			{
+				PGDUCK_SERVER_LOG("new clients rejected: at the %d client limit",
+								  MaxAllowedClients);
+				rejecting = true;
+			}
 
 			/* TODO: send error message to the client */
 			close(client->clientSocket);
 			pg_free(client);
+
+			pg_usleep(ACCEPT_REJECT_PAUSE_US);
 			continue;
 		}
+
+		rejecting = false;
 
 		/* state to pass into pgclient_thread_main and pgclient_thread_cleanup */
 		PgClientThreadInitState *initState =
@@ -492,7 +520,10 @@ pgserver_run(PGServer * pgServer)
 		if (disable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		if (pgserver_create_client_thread(initState) != OK)
+		int			threadCreateError = pgserver_create_client_thread(initState);
+		bool		threadCreated = threadCreateError == OK;
+
+		if (!threadCreated)
 		{
 			PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
 
@@ -513,6 +544,30 @@ pgserver_run(PGServer * pgServer)
 
 		if (enable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
+
+		if (!threadCreated)
+		{
+			/*
+			 * EAGAIN is the OS telling us it has no more threads for this
+			 * process, so max_clients is set above what this host can carry.
+			 * Lower it to what we are demonstrably running, and
+			 * reserve_slot() turns the next connections away by itself
+			 * instead of every one of them repeating this same failure.
+			 *
+			 * Only EAGAIN says anything about capacity.  EINVAL or EPERM mean
+			 * we asked for something the platform will not do, and clamping
+			 * on those would shrink the server for a reason that has nothing
+			 * to do with load.
+			 */
+			if (threadCreateError == EAGAIN)
+				pgclient_threadpool_clamp_cap_to_active();
+
+			/*
+			 * pause as above; we are past enable_shutdown_signals() so a
+			 * SIGTERM interrupts it
+			 */
+			pg_usleep(ACCEPT_REJECT_PAUSE_US);
+		}
 	}
 
 	return STATUS_OK;
@@ -561,6 +616,10 @@ pgserver_destroy(PGServer * pgServer)
  * pgserver_create_client_thread creates a new thread for the client.
  * We use PTHREAD_CREATE_DETACHED so that we don't have to join the threads.
  *
+ * Returns OK, or the errno-style code pthread_create() reported.  The caller
+ * needs to tell EAGAIN, which means the OS will not give us more threads,
+ * apart from the other failures, which say nothing about capacity.
+ *
  * The caller must block shutdown signals before calling this function
  * so the new thread inherits a blocked mask and never receives
  * SIGINT/SIGTERM.
@@ -586,12 +645,12 @@ pgserver_create_client_thread(const PgClientThreadInitState * initState)
 		/* TODO: send error message to the client */
 		pthread_attr_destroy(&threadAttr);
 
-		return STATUS_ERROR;
+		return isThreadCreated;
 	}
 
 	pthread_attr_destroy(&threadAttr);
 
-	return STATUS_OK;
+	return OK;
 }
 
 
