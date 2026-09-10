@@ -27,7 +27,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
         with:
           fetch-depth: 0
@@ -38,7 +38,7 @@ jobs:
           echo "PATH=/home/postgres/pgsql-${{ inputs.pg_version }}/bin:$PATH" >> $GITHUB_ENV
           echo "PG_REGRESS_DIR=/home/postgres/pgsql-${{ inputs.pg_version }}/regress" >> $GITHUB_ENV
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v5
         id: cache_pipenv
         name: Cache pipenv
         with:
