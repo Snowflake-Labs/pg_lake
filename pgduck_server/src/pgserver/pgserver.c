@@ -64,6 +64,17 @@ typedef struct PgClientThreadInitState
 		snprintf(path, sizeof(path), "%s/.s.PGSQL.%d", \
 				 (sockdir), (port))
 
+/*
+ * How long the accept loop pauses after a connection it could not serve.
+ *
+ * The rejected client is closed first, so it still fails immediately; the
+ * pause only limits how fast we take on the next one.  Without it a burst
+ * that outlasts the pool becomes a hot accept/reject/close loop that keeps
+ * the host too busy for the detached client threads to exit and release
+ * their slots.
+ */
+#define ACCEPT_REJECT_PAUSE_US 1000
+
 static int	create_and_bind_unix_socket(PGServer * server, char *unixSocketPath,
 										char *unixSocketOwningGroup,
 										int unixSocketPermissions,
@@ -418,6 +429,9 @@ pgserver_run(PGServer * pgServer)
 	if (install_shutdown_signal_handlers() != STATUS_OK)
 		return STATUS_ERROR;
 
+	/* whether we are currently turning clients away, to log it only once */
+	bool		rejecting = false;
+
 	while (running)
 	{
 		PGClient   *client = (PGClient *) pg_malloc0(sizeof(PGClient));
@@ -473,13 +487,27 @@ pgserver_run(PGServer * pgServer)
 
 		if (threadIndex == InvalidThreadIndex)
 		{
-			PGDUCK_SERVER_LOG("A new client rejected as it exceeds %d clients", MaxAllowedClients);
+			/*
+			 * Log only when we start rejecting, so a sustained burst does not
+			 * write a line per connection.  Reset once we serve someone
+			 * again.
+			 */
+			if (!rejecting)
+			{
+				PGDUCK_SERVER_LOG("new clients rejected: at the %d client limit",
+								  MaxAllowedClients);
+				rejecting = true;
+			}
 
 			/* TODO: send error message to the client */
 			close(client->clientSocket);
 			pg_free(client);
+
+			pg_usleep(ACCEPT_REJECT_PAUSE_US);
 			continue;
 		}
+
+		rejecting = false;
 
 		/* state to pass into pgclient_thread_main and pgclient_thread_cleanup */
 		PgClientThreadInitState *initState =
@@ -492,7 +520,9 @@ pgserver_run(PGServer * pgServer)
 		if (disable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		if (pgserver_create_client_thread(initState) != OK)
+		bool		threadCreated = pgserver_create_client_thread(initState) == OK;
+
+		if (!threadCreated)
 		{
 			PGDUCK_SERVER_ERROR("Thread creation failed for client %d", client->clientSocket);
 
@@ -513,6 +543,14 @@ pgserver_run(PGServer * pgServer)
 
 		if (enable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
+
+		/*
+		 * Same pause as the capacity reject above, so a burst that keeps
+		 * failing thread creation does not turn into a hot accept loop.  We
+		 * are past enable_shutdown_signals() so a SIGTERM interrupts it.
+		 */
+		if (!threadCreated)
+			pg_usleep(ACCEPT_REJECT_PAUSE_US);
 	}
 
 	return STATUS_OK;
