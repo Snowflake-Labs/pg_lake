@@ -396,15 +396,21 @@ duckdb_global_init(char *databaseFilePath,
 	if (run_command_on_duckdb(createS3Secret) == DuckDBError)
 		return DUCKDB_INITIALIZATION_ERROR;
 
-	const char *createGCSSecret =
-		"CREATE SECRET gcsdefault ("
-		"TYPE GCS, PROVIDER CREDENTIAL_CHAIN, "
-		"VALIDATION 'none', "
-		"ENDPOINT 'storage.googleapis.com'"
-		")";
-
-	if (run_command_on_duckdb(createGCSSecret) == DuckDBError)
-		return DUCKDB_INITIALIZATION_ERROR;
+	/*
+	 * No default GCS secret.
+	 *
+	 * We used to create one with PROVIDER CREDENTIAL_CHAIN, but that provider
+	 * is registered by the aws extension, not httpfs, for types {s3, r2, gcs,
+	 * aws}. It resolves the *AWS* credential chain, so the secret ended up
+	 * holding an AWS key scoped to gcs:// and gs://, every GCS request got
+	 * SigV4-signed with it, and Google returned 403. It also broke reads of
+	 * public buckets, because a non-empty secret makes httpfs sign instead of
+	 * sending an unauthenticated request.
+	 *
+	 * Without a secret, public buckets work and private ones give a plain 403
+	 * until the user creates a secret of their own. httpfs already defaults
+	 * the GCS endpoint to storage.googleapis.com, so nothing else is lost.
+	 */
 
 	char		setCommand[1024];
 

@@ -507,8 +507,46 @@ def test_pg_lake_remove_file_already_gone(s3, pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_pg_lake_remove_file_glob_gcs(gcs, pgduck_conn):
+    """GCS answers the same DeleteObjects request as S3 on its XML API, with the
+    same body and the same 1000 key limit, so gs:// takes the batch path too.
+
+    This covers that path end to end: the mock rejects a malformed body, and
+    PostDeleteObjects rejects a response that is not a DeleteResult. What it
+    cannot see is which path ran, since deleting one file at a time reaches the
+    same end state, and it cannot see real GCS accepting the S3 XML namespace
+    the body is built with."""
+    prefix = "test_remove_files_gcs/tbl"
+
+    keys = [
+        f"{prefix}/metadata/v1.metadata.json",
+        f"{prefix}/data/a.parquet",
+        f"{prefix}/data/nested/b.parquet",
+    ]
+    for key in keys:
+        gcs.put_object(Bucket=TEST_BUCKET_GCS, Key=key, Body=b"x")
+
+    # a sibling object outside the pattern must survive
+    survivor = "test_remove_files_gcs/other/keep.parquet"
+    gcs.put_object(Bucket=TEST_BUCKET_GCS, Key=survivor, Body=b"x")
+
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM glob('gs://{TEST_BUCKET_GCS}/{prefix}/**') "
+        "WHERE pg_lake_remove_file(file)",
+        pgduck_conn,
+    )
+    assert results[0][0] == len(keys)
+
+    assert list_objects(gcs, TEST_BUCKET_GCS, f"{prefix}/") == []
+    assert list_objects(gcs, TEST_BUCKET_GCS, survivor) == [survivor]
+
+    # cleanup
+    gcs.delete_object(Bucket=TEST_BUCKET_GCS, Key=survivor)
+    pgduck_conn.rollback()
+
+
 def test_pg_lake_remove_file_azure(azure, pgduck_conn):
-    """Only S3 has a batch delete API, so every other back end takes the fallback
+    """Azure has no S3 style batch delete, so it takes the fallback
     that removes one file at a time through the file system the ClientContext hands
     out. Nothing else covers that branch.
 
