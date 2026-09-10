@@ -138,23 +138,24 @@ static HTAB *TrackedIcebergMetadataOperationsHash = NULL;
  */
 typedef struct RestCatalogPendingMetadataDeletion
 {
-  char       *path;
-  Oid         relationId;
-  TimestampTz orphanedAt;
-} RestCatalogPendingMetadataDeletion;
+	char	   *path;
+	Oid			relationId;
+	TimestampTz orphanedAt;
+}			RestCatalogPendingMetadataDeletion;
 
 typedef struct PgLakeXactRestCatalogContext
 {
-  HTAB     *requestsHash;
-  MemoryContext commitContext;
-  RestCatalogOptions *catalogOpts;
-  /*
-   * Old metadata paths for this transaction that are waiting to be inserted
-   * into deletion_queue once the REST catalog batch commit returns 204.
-   * Allocated in TopTransactionContext; freed automatically at tx end.
-   */
-  List     *metadataToEnqueueOnSuccess;
-}      PgLakeXactRestCatalogContext;
+	HTAB	   *requestsHash;
+	MemoryContext commitContext;
+	RestCatalogOptions *catalogOpts;
+
+	/*
+	 * Old metadata paths for this transaction that are waiting to be inserted
+	 * into deletion_queue once the REST catalog batch commit returns 204.
+	 * Allocated in TopTransactionContext; freed automatically at tx end.
+	 */
+	List	   *metadataToEnqueueOnSuccess;
+}			PgLakeXactRestCatalogContext;
 
 static PgLakeXactRestCatalogContext * PgLakeXactRestCatalog = NULL;
 
@@ -255,70 +256,91 @@ ResetTrackedIcebergMetadataOperation(void)
 void
 ResetRestCatalogRequests(void)
 {
-  PgLakeXactRestCatalog = NULL;
+	PgLakeXactRestCatalog = NULL;
 }
 
 
 /*
  * AddRestCatalogMetadataForDeferredDeletion records an old metadata file path
- * that should be inserted into deletion_queue only after the current
- * transaction's REST catalog commit succeeds (returns HTTP 204).  If the REST
- * commit fails (e.g. 429 rate-limit), the path is silently discarded along
- * with the transaction context — eliminating the duplicate-key crash that
- * occurred when a plain InsertDeletionQueueRecord was called before the commit
- * outcome was known.
+ * that becomes safe to physically delete once the current transaction's REST
+ * catalog commit succeeds (returns HTTP 204).
+ *
+ * The path is durably inserted into deletion_queue right here, in the same
+ * SPI-safe, PRE_COMMIT-adjacent context this function already runs in --
+ * marked pending_rest_confirmation so it is invisible to
+ * GetDeletionQueueRecords until ConfirmRestCatalogDeletion flips it. This
+ * means the row survives a crash or backend churn between now and
+ * confirmation: at worst it stays pending forever (never deleted, never
+ * lost from tracking), instead of vanishing along with process memory the
+ * way relying solely on metadataToEnqueueOnSuccess/confirmedRestCatalogDeletions
+ * would.
+ *
+ * The in-memory list below remains as the fast path for confirmation: if the
+ * REST commit succeeds, PostAllRestCatalogRequests promotes it to
+ * confirmedRestCatalogDeletions so DrainConfirmedRestCatalogDeletions can
+ * flip the already-durable row to confirmed on the next PRE_COMMIT. If the
+ * REST commit fails, nothing here needs undoing: the row simply stays
+ * pending, which is exactly correct since the old metadata file might still
+ * be referenced by the catalog.
  */
 void
 AddRestCatalogMetadataForDeferredDeletion(char *path, Oid relationId, TimestampTz orphanedAt)
 {
-  InitRestCatalogRequestsHashIfNeeded();
+	InitRestCatalogRequestsHashIfNeeded();
 
-  MemoryContext oldctx = MemoryContextSwitchTo(TopTransactionContext);
+	InsertPendingRestCatalogDeletionRecord(path, relationId, orphanedAt);
 
-  RestCatalogPendingMetadataDeletion *pending =
-    palloc(sizeof(RestCatalogPendingMetadataDeletion));
-  pending->path = pstrdup(path);
-  pending->relationId = relationId;
-  pending->orphanedAt = orphanedAt;
+	MemoryContext oldctx = MemoryContextSwitchTo(TopTransactionContext);
 
-  PgLakeXactRestCatalog->metadataToEnqueueOnSuccess =
-    lappend(PgLakeXactRestCatalog->metadataToEnqueueOnSuccess, pending);
+	RestCatalogPendingMetadataDeletion *pending =
+		palloc(sizeof(RestCatalogPendingMetadataDeletion));
 
-  MemoryContextSwitchTo(oldctx);
+	pending->path = pstrdup(path);
+	pending->relationId = relationId;
+	pending->orphanedAt = orphanedAt;
+
+	PgLakeXactRestCatalog->metadataToEnqueueOnSuccess =
+		lappend(PgLakeXactRestCatalog->metadataToEnqueueOnSuccess, pending);
+
+	MemoryContextSwitchTo(oldctx);
 }
 
 
 /*
- * DrainConfirmedRestCatalogDeletions inserts into deletion_queue every
- * metadata path confirmed by a successful REST catalog commit in a prior
- * transaction.  Called in XACT_EVENT_PRE_COMMIT where an active snapshot is
- * available for the SPI call inside InsertDeletionQueueRecord.
+ * DrainConfirmedRestCatalogDeletions confirms every metadata path confirmed
+ * by a successful REST catalog commit in a prior transaction, making its
+ * already-durable deletion_queue row (see AddRestCatalogMetadataForDeferredDeletion)
+ * eligible for the next flush_deletion_queue / VACUUM pass.  Called in
+ * XACT_EVENT_PRE_COMMIT where an active snapshot is available for the SPI
+ * call inside ConfirmRestCatalogDeletion.
  *
  * The global list is cleared immediately on entry so that a mid-drain SQL
- * error does not re-try the same paths in the next transaction.
+ * error does not re-try the same paths in the next transaction. Paths that
+ * are never confirmed this way (crash, disconnect, backend churn) simply
+ * stay pending in deletion_queue -- never deleted, never lost.
  */
 void
 DrainConfirmedRestCatalogDeletions(void)
 {
-  if (confirmedRestCatalogDeletions == NIL)
-    return;
+	if (confirmedRestCatalogDeletions == NIL)
+		return;
 
-  /* Take ownership before any SQL work. */
-  List     *toProcess = confirmedRestCatalogDeletions;
+	/* Take ownership before any SQL work. */
+	List	   *toProcess = confirmedRestCatalogDeletions;
 
-  confirmedRestCatalogDeletions = NIL;
+	confirmedRestCatalogDeletions = NIL;
 
-  ListCell   *cell;
+	ListCell   *cell;
 
-  foreach(cell, toProcess)
-  {
-    RestCatalogPendingMetadataDeletion *entry = lfirst(cell);
+	foreach(cell, toProcess)
+	{
+		RestCatalogPendingMetadataDeletion *entry = lfirst(cell);
 
-    InsertDeletionQueueRecord(entry->path, entry->relationId, entry->orphanedAt);
-    pfree(entry->path);
-    pfree(entry);
-  }
-  list_free(toProcess);
+		ConfirmRestCatalogDeletion(entry->path);
+		pfree(entry->path);
+		pfree(entry);
+	}
+	list_free(toProcess);
 }
 
 
@@ -543,37 +565,37 @@ PostAllRestCatalogRequests(void)
 														  url, batchRequestBody->data,
 														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
-    if (httpResult.status != 204)
-    {
-      ReportHTTPError(httpResult, WARNING);
-    }
-    else
-    {
-      /*
-       * REST catalog commit succeeded.  Promote any pending metadata paths
-       * for this transaction to the process-global confirmed list so they
-       * can be inserted into deletion_queue in the next PRE_COMMIT.
-       * Allocate in TopMemoryContext because TopTransactionContext is freed
-       * at the end of this transaction.
-       */
-      MemoryContext prevctx = MemoryContextSwitchTo(TopMemoryContext);
-      ListCell   *cell;
+		if (httpResult.status != 204)
+		{
+			ReportHTTPError(httpResult, WARNING);
+		}
+		else
+		{
+			/*
+			 * REST catalog commit succeeded.  Promote any pending metadata
+			 * paths for this transaction to the process-global confirmed list
+			 * so they can be inserted into deletion_queue in the next
+			 * PRE_COMMIT. Allocate in TopMemoryContext because
+			 * TopTransactionContext is freed at the end of this transaction.
+			 */
+			MemoryContext prevctx = MemoryContextSwitchTo(TopMemoryContext);
+			ListCell   *cell;
 
-      foreach(cell, PgLakeXactRestCatalog->metadataToEnqueueOnSuccess)
-      {
-        RestCatalogPendingMetadataDeletion *src = lfirst(cell);
-        RestCatalogPendingMetadataDeletion *dst =
-          palloc(sizeof(RestCatalogPendingMetadataDeletion));
+			foreach(cell, PgLakeXactRestCatalog->metadataToEnqueueOnSuccess)
+			{
+				RestCatalogPendingMetadataDeletion *src = lfirst(cell);
+				RestCatalogPendingMetadataDeletion *dst =
+					palloc(sizeof(RestCatalogPendingMetadataDeletion));
 
-        dst->path = pstrdup(src->path);
-        dst->relationId = src->relationId;
-        dst->orphanedAt = src->orphanedAt;
-        confirmedRestCatalogDeletions =
-          lappend(confirmedRestCatalogDeletions, dst);
-      }
-      MemoryContextSwitchTo(prevctx);
-    }
-  }
+				dst->path = pstrdup(src->path);
+				dst->relationId = src->relationId;
+				dst->orphanedAt = src->orphanedAt;
+				confirmedRestCatalogDeletions =
+					lappend(confirmedRestCatalogDeletions, dst);
+			}
+			MemoryContextSwitchTo(prevctx);
+		}
+	}
 
 	/*
 	 * Switch back to old context from commitContext.

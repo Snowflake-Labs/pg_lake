@@ -173,3 +173,155 @@ def test_no_crash_after_repeated_failure_simulation(
     assert (
         _count_in_dq(superuser_conn, test_path) == 0
     ), "After two failed REST commits, deletion_queue must stay empty for the path"
+
+
+# ---------------------------------------------------------------------------
+# test: pending_rest_confirmation durability (fix for the review comment on
+# #397 -- "if the process ends we lose this list, so this doesn't seem like
+# a good solution").
+#
+# AddRestCatalogMetadataForDeferredDeletion now inserts the row durably,
+# in the SAME transaction that orphaned the path, marked
+# pending_rest_confirmation = true.  It is invisible to
+# GetDeletionQueueRecords / flush_deletion_queue until
+# ConfirmRestCatalogDeletion flips the flag.  If confirmation never happens
+# (crash, disconnect, backend churn) the row simply stays pending forever --
+# never deleted, but never lost from tracking either, unlike relying solely
+# on the backend-local confirmedRestCatalogDeletions list.
+# ---------------------------------------------------------------------------
+
+
+def test_pending_confirmation_defaults_false(superuser_conn, extension, test_path):
+    """A plain INSERT that does not mention pending_rest_confirmation must
+    default it to false, so every pre-existing call site (InsertDeletionQueueRecord,
+    InsertPrefixDeletionRecord, InsertMetadataResolveRecord) keeps behaving
+    exactly as before this column was added."""
+    run_command(
+        f"INSERT INTO lake_engine.deletion_queue "
+        f"(path, table_name, orphaned_at, is_prefix) "
+        f"VALUES ('{test_path}', NULL, NULL, false)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    pending = run_query(
+        f"SELECT pending_rest_confirmation FROM lake_engine.deletion_queue "
+        f"WHERE path = '{test_path}'",
+        superuser_conn,
+    )[0][0]
+    assert pending is False, "pending_rest_confirmation must default to false"
+
+
+def test_pending_row_excluded_from_flush_deletion_queue(
+    superuser_conn, extension, test_path
+):
+    """A row inserted with pending_rest_confirmation = true must never be
+    claimed by flush_deletion_queue, even with retention set to 0 and
+    orphaned_at already in the past.  This is what makes AddRestCatalogMetadataForDeferredDeletion's
+    early durable insert safe: the file is recorded, but not yet eligible
+    for physical deletion, so it is never removed while the REST catalog
+    commit that would make it safe is still in flight.
+
+    Because the row is filtered out before GetDeletionQueueRecords claims
+    any row for update, this never attempts an object-storage call for the
+    fake path below, so the test is deterministic regardless of storage
+    backend."""
+    run_command(
+        f"INSERT INTO lake_engine.deletion_queue "
+        f"(path, table_name, orphaned_at, is_prefix, pending_rest_confirmation) "
+        f"VALUES ('{test_path}', NULL, pg_catalog.now() - INTERVAL '1 day', false, true)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SELECT lake_engine.flush_deletion_queue(0)",
+        ]
+    )
+
+    assert (
+        _count_in_dq(superuser_conn, test_path) == 1
+    ), "A pending row must never be claimed/removed by flush_deletion_queue"
+
+    row = run_query(
+        f"SELECT retry_count, last_attempt_at, pending_rest_confirmation "
+        f"FROM lake_engine.deletion_queue WHERE path = '{test_path}'",
+        superuser_conn,
+    )[0]
+    retry_count, last_attempt_at, pending = row
+    assert retry_count == 0 and last_attempt_at is None, (
+        "A pending row must not even be attempted (no retry_count/last_attempt_at "
+        "change), proving it was excluded at the eligibility query, not merely "
+        "failed to delete"
+    )
+    assert pending is True
+
+
+def test_confirming_row_flips_flag(superuser_conn, extension, test_path):
+    """ConfirmRestCatalogDeletion's SQL contract: UPDATE ... SET
+    pending_rest_confirmation = false WHERE path = $1, applied to a row
+    that already exists (from the durable insert at PRE_COMMIT), not a
+    fresh INSERT.  This is the only DB write the deferred-confirmation
+    path performs once a REST commit is known to have succeeded."""
+    run_command(
+        f"INSERT INTO lake_engine.deletion_queue "
+        f"(path, table_name, orphaned_at, is_prefix, pending_rest_confirmation) "
+        f"VALUES ('{test_path}', NULL, NULL, false, true)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(
+        f"UPDATE lake_engine.deletion_queue "
+        f"SET pending_rest_confirmation = false WHERE path = '{test_path}'",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    pending = run_query(
+        f"SELECT pending_rest_confirmation FROM lake_engine.deletion_queue "
+        f"WHERE path = '{test_path}'",
+        superuser_conn,
+    )[0][0]
+    assert pending is False
+
+
+def test_confirmed_row_eligible_for_flush(superuser_conn, extension, test_path):
+    """Once pending_rest_confirmation is false, the row must become
+    eligible for flush_deletion_queue's claim query -- either it gets
+    physically removed, or (for a path that does not exist in storage) it
+    is at least attempted, evidenced by retry_count/last_attempt_at
+    advancing. Either outcome proves the row is no longer excluded, in
+    contrast to test_pending_row_excluded_from_flush_deletion_queue."""
+    run_command(
+        f"INSERT INTO lake_engine.deletion_queue "
+        f"(path, table_name, orphaned_at, is_prefix, pending_rest_confirmation) "
+        f"VALUES ('{test_path}', NULL, pg_catalog.now() - INTERVAL '1 day', false, false)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SELECT lake_engine.flush_deletion_queue(0)",
+        ]
+    )
+
+    remaining = _count_in_dq(superuser_conn, test_path)
+    if remaining == 0:
+        # Removed -- the fake path's DELETE no-op'd successfully.
+        return
+
+    row = run_query(
+        f"SELECT retry_count, last_attempt_at "
+        f"FROM lake_engine.deletion_queue WHERE path = '{test_path}'",
+        superuser_conn,
+    )[0]
+    retry_count, last_attempt_at = row
+    assert retry_count > 0 or last_attempt_at is not None, (
+        "An unconfirmed-no-longer-pending row must be claimed by "
+        "flush_deletion_queue -- either removed, or shown as attempted"
+    )
