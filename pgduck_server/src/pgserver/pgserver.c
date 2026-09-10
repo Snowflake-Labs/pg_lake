@@ -520,7 +520,8 @@ pgserver_run(PGServer * pgServer)
 		if (disable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		bool		threadCreated = pgserver_create_client_thread(initState) == OK;
+		int			threadCreateError = pgserver_create_client_thread(initState);
+		bool		threadCreated = threadCreateError == OK;
 
 		if (!threadCreated)
 		{
@@ -544,13 +545,29 @@ pgserver_run(PGServer * pgServer)
 		if (enable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		/*
-		 * Same pause as the capacity reject above, so a burst that keeps
-		 * failing thread creation does not turn into a hot accept loop.  We
-		 * are past enable_shutdown_signals() so a SIGTERM interrupts it.
-		 */
 		if (!threadCreated)
+		{
+			/*
+			 * EAGAIN is the OS telling us it has no more threads for this
+			 * process, so max_clients is set above what this host can carry.
+			 * Lower it to what we are demonstrably running, and
+			 * reserve_slot() turns the next connections away by itself
+			 * instead of every one of them repeating this same failure.
+			 *
+			 * Only EAGAIN says anything about capacity.  EINVAL or EPERM mean
+			 * we asked for something the platform will not do, and clamping
+			 * on those would shrink the server for a reason that has nothing
+			 * to do with load.
+			 */
+			if (threadCreateError == EAGAIN)
+				pgclient_threadpool_clamp_cap_to_active();
+
+			/*
+			 * pause as above; we are past enable_shutdown_signals() so a
+			 * SIGTERM interrupts it
+			 */
 			pg_usleep(ACCEPT_REJECT_PAUSE_US);
+		}
 	}
 
 	return STATUS_OK;
@@ -599,6 +616,10 @@ pgserver_destroy(PGServer * pgServer)
  * pgserver_create_client_thread creates a new thread for the client.
  * We use PTHREAD_CREATE_DETACHED so that we don't have to join the threads.
  *
+ * Returns OK, or the errno-style code pthread_create() reported.  The caller
+ * needs to tell EAGAIN, which means the OS will not give us more threads,
+ * apart from the other failures, which say nothing about capacity.
+ *
  * The caller must block shutdown signals before calling this function
  * so the new thread inherits a blocked mask and never receives
  * SIGINT/SIGTERM.
@@ -624,12 +645,12 @@ pgserver_create_client_thread(const PgClientThreadInitState * initState)
 		/* TODO: send error message to the client */
 		pthread_attr_destroy(&threadAttr);
 
-		return STATUS_ERROR;
+		return isThreadCreated;
 	}
 
 	pthread_attr_destroy(&threadAttr);
 
-	return STATUS_OK;
+	return OK;
 }
 
 

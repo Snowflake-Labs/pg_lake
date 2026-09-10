@@ -29,6 +29,7 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/resource.h>
 
 #include "pgserver/client_threadpool.h"
 #include "utils/pgduck_log_utils.h"
@@ -69,6 +70,21 @@ typedef struct PgClientThreadState
 
 int			MaxAllowedClients;
 int			MaxThreads;
+
+/*
+ * After clamp_cap_to_active() lowers MaxAllowedClients, restore the configured
+ * value once live clients fall to this.  5 is arbitrary: low enough that a
+ * burst has clearly passed, high enough that we do not wait for a completely
+ * idle process.
+ */
+#define CLAMP_RESTORE_CLIENTS 5
+
+/*
+ * max_clients as configured.  MaxAllowedClients can be lowered below this at
+ * runtime when the OS refuses a thread, and is restored from here once live
+ * clients drop to CLAMP_RESTORE_CLIENTS; see clamp_cap_to_active and free_slot.
+ */
+static int	ConfiguredMaxClients;
 
 /* all accesses to ClientThreadPool should happen while holding a lock */
 static PgClientThreadState * ClientThreadPool;
@@ -111,6 +127,7 @@ pgclient_threadpool_init(int maxAllowedClients)
 	 * We could perhaps use some smaller number, for now let's keep it simple.
 	 */
 	MaxAllowedClients = maxAllowedClients;
+	ConfiguredMaxClients = maxAllowedClients;
 	MaxThreads = maxAllowedClients * 2;
 
 	/* pg_malloc0 exists the program in case cannot allocate */
@@ -122,6 +139,91 @@ pgclient_threadpool_init(int maxAllowedClients)
 	{
 		PGDUCK_SERVER_ERROR("Failed to create rwlock with %d", rwLockCreated);
 		exit(STATUS_ERROR);
+	}
+}
+
+
+/*
+ * describe_nproc_limit renders RLIMIT_NPROC for the log, so that a reader can
+ * tell which wall we hit.  pthread_create reports EAGAIN both for "no more
+ * threads allowed" and for "could not get the resources for one", so the
+ * errno alone does not say whether the thread limit or memory was the
+ * constraint.  A live thread count well under this limit means memory.
+ */
+static const char *
+describe_nproc_limit(char *buf, size_t buflen)
+{
+	struct rlimit rlim;
+
+	if (getrlimit(RLIMIT_NPROC, &rlim) != 0)
+		return "unknown";
+
+	if (rlim.rlim_cur == RLIM_INFINITY)
+		return "unlimited";
+
+	snprintf(buf, buflen, "%llu", (unsigned long long) rlim.rlim_cur);
+
+	return buf;
+}
+
+
+/*
+ * pgclient_threadpool_clamp_cap_to_active lowers the client cap to the number
+ * of client threads we are currently carrying.
+ *
+ * Called when the OS refuses us a new client thread.  max_clients is a promise
+ * we cannot keep once the host runs out of threads or memory first, and the
+ * real ceiling is not something we can read up front.  There is no portable
+ * way to ask for it (sysconf(_SC_THREAD_THREADS_MAX) is indeterminate),
+ * RLIMIT_NPROC is a per-uid budget shared with the user's other processes, a
+ * cgroup pids.max is invisible to us, and when memory is the binding
+ * constraint none of those numbers describe it at all.  A failed
+ * pthread_create is the one moment the OS tells us what this host actually
+ * sustains, so record it and let the ordinary capacity check in
+ * reserve_slot() enforce it from then on.  Otherwise every later connection
+ * repeats the same failed pthread_create and the cap never engages.
+ *
+ * The cap is restored once live clients drop to CLAMP_RESTORE_CLIENTS; see
+ * free_slot.
+ */
+void
+pgclient_threadpool_clamp_cap_to_active(void)
+{
+	int			loweredTo = 0;
+	int			liveThreads = 0;
+	int			previousCap = 0;
+
+	pthread_rwlock_wrlock(&rwlock);
+
+	/*
+	 * The count still includes the slot reserved for the thread that failed,
+	 * so what we have proven we can carry is one less than that.
+	 */
+	int			sustainable = Max(ActiveClientThreadCount - 1, 1);
+
+	liveThreads = ActiveClientThreadCount;
+	previousCap = MaxAllowedClients;
+
+	if (sustainable < MaxAllowedClients)
+	{
+		MaxAllowedClients = sustainable;
+		loweredTo = sustainable;
+	}
+
+	pthread_rwlock_unlock(&rwlock);
+
+	if (loweredTo > 0)
+	{
+		char		limitBuf[32];
+
+		PGDUCK_SERVER_WARN("the OS refused a new client thread: %d client "
+						   "threads live, max_clients %d, RLIMIT_NPROC %s. "
+						   "Lowering max_clients to %d until clients drop to %d. "
+						   "A live count well below RLIMIT_NPROC means memory, "
+						   "not the thread limit, is the constraint",
+						   liveThreads, previousCap,
+						   describe_nproc_limit(limitBuf, sizeof(limitBuf)),
+						   loweredTo, CLAMP_RESTORE_CLIENTS);
 	}
 }
 
@@ -250,7 +352,28 @@ pgclient_threadpool_free_slot(int threadIndex)
 	if (threadIndex <= ThreadPoolAvailableIndexStart)
 		ThreadPoolAvailableIndexStart = threadState->threadIndex;
 
+	/*
+	 * Burst has passed.  If clamp_cap_to_active() lowered the cap earlier,
+	 * the EAGAIN behind it may well have been passing memory pressure rather
+	 * than a standing ceiling, pthread_create reports the same error for
+	 * both, so let the configured value apply again instead of staying shrunk
+	 * for the life of the process.  If the ceiling is real we relearn it at
+	 * the cost of one more failed pthread_create.
+	 */
+	bool		capRestored = false;
+
+	if (ActiveClientThreadCount <= CLAMP_RESTORE_CLIENTS &&
+		MaxAllowedClients < ConfiguredMaxClients)
+	{
+		MaxAllowedClients = ConfiguredMaxClients;
+		capRestored = true;
+	}
+
 	pthread_rwlock_unlock(&rwlock);
+
+	if (capRestored)
+		PGDUCK_SERVER_LOG("clients dropped to %d; restoring max_clients to %d",
+						  ActiveClientThreadCount, ConfiguredMaxClients);
 }
 
 /*
