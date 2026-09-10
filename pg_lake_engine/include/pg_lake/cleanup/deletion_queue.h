@@ -57,4 +57,8 @@ extern PGDLLEXPORT void InsertPrefixDeletionRecord(char *path, TimestampTz orpha
 extern PGDLLEXPORT void InsertMetadataResolveRecord(char *metadataPath, Oid relationId,
 													TimestampTz orphanedAt);
 extern PGDLLEXPORT void InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
-														  bool isPrefix, bool resolveMetadata);
+														  bool isPrefix, bool resolveMetadata,
+														  bool pendingConfirmation);
+extern PGDLLEXPORT void InsertPendingRestCatalogDeletionRecord(char *path, Oid relationId,
+															   TimestampTz orphanedAt);
+extern PGDLLEXPORT void ConfirmRestCatalogDeletion(char *path);
