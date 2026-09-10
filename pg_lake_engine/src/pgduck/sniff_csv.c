@@ -30,10 +30,14 @@
 /*
  * SniffCSV calls the DuckDB sniff_csv function to determine the
  * properties of the CSV file.
+ *
+ * The line terminator is deliberately not reported.  We only sniff the first
+ * file of the path, and DuckDB detects the terminator per file, so there is
+ * nothing useful a single answer could say about a multi-file path.
  */
 void
 SniffCSV(char *url, CopyDataCompression compression, List *options,
-		 char **delimiter, char **quote, char **escape, bool *header, char **newLine)
+		 char **delimiter, char **quote, char **escape, bool *header)
 {
 	StringInfoData command;
 
@@ -45,7 +49,7 @@ SniffCSV(char *url, CopyDataCompression compression, List *options,
 		ereport(ERROR, (errmsg("couldn't find files at %s", url)));
 
 	appendStringInfo(&command,
-					 "SELECT Delimiter, Quote, Escape, HasHeader, NewLineDelimiter FROM sniff_csv(%s",
+					 "SELECT Delimiter, Quote, Escape, HasHeader FROM sniff_csv(%s",
 					 quote_literal_cstr((char *) linitial(outputFiles)));
 
 	if (compression != DATA_COMPRESSION_INVALID)
@@ -70,7 +74,7 @@ SniffCSV(char *url, CopyDataCompression compression, List *options,
 	/* make sure we PQclear the result */
 	PG_TRY();
 	{
-		if (PQntuples(result) != 1 && PQnfields(result) != 4)
+		if (PQntuples(result) != 1 || PQnfields(result) != 4)
 		{
 			ereport(ERROR, (errmsg("unexpected CSV detection result")));
 		}
@@ -94,12 +98,6 @@ SniffCSV(char *url, CopyDataCompression compression, List *options,
 		*escape = pstrdup(rawValue);
 
 		*header = strcasecmp(PQgetvalue(result, 0, 3), "t") == 0;
-
-		rawValue = PQgetvalue(result, 0, 4);
-		if (strcmp(rawValue, "") == 0)
-			rawValue = "\\n";
-
-		*newLine = pstrdup(rawValue);
 
 		PQclear(result);
 	}

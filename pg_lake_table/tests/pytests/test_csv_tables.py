@@ -1049,3 +1049,42 @@ def test_csv_crlf_newlines_with_explicit_columns(pg_conn, s3, extension, tmp_pat
     assert result == [[1, "alice", 100], [2, "bob", 200], [3, "charlie", 300]], result
 
     pg_conn.rollback()
+
+
+def test_csv_mixed_line_terminators_across_glob(pg_conn, s3, extension, tmp_path):
+    """Files behind one glob may disagree on the line terminator
+
+    Column inference sniffs the first file only, so a terminator recorded
+    from it would be applied to every other file and silently drop rows.
+    """
+    prefix = "test_csv_mixed_line_terminators"
+
+    for name, terminator, rows in [
+        ("a_crlf", "\r\n", ["1,one", "2,two"]),
+        ("b_lf", "\n", ["3,three", "4,four"]),
+    ]:
+        lines = ["id,name"] + rows
+        local_csv_path = tmp_path / f"{name}.csv"
+        with open(local_csv_path, "wb") as csv_file:
+            csv_file.write((terminator.join(lines) + terminator).encode())
+
+        s3.upload_file(local_csv_path, TEST_BUCKET, f"{prefix}/{name}.csv")
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_mixed_terminators ()
+        SERVER pg_lake OPTIONS (path 's3://{TEST_BUCKET}/{prefix}/*.csv',
+                                format 'csv', header 'true');
+        """,
+        pg_conn,
+    )
+
+    result = run_query("SELECT * FROM test_mixed_terminators ORDER BY id", pg_conn)
+    assert result == [
+        [1, "one"],
+        [2, "two"],
+        [3, "three"],
+        [4, "four"],
+    ], result
+
+    pg_conn.rollback()
