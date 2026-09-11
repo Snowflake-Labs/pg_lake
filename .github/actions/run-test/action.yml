@@ -143,6 +143,25 @@ runs:
           psql -U postgres -d regression -h localhost -p 5432 -c "CREATE EXTENSION pg_lake CASCADE;"
           psql -U postgres -d regression -h localhost -p 5432 -c "CREATE EXTENSION pg_lake_spatial CASCADE;"
 
+          # pgduck_server was started in the background above and only binds
+          # its unix socket after DuckDB is initialized (extension install
+          # plus --init_file_path), so the socket appearing is the readiness
+          # signal.  Without this wait the first pytests can outrun that
+          # startup and fail with "could not start query engine: ... No such
+          # file or directory" while every later test passes.
+          for _ in $(seq 1 120); do
+            if [ -S /tmp/.s.PGSQL.5332 ]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [ ! -S /tmp/.s.PGSQL.5332 ]; then
+            echo "pgduck_server did not create /tmp/.s.PGSQL.5332 within 120s" >&2
+            cat /tmp/pgduck_installcheck_logs >&2 || true
+            exit 1
+          fi
+
           make ${{ inputs.test_make_target }}
         elif [ ${{ inputs.upgrade }} == 'true' ]; then
           TEST_PG_UPGRADE_FROM_BINDIR=/home/postgres/pgsql-${{ inputs.from_pg_version }}/bin make ${{ inputs.test_make_target }}
