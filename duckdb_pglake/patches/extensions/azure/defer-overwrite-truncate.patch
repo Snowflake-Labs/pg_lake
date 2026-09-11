@@ -1,0 +1,58 @@
+diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
+index 0bd6bf4..439a154 100644
+--- a/src/azure_blob_filesystem.cpp
++++ b/src/azure_blob_filesystem.cpp
+@@ -96,6 +96,12 @@ void AzureBlobStorageFileHandle::Sync() {
+ 	try {
+ 		StageWriteBuffer();
+ 		if (staged_block_count == 0) {
++			if (!truncate_pending) {
++				return;
++			}
++			auto res = blob_client.CommitBlockList({});
++			last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
++			truncate_pending = false;
+ 			return;
+ 		}
+ 		std::vector<std::string> all_ids;
+@@ -108,6 +114,7 @@ void AzureBlobStorageFileHandle::Sync() {
+ 		last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
+ 		committed_block_count += staged_block_count;
+ 		staged_block_count = 0;
++		truncate_pending = false;
+ 	} catch (const Azure::Storage::StorageException &e) {
+ 		throw IOException("AzureBlobStorageFileSystem FileSync of '%s' failed with %s Reason Phrase: %s", GetPath(),
+ 		                  e.ErrorCode, e.ReasonPhrase);
+@@ -307,7 +314,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 		auto res_create = afh.blob_client.CommitBlockList({});
+ 		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
+ 	};
+-	auto truncate_file = create_file;
+ 
+ 	try {
+ 		auto res_props = afh.blob_client.GetProperties();
+@@ -315,7 +321,11 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 			throw IOException("AzureBlobStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
+ 			                  "while file already exists.");
+ 		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
+-			return truncate_file();
++			// Defer the truncate until close. CommitBlockList({}) here would publish a
++			// zero-length blob while the new content is still being staged.
++			afh.committed_block_count = 0;
++			afh.truncate_pending = true;
++			return set_props(false, 0, ToTimestamp(res_props.Value.LastModified));
+ 		}
+ 		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
+ 		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/");
+diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
+index 67bfebd..1ada92a 100644
+--- a/src/include/azure_blob_filesystem.hpp
++++ b/src/include/azure_blob_filesystem.hpp
+@@ -39,6 +39,7 @@ public:
+ 	Azure::Storage::Blobs::BlockBlobClient blob_client;
+ 	size_t committed_block_count = 0; // maintain position while open; only used if Sync() called before Close()
+ 	uint32_t staged_block_count = 0;
++	bool truncate_pending = false;
+ 	duckdb::unique_ptr<data_t[]> write_buffer;
+ 	idx_t write_buffer_offset = 0;
+ };
