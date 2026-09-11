@@ -39,6 +39,7 @@
 #include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/numeric.h"
+#include "pg_lake/util/s3_reader_utils.h"
 #include "nodes/pg_list.h"
 #include "utils/builtins.h"
 #include "pg_lake/pgduck/parse_struct.h"
@@ -110,7 +111,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  ICEBERG_OOR_NONE,
 							  ICEBERG_COMPAT_AUTO /* compatibilityMode */ ,
 							  false /* wrapNativeTypes */ ,
-							  NIL /* partitionByExprs */ );
+							  NIL /* partitionByExprs */ ,
+							  false /* skipCacheOnWrite */ );
 }
 
 
@@ -132,7 +134,8 @@ WriteQueryResultTo(char *query,
 				   IcebergOutOfRangePolicy outOfRangePolicy,
 				   IcebergCompatibilityMode compatibilityMode,
 				   bool wrapNativeTypes,
-				   List *partitionByExprs)
+				   List *partitionByExprs,
+				   bool skipCacheOnWrite)
 {
 	if (outOfRangePolicy != ICEBERG_OOR_NONE)
 	{
@@ -198,9 +201,20 @@ WriteQueryResultTo(char *query,
 
 	initStringInfo(&command);
 
+	/*
+	 * When the caller never reads these files back through pgduck on this
+	 * instance, prefix the COPY destination with "nocache" so the caching
+	 * filesystem skips cache-on-write and does not spend local cache space on
+	 * a write-only file.  The prefix is a pgduck-side artifact only; we strip
+	 * it back off the returned file paths below before they reach the
+	 * catalog/manifest.
+	 */
+	char	   *copyDestination = skipCacheOnWrite ?
+		psprintf("%s%s", NO_CACHE_URL_PREFIX, destinationPath) : destinationPath;
+
 	appendStringInfo(&command, "COPY (%s) TO %s",
 					 query,
-					 quote_literal_cstr(destinationPath));
+					 quote_literal_cstr(copyDestination));
 
 	/* start WITH options */
 	appendStringInfoString(&command, " WITH (");
@@ -454,11 +468,36 @@ WriteQueryResultTo(char *query,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	return ExecuteCopyToCommandOnPGDuckConnection(command.data,
-												  leafFields,
-												  schema,
-												  destinationPath,
-												  destinationFormat);
+	StatsCollector *statsCollector =
+		ExecuteCopyToCommandOnPGDuckConnection(command.data,
+											   leafFields,
+											   schema,
+											   destinationPath,
+											   destinationFormat);
+
+	/*
+	 * DuckDB echoes back the destination we handed it, so for a skip-cache
+	 * write every returned file path still carries the "nocache" prefix.
+	 * Strip it so callers persist the real object-store path.
+	 */
+	if (skipCacheOnWrite && statsCollector != NULL)
+	{
+		size_t		prefixLen = strlen(NO_CACHE_URL_PREFIX);
+		ListCell   *statsCell = NULL;
+
+		foreach(statsCell, statsCollector->dataFileStats)
+		{
+			DataFileStats *fileStats = lfirst(statsCell);
+
+			if (fileStats->dataFilePath != NULL &&
+				strncmp(fileStats->dataFilePath, NO_CACHE_URL_PREFIX,
+						prefixLen) == 0)
+				fileStats->dataFilePath =
+					pstrdup(fileStats->dataFilePath + prefixLen);
+		}
+	}
+
+	return statsCollector;
 }
 
 
