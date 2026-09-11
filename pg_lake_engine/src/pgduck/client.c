@@ -525,71 +525,36 @@ CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
 
 
 /*
- * PGDUCK_ENGINE_ERROR_PREFIX marks LOG lines guaranteed to be free of customer
- * data, so log forwarding and monitoring can safely match on this prefix. The
- * text after it must always be a fixed label from ClassifyPGDuckErrorMessage,
- * never interpolated message text.
+ * PGDUCK_ENGINE_ERROR_PREFIX marks LOG lines that carry only a canned class
+ * (never DuckDB/query text).
  */
 #define PGDUCK_ENGINE_ERROR_PREFIX "pgduck_engine_error: "
 
 /*
- * ClassifyPGDuckErrorMessage maps a pgduck_server error message to a PII-free
- * error class.
- *
- * knownMessages matches fixed, developer-controlled text that pgduck_server
- * sends verbatim (see handle_pgsession_error_message in pgsession.c).
- * knownPrefixes matches DuckDB's "<Category> Error: " exception labels, where
- * the category is DuckDB-owned but the detail after it can embed customer SQL,
- * row values, or paths -- so we only ever compare and return the prefix, never
- * anything past it. Both tables list only classes seen in production logs;
- * anything else is "other".
+ * ClassifyPGDuckErrorSqlState maps the SQLSTATE reported by pgduck_server to a
+ * PII-free class. Codes we do not distinguish are "other".
  */
-const char *
-ClassifyPGDuckErrorMessage(const char *message)
+static const char *
+ClassifyPGDuckErrorSqlState(int sqlState)
 {
-	static const struct
+	switch (sqlState)
 	{
-		const char *text;
-		const char *errorClass;
-	}			knownMessages[] = {
-		{"lost connection to query engine", "lost_connection"},
-	};
-
-	static const struct
-	{
-		const char *prefix;
-		const char *errorClass;
-	}			knownPrefixes[] = {
-		{"Out of Memory Error: ", "out_of_memory"},
-		{"IO Error: ", "io_error"},
-		{"HTTP Error: ", "http_error"},
-		{"Invalid Error: ", "invalid_error"},
-	};
-
-	if (message != NULL)
-	{
-		for (int i = 0; i < lengthof(knownMessages); i++)
-		{
-			if (strcmp(message, knownMessages[i].text) == 0)
-				return knownMessages[i].errorClass;
-		}
-
-		for (int i = 0; i < lengthof(knownPrefixes); i++)
-		{
-			if (strncmp(message, knownPrefixes[i].prefix,
-						strlen(knownPrefixes[i].prefix)) == 0)
-				return knownPrefixes[i].errorClass;
-		}
+		case ERRCODE_OUT_OF_MEMORY:
+			return "out_of_memory";
+		case ERRCODE_IO_ERROR:
+			return "io_error";
+		case ERRCODE_INVALID_PARAMETER_VALUE:
+			return "invalid_input";
+		case ERRCODE_INTERNAL_ERROR:
+			return "internal_error";
+		default:
+			return "other";
 	}
-
-	return "other";
 }
 
 
 /*
- * LogPGDuckErrorClass emits a fixed, non-interpolated LOG line carrying only
- * the error class -- never the underlying message text -- so it is
- * guaranteed to be free of customer data.
+ * LogPGDuckErrorClass emits a LOG line with only the canned class.
  */
 static void
 LogPGDuckErrorClass(const char *errorClass)
@@ -644,7 +609,7 @@ ThrowIfPGDuckResultHasError(PGDuckConnection * pgDuckConnection, PGresult *resul
 		message = pchomp(PQerrorMessage(pgDuckConnection->conn));
 	}
 
-	LogPGDuckErrorClass(ClassifyPGDuckErrorMessage(message));
+	LogPGDuckErrorClass(ClassifyPGDuckErrorSqlState(sqlState));
 
 	ereport(ERROR, (errcode(sqlState),
 					errmsg("%s", message),
