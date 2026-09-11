@@ -1,0 +1,216 @@
+diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
+index 0bd6bf4..f512f15 100644
+--- a/src/azure_blob_filesystem.cpp
++++ b/src/azure_blob_filesystem.cpp
+@@ -89,13 +89,22 @@ void AzureBlobStorageFileHandle::StageWriteBuffer() {
+ 	write_buffer_offset = 0;
+ }
+ 
+-void AzureBlobStorageFileHandle::Sync() {
++void AzureBlobStorageFileHandle::Sync(bool close) {
+ 	if (!(flags.OpenForWriting() || flags.OpenForAppending())) {
+ 		return;
+ 	}
+ 	try {
+ 		StageWriteBuffer();
++		if (truncate_pending && !close) {
++			return;
++		}
+ 		if (staged_block_count == 0) {
++			if (!truncate_pending) {
++				return;
++			}
++			auto res = blob_client.CommitBlockList({});
++			last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
++			truncate_pending = false;
+ 			return;
+ 		}
+ 		std::vector<std::string> all_ids;
+@@ -108,6 +117,7 @@ void AzureBlobStorageFileHandle::Sync() {
+ 		last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
+ 		committed_block_count += staged_block_count;
+ 		staged_block_count = 0;
++		truncate_pending = false;
+ 	} catch (const Azure::Storage::StorageException &e) {
+ 		throw IOException("AzureBlobStorageFileSystem FileSync of '%s' failed with %s Reason Phrase: %s", GetPath(),
+ 		                  e.ErrorCode, e.ReasonPhrase);
+@@ -115,7 +125,7 @@ void AzureBlobStorageFileHandle::Sync() {
+ }
+ 
+ void AzureBlobStorageFileHandle::Close() {
+-	Sync();
++	Sync(true);
+ 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
+ }
+ 
+@@ -307,7 +317,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 		auto res_create = afh.blob_client.CommitBlockList({});
+ 		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
+ 	};
+-	auto truncate_file = create_file;
+ 
+ 	try {
+ 		auto res_props = afh.blob_client.GetProperties();
+@@ -315,7 +324,11 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 			throw IOException("AzureBlobStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
+ 			                  "while file already exists.");
+ 		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
+-			return truncate_file();
++			// Defer the truncate until close. CommitBlockList({}) here would publish a
++			// zero-length blob while the new content is still being staged.
++			afh.committed_block_count = 0;
++			afh.truncate_pending = true;
++			return set_props(false, 0, ToTimestamp(res_props.Value.LastModified));
+ 		}
+ 		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
+ 		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/");
+diff --git a/src/azure_dfs_filesystem.cpp b/src/azure_dfs_filesystem.cpp
+index 838abac..cd7282e 100644
+--- a/src/azure_dfs_filesystem.cpp
++++ b/src/azure_dfs_filesystem.cpp
+@@ -8,6 +8,7 @@
+ #include "duckdb/common/shared_ptr.hpp"
+ #include "duckdb/common/string_util.hpp"
+ #include "duckdb/common/types/timestamp.hpp"
++#include "duckdb/common/types/uuid.hpp"
+ #include "duckdb/function/scalar/string_common.hpp"
+ #include "duckdb/logging/file_system_logger.hpp"
+ 
+@@ -102,8 +103,12 @@ AzureDfsContextState::GetDfsFileSystemClient(const std::string &file_system_name
+ //////// AzureDfsContextState ////////
+ AzureDfsStorageFileHandle::AzureDfsStorageFileHandle(AzureDfsStorageFileSystem &fs, const OpenFileInfo &info,
+                                                      FileOpenFlags flags, const AzureOptions &options,
+-                                                     Azure::Storage::Files::DataLake::DataLakeFileClient client)
+-    : AzureFileHandle(fs, info, flags, FileType::FILE_TYPE_INVALID, options), file_client(std::move(client)) {
++                                                     Azure::Storage::Files::DataLake::DataLakeFileSystemClient fs_client,
++                                                     Azure::Storage::Files::DataLake::DataLakeFileClient client,
++                                                     string destination_path)
++    : AzureFileHandle(fs, info, flags, FileType::FILE_TYPE_INVALID, options),
++      file_system_client(std::move(fs_client)), file_client(std::move(client)),
++      destination_file_path(std::move(destination_path)) {
+ }
+ 
+ void AzureDfsStorageFileHandle::StageWriteBuffer() {
+@@ -138,8 +143,37 @@ void AzureDfsStorageFileHandle::Sync(bool close) {
+ }
+ 
+ void AzureDfsStorageFileHandle::Close() {
+-	Sync(true);
+-	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
++	if (closed) {
++		return;
++	}
++	try {
++		Sync(true);
++		if (replacement_pending) {
++			auto renamed = file_system_client.RenameFile(temporary_file_path, destination_file_path);
++			file_client = std::move(renamed.Value);
++			replacement_pending = false;
++		}
++		closed = true;
++		DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
++	} catch (...) {
++		CleanupPendingReplacement();
++		throw;
++	}
++}
++
++void AzureDfsStorageFileHandle::CleanupPendingReplacement() {
++	if (!replacement_pending) {
++		return;
++	}
++	try {
++		file_client.DeleteIfExists();
++	} catch (...) { // NOLINT
++	}
++	replacement_pending = false;
++}
++
++AzureDfsStorageFileHandle::~AzureDfsStorageFileHandle() {
++	CleanupPendingReplacement();
+ }
+ 
+ //////// AzureDfsStorageFileSystem ////////
+@@ -170,7 +204,8 @@ unique_ptr<AzureFileHandle> AzureDfsStorageFileSystem::CreateHandle(const OpenFi
+ 	}
+ 
+ 	auto handle = make_uniq<AzureDfsStorageFileHandle>(*this, info, flags, storage_context->options,
+-	                                                   file_system_client.GetFileClient(file_path));
++	                                                   file_system_client, file_system_client.GetFileClient(file_path),
++	                                                   file_path);
+ 	if (!handle->PostConstruct()) {
+ 		return nullptr;
+ 	}
+@@ -333,7 +368,6 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 		auto res_create = afh.file_client.Create();
+ 		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
+ 	};
+-	auto truncate_file = create_file;
+ 
+ 	try {
+ 		auto res_props = afh.file_client.GetProperties();
+@@ -341,7 +375,12 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 			throw IOException("AzureDfsStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
+ 			                  "while file already exists.");
+ 		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
+-			return truncate_file();
++			afh.temporary_file_path =
++			    afh.destination_file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
++			afh.file_client = afh.file_system_client.GetFileClient(afh.temporary_file_path);
++			auto res_create = afh.file_client.Create();
++			afh.replacement_pending = true;
++			return set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
+ 		}
+ 		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
+ 		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/") || res_props.Value.IsDirectory;
+diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
+index 67bfebd..beb6028 100644
+--- a/src/include/azure_blob_filesystem.hpp
++++ b/src/include/azure_blob_filesystem.hpp
+@@ -32,13 +32,14 @@ public:
+ 	~AzureBlobStorageFileHandle() override = default;
+ 
+ 	void StageWriteBuffer();
+-	void Sync();
++	void Sync(bool close = false);
+ 	void Close() override;
+ 
+ public:
+ 	Azure::Storage::Blobs::BlockBlobClient blob_client;
+ 	size_t committed_block_count = 0; // maintain position while open; only used if Sync() called before Close()
+ 	uint32_t staged_block_count = 0;
++	bool truncate_pending = false;
+ 	duckdb::unique_ptr<data_t[]> write_buffer;
+ 	idx_t write_buffer_offset = 0;
+ };
+diff --git a/src/include/azure_dfs_filesystem.hpp b/src/include/azure_dfs_filesystem.hpp
+index c28417d..2feedac 100644
+--- a/src/include/azure_dfs_filesystem.hpp
++++ b/src/include/azure_dfs_filesystem.hpp
+@@ -28,15 +28,24 @@ class AzureDfsStorageFileSystem;
+ class AzureDfsStorageFileHandle : public AzureFileHandle {
+ public:
+ 	AzureDfsStorageFileHandle(AzureDfsStorageFileSystem &fs, const OpenFileInfo &info, FileOpenFlags flags,
+-	                          const AzureOptions &options, Azure::Storage::Files::DataLake::DataLakeFileClient client);
+-	~AzureDfsStorageFileHandle() override = default;
++	                          const AzureOptions &options,
++	                          Azure::Storage::Files::DataLake::DataLakeFileSystemClient file_system_client,
++	                          Azure::Storage::Files::DataLake::DataLakeFileClient client,
++	                          string destination_file_path);
++	~AzureDfsStorageFileHandle() override;
+ 
+ 	void StageWriteBuffer();
+ 	void Sync(bool close = false);
+ 	void Close() override;
++	void CleanupPendingReplacement();
+ 
+ public:
++	Azure::Storage::Files::DataLake::DataLakeFileSystemClient file_system_client;
+ 	Azure::Storage::Files::DataLake::DataLakeFileClient file_client;
++	string destination_file_path;
++	string temporary_file_path;
++	bool replacement_pending = false;
++	bool closed = false;
+ 	duckdb::unique_ptr<data_t[]> write_buffer;
+ 	idx_t write_buffer_offset = 0;
+ 	// Bytes sent to Append (staged on server, committed or not): always <= file_offset,

@@ -1665,6 +1665,105 @@ def test_object_store_catalog_periodic_rewrite(
         superuser_conn.autocommit = False
 
 
+# Periodic catalog rewrites on Azure must not publish catalog.json as a zero-length
+# blob while the new content is still being uploaded.
+def test_object_store_catalog_periodic_rewrite_azure_no_zero_byte_reads(
+    pg_conn,
+    superuser_conn,
+    azure,
+    extension,
+):
+    location = f"azure://{TEST_BUCKET}"
+    catalog_prefix = "tmp_az_rewrite"
+
+    superuser_conn.autocommit = True
+    run_command(
+        f"ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = '{location}'",
+        superuser_conn,
+    )
+    run_command(
+        f"ALTER SYSTEM SET pg_lake_iceberg.internal_object_store_catalog_prefix = '{catalog_prefix}'",
+        superuser_conn,
+    )
+    run_command(
+        f"ALTER SYSTEM SET pg_lake_iceberg.external_object_store_catalog_prefix = '{catalog_prefix}'",
+        superuser_conn,
+    )
+    run_command(
+        "ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_max_age = '1s'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+
+    try:
+        run_command(
+            "DROP SCHEMA IF EXISTS test_periodic_rewrite_azure CASCADE", pg_conn
+        )
+        run_command(
+            f"SET pg_lake_iceberg.default_location_prefix TO '{location}'", pg_conn
+        )
+        pg_conn.commit()
+
+        run_command("CREATE SCHEMA test_periodic_rewrite_azure", pg_conn)
+        run_command(
+            "CREATE TABLE test_periodic_rewrite_azure.tbl(a int) USING iceberg WITH (catalog='object_store')",
+            pg_conn,
+        )
+        pg_conn.commit()
+        wait_until_object_store_writable_table_pushed(
+            pg_conn, "test_periodic_rewrite_azure", "tbl"
+        )
+
+        dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+        key = f"{catalog_prefix}/catalog/{dbname}/catalog.json"
+
+        first_body = json.loads(azure.download_blob(key).readall())
+        first_snapshot_time = first_body["catalog-snapshot-time"]
+        saw_new_snapshot = False
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            body = azure.download_blob(key).readall()
+            assert (
+                len(body) > 0
+            ), f"catalog.json at {key} was observed as zero bytes during a rewrite"
+            parsed = json.loads(body)
+            assert "catalog-snapshot-time" in parsed
+            assert "tables" in parsed
+            saw_new_snapshot |= parsed["catalog-snapshot-time"] > first_snapshot_time
+            time.sleep(0.01)
+
+        assert (
+            saw_new_snapshot
+        ), "catalog.json was not rewritten during the polling window"
+    finally:
+        run_command(
+            "DROP SCHEMA IF EXISTS test_periodic_rewrite_azure CASCADE", pg_conn
+        )
+        run_command("RESET pg_lake_iceberg.default_location_prefix", pg_conn)
+        pg_conn.commit()
+
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_location_prefix",
+            superuser_conn,
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.internal_object_store_catalog_prefix",
+            superuser_conn,
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.external_object_store_catalog_prefix",
+            superuser_conn,
+        )
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_max_age",
+            superuser_conn,
+        )
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        run_command("SELECT pg_sleep(0.2)", superuser_conn)
+        superuser_conn.autocommit = False
+
+
 CACHE_FILE_PREFIX = "pgl-cache."
 
 
