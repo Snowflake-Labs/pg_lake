@@ -1,10 +1,21 @@
 diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
-index 0bd6bf4..439a154 100644
+index 0bd6bf4..f512f15 100644
 --- a/src/azure_blob_filesystem.cpp
 +++ b/src/azure_blob_filesystem.cpp
-@@ -96,6 +96,12 @@ void AzureBlobStorageFileHandle::Sync() {
+@@ -89,13 +89,22 @@ void AzureBlobStorageFileHandle::StageWriteBuffer() {
+ 	write_buffer_offset = 0;
+ }
+ 
+-void AzureBlobStorageFileHandle::Sync() {
++void AzureBlobStorageFileHandle::Sync(bool close) {
+ 	if (!(flags.OpenForWriting() || flags.OpenForAppending())) {
+ 		return;
+ 	}
  	try {
  		StageWriteBuffer();
++		if (truncate_pending && !close) {
++			return;
++		}
  		if (staged_block_count == 0) {
 +			if (!truncate_pending) {
 +				return;
@@ -15,7 +26,7 @@ index 0bd6bf4..439a154 100644
  			return;
  		}
  		std::vector<std::string> all_ids;
-@@ -108,6 +114,7 @@ void AzureBlobStorageFileHandle::Sync() {
+@@ -108,6 +117,7 @@ void AzureBlobStorageFileHandle::Sync() {
  		last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
  		committed_block_count += staged_block_count;
  		staged_block_count = 0;
@@ -23,7 +34,16 @@ index 0bd6bf4..439a154 100644
  	} catch (const Azure::Storage::StorageException &e) {
  		throw IOException("AzureBlobStorageFileSystem FileSync of '%s' failed with %s Reason Phrase: %s", GetPath(),
  		                  e.ErrorCode, e.ReasonPhrase);
-@@ -307,7 +314,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -115,7 +125,7 @@ void AzureBlobStorageFileHandle::Sync() {
+ }
+ 
+ void AzureBlobStorageFileHandle::Close() {
+-	Sync();
++	Sync(true);
+ 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
+ }
+ 
+@@ -307,7 +317,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  		auto res_create = afh.blob_client.CommitBlockList({});
  		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
  	};
@@ -31,7 +51,7 @@ index 0bd6bf4..439a154 100644
  
  	try {
  		auto res_props = afh.blob_client.GetProperties();
-@@ -315,7 +321,11 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -315,7 +324,11 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  			throw IOException("AzureBlobStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
  			                  "while file already exists.");
  		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
@@ -45,7 +65,7 @@ index 0bd6bf4..439a154 100644
  		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
  		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/");
 diff --git a/src/azure_dfs_filesystem.cpp b/src/azure_dfs_filesystem.cpp
-index 838abac..96bedd6 100644
+index 838abac..cd7282e 100644
 --- a/src/azure_dfs_filesystem.cpp
 +++ b/src/azure_dfs_filesystem.cpp
 @@ -8,6 +8,7 @@
@@ -71,7 +91,7 @@ index 838abac..96bedd6 100644
  }
  
  void AzureDfsStorageFileHandle::StageWriteBuffer() {
-@@ -138,8 +143,45 @@ void AzureDfsStorageFileHandle::Sync(bool close) {
+@@ -138,8 +143,37 @@ void AzureDfsStorageFileHandle::Sync(bool close) {
  }
  
  void AzureDfsStorageFileHandle::Close() {
@@ -84,8 +104,8 @@ index 838abac..96bedd6 100644
 +		Sync(true);
 +		if (replacement_pending) {
 +			auto renamed = file_system_client.RenameFile(temporary_file_path, destination_file_path);
-+			replacement_pending = false;
 +			file_client = std::move(renamed.Value);
++			replacement_pending = false;
 +		}
 +		closed = true;
 +		DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
@@ -107,19 +127,11 @@ index 838abac..96bedd6 100644
 +}
 +
 +AzureDfsStorageFileHandle::~AzureDfsStorageFileHandle() {
-+	if (Exception::UncaughtException()) {
-+		CleanupPendingReplacement();
-+		return;
-+	}
-+	try {
-+		Close();
-+	} catch (...) { // NOLINT
-+		CleanupPendingReplacement();
-+	}
++	CleanupPendingReplacement();
  }
  
  //////// AzureDfsStorageFileSystem ////////
-@@ -170,7 +212,8 @@ unique_ptr<AzureFileHandle> AzureDfsStorageFileSystem::CreateHandle(const OpenFi
+@@ -170,7 +204,8 @@ unique_ptr<AzureFileHandle> AzureDfsStorageFileSystem::CreateHandle(const OpenFi
  	}
  
  	auto handle = make_uniq<AzureDfsStorageFileHandle>(*this, info, flags, storage_context->options,
@@ -129,7 +141,7 @@ index 838abac..96bedd6 100644
  	if (!handle->PostConstruct()) {
  		return nullptr;
  	}
-@@ -333,7 +376,6 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -333,7 +368,6 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  		auto res_create = afh.file_client.Create();
  		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
  	};
@@ -137,7 +149,7 @@ index 838abac..96bedd6 100644
  
  	try {
  		auto res_props = afh.file_client.GetProperties();
-@@ -341,7 +383,12 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -341,7 +375,12 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  			throw IOException("AzureDfsStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
  			                  "while file already exists.");
  		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
@@ -152,10 +164,18 @@ index 838abac..96bedd6 100644
  		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
  		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/") || res_props.Value.IsDirectory;
 diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
-index 67bfebd..1ada92a 100644
+index 67bfebd..beb6028 100644
 --- a/src/include/azure_blob_filesystem.hpp
 +++ b/src/include/azure_blob_filesystem.hpp
-@@ -39,6 +39,7 @@ public:
+@@ -32,13 +32,14 @@ public:
+ 	~AzureBlobStorageFileHandle() override = default;
+ 
+ 	void StageWriteBuffer();
+-	void Sync();
++	void Sync(bool close = false);
+ 	void Close() override;
+ 
+ public:
  	Azure::Storage::Blobs::BlockBlobClient blob_client;
  	size_t committed_block_count = 0; // maintain position while open; only used if Sync() called before Close()
  	uint32_t staged_block_count = 0;

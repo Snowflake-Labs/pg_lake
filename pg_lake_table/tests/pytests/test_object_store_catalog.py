@@ -1697,7 +1697,12 @@ def test_object_store_catalog_periodic_rewrite_azure_no_zero_byte_reads(
     run_command("SELECT pg_sleep(0.2)", superuser_conn)
 
     try:
-        run_command(f"SET pg_lake_iceberg.default_location_prefix TO '{location}'", pg_conn)
+        run_command(
+            "DROP SCHEMA IF EXISTS test_periodic_rewrite_azure CASCADE", pg_conn
+        )
+        run_command(
+            f"SET pg_lake_iceberg.default_location_prefix TO '{location}'", pg_conn
+        )
         pg_conn.commit()
 
         run_command("CREATE SCHEMA test_periodic_rewrite_azure", pg_conn)
@@ -1713,20 +1718,28 @@ def test_object_store_catalog_periodic_rewrite_azure_no_zero_byte_reads(
         dbname = run_query("SELECT current_database()", pg_conn)[0][0]
         key = f"{catalog_prefix}/catalog/{dbname}/catalog.json"
 
+        first_body = json.loads(azure.download_blob(key).readall())
+        first_snapshot_time = first_body["catalog-snapshot-time"]
+        saw_new_snapshot = False
         deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             body = azure.download_blob(key).readall()
-            assert len(body) > 0, (
-                f"catalog.json at {key} was observed as zero bytes during a rewrite"
-            )
+            assert (
+                len(body) > 0
+            ), f"catalog.json at {key} was observed as zero bytes during a rewrite"
             parsed = json.loads(body)
             assert "catalog-snapshot-time" in parsed
             assert "tables" in parsed
+            saw_new_snapshot |= parsed["catalog-snapshot-time"] > first_snapshot_time
             time.sleep(0.01)
 
-        run_command("DROP SCHEMA test_periodic_rewrite_azure CASCADE", pg_conn)
-        pg_conn.commit()
+        assert (
+            saw_new_snapshot
+        ), "catalog.json was not rewritten during the polling window"
     finally:
+        run_command(
+            "DROP SCHEMA IF EXISTS test_periodic_rewrite_azure CASCADE", pg_conn
+        )
         run_command("RESET pg_lake_iceberg.default_location_prefix", pg_conn)
         pg_conn.commit()
 
@@ -1747,6 +1760,7 @@ def test_object_store_catalog_periodic_rewrite_azure_no_zero_byte_reads(
             superuser_conn,
         )
         run_command("SELECT pg_reload_conf()", superuser_conn)
+        run_command("SELECT pg_sleep(0.2)", superuser_conn)
         superuser_conn.autocommit = False
 
 
