@@ -137,7 +137,8 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											IcebergOutOfRangePolicy outOfRangePolicy,
 											IcebergCompatibilityMode compatibilityMode,
 											bool wrapNativeTypes,
-											List *partitionByExprs);
+											List *partitionByExprs,
+											bool skipCacheOnWrite);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
@@ -1025,7 +1026,8 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 									   ICEBERG_OOR_NONE,
 									   ICEBERG_COMPAT_AUTO /* compatibilityMode */ ,
 									   false /* wrapNativeTypes */ ,
-									   NIL /* partitionByExprs */ );
+									   NIL /* partitionByExprs */ ,
+									   false /* skipCacheOnWrite */ );
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
@@ -1084,7 +1086,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 							   IcebergOutOfRangePolicy outOfRangePolicy,
 							   IcebergCompatibilityMode compatibilityMode,
 							   bool wrapNativeTypes,
-							   List *partitionByExprs)
+							   List *partitionByExprs,
+							   bool skipCacheOnWrite)
 {
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
@@ -1150,7 +1153,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   outOfRangePolicy,
 						   compatibilityMode,
 						   wrapNativeTypes,
-						   partitionByExprs);
+						   partitionByExprs,
+						   skipCacheOnWrite);
 
 	/*
 	 * Drop (and queue for deletion) any zero-row files DuckDB produced, so
@@ -1199,6 +1203,25 @@ int64
 AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 					  bool wrapNativeTypes)
 {
+	return AddQueryResultToTableExtended(relationId, readQuery, queryTupleDesc,
+										 wrapNativeTypes,
+										 false /* skipCacheOnWrite */ );
+}
+
+
+/*
+ * AddQueryResultToTableExtended is AddQueryResultToTable with control over
+ * cache-on-write.
+ *
+ * Pass skipCacheOnWrite=true when the written files are never read back
+ * through pgduck on this instance.  Their data files then skip the pgduck
+ * local cache entirely instead of evicting hotter entries.
+ */
+int64
+AddQueryResultToTableExtended(Oid relationId, char *readQuery,
+							  TupleDesc queryTupleDesc, bool wrapNativeTypes,
+							  bool skipCacheOnWrite)
+{
 	Assert(queryTupleDesc != NULL && queryTupleDesc->natts > 0);
 
 	BindRelationToXactRestCatalog(relationId);
@@ -1245,7 +1268,8 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 									   outOfRangePolicy,
 									   compatibilityMode,
 									   wrapNativeTypes,
-									   partitionByExprs);
+									   partitionByExprs,
+									   skipCacheOnWrite);
 
 	/*
 	 * For partitioned pushdown, each file may belong to a different
