@@ -25,6 +25,13 @@
 /* DuckDB's special path for an in-memory database (no on-disk file). */
 #define DUCKDB_MEMORY_DB_PATH ":memory:"
 
+/* SQLSTATEs reported to the client for DuckDB errors */
+#define PGDUCK_SQLSTATE_FEATURE_NOT_SUPPORTED "0A000"
+#define PGDUCK_SQLSTATE_OUT_OF_MEMORY "53200"
+#define PGDUCK_SQLSTATE_IO_ERROR "58030"
+#define PGDUCK_SQLSTATE_INVALID_PARAMETER "22023"
+#define PGDUCK_SQLSTATE_INTERNAL_ERROR "XX000"
+
 struct PGSession;
 struct ResponseFormat;
 
@@ -46,6 +53,12 @@ typedef struct DuckDBSession
 	struct PGSession *clientSession;
 	duckdb_connection connection;
 	duckdb_prepared_statement duckPreparedStatement;
+
+	/*
+	 * SQLSTATE mapped from the last DuckDB error type, or NULL when the error
+	 * did not carry one. Consumed and cleared when the error is reported.
+	 */
+	const char *errorSqlState;
 }			DuckDBSession;
 
 /* global instance of DuckDB that is shared across threads */

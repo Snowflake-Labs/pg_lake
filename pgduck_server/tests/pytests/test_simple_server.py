@@ -145,6 +145,8 @@ def test_query_failures(pgduck_server):
                 "Out of Range Error: cannot take logarithm of a negative number"
                 in str(e)
             )
+            # an ordinary query error keeps reporting feature_not_supported
+            assert e.pgcode == "0A000"
             conn.rollback()
 
     conn.close()

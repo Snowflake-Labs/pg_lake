@@ -256,7 +256,7 @@ pgsession_handle_connection(void *input)
 					 * currently no code-path to trigger this, unless a
 					 * malformed client directly sends 'B' before 'C'.
 					 */
-					check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage), pgSession, errorMessage);
+					check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage, NULL), pgSession, errorMessage);
 
 					break;
 				}
@@ -321,7 +321,7 @@ pgsession_handle_connection(void *input)
 					/* f: copy fail */
 					char	   *errorMessage = "COPY command not yet supported in the protocol";
 
-					check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage), pgSession, errorMessage);
+					check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage, NULL), pgSession, errorMessage);
 
 					break;
 				}
@@ -331,7 +331,7 @@ pgsession_handle_connection(void *input)
 					/* fastpath function call */
 					char	   *errorMessage = "fastpath message not yet supported";
 
-					check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage), pgSession, errorMessage);
+					check(pgsession_send_postgres_error(&pgSession, ERROR, errorMessage, NULL), pgSession, errorMessage);
 
 					break;
 				}
@@ -477,7 +477,7 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 	{
 		char	   *errorMessage = "named prepared statements not supported in pgduck_server";
 
-		if (!IsOK(pgsession_send_postgres_error(pgSession, ERROR, errorMessage)))
+		if (!IsOK(pgsession_send_postgres_error(pgSession, ERROR, errorMessage, NULL)))
 			return COMM_ERROR;
 
 		return QUERY_ERROR;
@@ -633,7 +633,7 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
 	{
 		char	   *errorMessage = "named prepared statements not supported in pgduck_server";
 
-		if (!IsOK(pgsession_send_postgres_error(pgSession, ERROR, errorMessage)))
+		if (!IsOK(pgsession_send_postgres_error(pgSession, ERROR, errorMessage, NULL)))
 			return COMM_ERROR;
 
 		return QUERY_ERROR;
@@ -647,7 +647,7 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
 	{
 		char	   *errorMessage = "named prepared statements not supported in pgduck_server";
 
-		if (!IsOK(pgsession_send_postgres_error(pgSession, ERROR, errorMessage)))
+		if (!IsOK(pgsession_send_postgres_error(pgSession, ERROR, errorMessage, NULL)))
 			return COMM_ERROR;
 
 		return QUERY_ERROR;
@@ -753,7 +753,7 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
 	{
 		char	   *errorMessage = "incorrect number of parameters";
 
-		return pgsession_send_postgres_error(pgSession, ERROR, errorMessage);
+		return pgsession_send_postgres_error(pgSession, ERROR, errorMessage, NULL);
 	}
 
 
@@ -814,7 +814,7 @@ process_execute_message(PGSession * pgSession, StringInfo inputMessage)
 	{
 		char	   *errorMessage = "named prepared statements not supported in pgduck_server";
 
-		if (!IsOK(pgsession_send_postgres_error(pgSession, ERROR, errorMessage)))
+		if (!IsOK(pgsession_send_postgres_error(pgSession, ERROR, errorMessage, NULL)))
 			return COMM_ERROR;
 
 		return QUERY_ERROR;
@@ -879,17 +879,45 @@ process_execute_message(PGSession * pgSession, StringInfo inputMessage)
 
 
 /*
+ * sqlstate_for_status maps the statuses that are raised without a DuckDB error
+ * type, so no SQLSTATE was recorded on the session. NULL leaves the default.
+ */
+static const char *
+sqlstate_for_status(DuckDBStatus status)
+{
+	switch (status)
+	{
+		case DUCKDB_OUT_OF_MEMORY_ERROR:
+			return PGDUCK_SQLSTATE_OUT_OF_MEMORY;
+		case DUCKDB_FATAL_ERROR:
+		case DUCKDB_INITIALIZATION_ERROR:
+		case DUCKDB_SESSION_INITIALIZATION_ERROR:
+			return PGDUCK_SQLSTATE_INTERNAL_ERROR;
+		default:
+			return NULL;
+	}
+}
+
+
+/*
  * Helper function to handle different DuckDB statuses.
  */
 static int
 handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char *errorMessage)
 {
 	int			errorRes;
+	const char *sqlState = pgSession->duckSession.errorSqlState;
+
+	if (sqlState == NULL)
+		sqlState = sqlstate_for_status(status);
+
+	pgSession->duckSession.errorSqlState = NULL;
 
 	switch (status)
 	{
 		case DUCKDB_QUERY_ERROR:
-			errorRes = pgsession_send_postgres_error(pgSession, ERROR, errorMessage);
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR, errorMessage,
+													 sqlState);
 			break;
 		case DUCKDB_FATAL_ERROR:
 
@@ -901,13 +929,16 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
 			 * connection went away.
 			 */
 			errorRes = pgsession_send_postgres_error(pgSession, ERROR,
-													 errorMessage != NULL ? errorMessage : "Fatal Error");
+													 errorMessage != NULL ? errorMessage : "Fatal Error",
+													 sqlState);
 			break;
 		case DUCKDB_INITIALIZATION_ERROR:
-			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Initialization Error");
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Initialization Error",
+													 sqlState);
 			break;
 		case DUCKDB_SESSION_INITIALIZATION_ERROR:
-			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Session Initialization Error");
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Session Initialization Error",
+													 sqlState);
 			break;
 		case DUCKDB_TYPE_CONVERSION_ERROR:
 
@@ -917,13 +948,16 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
 			 * back to the generic text.
 			 */
 			errorRes = pgsession_send_postgres_error(pgSession, ERROR,
-													 errorMessage != NULL ? errorMessage : "Unsupported type");
+													 errorMessage != NULL ? errorMessage : "Unsupported type",
+													 sqlState);
 			break;
 		case DUCKDB_OUT_OF_MEMORY_ERROR:
-			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Out of Memory");
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Out of Memory",
+													 sqlState);
 			break;
 		default:
-			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Unknown Error");
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR, "Unknown Error",
+													 sqlState);
 			break;
 	}
 

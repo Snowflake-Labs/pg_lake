@@ -613,6 +613,33 @@ duckdb_error_is_fatal(duckdb_error_type errorType, const char *errorMessage)
 
 
 /*
+ * sqlstate_for_duckdb_error maps a DuckDB error category to the SQLSTATE sent
+ * to the client. Categories without a closer match report
+ * feature_not_supported, which is what pgduck_server has always reported.
+ */
+static const char *
+sqlstate_for_duckdb_error(duckdb_error_type errorType)
+{
+	switch (errorType)
+	{
+		case DUCKDB_ERROR_OUT_OF_MEMORY:
+			return PGDUCK_SQLSTATE_OUT_OF_MEMORY;
+		case DUCKDB_ERROR_IO:
+		case DUCKDB_ERROR_HTTP:
+		case DUCKDB_ERROR_NETWORK:
+			return PGDUCK_SQLSTATE_IO_ERROR;
+		case DUCKDB_ERROR_INVALID_INPUT:
+			return PGDUCK_SQLSTATE_INVALID_PARAMETER;
+		case DUCKDB_ERROR_FATAL:
+		case DUCKDB_ERROR_INTERNAL:
+			return PGDUCK_SQLSTATE_INTERNAL_ERROR;
+		default:
+			return PGDUCK_SQLSTATE_FEATURE_NOT_SUPPORTED;
+	}
+}
+
+
+/*
  * A helper function for connecting to the global DuckDB,
  * and executing the command. The function discards the
  * results of the command, only returns duckdb_state.
@@ -772,6 +799,7 @@ duckdb_session_init(DuckDBSession * duckSession, PGSession * clientSession)
 								  clientSession->pgClient->cancellationProcId);
 
 	duckSession->clientSession = clientSession;
+	duckSession->errorSqlState = NULL;
 
 	return DUCKDB_SUCCESS;
 }
@@ -896,6 +924,8 @@ duckdb_session_run_command(DuckDBSession * duckSession, const char *queryString,
 
 		if (errorMessage != NULL)
 			*errorMessage = pstrdup(duckdbError);
+
+		duckSession->errorSqlState = sqlstate_for_duckdb_error(duckdbErrorType);
 
 		duckdb_destroy_result(&duckResult);
 
@@ -1074,6 +1104,7 @@ duckdb_session_execute_prepared(DuckDBSession * duckSession,
 		if (errorMessage != NULL)
 			*errorMessage = pstrdup(duckdbError);
 
+		duckSession->errorSqlState = sqlstate_for_duckdb_error(duckdbErrorType);
 
 		duckdb_destroy_result(&duckResult);
 		return status;
@@ -1389,6 +1420,8 @@ process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
 				}
 
 				*errorMessage = pstrdup(duckdbError);
+				clientSession->duckSession.errorSqlState =
+					sqlstate_for_duckdb_error(duckdbErrorType);
 				return status;
 			}
 			else
