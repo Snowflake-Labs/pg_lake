@@ -157,6 +157,12 @@ typedef struct RestCatalogOptions
 
 #define REST_CATALOG_TRANSACTION_COMMIT "%s/v1/%s/transactions/commit"
 
+/*
+ * Catalog configuration endpoint (Iceberg REST spec §2.2).  No catalog-name
+ * segment -- this is catalog-wide.
+ */
+#define REST_CATALOG_CONFIG "%s/v1/config"
+
 typedef enum RestCatalogOperationType
 {
 	REST_CATALOG_CREATE_TABLE = 0,
@@ -197,6 +203,15 @@ extern PGDLLEXPORT RestCatalogOptions * CopyRestCatalogOptions(MemoryContext dst
  * mount path in rest_endpoint.  Returns NULL for NULL input.
  */
 extern PGDLLEXPORT char *ResolveRestCatalogBaseUri(const char *endpoint);
+
+/*
+ * Fetch the catalog prefix advertised by the REST catalog's /v1/config
+ * endpoint.  Checks overrides.prefix first, then defaults.prefix.  Returns
+ * a palloc'd string, or NULL when the endpoint is unreachable, returns a
+ * non-200 status, or carries no prefix field.  Callers should fall back to
+ * get_database_name() on NULL.
+ */
+extern PGDLLEXPORT char *FetchRestCatalogConfigPrefix(RestCatalogOptions * opts);
 
 /*
  * Build options directly from a specific user mapping OID, bypassing

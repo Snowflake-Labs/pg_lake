@@ -36,6 +36,7 @@ PG_FUNCTION_INFO_V1(set_test_rest_catalog_auth_provider);
 PG_FUNCTION_INFO_V1(set_test_rest_catalog_auth_response);
 PG_FUNCTION_INFO_V1(test_rest_catalog_auth_provider_calls);
 PG_FUNCTION_INFO_V1(test_rest_catalog_auth_provider_endpoints);
+PG_FUNCTION_INFO_V1(fetch_rest_catalog_config_prefix_from_server);
 
 /*
 * register_namespace_to_rest_catalog is a test function that registers
@@ -309,4 +310,25 @@ test_rest_catalog_auth_provider_endpoints(PG_FUNCTION_ARGS)
 											  TestAuthProviderCatalog ? TestAuthProviderCatalog : "",
 											  TestAuthProviderBaseUri ? TestAuthProviderBaseUri : "",
 											  TestAuthProviderOauthEndpoint ? TestAuthProviderOauthEndpoint : "")));
+}
+
+
+/*
+ * fetch_rest_catalog_config_prefix_from_server exposes
+ * FetchRestCatalogConfigPrefix for testing: resolves the named catalog's
+ * options and contacts its /v1/config endpoint, returning whatever prefix the
+ * catalog advertises (overrides.prefix before defaults.prefix), or NULL when
+ * the endpoint is unreachable or carries no prefix field.
+ */
+Datum
+fetch_rest_catalog_config_prefix_from_server(PG_FUNCTION_ARGS)
+{
+	char	   *catalog = text_to_cstring(PG_GETARG_TEXT_P(0));
+	RestCatalogOptions *opts = ResolveRestCatalogOptions(catalog);
+	char	   *prefix = FetchRestCatalogConfigPrefix(opts);
+
+	if (prefix == NULL)
+		PG_RETURN_NULL();
+
+	PG_RETURN_TEXT_P(cstring_to_text(prefix));
 }
