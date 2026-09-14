@@ -55,6 +55,9 @@ int			IcebergAutovacuumNaptime = 10 * 60;
 /* managed via pg_lake_iceberg.log_autovacuum_min_duration, 10 minutes */
 int			IcebergAutovacuumLogMinDuration = 600000;
 
+/* managed via pg_lake_iceberg.autovacuum_lock_timeout, 1 minute */
+int			IcebergAutovacuumLockTimeout = 60000;
+
 static bool DeprecatedEnableStatsCollectionForNestedTypes;
 
 static bool IcebergLocationPrefixCheckHook(char **newvalue, void **extra, GucSource source);
@@ -112,6 +115,19 @@ _PG_init(void)
 							&IcebergAutovacuumNaptime,
 							10 * 60, 1, INT_MAX / 1000,
 							PGC_SIGHUP, GUC_UNIT_S,
+							NULL, NULL, NULL);
+
+	DefineCustomIntVariable("pg_lake_iceberg.autovacuum_lock_timeout",
+							gettext_noop("Maximum time the autovacuum worker waits for a lock "
+										 "before giving up on the current table."),
+							gettext_noop("A worker that is blocked on a lock keeps its snapshot "
+										 "and pins the transaction horizon for the whole database, "
+										 "so waiting out a long-running writer is worse than "
+										 "skipping the table until the next cycle. 0 disables the "
+										 "timeout. Manual VACUUM is not affected."),
+							&IcebergAutovacuumLockTimeout,
+							60000, 0, INT_MAX,
+							PGC_SIGHUP, GUC_UNIT_MS,
 							NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
