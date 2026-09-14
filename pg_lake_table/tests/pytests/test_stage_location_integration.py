@@ -34,6 +34,16 @@ def test_stage_location_set_valid_gs(superuser_conn):
     superuser_conn.rollback()
 
 
+def test_stage_location_set_valid_gcs(superuser_conn):
+    """Test setting pg_lake.stage_location to a gcs:// URL, the other GCS spelling"""
+    run_command(
+        "SET pg_lake.stage_location TO 'gcs://test-bucket/prefix'", superuser_conn
+    )
+    res = run_query("SHOW pg_lake.stage_location", superuser_conn)
+    assert res[0][0] == "gcs://test-bucket/prefix"
+    superuser_conn.rollback()
+
+
 def test_stage_location_set_valid_azure(superuser_conn):
     """Test setting pg_lake.stage_location to a valid Azure URL"""
     run_command(
