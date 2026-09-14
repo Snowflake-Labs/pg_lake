@@ -249,8 +249,11 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 * uses ERRCODE_QUERY_CANCELED and still propagates.
 *
 * This is applied on every iteration rather than once at worker startup so that
-* a SIGHUP takes effect, and outside a transaction so that an aborted vacuum
-* cycle cannot roll the value back.
+* a SIGHUP takes effect. The PGC_S_OVERRIDE source is what makes the value stick:
+* set_config_option treats anything at or below that source as a new default and
+* so never pushes the old value onto the GUC stack, which means an aborted vacuum
+* cycle cannot roll it back. It also outranks postgresql.conf, so a cluster-wide
+* lock_timeout does not leak into the worker.
 */
 static void
 ApplyAutovacuumLockTimeout(void)
