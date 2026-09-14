@@ -62,6 +62,7 @@
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
 #include "utils/catcache.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/ps_status.h"
@@ -109,6 +110,7 @@ static void VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool i
 static void VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose);
 static void VacuumRegisterMissingFields(Oid relationId);
 static void PgLakeIcebergVacuumForRelation(Oid relationId, bool firstLoop);
+static void ApplyAutovacuumLockTimeout(void);
 static void VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
 									   bool isAutoVacuum);
 static void VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt);
@@ -165,6 +167,8 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	while (true)
 	{
 		TimestampTz currentTime = GetCurrentTimestamp();
+
+		ApplyAutovacuumLockTimeout();
 
 		if (IcebergAutovacuumEnabled &&
 			TimestampDifferenceExceeds(lastVacuumTime, currentTime,
@@ -224,6 +228,38 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 		LightSleep(1000);
 	}
 	PG_RETURN_VOID();
+}
+
+
+/*
+* ApplyAutovacuumLockTimeout bounds how long any lock wait in this worker can
+* last, by setting lock_timeout from pg_lake_iceberg.autovacuum_lock_timeout.
+*
+* The advisory lock that CompactDataFiles and CompactMetadata take is held for
+* the duration of a writing transaction, so a single long-running INSERT can
+* block the worker for as long as it runs. That is worse than it sounds: a
+* blocked worker keeps its snapshot, which pins the transaction horizon and
+* stops heap dead-tuple cleanup for the whole database, not just for the iceberg
+* table it was trying to vacuum.
+*
+* On timeout the lock wait fails with ERRCODE_LOCK_NOT_AVAILABLE, which the
+* per-stage PG_CATCH in VacuumCompactDataFiles and VacuumCompactMetadata reports
+* as a WARNING before moving on, so the worker gives up on the contended table
+* and keeps going instead of waiting the writer out. A genuine cancellation
+* uses ERRCODE_QUERY_CANCELED and still propagates.
+*
+* This is applied on every iteration rather than once at worker startup so that
+* a SIGHUP takes effect, and outside a transaction so that an aborted vacuum
+* cycle cannot roll the value back.
+*/
+static void
+ApplyAutovacuumLockTimeout(void)
+{
+	char		lockTimeout[16];
+
+	snprintf(lockTimeout, sizeof(lockTimeout), "%d", IcebergAutovacuumLockTimeout);
+
+	SetConfigOption("lock_timeout", lockTimeout, PGC_USERSET, PGC_S_OVERRIDE);
 }
 
 

@@ -697,6 +697,113 @@ def test_autovacuum_compaction_summary_log(s3, pg_conn, extension, installcheck)
         )
 
 
+def test_autovacuum_lock_timeout(s3, pg_conn, extension, installcheck):
+    """A writer holding the table update lock used to block the autovacuum
+    worker for as long as the writing transaction ran.  The worker holds a
+    snapshot while it waits, which pins the transaction horizon for the whole
+    database, so waiting the writer out is worse than skipping the table.
+    With pg_lake_iceberg.autovacuum_lock_timeout set, the contended table is
+    given up on and the rest of the pass still runs."""
+    if installcheck:
+        return
+
+    logfile = f"{server_params.PG_DIR}/logfile"
+    blocked = "test_autovacuum_lock_timeout_blocked"
+    other = "test_autovacuum_lock_timeout_other"
+
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_iceberg.autovacuum_lock_timeout TO '1s';",
+            "ALTER SYSTEM SET pg_lake_iceberg.autovacuum_naptime TO '1s';",
+            "ALTER SYSTEM SET pg_lake_table.vacuum_compact_min_input_files TO 1;",
+            "SELECT pg_reload_conf();",
+        ]
+    )
+
+    pg_conn.autocommit = True
+    holder = None
+
+    try:
+        # The worker walks the tables in catalog order, so creating the table
+        # we are going to lock first is what makes the pass reach it before
+        # the other one -- otherwise the other one would already be compacted
+        # by the time the worker ever blocks.
+        for table in (blocked, other):
+            run_command(
+                f"""
+                CREATE TABLE {table} (id int, value text)
+                USING pg_lake_iceberg
+                WITH (location = 's3://{TEST_BUCKET}/{table}/');
+                INSERT INTO {table} VALUES (1, 'a');
+                INSERT INTO {table} VALUES (2, 'b');
+                INSERT INTO {table} VALUES (3, 'c');
+                """,
+                pg_conn,
+            )
+
+        offset = os.path.getsize(logfile)
+
+        # An UPDATE takes the same advisory lock the worker needs and holds it
+        # for the rest of the transaction.  The qual matches no rows so the
+        # table contents stay put, but it is not constant-folded away, so the
+        # foreign scan -- and with it the lock -- still happens.
+        holder = open_pg_conn()
+        holder.autocommit = False
+        run_command(f"UPDATE {blocked} SET value = value WHERE id = -1;", holder)
+
+        # The worker should give up on the locked table and compact the other
+        # one anyway.
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if data_file_count(pg_conn, other) == 1:
+                break
+            time.sleep(2)
+
+        assert data_file_count(pg_conn, other) == 1, (
+            f"autovacuum did not compact {other} while {blocked} was locked; "
+            "one contended table must not hold up the rest of the pass"
+        )
+        assert (
+            data_file_count(pg_conn, blocked) == 3
+        ), f"expected {blocked} to be left alone while its update lock was held"
+
+        with open(logfile) as f:
+            f.seek(offset)
+            delta = f.read()
+        assert "canceling statement due to lock timeout" in delta, (
+            "expected the worker to report a lock timeout, got: " + delta
+        )
+
+        # Once the writer commits, the skipped table is picked up again.
+        holder.commit()
+        holder.close()
+        holder = None
+
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            if data_file_count(pg_conn, blocked) == 1:
+                break
+            time.sleep(2)
+
+        assert (
+            data_file_count(pg_conn, blocked) == 1
+        ), f"autovacuum did not compact {blocked} after the lock was released"
+
+        run_command(f"DROP TABLE {blocked}, {other};", pg_conn)
+    finally:
+        if holder is not None:
+            holder.close()
+        pg_conn.autocommit = False
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_lock_timeout;",
+                "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum_naptime;",
+                "ALTER SYSTEM RESET pg_lake_table.vacuum_compact_min_input_files;",
+                "SELECT pg_reload_conf();",
+            ]
+        )
+
+
 def test_vacuum_multiple_metadata_ops(s3, pg_conn, extension, with_default_location):
     pg_conn.autocommit = True
 

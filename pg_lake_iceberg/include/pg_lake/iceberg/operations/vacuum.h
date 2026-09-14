@@ -22,3 +22,4 @@
 extern PGDLLEXPORT bool IcebergAutovacuumEnabled;
 extern PGDLLEXPORT int IcebergAutovacuumNaptime;
 extern PGDLLEXPORT int IcebergAutovacuumLogMinDuration;
+extern PGDLLEXPORT int IcebergAutovacuumLockTimeout;
