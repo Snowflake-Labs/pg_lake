@@ -1,8 +1,8 @@
 diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
-index 0bd6bf4..f512f15 100644
+index 0bd6bf4..e140b5f 100644
 --- a/src/azure_blob_filesystem.cpp
 +++ b/src/azure_blob_filesystem.cpp
-@@ -89,13 +89,22 @@ void AzureBlobStorageFileHandle::StageWriteBuffer() {
+@@ -89,13 +89,30 @@ void AzureBlobStorageFileHandle::StageWriteBuffer() {
  	write_buffer_offset = 0;
  }
  
@@ -12,29 +12,37 @@ index 0bd6bf4..f512f15 100644
  		return;
  	}
  	try {
- 		StageWriteBuffer();
-+		if (truncate_pending && !close) {
++		if (replace_pending && !close) {
 +			return;
 +		}
++		if (replace_pending && staged_block_count == 0 && write_buffer_offset > 0) {
++			auto body_stream = Azure::Core::IO::MemoryBodyStream(write_buffer.get(), write_buffer_offset);
++			auto res = blob_client.Upload(body_stream);
++			last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
++			write_buffer_offset = 0;
++			replace_pending = false;
++			return;
++		}
+ 		StageWriteBuffer();
  		if (staged_block_count == 0) {
-+			if (!truncate_pending) {
++			if (!replace_pending) {
 +				return;
 +			}
 +			auto res = blob_client.CommitBlockList({});
 +			last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
-+			truncate_pending = false;
++			replace_pending = false;
  			return;
  		}
  		std::vector<std::string> all_ids;
-@@ -108,6 +117,7 @@ void AzureBlobStorageFileHandle::Sync() {
+@@ -108,6 +125,7 @@ void AzureBlobStorageFileHandle::Sync() {
  		last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
  		committed_block_count += staged_block_count;
  		staged_block_count = 0;
-+		truncate_pending = false;
++		replace_pending = false;
  	} catch (const Azure::Storage::StorageException &e) {
  		throw IOException("AzureBlobStorageFileSystem FileSync of '%s' failed with %s Reason Phrase: %s", GetPath(),
  		                  e.ErrorCode, e.ReasonPhrase);
-@@ -115,7 +125,7 @@ void AzureBlobStorageFileHandle::Sync() {
+@@ -115,7 +133,7 @@ void AzureBlobStorageFileHandle::Sync() {
  }
  
  void AzureBlobStorageFileHandle::Close() {
@@ -43,7 +51,7 @@ index 0bd6bf4..f512f15 100644
  	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
  }
  
-@@ -307,7 +317,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -307,7 +325,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  		auto res_create = afh.blob_client.CommitBlockList({});
  		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
  	};
@@ -51,19 +59,28 @@ index 0bd6bf4..f512f15 100644
  
  	try {
  		auto res_props = afh.blob_client.GetProperties();
-@@ -315,7 +324,11 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -315,7 +332,9 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  			throw IOException("AzureBlobStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
  			                  "while file already exists.");
  		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
 -			return truncate_file();
-+			// Defer the truncate until close. CommitBlockList({}) here would publish a
-+			// zero-length blob while the new content is still being staged.
 +			afh.committed_block_count = 0;
-+			afh.truncate_pending = true;
++			afh.replace_pending = true;
 +			return set_props(false, 0, ToTimestamp(res_props.Value.LastModified));
  		}
  		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
  		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/");
+@@ -332,6 +351,10 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 	} catch (const Azure::Storage::StorageException &e) {
+ 		if (int(e.StatusCode) == 404 && afh.flags.OpenForWriting() &&
+ 		    (afh.flags.OverwriteExistingFile() || afh.flags.CreateFileIfNotExists())) {
++			if (afh.flags.OverwriteExistingFile()) {
++				afh.replace_pending = true;
++				return set_props(false, 0, timestamp_t(0));
++			}
+ 			return create_file();
+ 		}
+ 		throw;
 diff --git a/src/azure_dfs_filesystem.cpp b/src/azure_dfs_filesystem.cpp
 index 838abac..cd7282e 100644
 --- a/src/azure_dfs_filesystem.cpp
@@ -164,7 +181,7 @@ index 838abac..cd7282e 100644
  		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
  		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/") || res_props.Value.IsDirectory;
 diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
-index 67bfebd..beb6028 100644
+index 67bfebd..d34b40c 100644
 --- a/src/include/azure_blob_filesystem.hpp
 +++ b/src/include/azure_blob_filesystem.hpp
 @@ -32,13 +32,14 @@ public:
@@ -179,7 +196,7 @@ index 67bfebd..beb6028 100644
  	Azure::Storage::Blobs::BlockBlobClient blob_client;
  	size_t committed_block_count = 0; // maintain position while open; only used if Sync() called before Close()
  	uint32_t staged_block_count = 0;
-+	bool truncate_pending = false;
++	bool replace_pending = false;
  	duckdb::unique_ptr<data_t[]> write_buffer;
  	idx_t write_buffer_offset = 0;
  };
