@@ -288,7 +288,7 @@ PgLakeStageLocationCheckHook(char **newvalue, void **extra, GucSource source)
 	if (!IsSupportedURL(newStageLocation))
 	{
 		GUC_check_errdetail("pg_lake.stage_location must be a valid cloud storage URL "
-							"(s3://, gs://, az://, azure://, or abfss://)");
+							"(s3://, gs://, gcs://, az://, azure://, or abfss://)");
 		return false;
 	}
 
@@ -297,7 +297,7 @@ PgLakeStageLocationCheckHook(char **newvalue, void **extra, GucSource source)
 		strncmp(newStageLocation, HTTPS_URL_PREFIX, strlen(HTTPS_URL_PREFIX)) == 0)
 	{
 		GUC_check_errdetail("pg_lake.stage_location must be a valid cloud storage URL "
-							"(s3://, gs://, az://, azure://, or abfss://)");
+							"(s3://, gs://, gcs://, az://, azure://, or abfss://)");
 		return false;
 	}
 
