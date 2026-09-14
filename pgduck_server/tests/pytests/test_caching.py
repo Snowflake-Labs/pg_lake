@@ -1353,6 +1353,66 @@ def test_cache_on_write_disabled_after_some_writes(s3, pgduck_conn):
     )
 
 
+def test_cache_on_write_skipped_with_nocache_prefix(s3, pgduck_conn):
+    """A `nocache`-prefixed COPY destination writes the object but leaves no
+    cache-on-write copy, while the same write without the prefix is cached.
+
+    Callers that only ever read their output back from object storage -- never
+    through pgduck on this instance -- prefix the destination with `nocache` to
+    keep those writes out of the local cache. RETURN_STATS echoes the
+    destination string verbatim, so the reported filename still carries the
+    prefix and a stats consumer has to strip it before persisting the path.
+    """
+    base = "test_cache_on_write_skipped_with_nocache_prefix"
+
+    # cache-on-write is size-gated; a small limit left by another test would
+    # disable it and make the control assertion below vacuous, so pin the 1GB
+    # default first.
+    run_command(
+        "SET GLOBAL pg_lake_cache_on_write_max_size TO '1073741824';", pgduck_conn
+    )
+
+    copy_body = "SELECT s AS s FROM generate_series(1,100) g(s)"
+
+    # Control: an ordinary write lands a cache-on-write copy, and RETURN_STATS
+    # reports the plain destination.
+    plain_url = f"s3://{TEST_BUCKET}/{base}/plain/data.parquet"
+    plain_cached = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/{base}/plain/{CACHE_FILE_PREFIX}data.parquet"
+    )
+    stats = run_query(
+        f"COPY ({copy_body}) TO '{plain_url}' (FORMAT PARQUET, RETURN_STATS);",
+        pgduck_conn,
+    )
+    assert plain_cached.exists(), "ordinary write was not cached on write"
+    assert stats[0]["filename"] == plain_url
+
+    # nocache: the same write, prefixed, leaves no cache-on-write copy.
+    nocache_url = f"s3://{TEST_BUCKET}/{base}/nocache/data.parquet"
+    nocache_cached = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}"
+        f"/{base}/nocache/{CACHE_FILE_PREFIX}data.parquet"
+    )
+    stats = run_query(
+        f"COPY ({copy_body}) TO 'nocache{nocache_url}' (FORMAT PARQUET, RETURN_STATS);",
+        pgduck_conn,
+    )
+    assert not nocache_cached.exists(), "nocache-prefixed write left a cache copy"
+
+    # The echoed path keeps the prefix -- this is the string a stats consumer
+    # must strip before persisting the real object path.
+    assert stats[0]["filename"] == f"nocache{nocache_url}"
+
+    # The object is written and readable at its real URL regardless.
+    assert pg_lake_file_size(nocache_url, pgduck_conn) > 0
+    results = run_query(f"SELECT count(*) FROM '{nocache_url}'", pgduck_conn)
+    assert results[0][0] == 100
+
+    run_command("CALL pg_lake_manage_cache(0);", pgduck_conn)
+    pgduck_conn.rollback()
+
+
 def test_cache_on_write_success_leaves_no_stage_file(s3, pgduck_conn):
     """A successful write-through cache leaves the finalized pgl-cache.* file
     and no leftover .pgl-stage file.
