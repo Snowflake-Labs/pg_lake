@@ -1950,15 +1950,17 @@ CopyOptionsToReadCSVParams(List *copyOptions)
 		else if (strcmp(option->defname, "allow_quoted_nulls") == 0)
 		{
 			/*
-			 * Synthetic option (not a real COPY option) carried by the
-			 * internal-read options.  DuckDB's read_csv() defaults
-			 * allow_quoted_nulls to true, which is lenient behaviour aimed at
-			 * exotic external CSVs.  For our own exchange format it is wrong:
-			 * the CSV writer force-quotes any value that matches the null
-			 * sentinel (\N), so the distinction between a SQL NULL and the
-			 * literal string "\N" is carried by whether the field is quoted.
+			 * Synthetic option (not a real COPY option) carried by both the
+			 * internal-read options and the normalized external ones.
+			 * DuckDB's read_csv() defaults allow_quoted_nulls to true, which
+			 * collapses a quoted field matching the null string to SQL NULL.
 			 * Setting it to false makes quoted values read as their literal
-			 * text.
+			 * text, which is what both callers need: our own exchange format
+			 * force-quotes any value matching the null sentinel (\N) so that
+			 * quoting is what separates a SQL NULL from the literal string
+			 * "\N", and PostgreSQL's COPY applies the same rule to external
+			 * CSV, where "" is an empty string and a bare empty field is
+			 * NULL.
 			 */
 			bool		allow_quoted_nulls = defGetBoolean(option);
 
