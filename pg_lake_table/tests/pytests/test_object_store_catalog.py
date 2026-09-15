@@ -3,6 +3,7 @@ import datetime
 import itertools
 import json
 import re
+import threading
 import time
 import pytest
 
@@ -1665,103 +1666,59 @@ def test_object_store_catalog_periodic_rewrite(
         superuser_conn.autocommit = False
 
 
-# Periodic catalog rewrites on Azure must not publish catalog.json as a zero-length
-# blob while the new content is still being uploaded.
-def test_object_store_catalog_periodic_rewrite_azure_no_zero_byte_reads(
-    pg_conn,
-    superuser_conn,
-    azure,
-    extension,
-):
-    location = f"azure://{TEST_BUCKET}"
-    catalog_prefix = "tmp_az_rewrite"
+# An Azure object that is overwritten in place must never be observable as
+# zero bytes: pg_lake rewrites catalog.json in place and never writes an empty
+# catalog, so a reader that sees 0 bytes is looking at an in-flight write. The
+# object is larger than azure_write_block_size (8 MiB), which is what makes this
+# deterministic - the old code committed an empty block list at open, leaving
+# the destination empty for the whole upload.
+def test_azure_overwrite_is_never_observed_empty(pg_conn, azure, extension):
+    key = "test_azure_overwrite_never_empty/data.csv"
+    copy_command = f"""
+        COPY (SELECT i, repeat('x', 100) FROM generate_series(1, 150000) i)
+        TO 'azure://{TEST_BUCKET}/{key}'
+    """
 
-    superuser_conn.autocommit = True
-    run_command(
-        f"ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = '{location}'",
-        superuser_conn,
-    )
-    run_command(
-        f"ALTER SYSTEM SET pg_lake_iceberg.internal_object_store_catalog_prefix = '{catalog_prefix}'",
-        superuser_conn,
-    )
-    run_command(
-        f"ALTER SYSTEM SET pg_lake_iceberg.external_object_store_catalog_prefix = '{catalog_prefix}'",
-        superuser_conn,
-    )
-    run_command(
-        "ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_max_age = '1s'",
-        superuser_conn,
-    )
-    run_command("SELECT pg_reload_conf()", superuser_conn)
-    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+    run_command(copy_command, pg_conn)
+    pg_conn.commit()
 
+    size = len(azure.download_blob(key).readall())
+    assert (
+        size > 8 * 1024 * 1024
+    ), f"{key} is {size} bytes, too small to span several write blocks"
+
+    # the fixture client is session scoped and shared, so the poller gets its own
+    reader = BlobServiceClient.from_connection_string(
+        AZURITE_CONNECTION_STRING
+    ).get_container_client(TEST_BUCKET)
+    observed = []
+    stop = threading.Event()
+
+    def poll_size():
+        while not stop.is_set():
+            try:
+                observed.append(reader.get_blob_client(key).get_blob_properties().size)
+            except Exception as err:
+                observed.append(repr(err))
+            time.sleep(0.005)
+
+    poller = threading.Thread(target=poll_size)
+    poller.start()
     try:
-        run_command(
-            "DROP SCHEMA IF EXISTS test_periodic_rewrite_azure CASCADE", pg_conn
-        )
-        run_command(
-            f"SET pg_lake_iceberg.default_location_prefix TO '{location}'", pg_conn
-        )
+        run_command(copy_command, pg_conn)
         pg_conn.commit()
-
-        run_command("CREATE SCHEMA test_periodic_rewrite_azure", pg_conn)
-        run_command(
-            "CREATE TABLE test_periodic_rewrite_azure.tbl(a int) USING iceberg WITH (catalog='object_store')",
-            pg_conn,
-        )
-        pg_conn.commit()
-        wait_until_object_store_writable_table_pushed(
-            pg_conn, "test_periodic_rewrite_azure", "tbl"
-        )
-
-        dbname = run_query("SELECT current_database()", pg_conn)[0][0]
-        key = f"{catalog_prefix}/catalog/{dbname}/catalog.json"
-
-        first_body = json.loads(azure.download_blob(key).readall())
-        first_snapshot_time = first_body["catalog-snapshot-time"]
-        saw_new_snapshot = False
-        deadline = time.monotonic() + 8
-        while time.monotonic() < deadline:
-            body = azure.download_blob(key).readall()
-            assert (
-                len(body) > 0
-            ), f"catalog.json at {key} was observed as zero bytes during a rewrite"
-            parsed = json.loads(body)
-            assert "catalog-snapshot-time" in parsed
-            assert "tables" in parsed
-            saw_new_snapshot |= parsed["catalog-snapshot-time"] > first_snapshot_time
-            time.sleep(0.01)
-
-        assert (
-            saw_new_snapshot
-        ), "catalog.json was not rewritten during the polling window"
     finally:
-        run_command(
-            "DROP SCHEMA IF EXISTS test_periodic_rewrite_azure CASCADE", pg_conn
-        )
-        run_command("RESET pg_lake_iceberg.default_location_prefix", pg_conn)
-        pg_conn.commit()
+        stop.set()
+        poller.join(timeout=30)
 
-        run_command(
-            "ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_location_prefix",
-            superuser_conn,
-        )
-        run_command(
-            "ALTER SYSTEM RESET pg_lake_iceberg.internal_object_store_catalog_prefix",
-            superuser_conn,
-        )
-        run_command(
-            "ALTER SYSTEM RESET pg_lake_iceberg.external_object_store_catalog_prefix",
-            superuser_conn,
-        )
-        run_command(
-            "ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_max_age",
-            superuser_conn,
-        )
-        run_command("SELECT pg_reload_conf()", superuser_conn)
-        run_command("SELECT pg_sleep(0.2)", superuser_conn)
-        superuser_conn.autocommit = False
+    assert observed, "the overwrite completed before the poller took a sample"
+    unexpected = sorted({str(o) for o in observed if o != size})
+    assert not unexpected, (
+        f"{key} read back as {unexpected} while being overwritten, "
+        f"expected {size} bytes throughout ({len(observed)} samples)"
+    )
+
+    assert len(azure.download_blob(key).readall()) == size
 
 
 CACHE_FILE_PREFIX = "pgl-cache."

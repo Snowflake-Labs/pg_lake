@@ -1,8 +1,8 @@
 diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
-index 0bd6bf4..e140b5f 100644
+index 0bd6bf4..04e66b7 100644
 --- a/src/azure_blob_filesystem.cpp
 +++ b/src/azure_blob_filesystem.cpp
-@@ -89,13 +89,30 @@ void AzureBlobStorageFileHandle::StageWriteBuffer() {
+@@ -89,13 +89,33 @@ void AzureBlobStorageFileHandle::StageWriteBuffer() {
  	write_buffer_offset = 0;
  }
  
@@ -12,6 +12,9 @@ index 0bd6bf4..e140b5f 100644
  		return;
  	}
  	try {
++		// An overwrite must not touch the destination before Close(), so it gets none of
++		// the intermediate commits azure_write_staged_blocks_per_commit or an explicit
++		// FileSync would make.
 +		if (replace_pending && !close) {
 +			return;
 +		}
@@ -34,7 +37,7 @@ index 0bd6bf4..e140b5f 100644
  			return;
  		}
  		std::vector<std::string> all_ids;
-@@ -108,6 +125,7 @@ void AzureBlobStorageFileHandle::Sync() {
+@@ -108,6 +128,7 @@ void AzureBlobStorageFileHandle::Sync() {
  		last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
  		committed_block_count += staged_block_count;
  		staged_block_count = 0;
@@ -42,7 +45,7 @@ index 0bd6bf4..e140b5f 100644
  	} catch (const Azure::Storage::StorageException &e) {
  		throw IOException("AzureBlobStorageFileSystem FileSync of '%s' failed with %s Reason Phrase: %s", GetPath(),
  		                  e.ErrorCode, e.ReasonPhrase);
-@@ -115,7 +133,7 @@ void AzureBlobStorageFileHandle::Sync() {
+@@ -115,7 +136,7 @@ void AzureBlobStorageFileHandle::Sync() {
  }
  
  void AzureBlobStorageFileHandle::Close() {
@@ -51,7 +54,7 @@ index 0bd6bf4..e140b5f 100644
  	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
  }
  
-@@ -307,7 +325,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -307,7 +328,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  		auto res_create = afh.blob_client.CommitBlockList({});
  		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
  	};
@@ -59,7 +62,7 @@ index 0bd6bf4..e140b5f 100644
  
  	try {
  		auto res_props = afh.blob_client.GetProperties();
-@@ -315,7 +332,9 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -315,7 +335,9 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  			throw IOException("AzureBlobStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
  			                  "while file already exists.");
  		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
@@ -70,7 +73,7 @@ index 0bd6bf4..e140b5f 100644
  		}
  		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
  		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/");
-@@ -332,6 +351,10 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -332,6 +354,10 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  	} catch (const Azure::Storage::StorageException &e) {
  		if (int(e.StatusCode) == 404 && afh.flags.OpenForWriting() &&
  		    (afh.flags.OverwriteExistingFile() || afh.flags.CreateFileIfNotExists())) {
@@ -82,7 +85,7 @@ index 0bd6bf4..e140b5f 100644
  		}
  		throw;
 diff --git a/src/azure_dfs_filesystem.cpp b/src/azure_dfs_filesystem.cpp
-index 838abac..cd7282e 100644
+index 838abac..0eaedb7 100644
 --- a/src/azure_dfs_filesystem.cpp
 +++ b/src/azure_dfs_filesystem.cpp
 @@ -8,6 +8,7 @@
@@ -108,7 +111,7 @@ index 838abac..cd7282e 100644
  }
  
  void AzureDfsStorageFileHandle::StageWriteBuffer() {
-@@ -138,8 +143,37 @@ void AzureDfsStorageFileHandle::Sync(bool close) {
+@@ -138,8 +143,39 @@ void AzureDfsStorageFileHandle::Sync(bool close) {
  }
  
  void AzureDfsStorageFileHandle::Close() {
@@ -143,12 +146,14 @@ index 838abac..cd7282e 100644
 +	replacement_pending = false;
 +}
 +
++// A process that dies mid-write leaves the temp file behind and nothing reclaims it.
++// Accepted: the alternative is readers seeing a half-written destination.
 +AzureDfsStorageFileHandle::~AzureDfsStorageFileHandle() {
 +	CleanupPendingReplacement();
  }
  
  //////// AzureDfsStorageFileSystem ////////
-@@ -170,7 +204,8 @@ unique_ptr<AzureFileHandle> AzureDfsStorageFileSystem::CreateHandle(const OpenFi
+@@ -170,7 +206,8 @@ unique_ptr<AzureFileHandle> AzureDfsStorageFileSystem::CreateHandle(const OpenFi
  	}
  
  	auto handle = make_uniq<AzureDfsStorageFileHandle>(*this, info, flags, storage_context->options,
@@ -158,7 +163,7 @@ index 838abac..cd7282e 100644
  	if (!handle->PostConstruct()) {
  		return nullptr;
  	}
-@@ -333,7 +368,6 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -333,7 +370,6 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  		auto res_create = afh.file_client.Create();
  		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
  	};
@@ -166,11 +171,14 @@ index 838abac..cd7282e 100644
  
  	try {
  		auto res_props = afh.file_client.GetProperties();
-@@ -341,7 +375,12 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -341,7 +377,15 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  			throw IOException("AzureDfsStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
  			                  "while file already exists.");
  		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
 -			return truncate_file();
++			// Flush cannot rewrite or shrink committed bytes, so the new content goes to a temp
++			// file that Close() renames over the destination. That needs a hierarchical-namespace
++			// account and a credential allowed to rename.
 +			afh.temporary_file_path =
 +			    afh.destination_file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
 +			afh.file_client = afh.file_system_client.GetFileClient(afh.temporary_file_path);
