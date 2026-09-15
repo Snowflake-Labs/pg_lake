@@ -24,6 +24,7 @@
 #define PGDUCK_CLIENT_THREAD_H
 
 #include <pthread.h>
+#include <time.h>
 #include "pgsession/pgsession.h"
 
 #define InvalidThreadIndex -1
@@ -32,6 +33,8 @@ extern int	MaxThreads;
 extern int	MaxAllowedClients;
 
 extern void pgclient_threadpool_init(int maxAllowedClients);
+extern void pgclient_threadpool_clamp_cap_to_active(time_t now);
+extern void pgclient_threadpool_maybe_restore_cap(time_t now);
 extern int	pgclient_threadpool_reserve_slot(PGClient * client);
 extern void pgclient_threadpool_free_slot(int threadIndex);
 #if PG_VERSION_NUM >= 180000

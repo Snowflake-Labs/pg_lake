@@ -29,6 +29,8 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <time.h>
+#include <sys/resource.h>
 
 #include "pgserver/client_threadpool.h"
 #include "utils/pgduck_log_utils.h"
@@ -69,6 +71,43 @@ typedef struct PgClientThreadState
 
 int			MaxAllowedClients;
 int			MaxThreads;
+
+/*
+ * How long a clamped cap is held before the configured value is tried again.
+ *
+ * The clamp exists because the OS refused us a thread, and EAGAIN does not say
+ * why: POSIX uses it both for "the thread limit would be exceeded" and for
+ * "lacked the necessary resources", so it also fires under memory pressure
+ * nowhere near any thread limit.  Pressure like that passes, and it can come
+ * from elsewhere on the host, so the clamp has to expire rather than stand for
+ * the life of the process.
+ *
+ * It has to be a duration and not a client count.  A count cannot tell a burst
+ * that has passed from a client that happened to disconnect mid-burst, so it
+ * lifts the clamp while the burst is still arriving and we clamp again on the
+ * next connection, once per connection.
+ *
+ * 10 seconds is long enough to outlast a connection burst and short enough
+ * that a host which has recovered is not left throttled.  The cost of retrying
+ * too eagerly is one failed pthread_create, so the trade is really about log
+ * volume: against a ceiling that is not going away, this is a clamp and a retry
+ * every 10 seconds for as long as the load lasts.
+ *
+ * Timed off the wall clock the accept loop already reads, like the socket
+ * touch, so a clock step can expire a hold early or late.  Either way the cost
+ * is bounded and self correcting: early costs one failed pthread_create and we
+ * clamp again, late leaves the cap low a little longer.
+ */
+#define CLAMP_HOLD_SECONDS 10
+
+/* max_clients as configured, restored when a clamp expires */
+static int	ConfiguredMaxClients;
+
+/*
+ * When the current clamp expires.  0 means the cap is not clamped.  Monotonic,
+ * so it survives wall-clock changes.
+ */
+static time_t ClampHeldUntil = 0;
 
 /* all accesses to ClientThreadPool should happen while holding a lock */
 static PgClientThreadState * ClientThreadPool;
@@ -111,6 +150,7 @@ pgclient_threadpool_init(int maxAllowedClients)
 	 * We could perhaps use some smaller number, for now let's keep it simple.
 	 */
 	MaxAllowedClients = maxAllowedClients;
+	ConfiguredMaxClients = maxAllowedClients;
 	MaxThreads = maxAllowedClients * 2;
 
 	/* pg_malloc0 exists the program in case cannot allocate */
@@ -123,6 +163,134 @@ pgclient_threadpool_init(int maxAllowedClients)
 		PGDUCK_SERVER_ERROR("Failed to create rwlock with %d", rwLockCreated);
 		exit(STATUS_ERROR);
 	}
+}
+
+
+/*
+ * describe_nproc_limit renders RLIMIT_NPROC for the log, so a reader can tell
+ * which wall we hit.  pthread_create reports EAGAIN both for "no more threads
+ * allowed" and for "could not get the resources for one", so the errno alone
+ * does not say whether the thread limit or memory was the constraint.  A live
+ * thread count well under this limit means memory.
+ */
+static const char *
+describe_nproc_limit(char *buf, size_t buflen)
+{
+	struct rlimit rlim;
+
+	if (getrlimit(RLIMIT_NPROC, &rlim) != 0)
+		return "unknown";
+
+	if (rlim.rlim_cur == RLIM_INFINITY)
+		return "unlimited";
+
+	snprintf(buf, buflen, "%llu", (unsigned long long) rlim.rlim_cur);
+
+	return buf;
+}
+
+
+/*
+ * pgclient_threadpool_clamp_cap_to_active lowers the client cap to the number
+ * of client threads we are currently carrying, for CLAMP_HOLD_SECONDS.
+ *
+ * Called when the OS refuses us a new client thread.  max_clients is a promise
+ * we cannot keep once the host runs out of threads or memory first, and the
+ * real ceiling is not something we can read up front.  There is no portable
+ * way to ask for it (sysconf(_SC_THREAD_THREADS_MAX) is indeterminate),
+ * RLIMIT_NPROC is a per-uid budget shared with the user's other processes, a
+ * cgroup pids.max is invisible to us, and when memory is the binding
+ * constraint none of those numbers describe it at all.  A failed
+ * pthread_create is the one moment the OS tells us what this host actually
+ * sustains, so record it and let the ordinary capacity check in
+ * reserve_slot() enforce it from then on.  Otherwise every later connection
+ * repeats the same failed pthread_create and the cap never engages.
+ *
+ * The caller has already freed the slot it reserved for the thread that
+ * failed, so ActiveClientThreadCount is exactly what we are carrying and the
+ * cap becomes that: reserve_slot() rejects at >=, so we hold what we have and
+ * admit nobody new until a client leaves or the clamp expires.
+ *
+ * now is passed in rather than read here so that nothing but the counters is
+ * touched while the lock is held.
+ */
+void
+pgclient_threadpool_clamp_cap_to_active(time_t now)
+{
+	int			loweredTo = 0;
+	int			liveThreads;
+	int			previousCap;
+
+	pthread_rwlock_wrlock(&rwlock);
+
+	liveThreads = ActiveClientThreadCount;
+	previousCap = MaxAllowedClients;
+
+	/*
+	 * Never clamp to zero: if even the first client cannot get a thread we
+	 * still want to retry one at a time rather than refuse everything.
+	 */
+	int			sustainable = Max(liveThreads, 1);
+
+	if (sustainable < MaxAllowedClients)
+	{
+		MaxAllowedClients = sustainable;
+		loweredTo = sustainable;
+	}
+
+	/*
+	 * Extend the hold even when the cap did not move, so a burst that keeps
+	 * failing does not expire a clamp it is still provoking.
+	 */
+	ClampHeldUntil = now + CLAMP_HOLD_SECONDS;
+
+	pthread_rwlock_unlock(&rwlock);
+
+	if (loweredTo > 0)
+	{
+		char		limitBuf[32];
+
+		PGDUCK_SERVER_WARN("the OS refused a new client thread: %d client "
+						   "threads live, max_clients %d, RLIMIT_NPROC %s. "
+						   "Lowering max_clients to %d for %d seconds. A live "
+						   "count well below RLIMIT_NPROC means memory, not "
+						   "the thread limit, is the constraint",
+						   liveThreads, previousCap,
+						   describe_nproc_limit(limitBuf, sizeof(limitBuf)),
+						   loweredTo, CLAMP_HOLD_SECONDS);
+	}
+}
+
+
+/*
+ * pgclient_threadpool_maybe_restore_cap puts max_clients back once a clamp has
+ * expired.
+ *
+ * Called from the accept loop before reserving a slot, which is the moment the
+ * cap is about to matter.  Deliberately not driven off client exits: whether a
+ * burst has passed is a question about time, and a live-client count cannot
+ * distinguish a burst that ended from one client hanging up in the middle of
+ * one still arriving.
+ */
+void
+pgclient_threadpool_maybe_restore_cap(time_t now)
+{
+	int			restoredTo = 0;
+
+	pthread_rwlock_wrlock(&rwlock);
+
+	if (MaxAllowedClients < ConfiguredMaxClients && now >= ClampHeldUntil)
+	{
+		MaxAllowedClients = ConfiguredMaxClients;
+		ClampHeldUntil = 0;
+		restoredTo = ConfiguredMaxClients;
+	}
+
+	pthread_rwlock_unlock(&rwlock);
+
+	if (restoredTo > 0)
+		PGDUCK_SERVER_LOG("clamp expired after %d seconds; restoring "
+						  "max_clients to %d", CLAMP_HOLD_SECONDS, restoredTo);
 }
 
 
