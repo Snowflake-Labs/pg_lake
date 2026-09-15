@@ -85,7 +85,7 @@ index 0bd6bf4..04e66b7 100644
  		}
  		throw;
 diff --git a/src/azure_dfs_filesystem.cpp b/src/azure_dfs_filesystem.cpp
-index 838abac..0eaedb7 100644
+index 838abac..ba647f5 100644
 --- a/src/azure_dfs_filesystem.cpp
 +++ b/src/azure_dfs_filesystem.cpp
 @@ -8,6 +8,7 @@
@@ -163,31 +163,45 @@ index 838abac..0eaedb7 100644
  	if (!handle->PostConstruct()) {
  		return nullptr;
  	}
-@@ -333,7 +370,6 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -333,7 +370,18 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  		auto res_create = afh.file_client.Create();
  		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
  	};
 -	auto truncate_file = create_file;
++
++	// Flush cannot rewrite or shrink committed bytes, so the new content goes to a temp file
++	// that Close() renames over the destination. That needs a hierarchical-namespace account
++	// and a credential allowed to rename. Used for a missing destination too, so a reader
++	// keeps getting 404 instead of an empty file.
++	auto replace_file = [&]() {
++		afh.temporary_file_path = afh.destination_file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
++		afh.file_client = afh.file_system_client.GetFileClient(afh.temporary_file_path);
++		auto res_create = afh.file_client.Create();
++		afh.replacement_pending = true;
++		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
++	};
  
  	try {
  		auto res_props = afh.file_client.GetProperties();
-@@ -341,7 +377,15 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+@@ -341,7 +389,7 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
  			throw IOException("AzureDfsStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
  			                  "while file already exists.");
  		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
 -			return truncate_file();
-+			// Flush cannot rewrite or shrink committed bytes, so the new content goes to a temp
-+			// file that Close() renames over the destination. That needs a hierarchical-namespace
-+			// account and a credential allowed to rename.
-+			afh.temporary_file_path =
-+			    afh.destination_file_path + ".tmp-" + UUID::ToString(UUID::GenerateRandomUUID());
-+			afh.file_client = afh.file_system_client.GetFileClient(afh.temporary_file_path);
-+			auto res_create = afh.file_client.Create();
-+			afh.replacement_pending = true;
-+			return set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
++			return replace_file();
  		}
  		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
  		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/") || res_props.Value.IsDirectory;
+@@ -349,6 +397,9 @@ void AzureDfsStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 	} catch (const Azure::Storage::StorageException &e) {
+ 		if (int(e.StatusCode) == 404 && afh.flags.OpenForWriting() &&
+ 		    (afh.flags.OverwriteExistingFile() || afh.flags.CreateFileIfNotExists())) {
++			if (afh.flags.OverwriteExistingFile()) {
++				return replace_file();
++			}
+ 			return create_file();
+ 		}
+ 		throw;
 diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
 index 67bfebd..d34b40c 100644
 --- a/src/include/azure_blob_filesystem.hpp

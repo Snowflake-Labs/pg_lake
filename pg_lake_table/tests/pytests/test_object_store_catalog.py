@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import pytest
+from azure.core.exceptions import ResourceNotFoundError
 
 
 # Several tests in this module create the same schemas (object_store_sc1,
@@ -1719,6 +1720,57 @@ def test_azure_overwrite_is_never_observed_empty(pg_conn, azure, extension):
     )
 
     assert len(azure.download_blob(key).readall()) == size
+
+
+# The first write of a key must not publish it early either: until the upload
+# finishes a reader should get a 404, not an empty object. Same block-spanning
+# size as above, so the window is wide enough to sample.
+def test_azure_first_write_is_never_observed_empty(pg_conn, azure, extension):
+    key = "test_azure_first_write_never_empty/data.csv"
+
+    reader = BlobServiceClient.from_connection_string(
+        AZURITE_CONNECTION_STRING
+    ).get_container_client(TEST_BUCKET)
+    try:
+        reader.get_blob_client(key).delete_blob(delete_snapshots="include")
+    except ResourceNotFoundError:
+        pass
+
+    observed = []
+    stop = threading.Event()
+
+    def poll_size():
+        while not stop.is_set():
+            try:
+                observed.append(reader.get_blob_client(key).get_blob_properties().size)
+            except ResourceNotFoundError:
+                observed.append("absent")
+            time.sleep(0.005)
+
+    poller = threading.Thread(target=poll_size)
+    poller.start()
+    try:
+        run_command(
+            f"""
+            COPY (SELECT i, repeat('x', 100) FROM generate_series(1, 150000) i)
+            TO 'azure://{TEST_BUCKET}/{key}'
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+    finally:
+        stop.set()
+        poller.join(timeout=30)
+
+    size = len(azure.download_blob(key).readall())
+    assert size > 8 * 1024 * 1024, f"{key} is {size} bytes, too small to span blocks"
+
+    assert observed, "the write completed before the poller took a sample"
+    unexpected = sorted({str(o) for o in observed if o not in ("absent", size)})
+    assert not unexpected, (
+        f"{key} read back as {unexpected} while being written, expected it to stay "
+        f"absent until complete ({len(observed)} samples)"
+    )
 
 
 CACHE_FILE_PREFIX = "pgl-cache."
