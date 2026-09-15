@@ -714,3 +714,71 @@ def test_temp_directory_via_init_file_sets_spill_location():
             cur = conn.cursor()
             cur.execute("SELECT current_setting('temp_directory')")
             assert cur.fetchone()[0] == spill_dir
+
+
+# ---------------------------------------------------------------------------
+# Client cap
+#
+# Every client, and every in-flight cancellation, occupies a slot in the client
+# thread pool and runs on its own OS thread, so max_clients is what keeps the
+# process from running the host out of threads.
+# ---------------------------------------------------------------------------
+
+MAX_CLIENTS_PORT = 8256
+MAX_CLIENTS_DB = "/tmp/pgduck_server_test_max_clients.db"
+
+
+def test_max_clients_refuses_burst_and_logs_once():
+    """A burst against a full client pool is refused, and the accept loop says
+    so once instead of once per connection.
+
+    The count is the point of the test.  A loop that logs per rejection is the
+    same loop that spins on accept/reject/close, which is how the pool ends up
+    wedged: the host stays too busy for the detached client threads to exit and
+    release their slots.
+    """
+    max_clients = 2
+    refused_attempts = 15
+
+    server = PgDuckServer(
+        port=MAX_CLIENTS_PORT,
+        need_output=True,
+        duckdb_database_file_path=MAX_CLIENTS_DB,
+        extra_args=["--max_clients", str(max_clients)],
+    )
+    assert is_server_listening(server.socket_path)
+
+    # is_server_listening() connected and hung up, which briefly held a slot.
+    # Wait for that client thread to exit before counting on a full pool.
+    time.sleep(0.5)
+
+    held = []
+    try:
+        for _ in range(max_clients):
+            held.append(
+                psycopg2.connect(host=PGDUCK_UNIX_DOMAIN_PATH, port=MAX_CLIENTS_PORT)
+            )
+
+        # Every slot is taken, so each further connection has to be refused.
+        for _ in range(refused_attempts):
+            with pytest.raises(psycopg2.OperationalError):
+                psycopg2.connect(
+                    host=PGDUCK_UNIX_DOMAIN_PATH, port=MAX_CLIENTS_PORT
+                ).close()
+
+        # Being at the cap must not disturb the clients already connected.
+        for conn in held:
+            cur = conn.cursor()
+            cur.execute("SELECT 1")
+            assert cur.fetchone()[0] == 1
+            cur.close()
+
+        server_output = get_server_output(server.output_queue)
+        assert server_output.count("new clients rejected") == 1, (
+            f"expected a single rejection line for {refused_attempts} refused "
+            f"connections, got: {server_output}"
+        )
+        assert f"at the {max_clients} client limit" in server_output
+    finally:
+        for conn in held:
+            conn.close()
