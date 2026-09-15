@@ -1491,7 +1491,51 @@ def test_copy_to_array_with_nulls(pg_conn, duckdb_conn, tmp_path):
     pg_conn.rollback()
 
 
-def test_copy_virtual_column(pg_conn, tmp_path):
+def test_copy_stored_generated_column(pg_conn, duckdb_conn, tmp_path):
+    """COPY TO must exclude STORED generated columns so the output can be copied back.
+
+    Before the fix, COPY TO used SELECT * which included generated columns in
+    the Parquet file, making a round-trip COPY FROM (without an explicit column
+    list) fail with "cannot insert into column ... because it is a generated
+    column".  After the fix, only non-generated columns are emitted, so both
+    COPY TO and the round-trip COPY FROM succeed without an explicit column list.
+    """
+    parquet_path = tmp_path / "test_stored_gen.parquet"
+
+    run_command(
+        f"""
+        CREATE TABLE test_stored_gen (a int, g int GENERATED ALWAYS AS (a * 2) STORED);
+        INSERT INTO test_stored_gen (a) VALUES (1), (2), (3);
+        COPY test_stored_gen TO '{parquet_path}' WITH (format 'parquet');
+        """,
+        pg_conn,
+    )
+
+    # The Parquet file must contain only the non-generated column.
+    duckdb_conn.execute("DESCRIBE SELECT * FROM read_parquet($1)", [str(parquet_path)])
+    parquet_columns = [row[0] for row in duckdb_conn.fetchall()]
+    assert parquet_columns == ["a"], f"expected only ['a'], got {parquet_columns}"
+
+    # Round-trip COPY FROM without an explicit column list must succeed.
+    run_command(
+        f"COPY test_stored_gen FROM '{parquet_path}' WITH (format 'parquet')",
+        pg_conn,
+    )
+
+    result = run_query("SELECT a, g FROM test_stored_gen ORDER BY a", pg_conn)
+    assert result == [
+        [1, 2],
+        [1, 2],
+        [2, 4],
+        [2, 4],
+        [3, 6],
+        [3, 6],
+    ]
+
+    pg_conn.rollback()
+
+
+def test_copy_virtual_column(pg_conn, duckdb_conn, tmp_path):
     # virtual columns were introduced in PostgreSQL 18
     if get_pg_version_num(pg_conn) < 180000:
         return
@@ -1504,8 +1548,18 @@ def test_copy_virtual_column(pg_conn, tmp_path):
         CREATE TABLE test_virtual (a int, s text GENERATED ALWAYS AS (a::text) STORED, v text GENERATED ALWAYS AS (a::text) VIRTUAL);
         INSERT INTO test_virtual (a) VALUES (1), (2), (3), (null);
         COPY test_virtual TO '{parquet_path}' WITH (format 'parquet');
-        COPY test_virtual(a) FROM '{parquet_path}' WITH (format 'parquet');
-    """,
+        """,
+        pg_conn,
+    )
+
+    # Generated columns (both STORED and VIRTUAL) must not appear in the output.
+    duckdb_conn.execute("DESCRIBE SELECT * FROM read_parquet($1)", [str(parquet_path)])
+    parquet_columns = [row[0] for row in duckdb_conn.fetchall()]
+    assert parquet_columns == ["a"], f"expected only ['a'], got {parquet_columns}"
+
+    # Round-trip COPY FROM without an explicit column list must succeed.
+    run_command(
+        f"COPY test_virtual FROM '{parquet_path}' WITH (format 'parquet')",
         pg_conn,
     )
 
