@@ -113,7 +113,6 @@ FetchRestCatalogConfigPrefix(RestCatalogOptions * opts)
 }
 
 
-
 /*
  * ApplyGUCDefaults populates opts with the current GUC values.
  * All string fields are pstrdup'd so the struct is self-contained.

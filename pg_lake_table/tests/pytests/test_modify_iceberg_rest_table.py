@@ -709,6 +709,10 @@ def test_server_option_overrides_guc(
     run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
+    if guc_name is not None:
+        run_command(f"RESET {guc_name}", superuser_conn)
+        superuser_conn.commit()
+
 
 # ---------------------------------------------------------------------------
 # /v1/config catalog-prefix auto-detection integration test
@@ -729,7 +733,9 @@ def test_catalog_name_auto_detected_from_v1_config(
     installcheck,
     superuser_conn,
     pg_conn,
+    s3,
     extension,
+    set_polaris_gucs,
     polaris_session,
     create_http_helper_functions,
 ):
@@ -767,7 +773,7 @@ def test_catalog_name_auto_detected_from_v1_config(
 
     run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}", pg_conn)
     run_command(
-        f"CREATE TABLE {SCHEMA}.{TABLE} (id bigint, v text) USING iceberg",
+        f"CREATE TABLE {SCHEMA}.{TABLE} (id bigint, v text) USING iceberg WITH (catalog='rest')",
         pg_conn,
     )
     run_command(
@@ -938,10 +944,6 @@ def test_catalog_name_auto_detected_from_v1_config(
         pg_conn.commit()
 
         run_command(f"DROP SERVER IF EXISTS {USER_SERVER} CASCADE", superuser_conn)
-        superuser_conn.commit()
-
-    if guc_name is not None:
-        run_command(f"RESET {guc_name}", superuser_conn)
         superuser_conn.commit()
 
 
