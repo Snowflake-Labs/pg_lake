@@ -728,9 +728,21 @@ MAX_CLIENTS_PORT = 8256
 MAX_CLIENTS_DB = "/tmp/pgduck_server_test_max_clients.db"
 
 
-def test_max_clients_refuses_burst_and_logs_once():
-    """A burst against a full client pool is refused, and the accept loop says
-    so once instead of once per connection.
+def max_rejection_lines(burst_seconds):
+    """Lines the accept loop may write for a burst lasting *burst_seconds*.
+
+    It logs at most once a second, so a burst spans at most
+    ``int(burst_seconds) + 1`` second boundaries, and one more line is allowed
+    for the first rejection, which always logs.  Asserting an exact count
+    instead is a race: a burst of a few milliseconds writes two lines whenever
+    it happens to straddle a boundary.
+    """
+    return int(burst_seconds) + 2
+
+
+def test_max_clients_refuses_burst_and_rate_limits_log():
+    """A burst against a full client pool is refused, and the accept loop
+    reports it a fixed number of times rather than once per connection.
 
     The count is the point of the test.  A loop that logs per rejection is the
     same loop that spins on accept/reject/close, which is how the pool ends up
@@ -760,11 +772,13 @@ def test_max_clients_refuses_burst_and_logs_once():
             )
 
         # Every slot is taken, so each further connection has to be refused.
+        burst_start = time.time()
         for _ in range(refused_attempts):
             with pytest.raises(psycopg2.OperationalError):
                 psycopg2.connect(
                     host=PGDUCK_UNIX_DOMAIN_PATH, port=MAX_CLIENTS_PORT
                 ).close()
+        burst_seconds = time.time() - burst_start
 
         # Being at the cap must not disturb the clients already connected.
         for conn in held:
@@ -774,11 +788,79 @@ def test_max_clients_refuses_burst_and_logs_once():
             cur.close()
 
         server_output = get_server_output(server.output_queue)
-        assert server_output.count("new clients rejected") == 1, (
-            f"expected a single rejection line for {refused_attempts} refused "
-            f"connections, got: {server_output}"
+        rejection_lines = server_output.count("new clients rejected")
+        allowed = max_rejection_lines(burst_seconds)
+
+        assert rejection_lines >= 1, f"nothing reported the cap: {server_output}"
+        assert rejection_lines <= allowed, (
+            f"{rejection_lines} rejection lines for {refused_attempts} refused "
+            f"connections over {burst_seconds:.3f}s, at most {allowed} expected: "
+            f"{server_output}"
         )
         assert f"at the {max_clients} client limit" in server_output
     finally:
         for conn in held:
             conn.close()
+
+
+def test_max_clients_rejection_log_survives_churn():
+    """The rejection message stays rate limited when clients come and go.
+
+    A pool held by long-lived clients is the easy case.  When clients connect
+    and disconnect while a burst is arriving, anything that tracks "have we
+    said this already" gets cleared by every connection that succeeds, and the
+    log goes back to a line per rejected connection.
+    """
+    max_clients = 2
+    server = PgDuckServer(
+        port=MAX_CLIENTS_PORT,
+        need_output=True,
+        duckdb_database_file_path=MAX_CLIENTS_DB,
+        extra_args=["--max_clients", str(max_clients)],
+    )
+    assert is_server_listening(server.socket_path)
+    time.sleep(0.5)
+
+    refused = 0
+    burst_start = time.time()
+    deadline = burst_start + 3
+    refused_lock = threading.Lock()
+
+    def churn():
+        nonlocal refused
+        while time.time() < deadline:
+            try:
+                conn = psycopg2.connect(
+                    host=PGDUCK_UNIX_DOMAIN_PATH, port=MAX_CLIENTS_PORT
+                )
+                cur = conn.cursor()
+                cur.execute("SELECT 1")
+                cur.fetchone()
+                cur.close()
+                conn.close()
+            except psycopg2.OperationalError:
+                with refused_lock:
+                    refused += 1
+
+    threads = [threading.Thread(target=churn) for _ in range(max_clients + 6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=30)
+    burst_seconds = time.time() - burst_start
+
+    assert refused > 0, "expected some connections to be refused at the cap"
+
+    server_output = get_server_output(server.output_queue)
+    rejection_lines = server_output.count("new clients rejected")
+
+    # A handful, bounded by how long the burst ran rather than by how many
+    # connections it made.  The failure this guards is thousands: one line per
+    # refused connection.
+    allowed = max_rejection_lines(burst_seconds)
+
+    assert rejection_lines <= allowed, (
+        f"rejection message is not rate limited: {rejection_lines} lines for "
+        f"{refused} refused connections over {burst_seconds:.3f}s, at most "
+        f"{allowed} expected"
+    )
