@@ -709,6 +709,237 @@ def test_server_option_overrides_guc(
     run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
 
+
+# ---------------------------------------------------------------------------
+# /v1/config catalog-prefix auto-detection integration test
+# ---------------------------------------------------------------------------
+
+
+import socket as _socket
+from http.server import BaseHTTPRequestHandler, HTTPServer as _HTTPServer
+
+
+def _cfg_disc_free_port():
+    with _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_catalog_name_auto_detected_from_v1_config(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    extension,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """CREATE TABLE auto-detects catalog_name from /v1/config when it is not set.
+
+    A mock REST catalog server advertises a custom prefix "cfg-disc-prefix" via
+    /v1/config -- a value different from the PostgreSQL database name so the
+    test catches regressions.  The mock routes namespace and loadTable requests
+    only under that prefix; any request using the database-name fallback path
+    would get a 404.
+
+    The mock's loadTable response carries the real Polaris metadata-location for
+    a writable table created earlier in the test, so DescribeColumnsFromIceberg-
+    MetadataURI can read the real S3 data and complete the CREATE TABLE.  A
+    subsequent SELECT verifies the table is readable end-to-end.
+    """
+    if installcheck:
+        return
+
+    SCHEMA = "cfg_disc_schema"
+    TABLE = "cfg_disc_tbl"
+    RO_TABLE = "cfg_disc_ro_tbl"
+    USER_SERVER = "cfg_disc_user_server"
+    MOCK_PREFIX = "cfg-disc-prefix"
+
+    # -- 1. Create a writable Polaris table and stage a row so SELECT later
+    #       returns meaningful data.
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    endpoint = (
+        f"http://{server_params.POLARIS_HOSTNAME}"
+        f":{server_params.POLARIS_PORT}/api/catalog"
+    )
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}", pg_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA}.{TABLE} (id bigint, v text) USING iceberg",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {SCHEMA}.{TABLE} SELECT i, i::text FROM generate_series(1,5) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # -- 2. Ask Polaris for the table's metadata-location so the mock can
+    #       relay it to pg_lake (which then reads the real S3 metadata).
+    load_url = (
+        f"{endpoint}/v1/{server_params.PG_DATABASE}"
+        f"/namespaces/{SCHEMA}/tables/{TABLE}"
+    )
+    polaris_token = get_polaris_access_token()
+    resp = requests.get(load_url, headers={"Authorization": f"Bearer {polaris_token}"})
+    assert resp.status_code == 200, f"Polaris loadTable failed: {resp.text}"
+    real_metadata_location = resp.json()["metadata-location"]
+
+    # -- 3. Start a mock REST catalog that:
+    #       * returns MOCK_PREFIX from /v1/config
+    #       * serves namespace-exists 200 only for paths under MOCK_PREFIX
+    #       * serves a loadTable response (with the real metadata-location)
+    #         only for paths under MOCK_PREFIX
+    #
+    #    Requests arriving with the database-name prefix ("postgres") hit the
+    #    catch-all 404, so the test fails fast if auto-detection is bypassed.
+    def _make_cfg_disc_handler(metadata_location):
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def _json(self, status, body):
+                encoded = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def _handle(self):
+                if "/oauth/tokens" in self.path:
+                    self._json(
+                        200,
+                        {
+                            "access_token": "mock-token",
+                            "token_type": "bearer",
+                            "expires_in": 3600,
+                        },
+                    )
+                    return
+
+                if self.path.endswith("/v1/config"):
+                    self._json(
+                        200,
+                        {
+                            "overrides": {},
+                            "defaults": {"prefix": MOCK_PREFIX},
+                        },
+                    )
+                    return
+
+                mock_prefix_base = f"/v1/{MOCK_PREFIX}/"
+                if not self.path.startswith(mock_prefix_base):
+                    # Wrong prefix (e.g. the database-name fallback).
+                    self._json(404, {"error": "not found"})
+                    return
+
+                # Namespace existence check.
+                if "/tables" not in self.path:
+                    ns = self.path.split("/namespaces/", 1)[1].split("?")[0].rstrip("/")
+                    self._json(200, {"namespace": [ns], "properties": {}})
+                    return
+
+                # loadTable: return the real Polaris metadata-location.
+                self._json(200, {"metadata-location": metadata_location})
+
+            def do_GET(self):
+                self._handle()
+
+            def do_POST(self):
+                self._handle()
+
+        return _Handler
+
+    port = _cfg_disc_free_port()
+    httpd = _HTTPServer(
+        ("127.0.0.1", port), _make_cfg_disc_handler(real_metadata_location)
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        # -- 4. Create a user server pointing at the mock WITHOUT catalog_name.
+        run_command(
+            f"""
+            CREATE SERVER {USER_SERVER} TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (
+                    rest_endpoint 'http://127.0.0.1:{port}',
+                    location_prefix 's3://{TEST_BUCKET}/'
+                )
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"""
+            CREATE USER MAPPING FOR PUBLIC SERVER {USER_SERVER}
+                OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"GRANT USAGE ON FOREIGN SERVER {USER_SERVER} TO PUBLIC",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # -- 5. Create a read-only table via the mock server.  No catalog_name
+        #       is given; pg_lake must discover "cfg-disc-prefix" from /v1/config.
+        #       A wrong fallback ("postgres") would hit the mock's 404 path and
+        #       raise "namespace does not exist in the rest catalog".
+        run_command(
+            f"""
+            CREATE TABLE {SCHEMA}.{RO_TABLE} ()
+                USING iceberg
+                WITH (
+                    catalog='{USER_SERVER}',
+                    read_only='true',
+                    catalog_namespace='{SCHEMA}',
+                    catalog_table_name='{TABLE}'
+                )
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # -- 6. SELECT verifies the table is readable end-to-end.
+        results = run_query(f"SELECT count(*) FROM {SCHEMA}.{RO_TABLE}", pg_conn)
+        assert results[0][0] == 5, (
+            f"Expected 5 rows from auto-detected read-only table, "
+            f"got {results[0][0]}"
+        )
+
+        # -- 7. Verify the baked-in catalog_name is the discovered prefix.
+        opt_results = run_query(
+            f"""
+            SELECT opt.option_value
+            FROM pg_foreign_table ft
+            JOIN pg_class c ON c.oid = ft.ftrelid
+            JOIN LATERAL pg_options_to_table(ft.ftoptions) opt ON TRUE
+            WHERE c.relname = '{RO_TABLE}'
+              AND opt.option_name = 'catalog_name'
+            """,
+            pg_conn,
+        )
+        assert opt_results, "catalog_name not baked into foreign table options"
+        assert opt_results[0][0] == MOCK_PREFIX, (
+            f"Expected catalog_name='{MOCK_PREFIX}', " f"got '{opt_results[0][0]}'"
+        )
+
+        pg_conn.rollback()
+
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=5)
+
+        run_command(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE", pg_conn)
+        pg_conn.commit()
+
+        run_command(f"DROP SERVER IF EXISTS {USER_SERVER} CASCADE", superuser_conn)
+        superuser_conn.commit()
+
     if guc_name is not None:
         run_command(f"RESET {guc_name}", superuser_conn)
         superuser_conn.commit()
