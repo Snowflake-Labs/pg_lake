@@ -1395,8 +1395,9 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 	 * Build target list
 	 *
 	 * If no columns are specified in the attribute list of the COPY command,
-	 * then the target list is 'all' columns. Therefore, '*' should be used as
-	 * the target list for the resulting SELECT statement.
+	 * enumerate all non-dropped, non-generated columns explicitly.  Using
+	 * SELECT * would include stored and virtual generated columns, which must
+	 * be excluded so that the output can be copied back into the table.
 	 *
 	 * In the case that columns are specified in the attribute list, create a
 	 * ColumnRef and ResTarget for each column and add them to the target list
@@ -1404,17 +1405,29 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 	 */
 	if (!copyStmt->attlist)
 	{
-		cr = makeNode(ColumnRef);
-		cr->fields = list_make1(makeNode(A_Star));
-		cr->location = -1;
+		TupleDesc	relDesc = RelationGetDescr(relation);
 
-		target = makeNode(ResTarget);
-		target->name = NULL;
-		target->indirection = NIL;
-		target->val = (Node *) cr;
-		target->location = -1;
+		for (int i = 0; i < relDesc->natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(relDesc, i);
 
-		targetList = list_make1(target);
+			if (att->attisdropped)
+				continue;
+			if (att->attgenerated)
+				continue;
+
+			cr = makeNode(ColumnRef);
+			cr->fields = list_make1(makeString(pstrdup(NameStr(att->attname))));
+			cr->location = -1;
+
+			target = makeNode(ResTarget);
+			target->name = NULL;
+			target->indirection = NIL;
+			target->val = (Node *) cr;
+			target->location = -1;
+
+			targetList = lappend(targetList, target);
+		}
 	}
 	else
 	{
