@@ -620,6 +620,7 @@ def test_quoted_null(pg_conn, s3, extension, tmp_path):
         csv_file.write("abc,def\n")
         csv_file.write('"3.4","hello"\n')
         csv_file.write('"","world"\n')
+        csv_file.write(",bare\n")
 
     s3.upload_file(local_csv_path, TEST_BUCKET, csv_key)
 
@@ -631,11 +632,11 @@ def test_quoted_null(pg_conn, s3, extension, tmp_path):
         pg_conn,
     )
 
-    # we expect to interpret the "" as NULL
-    result = run_query("SELECT * FROM test_quoted_null ORDER BY 1", pg_conn)
-    assert len(result) == 2
-    assert result[0] == [3.4, "hello"]
-    assert result[1] == [None, "world"]
+    # Following PostgreSQL's COPY, only a bare empty field is NULL: a quoted
+    # "" is an empty string. The column is text rather than numeric because
+    # of the quoted empty value.
+    result = run_query("SELECT * FROM test_quoted_null ORDER BY def", pg_conn)
+    assert result == [[None, "bare"], ["3.4", "hello"], ["", "world"]], result
 
     pg_conn.rollback()
 
