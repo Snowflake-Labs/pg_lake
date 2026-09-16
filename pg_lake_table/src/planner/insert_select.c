@@ -345,10 +345,16 @@ TransformPushdownableInsertSelect(Query *query)
 												  column->atttypmod,
 												  column->attcollation);
 
-			/* column does not have a target list entry, create one */
+			/*
+			 * column does not have a target list entry, create one.
+			 *
+			 * pstrdup because makeTargetEntry does not copy resname: the name
+			 * outlives the table_close below, and deparse reads it after
+			 * catalog access that can free the relcache entry.
+			 */
 			targetEntry = makeTargetEntry((Expr *) nullConst,
 										  columnIndex + 1,
-										  NameStr(column->attname),
+										  pstrdup(NameStr(column->attname)),
 										  resjunk);
 			newTargetList = lappend(newTargetList, targetEntry);
 		}

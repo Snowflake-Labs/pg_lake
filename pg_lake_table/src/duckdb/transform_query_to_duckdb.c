@@ -180,7 +180,15 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 	 * ensure that the read function returns a double.
 	 */
 	Relation	rel = RelationIdGetRelation(relationId);
-	TupleDesc	readTupleDesc = projection != NULL ? projection : RelationGetDescr(rel);
+
+	/*
+	 * Copy the descriptor: the work below (notably GetDataFileSchemaForTable)
+	 * performs catalog access, which can process a relcache invalidation for
+	 * this relation.  Since we hold no relcache pin after RelationClose, that
+	 * frees the relcache descriptor while we are still deparsing from it.
+	 */
+	TupleDesc	readTupleDesc = projection != NULL ? projection :
+		CreateTupleDescCopy(RelationGetDescr(rel));
 
 	RelationClose(rel);
 	ReadDataStats stats = {0, 0};
