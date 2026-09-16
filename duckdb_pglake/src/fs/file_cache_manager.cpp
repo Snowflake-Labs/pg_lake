@@ -23,6 +23,7 @@
 #include "duckdb/common/local_file_system.hpp"
 
 #include "pg_lake/fs/cache_inode_budget.hpp"
+#include "pg_lake/fs/cache_space_budget.hpp"
 #include "pg_lake/fs/file_cache_manager.hpp"
 #include "pg_lake/fs/file_utils.hpp"
 #include "pg_lake/utils/pgduck_log_utils.h"
@@ -535,6 +536,7 @@ struct CacheActionCounts
 	int64_t skippedTooLarge = 0;
 	int64_t skippedTooOld = 0;
 	int64_t skippedConcurrent = 0;
+	int64_t skippedNoDirectory = 0;
 	int64_t skippedInodePressure = 0;
 	int64_t addFailed = 0;
 };
@@ -568,6 +570,9 @@ CountCacheActions(const vector<CacheAction> &actions)
 				break;
 			case SKIPPED_CONCURRENT_MODIFY:
 				counts.skippedConcurrent++;
+				break;
+			case SKIPPED_DIRECTORY_DOES_NOT_EXIST:
+				counts.skippedNoDirectory++;
 				break;
 			case SKIPPED_INODE_PRESSURE:
 				counts.skippedInodePressure++;
@@ -744,6 +749,30 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 	if (skipDownloads)
 		SkipQueuedDownloads(cacheFiles, actions, queueSize, inodes);
 
+	/*
+	 * maxCacheSize is configured, so nothing ties it to the file system the
+	 * cache lives on. A budget larger than that file system means the byte
+	 * comparison below is never true: the cache grows until the volume is full,
+	 * and from then on every write into it fails with ENOSPC while cache
+	 * management reports a cache that is well inside its budget. Cap the budget
+	 * at the room the file system has, keeping space.floor available.
+	 *
+	 * We only do that while our own cache files can restore the floor, for the
+	 * same reason the inode side does: the volume is usually shared, and
+	 * emptying the cache does not fix somebody else's disk use.
+	 */
+	SpaceBudget space = GetSpaceBudget(context, cacheDir);
+	int64_t configuredCacheSize = maxCacheSize;
+
+	int64_t roomForCache = space.RoomForCache(totalCacheSize);
+	bool belowSpaceFloor = space.floor > 0 && space.freeBytes < space.floor;
+	bool spaceFloorOutOfReach = belowSpaceFloor && roomForCache <= 0;
+	bool spaceBoundsCache =
+		space.floor > 0 && roomForCache > 0 && roomForCache < maxCacheSize;
+
+	if (spaceBoundsCache)
+		maxCacheSize = roomForCache;
+
 	/* sort from oldest to newest access time */
 	std::sort(cacheFiles.begin(), cacheFiles.end());
 
@@ -915,19 +944,20 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 
 	if (counts.added > 0 || counts.removed > 0 || counts.skippedTooOld > 0 ||
 		counts.skippedTooLarge > 0 || counts.addFailed > 0 ||
-		counts.skippedInodePressure > 0)
+		counts.skippedNoDirectory > 0 || counts.skippedInodePressure > 0)
 	{
 		PGDUCK_SERVER_LOG("cache pressure: added %" PRIu64 " files (%" PRIu64
 						  " bytes), evicted %" PRIu64 " files (%" PRIu64 " bytes), "
 						  "skipped %" PRIu64 " (too old), %" PRIu64 " (too large), "
-						  "%" PRIu64 " (concurrent), %" PRIu64 " (add failed), "
-						  "%" PRIu64 " (low on inodes); "
+						  "%" PRIu64 " (concurrent), %" PRIu64 " (no directory), "
+						  "%" PRIu64 " (add failed), %" PRIu64 " (low on inodes); "
 						  "cache now %" PRIu64 "/%" PRIu64 " bytes",
 						  (uint64_t) counts.added, (uint64_t) counts.addedBytes,
 						  (uint64_t) counts.removed, (uint64_t) counts.removedBytes,
 						  (uint64_t) counts.skippedTooOld,
 						  (uint64_t) counts.skippedTooLarge,
 						  (uint64_t) counts.skippedConcurrent,
+						  (uint64_t) counts.skippedNoDirectory,
 						  (uint64_t) counts.addFailed,
 						  (uint64_t) counts.skippedInodePressure,
 						  (uint64_t) totalCacheSize,
@@ -960,6 +990,39 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 	}
 
 	wasLowOnInodes = inodePressure;
+
+	/*
+	 * Report the disk space side separately as well: the rounds in which the
+	 * file system rather than the configured budget is what bounds the cache,
+	 * and the rounds in which the space is gone and the cache is not what is
+	 * holding it.
+	 *
+	 * Only at the start and the end of an episode, unlike the inode side. A
+	 * cache volume smaller than pg_lake_engine.max_cache_size is a lasting
+	 * condition rather than an incident, and evicting for it is what we now do
+	 * about it, so reporting every round we evict in would be a message every
+	 * few seconds for as long as the deployment lives.
+	 */
+	bool spacePressure = spaceBoundsCache || spaceFloorOutOfReach;
+
+	if (spacePressure && !wasLowOnSpace)
+	{
+		LogSpacePressure(cacheDir, space, configuredCacheSize, maxCacheSize,
+						 counts.removed, counts.removedBytes,
+						 spaceFloorOutOfReach);
+	}
+	else if (wasLowOnSpace && !spacePressure && space.floor > 0)
+	{
+		PGDUCK_SERVER_LOG("cache directory %s has room for the configured cache "
+						  "size again: %" PRIu64 "/%" PRIu64 " bytes available, "
+						  "keeping %" PRIu64 " available",
+						  cacheDir.c_str(),
+						  (uint64_t) space.freeBytes,
+						  (uint64_t) space.totalBytes,
+						  (uint64_t) space.floor);
+	}
+
+	wasLowOnSpace = spacePressure;
 
 	return actions;
 }
