@@ -139,7 +139,7 @@ static void CheckCopyTableKind(CopyStmt *copyStmt, ParseState *pstate,
 static void ErrorIfCopyFromWithRowLevelSecurityEnabled(PlannedStmt *plannedStmt, Relation relation);
 static RawStmt *CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation);
 static TupleDesc BuildTupleDescriptorForRelation(Relation relation, List *attributeList);
-static TupleDesc RemoveDroppedColumnsFromTupleDesc(TupleDesc tupleDesc);
+static TupleDesc RemoveSkippedColumnsFromTupleDesc(TupleDesc tupleDesc);
 static void VerifyNoDuplicateNames(TupleDesc tupleDesc);
 static int	CopyReceivedTransmitDataToBuffer(void *outbuf, int minread, int maxread);
 static bool ReceiveCopyData(PGDuckConnection * pgDuckConn, StringInfo buffer);
@@ -1498,7 +1498,7 @@ BuildTupleDescriptorForRelation(Relation relation, List *attributeList)
 
 	if (attributeCount == 0)
 	{
-		return RemoveDroppedColumnsFromTupleDesc(tableDescriptor);
+		return RemoveSkippedColumnsFromTupleDesc(tableDescriptor);
 	}
 
 	TupleDesc	attributeDescriptor = CreateTemplateTupleDesc(attributeCount);
@@ -1551,23 +1551,28 @@ BuildTupleDescriptorForRelation(Relation relation, List *attributeList)
 
 
 /*
- * RemoveDroppedColumnsFromTupleDesc returns a new TupleDesc with the
- * dropped columns removed and the remaining columns renumbered.
+ * RemoveSkippedColumnsFromTupleDesc returns a new TupleDesc with dropped
+ * and generated columns removed and the remaining columns renumbered.
  *
  * We use this to construct a TupleDesc that matches the output of
- * the remote query, rather than the local table.
+ * the remote query, rather than the local table.  Generated columns are
+ * excluded because COPY TO does not write them (matching core PostgreSQL's
+ * CopyGetAttnums behaviour), so the Parquet/CSV/JSON file will not contain
+ * them and the read-back SELECT must not reference them.
  */
 static TupleDesc
-RemoveDroppedColumnsFromTupleDesc(TupleDesc tableDescriptor)
+RemoveSkippedColumnsFromTupleDesc(TupleDesc tableDescriptor)
 {
 	int			liveColumnCount = 0;
 
-	/* count number of not-dropped columns */
+	/* count number of readable (non-dropped, non-generated) columns */
 	for (int columnIndex = 0; columnIndex < tableDescriptor->natts; columnIndex++)
 	{
 		Form_pg_attribute column = TupleDescAttr(tableDescriptor, columnIndex);
 
 		if (column->attisdropped)
+			continue;
+		if (column->attgenerated)
 			continue;
 
 		liveColumnCount++;
@@ -1582,6 +1587,8 @@ RemoveDroppedColumnsFromTupleDesc(TupleDesc tableDescriptor)
 		Form_pg_attribute column = TupleDescAttr(tableDescriptor, columnIndex);
 
 		if (column->attisdropped)
+			continue;
+		if (column->attgenerated)
 			continue;
 
 		TupleDescInitEntry(cleanTupleDesc, (AttrNumber) attributeNumber,
