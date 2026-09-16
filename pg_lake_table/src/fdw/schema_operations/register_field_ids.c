@@ -106,9 +106,8 @@ GetDataFileSchemaForTableWithExclusion(Oid relationId, List *excludedColumns)
 
 	/*
 	 * Copy: GetRegisteredFieldForAttribute() below goes through SPI, which
-	 * can process a relcache invalidation for this relation.
-	 * RelationGetDescr does not pin the descriptor, so the snapshot would
-	 * then dangle.
+	 * can process a relcache invalidation for this relation. RelationGetDescr
+	 * does not pin the descriptor, so the snapshot would then dangle.
 	 */
 	TupleDesc	tupDesc = CreateTupleDescCopy(RelationGetDescr(rel));
 
