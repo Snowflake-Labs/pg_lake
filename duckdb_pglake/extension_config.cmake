@@ -17,6 +17,7 @@ duckdb_extension_load(aws
 duckdb_extension_load(azure
     GIT_URL https://github.com/duckdb/duckdb-azure
     GIT_TAG 003214c96d0caa39d5c3e27a9e1976a0692c7d37
+    APPLY_PATCHES
 )
 
 # Extension from this repo

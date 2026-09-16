@@ -148,6 +148,7 @@ patch_duckdb: $(shell find patches -type f -name '*.patch')
 		[ -d "$$extdir" ] || continue ; \
 		ext=$$(basename $$extdir) ; \
 		echo "staging patches for extension $$ext" ; \
+		rm -rf duckdb/.github/patches/extensions/$$ext && \
 		mkdir -p duckdb/.github/patches/extensions/$$ext && \
 		cp $$extdir*.patch duckdb/.github/patches/extensions/$$ext/ ; \
 	done
