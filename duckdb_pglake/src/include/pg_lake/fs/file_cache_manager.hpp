@@ -283,6 +283,12 @@ private:
 	 */
 	bool wasLowOnInodes = false;
 
+	/*
+	 * The same, for the free space on the cache file system. Only accessed
+	 * while holding manageCacheLock.
+	 */
+	bool wasLowOnSpace = false;
+
 	shared_ptr<FileCacheActivity> GetFileCacheActivity(const string& path);
 	unique_lock<mutex> TryAcquireCachePathLock(const string& path, bool waitForLock, bool &acquired);
 

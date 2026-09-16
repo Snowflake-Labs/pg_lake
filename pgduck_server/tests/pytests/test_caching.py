@@ -854,6 +854,163 @@ def test_min_free_cache_inodes_setting(pgduck_conn):
     pgduck_conn.rollback()
 
 
+@pytest.mark.parametrize("budget_binds", [False, True])
+def test_pg_lake_manage_cache_disk_pressure(s3, pgduck_conn, budget_binds):
+    """Cache management must also evict when the cache file system is running out
+    of space, not only when the cache exceeds its byte budget.
+
+    pg_lake_engine.max_cache_size is a configured number, so the cache can be
+    inside its budget while the file system it lives on has nothing left, and
+    from that point on every write into the cache fails with ENOSPC. That is
+    true of a budget larger than the volume, which never binds at all, and of a
+    budget that does bind but leaves room that goes to something the byte count
+    does not include, so we run both.
+
+    The number of bytes to keep available is normally derived from the cache file
+    system, but pg_lake_min_free_cache_bytes can name it, so that this test can
+    ask for a floor that the cache itself can reach.
+    """
+    # Start from an empty cache, so the file under test is the oldest thing in it
+    # and the byte counts below are about our own files
+    run_query("CALL pg_lake_manage_cache(0)", pgduck_conn)
+
+    url = f"s3://{TEST_BUCKET}/test_manage_cache_disk/data.csv"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}/test_manage_cache_disk/{CACHE_FILE_PREFIX}data.csv"
+    )
+
+    run_command(
+        f"COPY (SELECT number FROM generate_series(1,100) as series(number)) TO '{url}';",
+        pgduck_conn,
+    )
+    assert cached_path.exists()
+
+    # Cache management only evicts for space when its own files can get the file
+    # system back above the floor, so pad the cache with something it can free.
+    # The floor below is derived from the free space we measure here, and the
+    # cache shares its file system with everything else, so make the padding
+    # large enough that space we do not control has to move by megabytes before
+    # the floor stops being reachable. The padding prefix sorts after the one
+    # under test, which stays the oldest and is therefore evicted first.
+    padding_url = f"s3://{TEST_BUCKET}/test_manage_cache_disk_zpad/pad.csv"
+    padding_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}/test_manage_cache_disk_zpad/{CACHE_FILE_PREFIX}pad.csv"
+    )
+
+    run_command(
+        f"COPY (SELECT number FROM generate_series(1,4000000) as series(number)) TO '{padding_url}';",
+        pgduck_conn,
+    )
+    assert padding_path.exists()
+
+    cache_bytes = sum(
+        cache_file.stat().st_size
+        for cache_file in Path(server_params.PGDUCK_CACHE_DIR).rglob(
+            f"{CACHE_FILE_PREFIX}*"
+        )
+    )
+    assert cache_bytes > 2 * 1024 * 1024
+
+    # Either a byte budget the cache never comes close to, like the default, or
+    # one that binds the way a budget set below the size of the cache volume
+    # does. The cache is inside both of them, so only the free space floor can
+    # get anything evicted.
+    cache_size = cache_bytes * 3 if budget_binds else 20 * 1024 * 1024 * 1024
+
+    # Without a free space floor, the file stays in the cache
+    run_command("SET pg_lake_min_free_cache_bytes TO 0;", pgduck_conn)
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'", pgduck_conn
+    )
+    assert len(results) == 0
+    assert cached_path.exists()
+
+    # A floor above what is available, but by less than the cache is holding, so
+    # that evicting our own files gets the file system back above it
+    stats = os.statvfs(server_params.PGDUCK_CACHE_DIR)
+    reachable_free_bytes = stats.f_bavail * stats.f_frsize + cache_bytes // 2
+
+    # Under space pressure the file is evicted even though it fits in the budget.
+    # Eviction runs until the cache is back inside the room the file system has,
+    # so it takes the padding with it; the file under test is the oldest, which is
+    # why it is the one we can name.
+    run_command(
+        f"SET pg_lake_min_free_cache_bytes TO {reachable_free_bytes};", pgduck_conn
+    )
+    results = run_query(
+        f"FROM pg_lake_manage_cache({cache_size}) WHERE url = '{url}'", pgduck_conn
+    )
+    assert len(results) == 1
+    assert results[0][2] == "removed"
+    assert not cached_path.exists()
+
+    # Put a file back, so the next round has something it could evict
+    run_command(
+        f"COPY (SELECT number FROM generate_series(1,100) as series(number)) TO '{url}';",
+        pgduck_conn,
+    )
+    assert cached_path.exists()
+
+    # A floor the cache cannot reach, which means something other than the cache
+    # is using up the space
+    stats = os.statvfs(server_params.PGDUCK_CACHE_DIR)
+    unreachable_free_bytes = (
+        stats.f_blocks * stats.f_frsize + stats.f_bavail * stats.f_frsize
+    )
+
+    # We do not throw away a cache that cannot get us above the floor anyway,
+    # since we can still read from it
+    run_command(
+        f"SET pg_lake_min_free_cache_bytes TO {unreachable_free_bytes};", pgduck_conn
+    )
+    results = run_query(f"FROM pg_lake_manage_cache({cache_size})", pgduck_conn)
+    assert results == []
+    assert cached_path.exists()
+
+    # Wipe the cache
+    run_query("CALL pg_lake_manage_cache(0)", pgduck_conn)
+
+    run_command("RESET pg_lake_min_free_cache_bytes;", pgduck_conn)
+
+    pgduck_conn.rollback()
+
+
+def test_min_free_cache_bytes_setting(pgduck_conn):
+    """The default derives the floor from the cache file system, so that cache
+    management stays inside that file system without anybody configuring it.
+
+    Anything other than AUTO or a non-negative number of bytes is rejected,
+    rather than quietly turning the free space floor off. pgduck_server reports
+    success for a SET it could not apply, so the rejection shows up as an aborted
+    transaction and a setting that kept the value it had.
+    """
+    results = run_query(
+        "SELECT current_setting('pg_lake_min_free_cache_bytes')", pgduck_conn
+    )
+    assert results[0][0] == "AUTO"
+
+    for rejected in ("-2", "'not a number'"):
+        run_command(f"SET pg_lake_min_free_cache_bytes TO {rejected};", pgduck_conn)
+        pgduck_conn.rollback()
+
+        results = run_query(
+            "SELECT current_setting('pg_lake_min_free_cache_bytes')", pgduck_conn
+        )
+        assert results[0][0] == "AUTO"
+
+    # A number of bytes is what an operator would put in the init file
+    run_command("SET pg_lake_min_free_cache_bytes TO 1073741824;", pgduck_conn)
+
+    results = run_query(
+        "SELECT current_setting('pg_lake_min_free_cache_bytes')", pgduck_conn
+    )
+    assert results[0][0] == "1073741824"
+
+    run_command("RESET pg_lake_min_free_cache_bytes;", pgduck_conn)
+
+    pgduck_conn.rollback()
+
+
 def test_pg_lake_manage_cache_invalid_url(s3, pgduck_conn):
     # Invalid URL should not get cached
     key = "test_pg_lake_manage_cache_invalid_url/data.csv"
