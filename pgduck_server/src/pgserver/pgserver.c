@@ -490,6 +490,12 @@ pgserver_run(PGServer * pgServer)
 		if (now - pgServer->last_touch_time >= 58 * SECS_PER_MINUTE)
 			touch_internal_files(pgServer, now);
 
+		/*
+		 * A clamp from an earlier refused thread may have expired by now; put
+		 * max_clients back before we consult it.
+		 */
+		pgclient_threadpool_maybe_restore_cap(now);
+
 		/* first check if we have available threads */
 		int			threadIndex = pgclient_threadpool_reserve_slot(client);
 
@@ -528,7 +534,8 @@ pgserver_run(PGServer * pgServer)
 		if (disable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		bool		threadCreated = pgserver_create_client_thread(initState) == OK;
+		int			threadCreateError = pgserver_create_client_thread(initState);
+		bool		threadCreated = threadCreateError == OK;
 
 		if (!threadCreated)
 		{
@@ -552,13 +559,31 @@ pgserver_run(PGServer * pgServer)
 		if (enable_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
-		/*
-		 * Same pause as the capacity reject above, so a burst that keeps
-		 * failing thread creation does not turn into a hot accept loop.  We
-		 * are past enable_shutdown_signals() so a SIGTERM interrupts it.
-		 */
 		if (!threadCreated)
+		{
+			/*
+			 * EAGAIN means the OS has no more threads for this process, so
+			 * max_clients is set above what this host can carry.  Lower it to
+			 * what we are demonstrably running, and reserve_slot() turns the
+			 * next connections away by itself instead of every one of them
+			 * repeating this same failure.
+			 *
+			 * Only EAGAIN says anything about capacity.  EINVAL or EPERM mean
+			 * we asked for something the platform will not do, and clamping
+			 * on those would shrink the server for a reason unrelated to
+			 * load.
+			 */
+			if (threadCreateError == EAGAIN)
+				pgclient_threadpool_clamp_cap_to_active(now);
+
+			/*
+			 * Same pause as the capacity reject above, so a burst that keeps
+			 * failing thread creation does not turn into a hot accept loop.
+			 * We are past enable_shutdown_signals() so a SIGTERM interrupts
+			 * it.
+			 */
 			pg_usleep(ACCEPT_REJECT_PAUSE_US);
+		}
 	}
 
 	return STATUS_OK;
@@ -607,6 +632,11 @@ pgserver_destroy(PGServer * pgServer)
  * pgserver_create_client_thread creates a new thread for the client.
  * We use PTHREAD_CREATE_DETACHED so that we don't have to join the threads.
  *
+ * Returns OK, or the error code pthread_create() reported.  pthread_create()
+ * returns these directly rather than setting errno, and the caller has to tell
+ * EAGAIN, meaning the OS will not give us more threads, apart from the rest,
+ * which say nothing about capacity.
+ *
  * The caller must block shutdown signals before calling this function
  * so the new thread inherits a blocked mask and never receives
  * SIGINT/SIGTERM.
@@ -620,24 +650,24 @@ pgserver_create_client_thread(const PgClientThreadInitState * initState)
 	pthread_attr_init(&threadAttr);
 	pthread_attr_setdetachstate(&threadAttr, PTHREAD_CREATE_DETACHED);
 
-	int			isThreadCreated = pthread_create(&threadId,
-												 &threadAttr,
-												 pgclient_thread_main,
-												 (void *) initState);
+	int			threadCreateError = pthread_create(&threadId,
+												   &threadAttr,
+												   pgclient_thread_main,
+												   (void *) initState);
 
-	if (isThreadCreated != 0)
+	if (threadCreateError != 0)
 	{
-		PGDUCK_SERVER_ERROR("Thread creation failed with %d", isThreadCreated);
+		PGDUCK_SERVER_ERROR("Thread creation failed with %d", threadCreateError);
 
 		/* TODO: send error message to the client */
 		pthread_attr_destroy(&threadAttr);
 
-		return STATUS_ERROR;
+		return threadCreateError;
 	}
 
 	pthread_attr_destroy(&threadAttr);
 
-	return STATUS_OK;
+	return OK;
 }
 
 
