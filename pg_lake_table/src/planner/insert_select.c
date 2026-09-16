@@ -293,7 +293,7 @@ TransformPushdownableInsertSelect(Query *query)
 	Relation	insertRel = table_open(insertRelid, RowExclusiveLock);
 
 	/*
-	 * Copy the descriptor and the names we stash on TargetEntrys: we
+	 * Copy the descriptor and the names we stash on TargetEntry nodes: we
 	 * table_close below, and later deparse (and catalog access under
 	 * debug_discard_caches) can free the relcache entry while those pointers
 	 * are still live.
