@@ -390,7 +390,12 @@ CreateRegisteredFieldForAttribute(Oid relationId, int spiIndex)
 
 	Form_pg_attribute attr = TupleDescAttr(tupleDesc, attrNo - 1);
 
-	field->name = NameStr(attr->attname);
+	/*
+	 * pstrdup: the field outlives the relcache pin we drop below, and a
+	 * relcache invalidation for this relation would otherwise leave the name
+	 * pointing into a freed tuple descriptor.
+	 */
+	field->name = pstrdup(NameStr(attr->attname));
 
 	field->required = attr->attnotnull;
 
