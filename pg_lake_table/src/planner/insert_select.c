@@ -291,7 +291,14 @@ TransformPushdownableInsertSelect(Query *query)
 	 */
 	Oid			insertRelid = GetInsertRelidFromInsertSelect(query);
 	Relation	insertRel = table_open(insertRelid, RowExclusiveLock);
-	TupleDesc	relationTupleDesc = RelationGetDescr(insertRel);
+
+	/*
+	 * Copy the descriptor and the names we stash on TargetEntrys: we
+	 * table_close below, and later deparse (and catalog access under
+	 * debug_discard_caches) can free the relcache entry while those pointers
+	 * are still live.
+	 */
+	TupleDesc	relationTupleDesc = CreateTupleDescCopy(RelationGetDescr(insertRel));
 
 	List	   *newTargetList = NIL;
 	ListCell   *targetEntryCell = list_head(query->targetList);
@@ -349,7 +356,7 @@ TransformPushdownableInsertSelect(Query *query)
 			/* column does not have a target list entry, create one */
 			targetEntry = makeTargetEntry((Expr *) nullConst,
 										  columnIndex + 1,
-										  NameStr(column->attname),
+										  pstrdup(NameStr(column->attname)),
 										  resjunk);
 			newTargetList = lappend(newTargetList, targetEntry);
 		}

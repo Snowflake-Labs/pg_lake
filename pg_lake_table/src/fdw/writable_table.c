@@ -236,7 +236,12 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 {
 	Relation	relation = table_open(relationId, RowExclusiveLock);
 	ForeignTable *foreignTable = GetForeignTable(relationId);
-	TupleDesc	tupleDescriptor = RelationGetDescr(relation);
+
+	/*
+	 * Copy after GetForeignTable: that lookup can process a relcache
+	 * invalidation, and ConvertCSVFileTo() still walks this descriptor.
+	 */
+	TupleDesc	tupleDescriptor = CreateTupleDescCopy(RelationGetDescr(relation));
 
 	List	   *options = foreignTable->options;
 
@@ -788,7 +793,12 @@ CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
 	PushActiveSnapshot(GetLatestSnapshot());
 
 	Relation	rel = table_open(relationId, RowExclusiveLock);
-	TupleDesc	tupleDescriptor = RelationGetDescr(rel);
+
+	/*
+	 * Copy: GetForeignTable / catalog reads below can rebuild the relcache
+	 * entry, and TryCompactDataFiles() still walks this descriptor.
+	 */
+	TupleDesc	tupleDescriptor = CreateTupleDescCopy(RelationGetDescr(rel));
 
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;

@@ -104,7 +104,12 @@ GetDataFileSchemaForTableWithExclusion(Oid relationId, List *excludedColumns)
 	 */
 	Relation	rel = table_open(relationId, AccessShareLock);
 
-	TupleDesc	tupDesc = RelationGetDescr(rel);
+	/*
+	 * Copy: GetRegisteredFieldForAttribute() below goes through SPI, which
+	 * can process a relcache invalidation for this relation.  RelationGetDescr
+	 * does not pin the descriptor, so the snapshot would then dangle.
+	 */
+	TupleDesc	tupDesc = CreateTupleDescCopy(RelationGetDescr(rel));
 
 	DataFileSchema *schema = palloc0(sizeof(DataFileSchema));
 
@@ -190,7 +195,12 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 
 	Relation	rel = table_open(relationId, AccessShareLock);
 
-	TupleDesc	tupleDesc = RelationGetDescr(rel);
+	/*
+	 * CopyConstr: get_attnum / IcebergCompatibilityModeFromRelation hit the
+	 * syscache, and GetIcebergJsonSerializedDefaultExpr reads defaults off
+	 * this descriptor.
+	 */
+	TupleDesc	tupleDesc = CreateTupleDescCopyConstr(RelationGetDescr(rel));
 
 	/*
 	 * compatibility_mode is consulted ONLY here, at registration. It decides
@@ -328,7 +338,12 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 	DataFileSchema *schema = GetDataFileSchemaForExternalIcebergTable(currentMetadataPath);
 
 	Relation	rel = RelationIdGetRelation(relationId);
-	TupleDesc	tupDesc = RelationGetDescr(rel);
+
+	/*
+	 * Copy: get_attnum() in the loop can process a relcache invalidation
+	 * before TupleDescAttr() reads the snapshot.
+	 */
+	TupleDesc	tupDesc = CreateTupleDescCopy(RelationGetDescr(rel));
 
 	List	   *pgColumnMappingList = NIL;
 
