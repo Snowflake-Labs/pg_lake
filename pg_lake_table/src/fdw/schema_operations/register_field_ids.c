@@ -341,9 +341,10 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 
 	/*
 	 * Copy: get_attnum() in the loop can process a relcache invalidation
-	 * before TupleDescAttr() reads the snapshot.
+	 * before TupleDescAttr() reads the snapshot.  CopyConstr, not Copy: we
+	 * read attnotnull and atthasdef below, and the plain copy clears both.
 	 */
-	TupleDesc	tupDesc = CreateTupleDescCopy(RelationGetDescr(rel));
+	TupleDesc	tupDesc = CreateTupleDescCopyConstr(RelationGetDescr(rel));
 
 	List	   *pgColumnMappingList = NIL;
 
