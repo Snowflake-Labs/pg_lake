@@ -57,14 +57,14 @@ runs:
         echo "PG_REGRESS_DIR=/home/postgres/pgsql-${{ inputs.pg_version }}/regress" >> $GITHUB_ENV
 
     - name: Download postgres-${{ inputs.pg_version }} artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: postgres-${{ inputs.pg_version }}-${{ inputs.container_os }}-artifacts
         path: /home/postgres/pgsql-${{ inputs.pg_version }}/
 
     - name: Download postgres (from_pg_version) artifacts
       if: ${{ inputs.upgrade == 'true' }}
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: postgres-${{ inputs.from_pg_version }}-${{ inputs.container_os }}-artifacts
         path: /home/postgres/pgsql-${{ inputs.from_pg_version }}/
@@ -72,7 +72,7 @@ runs:
     # avro tests needs a clean environment
     - name: Download avro artifacts for ${{ inputs.container_os }}
       if: ${{ inputs.test_make_target != 'check-avro' }}
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: avro-${{ inputs.container_os }}-artifacts
         path: |
@@ -90,7 +90,7 @@ runs:
           chmod 755 /home/postgres/pgsql-${{ inputs.from_pg_version }}/lib/*.so
         fi
 
-    - uses: actions/cache@v4
+    - uses: actions/cache@v5
       name: Cache pipenv
       with:
         path: ~/.local/share/virtualenvs
@@ -154,7 +154,7 @@ runs:
         fi
 
     - name: Upload postgres test logs
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       if: always()
       with:
         name: postgres-logs-${{ inputs.pg_version }}-${{ inputs.test_make_target }}${{ inputs.from_pg_version != '' && format('-from{0}', inputs.from_pg_version) || '' }}${{ inputs.worker_id != '' && format('-{0}', inputs.worker_id) || '' }}

@@ -20,7 +20,7 @@ runs:
         echo "PATH=/home/postgres/pgsql-${{ inputs.pg_version }}/bin:$PATH" >> $GITHUB_ENV
         echo "PG_REGRESS_DIR=/home/postgres/pgsql-${{ inputs.pg_version }}/regress" >> $GITHUB_ENV
 
-    - uses: actions/cache@v4
+    - uses: actions/cache@v5
       id: cache_pipenv
       name: Cache pipenv
       with:
@@ -36,7 +36,7 @@ runs:
     - name: Check for typos # ;)
       uses: ./.github/actions/check-typos
 
-    - uses: actions/cache@v4
+    - uses: actions/cache@v5
       id: cache_libduckdb
       name: Cache libduckdb
       with:
@@ -48,7 +48,7 @@ runs:
           ${{ env.PG_INCLUDEDIR }}/duckdb.hpp
           ${{ env.PG_INCLUDEDIR }}/duckdb_extension.h
 
-    - uses: actions/cache@v4
+    - uses: actions/cache@v5
       id: cache_polaris
       name: Cache Polaris
       with:
@@ -86,7 +86,7 @@ runs:
         make -C pg_lake_table prepare-check
 
     - name: Upload postgres-${{ inputs.pg_version }} artifacts for ${{ inputs.container_os }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: postgres-${{ inputs.pg_version }}-${{ inputs.container_os }}-artifacts
         path: /home/postgres/pgsql-${{ inputs.pg_version }}/
@@ -94,7 +94,7 @@ runs:
     # need to upload once, same for all pg versions
     - name: Upload avro artifacts for ${{ inputs.container_os }}
       if: ${{ inputs.pg_version == 18 }}
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: avro-${{ inputs.container_os }}-artifacts
         path: ./avro/lang/c/build/avrolib

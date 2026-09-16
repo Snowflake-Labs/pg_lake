@@ -34,7 +34,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - uses: ./.github/actions/build-and-push-image
         id: build-and-push
@@ -66,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - uses: ./.github/actions/build-and-push-image
         id: build-and-push
@@ -94,7 +94,7 @@ jobs:
         pg_version: [16, 17, 18, 19]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - uses: ./.github/actions/build-and-install
@@ -119,7 +119,7 @@ jobs:
         pg_version: [16, 17, 18, 19]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - uses: ./.github/actions/build-and-install
@@ -163,7 +163,7 @@ jobs:
           - 'check-pg_map'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - uses: ./.github/actions/run-test
@@ -194,7 +194,7 @@ jobs:
         worker_id: [1, 2, 3, 4, 5]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - uses: ./.github/actions/run-test
@@ -231,7 +231,7 @@ jobs:
           - 'installcheck-pg_map'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - uses: ./.github/actions/run-test
@@ -261,7 +261,7 @@ jobs:
           - 'installcheck-postgres-with_extensions_created'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - uses: ./.github/actions/run-test
@@ -275,7 +275,7 @@ jobs:
       
       - name: Upload installcheck-postgres artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: installcheck-postgres-${{ matrix.pg_version }}-debian-logs
           path: ${{ env.PG_REGRESS_DIR }}/regression.diffs
@@ -301,7 +301,7 @@ jobs:
         worker_id: [1, 2, 3, 4, 5]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - uses: ./.github/actions/run-test
@@ -332,7 +332,7 @@ jobs:
           - 'check-isolation_pg_lake_table'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - uses: ./.github/actions/run-test
@@ -361,7 +361,7 @@ jobs:
           - 'check-pg_lake_table-upgrade'
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         name: Check out repository code
 
       - name: Extract from and to pg versions
