@@ -409,12 +409,7 @@ CreateDDLOperationsForAlterTable(AlterTableStmt *alterStmt)
 
 	Relation	rel = table_open(relationId, AccessShareLock);
 
-	/*
-	 * CopyConstr: get_attnum / GetRegisteredFieldForAttribute hit the
-	 * catalog, and GetIcebergJsonSerializedDefaultExpr reads defaults off
-	 * this descriptor.
-	 */
-	TupleDesc	tupleDesc = CreateTupleDescCopyConstr(RelationGetDescr(rel));
+	TupleDesc	tupleDesc = RelationGetDescr(rel);
 
 	ListCell   *subcommandCell = NULL;
 
