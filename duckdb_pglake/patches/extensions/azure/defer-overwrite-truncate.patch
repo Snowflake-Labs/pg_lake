@@ -1,0 +1,100 @@
+diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
+index 0bd6bf4..f342821 100644
+--- a/src/azure_blob_filesystem.cpp
++++ b/src/azure_blob_filesystem.cpp
+@@ -89,11 +89,23 @@ void AzureBlobStorageFileHandle::StageWriteBuffer() {
+ 	write_buffer_offset = 0;
+ }
+ 
+-void AzureBlobStorageFileHandle::Sync() {
++void AzureBlobStorageFileHandle::Sync(bool close) {
+ 	if (!(flags.OpenForWriting() || flags.OpenForAppending())) {
+ 		return;
+ 	}
+ 	try {
++		// An overwrite has left the destination alone so far (no truncate at open), so replace it
++		// in a single Put Blob if the whole file still fits in the write buffer. That covers a
++		// small fixed-path file like catalog.json, and an overwrite that writes no bytes at all.
++		// Only on close: bytes sent this way are not in the block list a later commit rebuilds.
++		if (close && overwrite_pending && staged_block_count == 0) {
++			auto body_stream = Azure::Core::IO::MemoryBodyStream(write_buffer.get(), write_buffer_offset);
++			auto res = blob_client.Upload(body_stream);
++			last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
++			write_buffer_offset = 0;
++			overwrite_pending = false;
++			return;
++		}
+ 		StageWriteBuffer();
+ 		if (staged_block_count == 0) {
+ 			return;
+@@ -108,6 +120,8 @@ void AzureBlobStorageFileHandle::Sync() {
+ 		last_modified = AzureBlobStorageFileSystem::ToTimestamp(res.Value.LastModified);
+ 		committed_block_count += staged_block_count;
+ 		staged_block_count = 0;
++		// The block list that just landed is the replacement.
++		overwrite_pending = false;
+ 	} catch (const Azure::Storage::StorageException &e) {
+ 		throw IOException("AzureBlobStorageFileSystem FileSync of '%s' failed with %s Reason Phrase: %s", GetPath(),
+ 		                  e.ErrorCode, e.ReasonPhrase);
+@@ -115,7 +129,7 @@ void AzureBlobStorageFileHandle::Sync() {
+ }
+ 
+ void AzureBlobStorageFileHandle::Close() {
+-	Sync();
++	Sync(true);
+ 	DUCKDB_LOG_FILE_SYSTEM_CLOSE((*this));
+ }
+ 
+@@ -307,7 +321,6 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 		auto res_create = afh.blob_client.CommitBlockList({});
+ 		set_props(false, 0, ToTimestamp(res_create.Value.LastModified));
+ 	};
+-	auto truncate_file = create_file;
+ 
+ 	try {
+ 		auto res_props = afh.blob_client.GetProperties();
+@@ -315,7 +328,10 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 			throw IOException("AzureBlobStorageFileSystem will not open file: '%s', ExclusiveCreate specified "
+ 			                  "while file already exists.");
+ 		} else if (afh.flags.OpenForWriting() && afh.flags.OverwriteExistingFile()) {
+-			return truncate_file();
++			// Truncate when the new bytes are committed, not now: a CommitBlockList({}) here
++			// publishes a durable zero-length blob for the rest of the write.
++			afh.overwrite_pending = true;
++			return set_props(false, 0, ToTimestamp(res_props.Value.LastModified));
+ 		}
+ 		// NOTE: honor convention for S3/Azure "foo/" empty file -> "foo" dir marker
+ 		auto is_dir = StringUtil::EndsWith(afh.GetPath(), "/");
+@@ -332,6 +348,11 @@ void AzureBlobStorageFileSystem::LoadRemoteFileInfo(AzureFileHandle &handle) {
+ 	} catch (const Azure::Storage::StorageException &e) {
+ 		if (int(e.StatusCode) == 404 && afh.flags.OpenForWriting() &&
+ 		    (afh.flags.OverwriteExistingFile() || afh.flags.CreateFileIfNotExists())) {
++			if (afh.flags.OverwriteExistingFile()) {
++				// Same for a first write: a reader should get 404 until the bytes are there.
++				afh.overwrite_pending = true;
++				return set_props(false, 0, timestamp_t(0));
++			}
+ 			return create_file();
+ 		}
+ 		throw;
+diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
+index 67bfebd..088a65f 100644
+--- a/src/include/azure_blob_filesystem.hpp
++++ b/src/include/azure_blob_filesystem.hpp
+@@ -32,13 +32,15 @@ public:
+ 	~AzureBlobStorageFileHandle() override = default;
+ 
+ 	void StageWriteBuffer();
+-	void Sync();
++	void Sync(bool close = false);
+ 	void Close() override;
+ 
+ public:
+ 	Azure::Storage::Blobs::BlockBlobClient blob_client;
+ 	size_t committed_block_count = 0; // maintain position while open; only used if Sync() called before Close()
+ 	uint32_t staged_block_count = 0;
++	// Set when an overwrite still owes the destination its replacement, see Sync().
++	bool overwrite_pending = false;
+ 	duckdb::unique_ptr<data_t[]> write_buffer;
+ 	idx_t write_buffer_offset = 0;
+ };
