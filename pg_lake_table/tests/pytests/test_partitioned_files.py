@@ -85,3 +85,39 @@ def test_load_from_partition_by(pg_conn, s3, extension, with_default_location):
     assert res[0] == [250, 250]
 
     pg_conn.rollback()
+
+
+# Issue #460: the default GUC (5000) exceeds PostgreSQL's per-backend transient
+# descriptor budget (~max_safe_fds / 3 ≈ 320 on a stock server).  The effective
+# flush threshold is clamped at runtime so that inserts spanning many distinct
+# partition tuples succeed rather than crashing with "exceeded maxAllocatedDescs".
+def test_partitioned_write_does_not_exceed_pg_fd_limit(
+    superuser_conn, s3, extension, with_default_location
+):
+    # Insert 400 rows with 400 distinct partition keys.  With the default GUC of
+    # 5000 and no clamping, the receiver would try to hold ~400 staging FDs open
+    # simultaneously, tripping PostgreSQL's per-backend AllocateFile() cap before
+    # any flush occurs.  With the runtime clamp the largest open file is flushed
+    # proactively, so the operation completes cleanly.
+    run_command(
+        """
+        CREATE SCHEMA test_fd_limit;
+        CREATE TABLE test_fd_limit.tbl (a int) USING iceberg
+            WITH (autovacuum_enabled=False, partition_by='a');
+
+        -- keep the GUC at its default (5000) to exercise the runtime clamp
+        -- disable pushdown so the row-by-row PartitionedDestReceiver is used
+        SET pg_lake_table.enable_insert_select_pushdown TO false;
+
+        INSERT INTO test_fd_limit.tbl SELECT i FROM generate_series(0, 399) i;
+        """,
+        superuser_conn,
+    )
+
+    res = run_query(
+        "SELECT count(*), count(DISTINCT a) FROM test_fd_limit.tbl",
+        superuser_conn,
+    )
+    assert res[0] == [400, 400]
+
+    superuser_conn.rollback()

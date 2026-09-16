@@ -18,6 +18,7 @@
 #include "postgres.h"
 
 #include "access/tupdesc.h"
+#include "storage/fd.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
 #include "common/hashfn.h"
@@ -74,7 +75,7 @@ typedef struct PartitioningDestReceiverData
 
 	/*
 	 * List of modifications that have been flushed (e.g., when we reached
-	 * MaxOpenFilesForPartitionedWrite).
+	 * EffectiveMaxOpenFilesForPartitionedWrite()).
 	 */
 	List	   *alreadyFlushedPartitionModifications;
 
@@ -106,6 +107,33 @@ static List *FlushLargestPartitionedDestReceiver(PartitioningDestReceiverData * 
 
 /* controlled by a GUC */
 int			MaxOpenFilesForPartitionedWrite = 5000;
+
+
+/*
+ * EffectiveMaxOpenFilesForPartitionedWrite returns the flush threshold that
+ * will actually be applied: the lesser of the user-configured GUC value and
+ * the number of transient AllocateFile() descriptors PostgreSQL allows per
+ * backend.  PostgreSQL caps those at max_safe_fds / 3 (see
+ * reserveAllocatedDesc in fd.c).  Exceeding that cap raises
+ * "exceeded maxAllocatedDescs", so we leave a small safety margin.
+ *
+ * Without this clamp, the default GUC of 5000 is always larger than the
+ * ~320 descriptor budget that stock PostgreSQL grants (max_files_per_process =
+ * 1000 by default), causing every partitioned write across more than ~300
+ * distinct partition tuples to error before the flush guard triggers.
+ */
+static int
+EffectiveMaxOpenFilesForPartitionedWrite(void)
+{
+	/*
+	 * Leave 32 descriptors as a safety margin for csv_writer, DuckDB, and
+	 * other internal file handles that may be open concurrently.
+	 */
+	const int	headroom = 32;
+	int			pg_limit = Max(1, max_safe_fds / 3 - headroom);
+
+	return Min(MaxOpenFilesForPartitionedWrite, pg_limit);
+}
 
 
 /*
@@ -245,7 +273,7 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 		 */
 		int			numActiveSubreceivers = hash_get_num_entries(myState->partitionsHash);
 
-		if (numActiveSubreceivers > MaxOpenFilesForPartitionedWrite)
+		if (numActiveSubreceivers > EffectiveMaxOpenFilesForPartitionedWrite())
 		{
 			/*
 			 * We have reached the maximum number of active subreceivers.
@@ -295,7 +323,7 @@ PartitionedDestReceiveSlot(TupleTableSlot *slot, DestReceiver *self)
 /*
 * FlushLargestPartitionedDestReceiver flushes the largest partitioned
 * dest receiver. This is used to limit the number of active subreceivers
-* to MaxOpenFilesForPartitionedWrite.
+* to EffectiveMaxOpenFilesForPartitionedWrite().
 */
 static List *
 FlushLargestPartitionedDestReceiver(PartitioningDestReceiverData * myState)
