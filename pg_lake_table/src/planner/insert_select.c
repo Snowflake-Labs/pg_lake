@@ -550,7 +550,11 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod)
 bool
 RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceFormat)
 {
-	TupleDesc	tableDescriptor = RelationGetDescr(relation);
+	/*
+	 * Copy: type_is_array / get_typtype / TypeContainsUnsuitableForPushdown
+	 * below hit the syscache, and RelationGetDescr does not pin the snapshot.
+	 */
+	TupleDesc	tableDescriptor = CreateTupleDescCopy(RelationGetDescr(relation));
 
 	for (int columnIndex = 0; columnIndex < tableDescriptor->natts; columnIndex++)
 	{

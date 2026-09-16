@@ -3624,7 +3624,12 @@ create_foreign_modify(Relation rel,
 												0);
 		}
 
-		fmstate->tupleDesc = RelationGetDescr(rel);
+		/*
+		 * Copy before GetForeignTable / IcebergCompatibilityModeFromRelation:
+		 * those catalog lookups can rebuild the relcache entry, and we keep
+		 * walking this descriptor afterwards.
+		 */
+		fmstate->tupleDesc = CreateTupleDescCopy(RelationGetDescr(rel));
 		fmstate->outOfRangePolicy =
 			GetIcebergOutOfRangePolicyForTable(relationId);
 		fmstate->needsOutOfRangeValidation = TupleDescNeedsIcebergValidation(fmstate->tupleDesc);
