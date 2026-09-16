@@ -288,11 +288,13 @@ _PG_init(void)
 							NULL);
 
 	DefineCustomIntVariable("pg_lake_table.max_open_files_for_partitioned_write",
-							"Determines the maximum number of open files for "
-							"partitioned writes. If this limit is reached, currently the "
-							"largest partitioned file will be flushed. Lowering "
-							"this value would cause pushing smaller files, but decrease the "
-							"amount of the total intermediate data size during writes.",
+							"Maximum number of concurrently open CSV staging files "
+							"for partitioned Iceberg writes. When the limit is reached "
+							"the largest staging file is flushed to make room. "
+							"The effective limit is also capped at max_safe_fds / 3 "
+							"(PostgreSQL's per-backend transient-descriptor budget) "
+							"minus a small headroom, so setting this above that value "
+							"has no effect on a stock-configured server.",
 							NULL,
 							&MaxOpenFilesForPartitionedWrite,
 							5000,
