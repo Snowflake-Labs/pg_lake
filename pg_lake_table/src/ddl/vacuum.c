@@ -161,6 +161,12 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	/* set up invalidation callbacks */
 	InitObjectStoreCatalog();
 
+	START_TRANSACTION();
+	{
+		RemoveLegacyAzureObjectStoreCatalog();
+	}
+	END_TRANSACTION();
+
 	TimestampTz lastVacuumTime = GetCurrentTimestamp();
 	TimestampTz lastCatalogExportTime = GetCurrentTimestamp();
 

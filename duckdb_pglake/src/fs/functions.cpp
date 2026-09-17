@@ -26,6 +26,8 @@
 
 #include "azure_blob_filesystem.hpp"
 #include "azure_dfs_filesystem.hpp"
+#include "azure_storage_account_client.hpp"
+#include <azure/storage/common/storage_exception.hpp>
 
 namespace duckdb {
 
@@ -618,6 +620,39 @@ AddS3ExpressRegionEndpointScalarFun(DataChunk &args, ExpressionState &state, Vec
 }
 
 
+static void
+DeleteAzureAppendBlobScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
+  UnaryExecutor::Execute<string_t, bool>(
+    args.data[0], result, args.size(),
+    [&](string_t fileName) {
+      string path = fileName.GetString();
+      if (!StringUtil::StartsWith(path, AzureBlobStorageFileSystem::PATH_PREFIX))
+        return false;
+
+      auto parsedUrl = ParseUrl(path);
+      auto opener = state.GetContext().client_data->file_opener.get();
+      auto service = ConnectToBlobStorageAccount(opener, path, parsedUrl);
+      auto blob = service.GetBlobContainerClient(parsedUrl.container).GetBlobClient(parsedUrl.path);
+
+      try {
+        auto properties = blob.GetProperties().Value;
+        if (properties.BlobType != Azure::Storage::Blobs::Models::BlobType::AppendBlob)
+          return false;
+
+        Azure::Storage::Blobs::DeleteBlobOptions options;
+        options.AccessConditions.IfMatch = properties.ETag;
+        return blob.DeleteIfExists(options).Value.Deleted;
+      } catch (const Azure::Storage::StorageException &error) {
+        if (error.ErrorCode == "BlobNotFound")
+          return false;
+        throw IOException("Deleting Azure append blob '%s' failed with %s: %s",
+                  path, error.ErrorCode, error.ReasonPhrase);
+      }
+    }
+  );
+}
+
+
 /*
  * Implementation of the pg_lake_file_exists scalar function.
  */
@@ -725,6 +760,14 @@ GetManagedStorageRegionScalarFun(DataChunk &args, ExpressionState &state, Vector
 void
 PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 {
+  {
+    ScalarFunction deleteAzureAppendBlob("pg_lake_delete_azure_append_blob",
+                       {LogicalType::VARCHAR}, LogicalType::BOOLEAN,
+                       DeleteAzureAppendBlobScalarFun);
+    deleteAzureAppendBlob.stability = FunctionStability::VOLATILE;
+    loader.RegisterFunction(deleteAzureAppendBlob);
+  }
+
 	/* pg_lake_cache_file function definition */
 	{
 		TableFunctionSet pg_lake_cache_file("pg_lake_cache_file");
