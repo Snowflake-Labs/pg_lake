@@ -16,9 +16,11 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/pgduck/remote_storage.h"
+#include "pg_lake/pgduck/client.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
@@ -168,6 +170,31 @@ force_push_object_store_catalog(PG_FUNCTION_ARGS)
 	PushMetadataLocationToObjectStoreCatalog();
 
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * RemoveLegacyAzureObjectStoreCatalog deletes the internal catalog of the
+ * current database when it is still the append blob that 3.4 wrote, since the
+ * block-blob writer cannot overwrite one.
+ */
+void
+RemoveLegacyAzureObjectStoreCatalog(void)
+{
+	if (!EnableObjectStoreCatalog || ObjectStoreCatalogLocationPrefix == NULL)
+		return;
+
+	if (strncmp(ObjectStoreCatalogLocationPrefix, AZURE_URL_PREFIX,
+				strlen(AZURE_URL_PREFIX)) != 0 &&
+		strncmp(ObjectStoreCatalogLocationPrefix, AZURE_BLOB_URL_PREFIX,
+				strlen(AZURE_BLOB_URL_PREFIX)) != 0)
+		return;
+
+	char	   *catalogPath = GetInternalObjectStoreCatalogFilePath(get_database_name(MyDatabaseId));
+	char	   *command = psprintf("SELECT pg_lake_delete_azure_append_blob(%s)",
+								   quote_literal_cstr(catalogPath));
+
+	ExecuteCommandInPGDuck(command);
 }
 
 
