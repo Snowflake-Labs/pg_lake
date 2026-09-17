@@ -170,10 +170,9 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 				 * pg_lake_table.defer_drop_file_cleanup GUC), don't walk
 				 * object storage now: queue the table's metadata.json as a
 				 * single resolve_metadata row and let VACUUM resolve it into
-				 * the exact referenced files later. This stays file-accurate
-				 * (never a whole prefix), so it is safe for custom locations
-				 * too. A table created in this transaction has no persisted
-				 * metadata to resolve, so it takes the normal path.
+				 * the exact referenced files later. A table created in this
+				 * transaction has no persisted metadata to resolve, so it
+				 * takes the normal path.
 				 */
 				bool		deferMetadataResolution =
 					DeferDropFileCleanup &&
@@ -184,8 +183,26 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 					char	   *metadataLocation =
 						GetIcebergMetadataLocation(relationId, true);
 
+					/*
+					 * Remember where to delete from if that resolution turns
+					 * out to be impossible, but only for a table at its
+					 * default managed location: a custom location may hold
+					 * other tables, exactly as the eager path reasons about
+					 * its own prefix fallback.
+					 */
+					char	   *fallbackPrefix = NULL;
+
+					if (!HasCustomLocation(relationId))
+					{
+						char	   *queryArguments = "";
+
+						fallbackPrefix = GetWritableTableLocation(relationId,
+																  &queryArguments);
+					}
+
 					InsertMetadataResolveRecord(metadataLocation, InvalidOid,
-												GetCurrentTransactionStartTimestamp());
+												GetCurrentTransactionStartTimestamp(),
+												fallbackPrefix);
 				}
 				else if (!createdInCurrentTx)
 				{
