@@ -57,6 +57,7 @@ static void LogPGDuckErrorClass(const char *errorClass);
 
 /* query engine settings */
 char	   *PgduckServerConninfo = DEFAULT_PGDUCK_SERVER_CONNINFO;
+bool		LogPGDuckEngineErrors = true;
 
 /* monotonically increasing key */
 static uint32 ConnectionId = 0;
@@ -559,6 +560,9 @@ ClassifyPGDuckErrorSqlState(int sqlState)
 static void
 LogPGDuckErrorClass(const char *errorClass)
 {
+	if (!LogPGDuckEngineErrors)
+		return;
+
 	elog(LOG, PGDUCK_ENGINE_ERROR_PREFIX "%s", errorClass);
 }
 

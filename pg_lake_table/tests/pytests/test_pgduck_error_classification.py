@@ -31,3 +31,31 @@ def test_pgduck_engine_error_log_has_class_not_detail(pg_conn, s3, extension):
     )
     assert url not in line
     pg_conn.rollback()
+
+
+def test_pgduck_engine_error_log_can_be_disabled(pg_conn, s3, extension):
+    url = f"s3://{TEST_BUCKET}/test_pgduck_engine_error_log/missing_disabled.parquet"
+    run_command(
+        f"""
+        CREATE SCHEMA IF NOT EXISTS test_pgduck_engine_error_log;
+        CREATE FOREIGN TABLE test_pgduck_engine_error_log.t_disabled (id int)
+        SERVER pg_lake OPTIONS (format 'parquet', path '{url}');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command("SET pg_lake_engine.log_engine_errors TO off", pg_conn)
+    run_command("SET client_min_messages TO log", pg_conn)
+    del pg_conn.notices[:]
+
+    try:
+        with pytest.raises(psycopg2.Error):
+            run_query("SELECT * FROM test_pgduck_engine_error_log.t_disabled", pg_conn)
+        class_lines = [n for n in pg_conn.notices if "pgduck_engine_error:" in n]
+        assert (
+            not class_lines
+        ), f"expected no classified LOG when disabled, got {pg_conn.notices!r}"
+    finally:
+        pg_conn.rollback()
+        run_command("RESET pg_lake_engine.log_engine_errors", pg_conn)
