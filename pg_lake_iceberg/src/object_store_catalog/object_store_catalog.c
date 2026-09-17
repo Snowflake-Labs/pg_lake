@@ -172,6 +172,7 @@ force_push_object_store_catalog(PG_FUNCTION_ARGS)
 }
 
 
+/* Older Azure writers created append catalogs that the block writer cannot replace. */
 void
 RemoveLegacyAzureObjectStoreCatalog(void)
 {

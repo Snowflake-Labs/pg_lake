@@ -65,8 +65,11 @@ def test_azure_catalog_startup_migrates_append_blob(
             else:
                 pytest.fail("startup deletion failure was not recorded")
             assert blob.get_blob_properties().etag == original_etag
+            previous_pid = worker_pid()
+            assert previous_pid
             lease.release()
             lease = None
+            run_command(f"SELECT pg_terminate_backend({previous_pid})", superuser_conn)
 
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:

@@ -161,11 +161,12 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	/* set up invalidation callbacks */
 	InitObjectStoreCatalog();
 
+	/* Let the first export recreate a legacy append catalog as a block blob. */
 	START_TRANSACTION();
 	{
 		RemoveLegacyAzureObjectStoreCatalog();
 	}
-	END_TRANSACTION();
+	END_TRANSACTION_NO_THROW(WARNING);
 
 	TimestampTz lastVacuumTime = GetCurrentTimestamp();
 	TimestampTz lastCatalogExportTime = GetCurrentTimestamp();

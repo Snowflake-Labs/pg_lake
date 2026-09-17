@@ -620,6 +620,7 @@ AddS3ExpressRegionEndpointScalarFun(DataChunk &args, ExpressionState &state, Vec
 }
 
 
+/* Remove a legacy append blob only if it has not changed since inspection. */
 static void
 DeleteAzureAppendBlobScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
   UnaryExecutor::Execute<string_t, bool>(
