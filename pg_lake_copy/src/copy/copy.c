@@ -151,6 +151,7 @@ PG_FUNCTION_INFO_V1(pg_lake_last_copy_pushed_down_test);
 bool		EnablePgLakeCopy = true;
 bool		EnablePgLakeCopyJson = true;
 int			JsonCopyMode = JSON_COPY_MODE_AUTO;
+bool		IncludeGeneratedColumnsInCopyTo = false;
 
 /* allowed values for the pg_lake_copy.json_copy_mode enum GUC */
 const struct config_enum_entry json_copy_mode_options[] = {
@@ -1413,7 +1414,7 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 
 			if (att->attisdropped)
 				continue;
-			if (att->attgenerated)
+			if (att->attgenerated && !IncludeGeneratedColumnsInCopyTo)
 				continue;
 
 			cr = makeNode(ColumnRef);

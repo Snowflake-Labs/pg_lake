@@ -68,6 +68,20 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable(
+							 "pg_lake_copy.include_generated_columns",
+							 gettext_noop("Include generated columns in COPY TO output"),
+							 gettext_noop("When off (the default), COPY <table> TO "
+										  "excludes generated columns from the output, "
+										  "matching core PostgreSQL behaviour.  Set to on "
+										  "to restore the pre-fix behaviour and include "
+										  "generated columns in the exported file."),
+							 &IncludeGeneratedColumnsInCopyTo,
+							 false,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	/*
 	 * Hidden, test-only knob controlling who handles a JSON COPY. We follow
 	 * the same rule as CSV: Postgres gets precedence whenever it natively
