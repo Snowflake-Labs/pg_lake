@@ -16,6 +16,7 @@
  */
 
 #include "duckdb.hpp"
+#include "duckdb/main/config.hpp"
 
 #include "pg_lake/fs/cache_inode_budget.hpp"
 #include "pg_lake/fs/caching_file_system.hpp"
@@ -629,6 +630,9 @@ DeleteAzureAppendBlobScalarFun(DataChunk &args, ExpressionState &state, Vector &
       string path = fileName.GetString();
       if (!StringUtil::StartsWith(path, AzureBlobStorageFileSystem::PATH_PREFIX))
         return false;
+
+      if (!DBConfig::GetConfig(state.GetContext()).CanAccessFile(path, FileType::FILE_TYPE_REGULAR))
+        throw PermissionException("Cannot access file '%s' - file system operations are disabled by configuration", path);
 
       auto parsedUrl = ParseUrl(path);
       auto opener = state.GetContext().client_data->file_opener.get();

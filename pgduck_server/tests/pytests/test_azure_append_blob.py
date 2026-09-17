@@ -2,6 +2,7 @@ import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import threading
 
+import psycopg2
 import pytest
 from azure.storage.blob import BlobType
 from utils_pytest import *
@@ -120,4 +121,33 @@ def test_delete_azure_append_blob_preserves_concurrent_write(pgduck_conn, azure)
         proxy.shutdown()
         thread.join(timeout=10)
         proxy.server_close()
+        blob.delete_blob()
+
+
+def test_delete_azure_append_blob_respects_external_access(azure, tmp_path):
+    key = "test_delete_azure_append_blob/external_access.json"
+    blob = azure.get_blob_client(key)
+    blob.create_append_blob()
+    blob.append_block(b"protected catalog")
+    server = PgDuckServer(unix_socket_directory=str(tmp_path), port=8588)
+    connection = None
+    try:
+        assert is_server_listening(server.socket_path)
+        connection = psycopg2.connect(host=str(tmp_path), port=8588)
+        run_command(
+            f"CREATE SECRET azure_access (TYPE AZURE, CONNECTION_STRING '{AZURITE_CONNECTION_STRING}')",
+            connection,
+        )
+        run_command("SET enable_external_access = false", connection)
+        error = run_command(
+            f"SELECT pg_lake_delete_azure_append_blob('azure://{TEST_BUCKET}/{key}')",
+            connection,
+            raise_error=False,
+        )
+        assert "file system operations are disabled" in str(error)
+        assert blob.download_blob().readall() == b"protected catalog"
+    finally:
+        if connection:
+            connection.close()
+        server.cleanup()
         blob.delete_blob()
