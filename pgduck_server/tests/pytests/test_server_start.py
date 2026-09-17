@@ -559,6 +559,9 @@ def test_temp_directory_limit_does_not_crash_server():
             f"DuckDB error no longer mentions '{TEMP_DIR_SIZE_TOKEN}'; duckdb.c "
             f"can no longer classify it as non-fatal. Got: {exc_info.value}"
         )
+        assert (
+            exc_info.value.pgcode == "53200"
+        ), f"recoverable OOM should report SQLSTATE 53200, got {exc_info.value.pgcode}"
 
         # The server must still be up and serving (not exited on the overflow).
         _assert_server_alive(server)
