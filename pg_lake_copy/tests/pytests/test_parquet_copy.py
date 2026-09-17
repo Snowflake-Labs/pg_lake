@@ -1495,10 +1495,14 @@ def test_copy_stored_generated_column(pg_conn, duckdb_conn, tmp_path):
     """COPY TO must exclude STORED generated columns so the output can be copied back.
 
     Before the fix, COPY TO used SELECT * which included generated columns in
-    the Parquet file, making a round-trip COPY FROM (without an explicit column
-    list) fail with "cannot insert into column ... because it is a generated
-    column".  After the fix, only non-generated columns are emitted, so both
-    COPY TO and the round-trip COPY FROM succeed without an explicit column list.
+    the Parquet file.  The COPY FROM round-trip then failed because
+    BuildTupleDescriptorForRelation included the generated column in the tuple
+    descriptor, causing pgduck to issue SELECT a, g FROM read_parquet(...) — but
+    since the file only contained 'a', DuckDB raised:
+        Binder Error: Referenced column "g" not found in FROM clause
+    After the fix, COPY TO enumerates only non-generated columns explicitly and
+    RemoveSkippedColumnsFromTupleDesc also skips them on COPY FROM, so both
+    directions work without an explicit column list.
     """
     parquet_path = tmp_path / "test_stored_gen.parquet"
 
