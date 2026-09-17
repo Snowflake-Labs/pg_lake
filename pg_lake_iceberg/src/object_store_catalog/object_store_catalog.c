@@ -36,6 +36,19 @@ PG_FUNCTION_INFO_V1(list_object_store_tables);
 PG_FUNCTION_INFO_V1(trigger_object_store_catalog_generation);
 PG_FUNCTION_INFO_V1(force_push_object_store_catalog);
 
+/*
+ * Prefix on every error raised while exporting the object store catalog.
+ *
+ * The periodic export runs in the vacuum worker, which demotes the error to a
+ * WARNING and carries on, so the message text is all a log collector has to
+ * recognize the failure by. The underlying errors come from pgduck, DuckDB or
+ * file access and say nothing about the catalog, and a stale catalog is
+ * invisible from the outside: readers keep resolving the last catalog file that
+ * landed and see a database that has stopped gaining tables. Prefixing gives
+ * one string to match on.
+ */
+#define CATALOG_EXPORT_ERROR_PREFIX "pg_lake_iceberg: object store catalog export failed"
+
 
 /* pg_lake_iceberg.enable_object_store_catalog setting */
 bool		EnableObjectStoreCatalog = true;
@@ -56,6 +69,7 @@ static TimestampTz LastCatalogPushTime = 0;
 
 static bool CatalogNeedsExport(void);
 static void PushMetadataLocationToObjectStoreCatalog(void);
+static void BuildAndUploadObjectStoreCatalogFile(void);
 static void TrackInvalidateCatalogExport(Datum argument, Oid relationId);
 static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName);
 static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
@@ -361,9 +375,43 @@ GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId)
 /*
 * PushMetadataLocationToObjectStoreCatalog exports the current contents of
 * tables_internal to the object store catalog file in S3.
+*
+* Any failure is re-raised with CATALOG_EXPORT_ERROR_PREFIX in front of the
+* original message, keeping the error code, detail and hint intact.
 */
 static void
 PushMetadataLocationToObjectStoreCatalog(void)
+{
+	MemoryContext callerContext = CurrentMemoryContext;
+
+	PG_TRY();
+	{
+		BuildAndUploadObjectStoreCatalogFile();
+	}
+	PG_CATCH();
+	{
+		/* CopyErrorData() refuses to run in ErrorContext */
+		MemoryContextSwitchTo(callerContext);
+
+		ErrorData  *edata = CopyErrorData();
+
+		FlushErrorState();
+
+		edata->message = psprintf(CATALOG_EXPORT_ERROR_PREFIX ": %s",
+								  edata->message ? edata->message : "unknown error");
+
+		ThrowErrorData(edata);
+	}
+	PG_END_TRY();
+}
+
+
+/*
+* BuildAndUploadObjectStoreCatalogFile builds the catalog file from
+* tables_internal and uploads it to the catalog's fixed path in object storage.
+*/
+static void
+BuildAndUploadObjectStoreCatalogFile(void)
 {
 	/*
 	 * allocate before SPI so that future expansions use the current memory
