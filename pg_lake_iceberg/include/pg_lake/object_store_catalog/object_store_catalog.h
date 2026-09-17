@@ -15,6 +15,7 @@ extern PGDLLEXPORT char *ExternalObjectStorePrefix;
 extern PGDLLEXPORT char *InternalObjectStorePrefix;
 
 extern PGDLLEXPORT void InitObjectStoreCatalog(void);
+extern PGDLLEXPORT void RemoveLegacyAzureObjectStoreCatalog(void);
 extern PGDLLEXPORT void ExportIcebergCatalogIfNeeded(void);
 extern PGDLLEXPORT const char *GetObjectStoreDefaultLocationPrefix(void);
 extern PGDLLEXPORT char *GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId);

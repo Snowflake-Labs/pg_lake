@@ -161,6 +161,17 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	/* set up invalidation callbacks */
 	InitObjectStoreCatalog();
 
+	/*
+	 * 3.4 wrote Azure object store catalogs as append blobs, which the
+	 * current block-blob writer cannot overwrite. Drop one here so the first
+	 * export recreates it.
+	 */
+	START_TRANSACTION();
+	{
+		RemoveLegacyAzureObjectStoreCatalog();
+	}
+	END_TRANSACTION_NO_THROW(WARNING);
+
 	TimestampTz lastVacuumTime = GetCurrentTimestamp();
 	TimestampTz lastCatalogExportTime = GetCurrentTimestamp();
 
