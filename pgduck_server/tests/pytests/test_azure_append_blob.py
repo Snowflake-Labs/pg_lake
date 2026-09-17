@@ -34,12 +34,29 @@ def test_delete_azure_append_blob(pgduck_conn, azure, blob_type):
             blob.delete_blob()
 
 
-@pytest.mark.parametrize("scheme", ["az", "abfs", "abfss", "s3", "gs", "file"])
+@pytest.mark.parametrize("scheme", ["abfs", "abfss", "s3", "gs", "file"])
 def test_delete_azure_append_blob_ignores_other_schemes(pgduck_conn, scheme):
     assert run_query(
         f"SELECT pg_lake_delete_azure_append_blob('{scheme}://unconfigured/catalog.json')",
         pgduck_conn,
     ) == [[False]]
+
+
+@pytest.mark.parametrize("scheme", ["azure", "az"])
+def test_delete_azure_append_blob_accepts_both_blob_schemes(pgduck_conn, azure, scheme):
+    key = f"test_delete_azure_append_blob/{scheme}_scheme.json"
+    blob = azure.get_blob_client(key)
+    blob.create_append_blob()
+    blob.append_block(b"legacy catalog")
+    try:
+        assert run_query(
+            f"SELECT pg_lake_delete_azure_append_blob('{scheme}://{TEST_BUCKET}/{key}')",
+            pgduck_conn,
+        ) == [[True]]
+        assert not blob.exists()
+    finally:
+        if blob.exists():
+            blob.delete_blob()
 
 
 def test_delete_azure_append_blob_preserves_leased_blob(pgduck_conn, azure):

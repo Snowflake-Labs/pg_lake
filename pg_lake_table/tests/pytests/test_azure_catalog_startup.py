@@ -9,15 +9,21 @@ from utils_pytest import *
 
 
 @pytest.mark.parametrize(
-    "enabled, leased", [(True, False), (False, False), (True, True)]
+    "enabled, leased, scheme",
+    [
+        (True, False, "azure"),
+        (False, False, "azure"),
+        (True, True, "azure"),
+        (True, False, "az"),
+    ],
 )
 def test_azure_catalog_startup_migrates_append_blob(
-    superuser_conn, azure, extension, enabled, leased, installcheck
+    superuser_conn, azure, extension, enabled, leased, scheme, installcheck
 ):
     if leased and installcheck:
         pytest.skip("startup retry assertion needs the test cluster log")
     database = "azure_catalog_startup"
-    root = f"test_azure_catalog_startup/{enabled}/{leased}"
+    root = f"test_azure_catalog_startup/{enabled}/{leased}/{scheme}"
     key = f"{root}/frompg/catalog/{database}/catalog.json"
     blob = azure.get_blob_client(key)
     blob.create_append_blob()
@@ -30,7 +36,7 @@ def test_azure_catalog_startup_migrates_append_blob(
         run_command(f"CREATE DATABASE {database}", superuser_conn)
         run_command(
             "ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix "
-            f"= 'azure://{TEST_BUCKET}/{root}'",
+            f"= '{scheme}://{TEST_BUCKET}/{root}'",
             superuser_conn,
         )
         run_command(

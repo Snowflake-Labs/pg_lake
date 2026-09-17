@@ -161,7 +161,11 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	/* set up invalidation callbacks */
 	InitObjectStoreCatalog();
 
-	/* Let the first export recreate a legacy append catalog as a block blob. */
+	/*
+	 * 3.4 wrote Azure object store catalogs as append blobs, which the
+	 * current block-blob writer cannot overwrite. Drop one here so the first
+	 * export recreates it.
+	 */
 	START_TRANSACTION();
 	{
 		RemoveLegacyAzureObjectStoreCatalog();

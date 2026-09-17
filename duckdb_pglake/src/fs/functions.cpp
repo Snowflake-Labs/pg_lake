@@ -621,14 +621,21 @@ AddS3ExpressRegionEndpointScalarFun(DataChunk &args, ExpressionState &state, Vec
 }
 
 
-/* Remove a legacy append blob only if it has not changed since inspection. */
+/*
+ * Implementation of the pg_lake_delete_azure_append_blob scalar function.
+ *
+ * Deletes an Azure blob only while it is still the append blob we inspected, so
+ * a concurrent writer that replaced it keeps its object. Any other blob type is
+ * left alone.
+ */
 static void
 DeleteAzureAppendBlobScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
   UnaryExecutor::Execute<string_t, bool>(
     args.data[0], result, args.size(),
     [&](string_t fileName) {
       string path = fileName.GetString();
-      if (!StringUtil::StartsWith(path, AzureBlobStorageFileSystem::PATH_PREFIX))
+      if (!StringUtil::StartsWith(path, AzureBlobStorageFileSystem::PATH_PREFIX) &&
+          !StringUtil::StartsWith(path, AzureBlobStorageFileSystem::SHORT_PATH_PREFIX))
         return false;
 
       if (!DBConfig::GetConfig(state.GetContext()).CanAccessFile(path, FileType::FILE_TYPE_REGULAR))
