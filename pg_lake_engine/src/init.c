@@ -137,6 +137,17 @@ _PG_init(void)
 							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
+							 "pg_lake_engine.log_engine_errors",
+							 gettext_noop("Log a canned class for query-engine errors "
+										  "(no DuckDB or query text)."),
+							 NULL,
+							 &LogPGDuckEngineErrors,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
 							 "pg_lake_engine.enable_heavy_asserts",
 							 gettext_noop("Computationally heavy asserts for the pg_lake. "
 										  "This should only be used in "

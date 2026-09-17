@@ -37,6 +37,7 @@ extern int	pgsession_put_bytes(PGSession * session, char *buf, size_t bufferLeng
 extern int	pgsession_flush(PGSession * session);
 extern char *pgduck_client_to_server(const char *s, int len);
 extern void pq_sendstring(StringInfo buf, const char *str);
-extern int	pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMessage);
+extern int	pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMessage,
+										  const char *sqlState);
 
 #endif							/* // PGDUCK_PG_SESSION_IO_H */

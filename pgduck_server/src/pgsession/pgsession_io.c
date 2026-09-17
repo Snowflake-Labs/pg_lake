@@ -723,13 +723,15 @@ pgsession_get_byte(PGSession * pgSession)
 
 
 /*
- * pgsession_send_postgres_error sends an error to the client.
+ * pgsession_send_postgres_error sends an error to the client. A NULL sqlState
+ * reports feature_not_supported.
  *
  * On success, returns OK, else EOF.
  * Derived from send_message_to_frontend
  */
 int
-pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMessage)
+pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMessage,
+							  const char *sqlState)
 {
 	StringInfoData msgBuffer;
 
@@ -739,6 +741,9 @@ pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMess
 	if (!codeFound)
 		return EOF;
 
+	if (sqlState == NULL)
+		sqlState = PGDUCK_SQLSTATE_FEATURE_NOT_SUPPORTED;
+
 	pq_beginmessage(&msgBuffer, 'E');
 
 	pq_sendbyte(&msgBuffer, PG_DIAG_SEVERITY);
@@ -747,9 +752,7 @@ pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMess
 	pq_sendstring(&msgBuffer, errSevStr);
 
 	pq_sendbyte(&msgBuffer, PG_DIAG_SQLSTATE);
-
-	/* 0A000    E    ERRCODE_FEATURE_NOT_SUPPORTED feature_not_supported */
-	pq_sendstring(&msgBuffer, "0A000");
+	pq_sendstring(&msgBuffer, sqlState);
 
 	/* M field is required per protocol, so always send something */
 	pq_sendbyte(&msgBuffer, PG_DIAG_MESSAGE_PRIMARY);
