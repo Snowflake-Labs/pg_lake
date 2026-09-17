@@ -30,6 +30,7 @@
 
 /* settings */
 extern char *PgduckServerConninfo;
+extern bool LogPGDuckEngineErrors;
 
 typedef struct PGDuckConnection
 {

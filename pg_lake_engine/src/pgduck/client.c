@@ -52,9 +52,11 @@ static bool StartCancelQuery(PGconn *conn);
 static bool FinishCancelQuery(PGconn *conn, TimestampTz endtime, bool consume_input);
 static bool WaitForLastResultWithTimeout(PGconn *conn, TimestampTz endtime,
 										 PGresult **result, bool *timed_out);
+static void LogPGDuckErrorClass(const char *errorClass);
 
 /* query engine settings */
 char	   *PgduckServerConninfo = DEFAULT_PGDUCK_SERVER_CONNINFO;
+bool		LogPGDuckEngineErrors = true;
 
 /* monotonically increasing key */
 static uint32 ConnectionId = 0;
@@ -237,6 +239,7 @@ SendQueryToPGDuck(PGDuckConnection * pgDuckConnection, char *query)
 
 	if (sentQuery == 0)
 	{
+		LogPGDuckErrorClass("lost_connection");
 		ereport(ERROR, (errmsg("lost connection to query engine")));
 	}
 }
@@ -393,7 +396,10 @@ ExecuteQueryOnPGDuckConnection(PGDuckConnection * pgDuckConnection,
 #endif
 
 	if (PQsendQuery(conn, query) == 0)
+	{
+		LogPGDuckErrorClass("lost_connection");
 		ereport(ERROR, (errmsg("lost connection to query engine")));
+	}
 
 	return WaitForLastResult(pgDuckConnection);
 }
@@ -444,6 +450,7 @@ WaitForResult(PGDuckConnection * pgDuckConnection)
 				 * Releasing here would risk a double-free or PQfinish() of a
 				 * connection the caller still holds a pointer to.
 				 */
+				LogPGDuckErrorClass("lost_connection");
 				ereport(ERROR, (errmsg("lost connection to query engine")));
 			}
 		}
@@ -518,6 +525,48 @@ CheckPGDuckResult(PGDuckConnection * pgDuckConnection, PGresult *result)
 
 
 /*
+ * PGDUCK_ENGINE_ERROR_PREFIX marks LOG lines that carry only a canned class
+ * (never DuckDB/query text).
+ */
+#define PGDUCK_ENGINE_ERROR_PREFIX "pgduck_engine_error: "
+
+/*
+ * ClassifyPGDuckErrorSqlState maps the SQLSTATE reported by pgduck_server to a
+ * PII-free class. Codes we do not distinguish are "other".
+ */
+static const char *
+ClassifyPGDuckErrorSqlState(int sqlState)
+{
+	switch (sqlState)
+	{
+		case ERRCODE_OUT_OF_MEMORY:
+			return "out_of_memory";
+		case ERRCODE_IO_ERROR:
+			return "io_error";
+		case ERRCODE_INVALID_PARAMETER_VALUE:
+			return "invalid_input";
+		case ERRCODE_INTERNAL_ERROR:
+			return "internal_error";
+		default:
+			return "other";
+	}
+}
+
+
+/*
+ * LogPGDuckErrorClass emits a LOG line with only the canned class.
+ */
+static void
+LogPGDuckErrorClass(const char *errorClass)
+{
+	if (!LogPGDuckEngineErrors)
+		return;
+
+	elog(LOG, PGDUCK_ENGINE_ERROR_PREFIX "%s", errorClass);
+}
+
+
+/*
  * PGDuckResultHasError returns true when the result carries an error status.
  * Use this when you need a non-throwing check (e.g. deciding whether to retry
  * before calling ThrowIfPGDuckResultHasError on the final attempt).
@@ -562,6 +611,8 @@ ThrowIfPGDuckResultHasError(PGDuckConnection * pgDuckConnection, PGresult *resul
 	{
 		message = pchomp(PQerrorMessage(pgDuckConnection->conn));
 	}
+
+	LogPGDuckErrorClass(ClassifyPGDuckErrorSqlState(sqlState));
 
 	ereport(ERROR, (errcode(sqlState),
 					errmsg("%s", message),
@@ -984,6 +1035,7 @@ SendQueryWithParams(PGDuckConnection * pgduckConn, char *queryString,
 	if (!PQsendQueryParams(conn, queryString, numParams,
 						   NULL, parameterValues, NULL, NULL, 0))
 	{
+		LogPGDuckErrorClass("lost_connection");
 		ereport(ERROR, (errcode(ERRCODE_IO_ERROR),
 						errmsg("lost connection to query engine")));
 	}
