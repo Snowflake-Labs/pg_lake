@@ -1428,6 +1428,14 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 
 			targetList = lappend(targetList, target);
 		}
+
+		if (targetList == NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("table \"%s\" has no non-generated columns",
+							RelationGetRelationName(relation)),
+					 errhint("Use COPY (SELECT ...) TO to specify the columns "
+							 "to copy explicitly.")));
 	}
 	else
 	{
