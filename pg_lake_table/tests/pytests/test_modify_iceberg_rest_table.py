@@ -735,6 +735,7 @@ def test_catalog_name_auto_detected_from_v1_config(
     pg_conn,
     s3,
     extension,
+    with_default_location,
     set_polaris_gucs,
     polaris_session,
     create_http_helper_functions,
