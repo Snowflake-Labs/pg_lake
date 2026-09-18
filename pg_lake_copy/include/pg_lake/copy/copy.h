@@ -29,6 +29,17 @@ extern bool EnablePgLakeCopy;
 extern bool EnablePgLakeCopyJson;
 
 /*
+ * When false (the default), COPY <table> TO excludes generated columns from
+ * the output, matching core PostgreSQL's CopyGetAttnums behaviour.  Set to
+ * true to restore the pre-fix behaviour of including generated columns in the
+ * exported file (useful for pipelines that want computed values baked into
+ * Parquet/CSV/JSON for downstream consumers that do not have the generation
+ * expression).  Note: COPY FROM always ignores generated columns regardless
+ * of this setting, because PostgreSQL does not allow writing to them.
+ */
+extern bool IncludeGeneratedColumnsInCopyTo;
+
+/*
  * JsonCopyMode controls who handles a JSON COPY. It is a hidden, test-only knob
  * (see pg_lake_copy.json_copy_mode); normal users never set it and rely on the
  * "auto" default. We follow the same rule as CSV: Postgres gets precedence

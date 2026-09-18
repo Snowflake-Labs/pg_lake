@@ -139,7 +139,7 @@ static void CheckCopyTableKind(CopyStmt *copyStmt, ParseState *pstate,
 static void ErrorIfCopyFromWithRowLevelSecurityEnabled(PlannedStmt *plannedStmt, Relation relation);
 static RawStmt *CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation);
 static TupleDesc BuildTupleDescriptorForRelation(Relation relation, List *attributeList);
-static TupleDesc RemoveDroppedColumnsFromTupleDesc(TupleDesc tupleDesc);
+static TupleDesc RemoveSkippedColumnsFromTupleDesc(TupleDesc tupleDesc);
 static void VerifyNoDuplicateNames(TupleDesc tupleDesc);
 static int	CopyReceivedTransmitDataToBuffer(void *outbuf, int minread, int maxread);
 static bool ReceiveCopyData(PGDuckConnection * pgDuckConn, StringInfo buffer);
@@ -151,6 +151,7 @@ PG_FUNCTION_INFO_V1(pg_lake_last_copy_pushed_down_test);
 bool		EnablePgLakeCopy = true;
 bool		EnablePgLakeCopyJson = true;
 int			JsonCopyMode = JSON_COPY_MODE_AUTO;
+bool		IncludeGeneratedColumnsInCopyTo = false;
 
 /* allowed values for the pg_lake_copy.json_copy_mode enum GUC */
 const struct config_enum_entry json_copy_mode_options[] = {
@@ -1395,8 +1396,9 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 	 * Build target list
 	 *
 	 * If no columns are specified in the attribute list of the COPY command,
-	 * then the target list is 'all' columns. Therefore, '*' should be used as
-	 * the target list for the resulting SELECT statement.
+	 * enumerate all non-dropped, non-generated columns explicitly.  Using
+	 * SELECT * would include stored and virtual generated columns, which must
+	 * be excluded so that the output can be copied back into the table.
 	 *
 	 * In the case that columns are specified in the attribute list, create a
 	 * ColumnRef and ResTarget for each column and add them to the target list
@@ -1404,17 +1406,37 @@ CreateQueryForCopyToCommand(PlannedStmt *plannedStmt, Relation relation)
 	 */
 	if (!copyStmt->attlist)
 	{
-		cr = makeNode(ColumnRef);
-		cr->fields = list_make1(makeNode(A_Star));
-		cr->location = -1;
+		TupleDesc	relDesc = RelationGetDescr(relation);
 
-		target = makeNode(ResTarget);
-		target->name = NULL;
-		target->indirection = NIL;
-		target->val = (Node *) cr;
-		target->location = -1;
+		for (int i = 0; i < relDesc->natts; i++)
+		{
+			Form_pg_attribute att = TupleDescAttr(relDesc, i);
 
-		targetList = list_make1(target);
+			if (att->attisdropped)
+				continue;
+			if (att->attgenerated && !IncludeGeneratedColumnsInCopyTo)
+				continue;
+
+			cr = makeNode(ColumnRef);
+			cr->fields = list_make1(makeString(pstrdup(NameStr(att->attname))));
+			cr->location = -1;
+
+			target = makeNode(ResTarget);
+			target->name = NULL;
+			target->indirection = NIL;
+			target->val = (Node *) cr;
+			target->location = -1;
+
+			targetList = lappend(targetList, target);
+		}
+
+		if (targetList == NIL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("table \"%s\" has no non-generated columns",
+							RelationGetRelationName(relation)),
+					 errhint("Use COPY (SELECT ...) TO to specify the columns "
+							 "to copy explicitly.")));
 	}
 	else
 	{
@@ -1485,7 +1507,7 @@ BuildTupleDescriptorForRelation(Relation relation, List *attributeList)
 
 	if (attributeCount == 0)
 	{
-		return RemoveDroppedColumnsFromTupleDesc(tableDescriptor);
+		return RemoveSkippedColumnsFromTupleDesc(tableDescriptor);
 	}
 
 	TupleDesc	attributeDescriptor = CreateTemplateTupleDesc(attributeCount);
@@ -1538,23 +1560,28 @@ BuildTupleDescriptorForRelation(Relation relation, List *attributeList)
 
 
 /*
- * RemoveDroppedColumnsFromTupleDesc returns a new TupleDesc with the
- * dropped columns removed and the remaining columns renumbered.
+ * RemoveSkippedColumnsFromTupleDesc returns a new TupleDesc with dropped
+ * and generated columns removed and the remaining columns renumbered.
  *
  * We use this to construct a TupleDesc that matches the output of
- * the remote query, rather than the local table.
+ * the remote query, rather than the local table.  Generated columns are
+ * excluded because COPY TO does not write them (matching core PostgreSQL's
+ * CopyGetAttnums behaviour), so the Parquet/CSV/JSON file will not contain
+ * them and the read-back SELECT must not reference them.
  */
 static TupleDesc
-RemoveDroppedColumnsFromTupleDesc(TupleDesc tableDescriptor)
+RemoveSkippedColumnsFromTupleDesc(TupleDesc tableDescriptor)
 {
 	int			liveColumnCount = 0;
 
-	/* count number of not-dropped columns */
+	/* count number of readable (non-dropped, non-generated) columns */
 	for (int columnIndex = 0; columnIndex < tableDescriptor->natts; columnIndex++)
 	{
 		Form_pg_attribute column = TupleDescAttr(tableDescriptor, columnIndex);
 
 		if (column->attisdropped)
+			continue;
+		if (column->attgenerated)
 			continue;
 
 		liveColumnCount++;
@@ -1569,6 +1596,8 @@ RemoveDroppedColumnsFromTupleDesc(TupleDesc tableDescriptor)
 		Form_pg_attribute column = TupleDescAttr(tableDescriptor, columnIndex);
 
 		if (column->attisdropped)
+			continue;
+		if (column->attgenerated)
 			continue;
 
 		TupleDescInitEntry(cleanTupleDesc, (AttrNumber) attributeNumber,
