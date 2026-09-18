@@ -96,44 +96,6 @@ def test_types(pg_conn, duckdb_conn, superuser_conn, tmp_path, app_user):
     pg_conn.rollback()
 
 
-def test_copy_include_generated_columns_guc(
-    pg_conn, duckdb_conn, tmp_path, superuser_conn
-):
-    """pg_lake_copy.include_generated_columns = on restores legacy behaviour.
-
-    With the GUC on, COPY TO includes generated columns in the output (matching
-    the pre-fix behaviour), so downstream consumers that want the computed value
-    baked into the Parquet file can still get it.  COPY FROM still ignores
-    generated columns regardless of the GUC setting.
-    """
-    parquet_path = tmp_path / "test_guc_on.parquet"
-
-    run_command(
-        f"""
-        CREATE TABLE test_guc_on (a int, g int GENERATED ALWAYS AS (a * 3) STORED);
-        INSERT INTO test_guc_on (a) VALUES (10), (20);
-        SET pg_lake_copy.include_generated_columns = on;
-        COPY test_guc_on TO '{parquet_path}' WITH (format 'parquet');
-        RESET pg_lake_copy.include_generated_columns;
-        """,
-        pg_conn,
-    )
-
-    # With GUC on the generated column must appear in the file.
-    duckdb_conn.execute("DESCRIBE SELECT * FROM read_parquet($1)", [str(parquet_path)])
-    parquet_columns = [row[0] for row in duckdb_conn.fetchall()]
-    assert parquet_columns == ["a", "g"], f"expected ['a','g'], got {parquet_columns}"
-
-    # Verify the computed values were baked in correctly.
-    duckdb_conn.execute(
-        "SELECT a, g FROM read_parquet($1) ORDER BY a", [str(parquet_path)]
-    )
-    rows = duckdb_conn.fetchall()
-    assert rows == [(10, 30), (20, 60)]
-
-    pg_conn.rollback()
-
-
 def test_null_nan(pg_conn, duckdb_conn, tmp_path):
     parquet_path = tmp_path / "test.parquet"
 
@@ -1617,5 +1579,43 @@ def test_copy_virtual_column(pg_conn, duckdb_conn, tmp_path):
         [None, None, None],
         [None, None, None],
     ]
+
+    pg_conn.rollback()
+
+
+def test_copy_include_generated_columns_guc(
+    pg_conn, duckdb_conn, tmp_path, superuser_conn
+):
+    """pg_lake_copy.include_generated_columns = on restores legacy behaviour.
+
+    With the GUC on, COPY TO includes generated columns in the output (matching
+    the pre-fix behaviour), so downstream consumers that want the computed value
+    baked into the Parquet file can still get it.  COPY FROM still ignores
+    generated columns regardless of the GUC setting.
+    """
+    parquet_path = tmp_path / "test_guc_on.parquet"
+
+    run_command(
+        f"""
+        CREATE TABLE test_guc_on (a int, g int GENERATED ALWAYS AS (a * 3) STORED);
+        INSERT INTO test_guc_on (a) VALUES (10), (20);
+        SET pg_lake_copy.include_generated_columns = on;
+        COPY test_guc_on TO '{parquet_path}' WITH (format 'parquet');
+        RESET pg_lake_copy.include_generated_columns;
+        """,
+        pg_conn,
+    )
+
+    # With GUC on the generated column must appear in the file.
+    duckdb_conn.execute("DESCRIBE SELECT * FROM read_parquet($1)", [str(parquet_path)])
+    parquet_columns = [row[0] for row in duckdb_conn.fetchall()]
+    assert parquet_columns == ["a", "g"], f"expected ['a','g'], got {parquet_columns}"
+
+    # Verify the computed values were baked in correctly.
+    duckdb_conn.execute(
+        "SELECT a, g FROM read_parquet($1) ORDER BY a", [str(parquet_path)]
+    )
+    rows = duckdb_conn.fetchall()
+    assert rows == [(10, 30), (20, 60)]
 
     pg_conn.rollback()
