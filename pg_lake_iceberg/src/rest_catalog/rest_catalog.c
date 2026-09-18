@@ -71,6 +71,50 @@ ResolveRestCatalogBaseUri(const char *endpoint)
 
 
 /*
+ * FetchRestCatalogConfigPrefix contacts the catalog's /v1/config endpoint
+ * and returns the prefix the catalog advertises.
+ *
+ * The Iceberg REST spec allows a catalog to declare a routing prefix via the
+ * config endpoint so that clients do not need to know it in advance.  The
+ * response is a JSON object with two optional sections:
+ *
+ *   { "overrides": { "prefix": "sales" }, "defaults": { "prefix": "fallback" } }
+ *
+ * "overrides" take priority over "defaults".  The prefix maps directly to the
+ * catalogName slot in the REST_CATALOG_* URL templates.  Common examples:
+ *   Polaris    -- prefix matches the catalog name the user created ("sales")
+ *   Lakekeeper -- prefix is a UUID the user cannot easily predict
+ *   Nessie     -- prefix is the repository name
+ *
+ * Returns a palloc'd string, or NULL when:
+ *   - the endpoint is unreachable or returns a non-200 status, or
+ *   - the response carries neither overrides.prefix nor defaults.prefix.
+ *
+ * Callers should treat NULL as "no auto-detected prefix" and fall back to
+ * get_database_name() or whatever default they need.
+ */
+char *
+FetchRestCatalogConfigPrefix(RestCatalogOptions * opts)
+{
+	char	   *configUrl = psprintf(REST_CATALOG_CONFIG, opts->baseUri);
+	List	   *headers = GetHeadersWithAuth(opts);
+	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, configUrl, NULL, headers);
+
+	if (hr.status != 200)
+		return NULL;
+
+	/* overrides.prefix takes precedence over defaults.prefix */
+	char	   *prefix = JsonbGetStringByPath(hr.body, 2, "overrides", "prefix");
+
+	if (prefix == NULL)
+		prefix = JsonbGetStringByPath(hr.body, 2, "defaults", "prefix");
+
+	return prefix;
+}
+
+
+
+/*
  * ApplyGUCDefaults populates opts with the current GUC values.
  * All string fields are pstrdup'd so the struct is self-contained.
  *
