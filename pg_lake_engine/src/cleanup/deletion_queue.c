@@ -457,7 +457,8 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 						 "    SELECT ctid, path, orphaned_at, retry_count, is_prefix, resolve_metadata "
 						 "    FROM " DELETION_QUEUE_TABLE " "
 						 "    WHERE (orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d ",
+						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d AND "
+						 "		  NOT pending_rest_confirmation ",
 						 OrphanedFileRetentionPeriod, relationId, VacuumFileRemoveMaxRetries);
 
 		if (!isFull)
@@ -479,7 +480,8 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 						 "    FROM " DELETION_QUEUE_TABLE " del "
 						 "    LEFT JOIN pg_catalog.pg_class c ON c.oid OPERATOR(pg_catalog.=) del.table_name "
 						 "    WHERE (del.orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (del.orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "          c.oid IS NULL  AND retry_count OPERATOR(pg_catalog.<=) %d ",
+						 "          c.oid IS NULL  AND retry_count OPERATOR(pg_catalog.<=) %d AND "
+						 "          NOT del.pending_rest_confirmation ",
 						 OrphanedFileRetentionPeriod, VacuumFileRemoveMaxRetries);
 
 		if (!isFull)
@@ -546,7 +548,7 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 void
 InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt)
 {
-	InsertDeletionQueueRecordExtended(path, InvalidOid, orphanedAt, true, false);
+	InsertDeletionQueueRecordExtended(path, InvalidOid, orphanedAt, true, false, false);
 }
 
 
@@ -557,7 +559,7 @@ InsertPrefixDeletionRecord(char *path, TimestampTz orphanedAt)
 void
 InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz orphanedAt)
 {
-	InsertDeletionQueueRecordExtended(path, relationId, orphanedAt, false, false);
+	InsertDeletionQueueRecordExtended(path, relationId, orphanedAt, false, false, false);
 }
 
 
@@ -573,30 +575,85 @@ InsertMetadataResolveRecord(char *metadataPath, Oid relationId, TimestampTz orph
 	bool		resolveMetadata = true;
 
 	InsertDeletionQueueRecordExtended(metadataPath, relationId, orphanedAt,
-									  isPrefix, resolveMetadata);
+									  isPrefix, resolveMetadata, false);
 }
 
 /*
 * InsertDeletionQueueRecordExtended is the internal function to insert
 * a record into the deletion queue. is_prefix marks a whole-prefix delete and
 * resolve_metadata marks a metadata.json to be resolved into referenced files
-* by VACUUM; the two are mutually exclusive.
+* by VACUUM; the two are mutually exclusive. pendingConfirmation marks a row
+* that is not yet eligible for deletion -- see InsertPendingRestCatalogDeletionRecord.
 */
 void
 InsertDeletionQueueRecordExtended(char *path, Oid relationId, TimestampTz orphanedAt,
-								  bool isPrefix, bool resolveMetadata)
+								  bool isPrefix, bool resolveMetadata,
+								  bool pendingConfirmation)
 {
 	char	   *query =
 		"insert into " DELETION_QUEUE_TABLE " "
-		"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
-		"values ($1,$2,$3,$4,$5)";
+		"(path, table_name, orphaned_at, is_prefix, resolve_metadata, pending_rest_confirmation) "
+		"values ($1,$2,$3,$4,$5,$6)";
 
-	DECLARE_SPI_ARGS(5);
+	DECLARE_SPI_ARGS(6);
 	SPI_ARG_VALUE(1, TEXTOID, path, false);
 	SPI_ARG_VALUE(2, OIDOID, relationId, false);
 	SPI_ARG_VALUE(3, TIMESTAMPTZOID, orphanedAt, orphanedAt == 0);
 	SPI_ARG_VALUE(4, BOOLOID, isPrefix, false);
 	SPI_ARG_VALUE(5, BOOLOID, resolveMetadata, false);
+	SPI_ARG_VALUE(6, BOOLOID, pendingConfirmation, false);
+
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	SPI_END();
+}
+
+
+/*
+ * InsertPendingRestCatalogDeletionRecord durably records that "path" will
+ * become safe to delete once a REST catalog commit made in the current
+ * transaction is confirmed (HTTP 204). The row is invisible to
+ * GetDeletionQueueRecords until ConfirmRestCatalogDeletion flips it.
+ *
+ * Called at PRE_COMMIT-adjacent time (SPI-safe), inside the SAME
+ * transaction whose metadata write orphaned this path -- so the row is
+ * as durable as the transaction itself, unlike relying on process
+ * memory alone to remember that this path exists.
+ */
+void
+InsertPendingRestCatalogDeletionRecord(char *path, Oid relationId, TimestampTz orphanedAt)
+{
+	InsertDeletionQueueRecordExtended(path, relationId, orphanedAt,
+									   /* isPrefix */ false, /* resolveMetadata */ false,
+									   /* pendingConfirmation */ true);
+}
+
+
+/*
+ * ConfirmRestCatalogDeletion flips pending_rest_confirmation off for a
+ * path once its REST catalog commit is known to have succeeded, making
+ * it eligible for the next flush_deletion_queue / VACUUM pass.
+ *
+ * Best-effort: if this never runs (crash, disconnect, backend churn),
+ * the row simply stays pending -- the file is never deleted, but it is
+ * never lost from tracking either, unlike relying on process memory
+ * alone. A future reconciliation pass can sweep stale pending rows.
+ */
+void
+ConfirmRestCatalogDeletion(char *path)
+{
+	char	   *query =
+		"update " DELETION_QUEUE_TABLE " "
+		"set pending_rest_confirmation = false "
+		"where path OPERATOR(pg_catalog.=) $1";
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, TEXTOID, path, false);
 
 	/* switch to schema owner, we assume callers checked permissions */
 	SPI_START_EXTENSION_OWNER(PgLakeTable);

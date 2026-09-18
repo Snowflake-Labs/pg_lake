@@ -50,10 +50,11 @@ IcebergXactCallback(XactEvent event, void *arg)
 				 * Postgres handles Pop'ing the snapshot later on, so we don't
 				 * need to worry about.
 				 */
-				Assert(!ActiveSnapshotSet());
-				PushActiveSnapshot(GetTransactionSnapshot());
+        Assert(!ActiveSnapshotSet());
+        PushActiveSnapshot(GetTransactionSnapshot());
 
-				ConsumeTrackedIcebergMetadataChanges(false);
+        DrainConfirmedRestCatalogDeletions();
+        ConsumeTrackedIcebergMetadataChanges(false);
 
 				PopActiveSnapshot();
 
