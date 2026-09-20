@@ -139,3 +139,53 @@ def test_geometric_array_null(pg_geometric_tables, pgduck_conn):
     scan = _scan("scanner_geometric_array_tbl")
     rows = perform_query_on_cursor(f"SELECT pts FROM {scan} WHERE id = 2", pgduck_conn)
     assert rows == [(None,)]
+
+
+@pytest.fixture(scope="module")
+def pg_user_type_named_point(postgres):
+    """A user-defined composite type that happens to be called "point"."""
+    conn = open_pg_conn()
+    conn.autocommit = True
+    cur = conn.cursor()
+
+    cur.execute("DROP SCHEMA IF EXISTS scanner_geom_collision CASCADE")
+    cur.execute("CREATE SCHEMA scanner_geom_collision")
+    cur.execute("CREATE TYPE scanner_geom_collision.point AS (a int, b text)")
+    cur.execute(
+        "CREATE TABLE scanner_geom_collision.t "
+        "(id int PRIMARY KEY, p scanner_geom_collision.point)"
+    )
+    cur.execute(
+        "INSERT INTO scanner_geom_collision.t VALUES "
+        "(1, ROW(7, 'seven')::scanner_geom_collision.point),"
+        "(2, NULL)"
+    )
+
+    cur.close()
+    conn.close()
+
+    yield
+
+    conn = open_pg_conn()
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("DROP SCHEMA IF EXISTS scanner_geom_collision CASCADE")
+    cur.close()
+    conn.close()
+
+
+def test_user_type_named_point_is_not_read_as_text(
+    pg_user_type_named_point, pgduck_conn
+):
+    """The varchar cast keys off the pg_catalog OID, not the type name.
+
+    A composite type of the user's own named "point" has to keep resolving as
+    that composite; reading it as text would write a Parquet primitive into a
+    struct column.
+    """
+    scan = _scan("t", schema="scanner_geom_collision")
+    rows = perform_query_on_cursor(
+        f"SELECT typeof(p), p.a, p.b FROM {scan} WHERE id = 1", pgduck_conn
+    )
+    assert rows[0][0].startswith("STRUCT("), rows[0][0]
+    assert rows[0][1:] == (7, "seven")

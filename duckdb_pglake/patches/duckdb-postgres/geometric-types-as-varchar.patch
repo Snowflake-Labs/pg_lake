@@ -13,12 +13,17 @@ existing varchar path casts the column server-side (col::VARCHAR, or
 ::VARCHAR[] for an array of them) and the scanned value is exactly what
 Postgres itself prints.
 
+The types are matched by pg_catalog OID rather than by the name upstream
+switches on: a user-defined type in its own schema may well be called "point",
+and it has to keep resolving as the composite or enum it is.  The type OID
+comes from composite-type-resolution.patch, which is applied before this one.
+
 Note: the coordinate-wise struct/list representation is no longer reachable
 through the scanner; a caller that wants coordinates has to parse the text.
 
 --- a/src/postgres_utils.cpp
 +++ b/src/postgres_utils.cpp
-@@ -284,30 +284,14 @@
+@@ -284,30 +284,17 @@
  		return LogicalType::INTERVAL;
  	} else if (pgtypename == "uuid") {
  		return LogicalType::UUID;
@@ -46,12 +51,15 @@ through the scanner; a caller that wants coordinates has to parse the text.
 -	} else if (pgtypename == "circle") {
 -		postgres_type.info = PostgresTypeAnnotation::GEOM_CIRCLE;
 -		return LogicalType::LIST(LogicalType::DOUBLE);
-+	} else if (pgtypename == "point" || pgtypename == "line" || pgtypename == "lseg" ||
-+	           pgtypename == "box" || pgtypename == "path" || pgtypename == "polygon" ||
-+	           pgtypename == "circle") {
-+		// Upstream maps these to a struct (point) or a list of doubles, but pg_lake has no
-+		// Iceberg mapping for them and stores their Postgres text form as a string, so read
-+		// them the same way here.
++	} else if (type_info.type_oid == 600 || type_info.type_oid == 601 || type_info.type_oid == 602 ||
++	           type_info.type_oid == 603 || type_info.type_oid == 604 || type_info.type_oid == 628 ||
++	           type_info.type_oid == 718) {
++		// point, lseg, path, box, polygon, line and circle.  Upstream maps point to a struct
++		// and the other six to a list of doubles, but pg_lake has no Iceberg mapping for them
++		// and stores their Postgres text form as a string, so read them the same way here.
++		// Matched by OID and not by name: a user-defined type called "point" in its own schema
++		// must keep resolving as the composite or enum it is.  A geometric type whose OID did
++		// not reach us falls through to the varchar fallback below, which is the same result.
 +		postgres_type.info = PostgresTypeAnnotation::CAST_TO_VARCHAR;
 +		return LogicalType::VARCHAR;
  	}
