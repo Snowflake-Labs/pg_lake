@@ -1103,22 +1103,24 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
 
 			PGType		baseColumnType = MakePGType(GetRelatedTypeOid(col->colType, false),
 													col->colTypeMod);
-			DuckDBType	duckDBType = GetDuckDBTypeForPGType(baseColumnType);
 
-			if (duckDBType)
-			{
-				const char *duckDBName = GetFullDuckDBTypeNameForPGType(baseColumnType, format);
+			/*
+			 * A field whose type has no DuckDB equivalent (a builtin
+			 * geometric type, say) is stored as text, exactly as the same
+			 * type in a top-level column is: GetFullDuckDBTypeNameForPGType()
+			 * falls back to VARCHAR, StructOutForPGDuck() emits the field
+			 * through its PostgreSQL output function, and PostgreSQL parses
+			 * that text back when the value is read.  Refusing here instead
+			 * made the whole composite unwritable.
+			 */
+			const char *duckDBName = GetFullDuckDBTypeNameForPGType(baseColumnType, format);
 
-				if (duckDBName)
-					appendStringInfoString(string, duckDBName);
-				else
-					ereport(ERROR, (errmsg("unresolved duckdb type name for type: %d", duckDBType),
-									errcode(ERRCODE_INTERNAL_ERROR)));
-			}
-			else
-				ereport(ERROR, (errmsg("composite types with a \"%s\" field cannot be exported to data lake",
+			if (duckDBName == NULL)
+				ereport(ERROR, (errmsg("unresolved duckdb type name for type: %s",
 									   format_type_be(col->colType)),
-								errcode(ERRCODE_INDETERMINATE_DATATYPE)));
+								errcode(ERRCODE_INTERNAL_ERROR)));
+
+			appendStringInfoString(string, duckDBName);
 		}
 		if (col->isArray)
 			appendStringInfoString(string, "[]");

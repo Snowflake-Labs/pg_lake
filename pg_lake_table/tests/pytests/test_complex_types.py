@@ -546,3 +546,84 @@ def test_numeric_typmod_inside_composite(
     run_command("DROP SCHEMA IF EXISTS numeric_typmod CASCADE;", pg_conn)
     run_command("RESET search_path;", pg_conn)
     pg_conn.commit()
+
+
+def test_geometric_field_inside_composite(
+    pg_conn, superuser_conn, pgduck_conn, extension, s3, with_default_location
+):
+    """
+    The builtin geometric types have no DuckDB equivalent, so they are stored as
+    their PostgreSQL text form.  A top-level column always was; a composite
+    *field* of such a type used to be refused outright with "composite types
+    with a "point" field cannot be exported to data lake", which made the whole
+    column unwritable.
+    """
+    run_command(
+        """
+        CREATE SCHEMA geom_composite;
+        SET search_path TO geom_composite;
+        CREATE TYPE inner_t AS (n int, g point);
+        CREATE TYPE outer_t AS (label text, inr inner_t);
+        CREATE TABLE places (
+            id integer,
+            top point,
+            nested inner_t,
+            deep outer_t,
+            nested_arr inner_t[]
+        ) USING iceberg;
+        INSERT INTO places VALUES (
+            1,
+            '(1,2)',
+            ROW(5, '(1,2)')::inner_t,
+            ROW('lbl', ROW(6, '(3,4)')::inner_t)::outer_t,
+            ARRAY[ROW(7, '(5,6)')::inner_t]
+        );
+        INSERT INTO places VALUES (2, NULL, NULL, NULL, NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Every point comes back as itself, at every depth, and the sibling fields
+    # of the composite keep their own types.
+    res = run_query(
+        """
+        SELECT top::text, ((nested).g)::text, (((deep).inr).g)::text,
+               ((nested_arr[1]).g)::text, (nested).n, (deep).label
+        FROM places WHERE id = 1
+        """,
+        pg_conn,
+    )
+    assert res[0] == ["(1,2)", "(1,2)", "(3,4)", "(5,6)", 5, "lbl"], res[0]
+
+    res = run_query(
+        """
+        SELECT top, nested, deep, nested_arr FROM places WHERE id = 2
+        """,
+        pg_conn,
+    )
+    assert res[0] == [None, None, None, None], res[0]
+
+    # Physically the point leaves are strings, like the top-level column.
+    files = run_query(
+        "SELECT path FROM lake_table.files "
+        "WHERE table_name = 'geom_composite.places'::regclass",
+        superuser_conn,
+    )
+    assert files, "expected at least one data file for geom_composite.places"
+    for (path,) in files:
+        leaves = {
+            name: (type_, converted)
+            for name, type_, converted in run_query(
+                "SELECT name, type, converted_type "
+                f"FROM parquet_schema('{path}') WHERE num_children IS NULL",
+                pgduck_conn,
+            )
+        }
+        assert leaves["top"] == ("BYTE_ARRAY", "UTF8"), leaves
+        assert leaves["g"] == ("BYTE_ARRAY", "UTF8"), leaves
+
+    pg_conn.rollback()
+    run_command("DROP SCHEMA IF EXISTS geom_composite CASCADE;", pg_conn)
+    run_command("RESET search_path;", pg_conn)
+    pg_conn.commit()
