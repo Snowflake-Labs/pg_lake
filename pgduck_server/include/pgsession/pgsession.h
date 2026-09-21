@@ -181,5 +181,6 @@ typedef struct PGSession
 extern void *pgsession_handle_connection(void *input);
 
 extern int	oom_is_fatal;
+extern bool log_engine_errors;
 
 #endif							/* // PGDUCK_PG_SESSION_H */
