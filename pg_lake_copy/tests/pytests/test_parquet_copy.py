@@ -1583,9 +1583,7 @@ def test_copy_virtual_column(pg_conn, duckdb_conn, tmp_path):
     pg_conn.rollback()
 
 
-def test_copy_include_generated_columns_guc(
-    pg_conn, duckdb_conn, tmp_path, superuser_conn
-):
+def test_copy_include_generated_columns_guc(pg_conn, duckdb_conn, tmp_path):
     """pg_lake_copy.include_generated_columns = on restores legacy behaviour.
 
     With the GUC on, COPY TO includes generated columns in the output (matching
