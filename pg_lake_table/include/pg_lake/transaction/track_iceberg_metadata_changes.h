@@ -34,6 +34,14 @@ typedef struct TableMetadataOperationTracker
 	bool		relationDataFilesRemoveAllSeen;
 
 	/*
+	 * Set when a single data file was removed from the relation, by a DELETE,
+	 * an UPDATE or a rewrite. The commit-time diff needs the last pushed
+	 * metadata only to find such files, so a transaction that never set this
+	 * can build its operations from the catalog alone.
+	 */
+	bool		relationDataFileRemoveSeen;
+
+	/*
 	 * Number of single-file data-file operations recorded for this relation
 	 * in the current transaction (DATA_FILE_ADD + DATA_FILE_REMOVE). Each
 	 * such op rewrites the pg_lake catalogs that the commit-time diff joins,
@@ -51,6 +59,7 @@ typedef struct TableMetadataOperationTracker
 }			TableMetadataOperationTracker;
 
 extern PGDLLEXPORT int CommitTimeCatalogAnalyzeThreshold;
+extern PGDLLEXPORT bool EnableAppendOnlyCommitFastPath;
 
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);

@@ -136,9 +136,8 @@ BatchableType(TableMetadataOperationType type)
 /*
  * Apply a run of DATA_FILE_ADD ops via bulk INSERTs into the three lake_table
  * catalogs (files, data_file_column_stats, data_file_partition_values) plus
- * the optional tx_data_file_ids temp table when PgLakeAddDataFileHook opts
- * in. Pays O(catalogs) SPI round trips instead of O(files * (1 + columns +
- * partition_fields)).
+ * the tx-scoped tracked-file-ids temp table. Pays O(catalogs) SPI round
+ * trips instead of O(files * (1 + columns + partition_fields)).
  */
 static void
 FlushDataFileAddBatch(Oid relationId, List *addOps)
@@ -601,38 +600,26 @@ AddOpHasPartitionValues(TableMetadataOperation * operation)
 
 
 /*
- * Collect file ids opted in by PgLakeAddDataFileHook and insert them into
- * the tx-scoped temp table. The hook fires once per CONTENT_DATA op; ids are
- * resolved via pathToFileId rather than a JOIN to lake_table.files.
+ * Record the id of every file this batch added into the tx-scoped temp
+ * table, regardless of content type. Ids are resolved via pathToFileId
+ * rather than a JOIN back to lake_table.files.
+ *
+ * Unconditional: earlier this only ran when a sibling extension opted in
+ * via PgLakeAddDataFileHook, which meant the temp table -- and therefore
+ * every newFilesOnly read, including the append-only commit path in
+ * track_iceberg_metadata_changes.c -- silently saw no rows by default.
  */
 static void
 BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 {
-	if (PgLakeAddDataFileHook == NULL)
-		return;
-
-	/*
-	 * Lazy palloc: most batches won't have any hook-tracked files (the hook
-	 * only fires for CONTENT_DATA ops and only when the sibling extension
-	 * opts in). Defer the allocation to the first hit so partition-only or
-	 * deletes-only runs don't pay for an array they'll never use.
-	 */
 	int			fileCount = list_length(addOps);
-	Datum	   *fileIdDatums = NULL;
+	Datum	   *fileIdDatums = palloc(sizeof(Datum) * fileCount);
 	int			trackedFileCount = 0;
 	ListCell   *operationCell = NULL;
 
 	foreach(operationCell, addOps)
 	{
 		TableMetadataOperation *operation = lfirst(operationCell);
-
-		if (operation->content != CONTENT_DATA)
-			continue;
-		if (!PgLakeAddDataFileHook())
-			continue;
-
-		if (fileIdDatums == NULL)
-			fileIdDatums = palloc(sizeof(Datum) * fileCount);
 
 		FileIdHashEntry *entry = (FileIdHashEntry *)
 			PathHashSearch(pathToFileId, operation->path, HASH_FIND, NULL);
@@ -641,8 +628,7 @@ BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 		fileIdDatums[trackedFileCount++] = Int64GetDatum(entry->fileId);
 	}
 
-	if (trackedFileCount == 0)
-		return;
+	Assert(trackedFileCount == fileCount);
 
 	CreateTxDataFileIdsTempTableIfNotExists();
 
@@ -658,7 +644,7 @@ static void
 ExecInsertTrackedFileIds(ArrayType *fileIdArray)
 {
 	char	   *query =
-		"INSERT INTO " TX_DATA_FILES_QUALIFIED_TABLE_NAME " (id) "
+		"INSERT INTO " TX_DATA_FILES_TABLE_NAME " (id) "
 		"SELECT id FROM pg_catalog.unnest($1) AS t(id)";
 
 	DECLARE_SPI_ARGS(1);
@@ -677,15 +663,29 @@ ExecInsertTrackedFileIds(ArrayType *fileIdArray)
  * so we use the SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS variant which
  * omits the restricted-op flag.  The search_path lockdown stays in effect;
  * the DDL is a fixed string with no caller-supplied input.
+ *
+ * This runs once per session and every write after that hits the IF NOT
+ * EXISTS no-op, which would otherwise put a "relation ... already exists,
+ * skipping" NOTICE in front of every ordinary INSERT. Drop the message down
+ * to WARNING for this one statement, the same way EnsureExtensionIsUpdated
+ * quiets ALTER EXTENSION's own notice.
  */
 static void
 CreateTxDataFileIdsTempTableIfNotExists(void)
 {
 	const char *query =
-		"create temporary table if not exists " TX_DATA_FILES_QUALIFIED_TABLE_NAME " "
+		"create temporary table if not exists " TX_DATA_FILES_TABLE_NAME " "
 		"(id bigint primary key) USING heap ON COMMIT DELETE ROWS;";
 
 	SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS(PgLakeTable);
+
+	if (client_min_messages == NOTICE)
+	{
+		(void) set_config_option("client_min_messages", "warning",
+								 PGC_USERSET, PGC_S_SESSION,
+								 GUC_ACTION_SAVE, true, 0, false);
+	}
+
 	SPI_execute(query, /* readOnly = */ false, 0);
 	SPI_END();
 }

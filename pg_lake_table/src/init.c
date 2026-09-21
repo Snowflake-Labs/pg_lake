@@ -183,6 +183,21 @@ _PG_init(void)
 							NULL,
 							NULL);
 
+	DefineCustomBoolVariable("pg_lake_table.enable_append_only_commit_fast_path",
+							 "Builds pre-commit Iceberg metadata operations for a "
+							 "transaction that added data files and removed none "
+							 "directly from the catalog's per-tx tracked file ids, "
+							 "instead of diffing every file of the table against the "
+							 "last pushed metadata. Disable to always run the diff.",
+							 NULL,
+							 &EnableAppendOnlyCommitFastPath,
+							 true,
+							 PGC_SUSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL,
+							 NULL,
+							 NULL);
+
 	DefineCustomIntVariable("pg_lake_table.copy_on_write_threshold",
 							"Determines the percentage of deleted rows in a file "
 							"after which we use copy-on-write instead of merge-on-read "
