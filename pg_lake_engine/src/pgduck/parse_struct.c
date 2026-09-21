@@ -1115,6 +1115,10 @@ GetDuckDBStructDefinitionForCompositeType(CompositeType * type,
 			 */
 			const char *duckDBName = GetFullDuckDBTypeNameForPGType(baseColumnType, format);
 
+			/*
+			 * Only the MAP branch of GetFullDuckDBTypeNameForPGType() can
+			 * return NULL, and appendStringInfoString() would crash on it.
+			 */
 			if (duckDBName == NULL)
 				ereport(ERROR, (errmsg("unresolved duckdb type name for type: %s",
 									   format_type_be(col->colType)),
