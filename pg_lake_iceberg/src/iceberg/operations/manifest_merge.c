@@ -29,6 +29,7 @@
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/storage/local_storage.h"
+#include "pg_lake/util/injection_points.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
@@ -216,6 +217,24 @@ RemoveDeletedManifestEntries(IcebergSnapshot * currentSnapshot,
 	foreach(manifestCell, *manifests)
 	{
 		IcebergManifest *manifest = lfirst(manifestCell);
+
+		/*
+		 * The manifest list records how many entries of this manifest are
+		 * marked deleted, so a manifest without any has nothing for us to
+		 * remove and we can carry it over without reading it. The counts are
+		 * required fields in format version 2, and we neither read nor write
+		 * anything older, so they are always set here.
+		 *
+		 * The remaining entry count has to be non-zero as well, because a
+		 * manifest whose entries are all gone is dropped rather than carried
+		 * into the new snapshot.
+		 */
+		if (manifest->deleted_files_count == 0 &&
+			manifest->added_files_count + manifest->existing_files_count > 0)
+		{
+			resultManifests = lappend(resultManifests, manifest);
+			continue;
+		}
 
 		bool		modified = RemoveDeletedManifestEntriesInternal(&manifest, currentSnapshot,
 																	allTransforms, contentType,
@@ -521,6 +540,9 @@ RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapsho
 							  ALLOCSET_DEFAULT_SIZES);
 
 	MemoryContext callerCtx = MemoryContextSwitchTo(perManifestCtx);
+
+	/* tests attach here to check that a manifest is not read needlessly */
+	INJECTION_POINT_COMPAT("manifest-merge-read-manifest-entries");
 
 	List	   *manifestEntries = FetchManifestEntriesFromManifest(*manifest, NULL);
 
