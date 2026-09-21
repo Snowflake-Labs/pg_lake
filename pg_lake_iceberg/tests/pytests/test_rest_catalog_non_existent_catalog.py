@@ -22,6 +22,36 @@ from utils_pytest import *
 
 _FAKE_TOKEN = "fake-bearer-token-for-catalog-exists-test"
 
+_NS_NOT_FOUND_BODY = json.dumps(
+    {
+        "error": {
+            "message": "Namespace does not exist",
+            "type": "NoSuchNamespaceException",
+            "code": 404,
+        }
+    }
+)
+
+_CATALOG_NOT_FOUND_BODY = json.dumps(
+    {
+        "error": {
+            "message": "Catalog does not exist",
+            "type": "NoSuchCatalogException",
+            "code": 404,
+        }
+    }
+)
+
+_GENERIC_404_BODY = json.dumps(
+    {
+        "error": {
+            "message": "Not found",
+            "type": "NotFoundException",
+            "code": 404,
+        }
+    }
+)
+
 
 def _find_free_port():
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -72,7 +102,9 @@ def _make_handler_class(get_responses: dict, post_responses: dict = None):
                     return
 
             self.send_response(404)
+            self.send_header("Content-Type", "application/json")
             self.end_headers()
+            self.wfile.write(_GENERIC_404_BODY.encode())
 
         def do_GET(self):
             self.recorded_requests.append(("GET", self.path, ""))
@@ -86,7 +118,9 @@ def _make_handler_class(get_responses: dict, post_responses: dict = None):
                     return
 
             self.send_response(404)
+            self.send_header("Content-Type", "application/json")
             self.end_headers()
+            self.wfile.write(_GENERIC_404_BODY.encode())
 
     return _Handler
 
@@ -181,11 +215,11 @@ def test_register_namespace_when_catalog_does_not_exist(
         get_responses={
             "/v1/non_existing_catalog/namespaces/my_ns": (
                 404,
-                '{"error": "not found"}',
+                _NS_NOT_FOUND_BODY,
             ),
             "/v1/non_existing_catalog/namespaces": (
                 404,
-                '{"error": "catalog not found"}',
+                _CATALOG_NOT_FOUND_BODY,
             ),
         }
     )
@@ -231,7 +265,7 @@ def test_register_namespace_when_catalog_exists_creates_namespace(
     """
     httpd, port, handler = _start_mock_server(
         get_responses={
-            "/v1/existing_catalog/namespaces/new_ns": (404, '{"error": "not found"}'),
+            "/v1/existing_catalog/namespaces/new_ns": (404, _NS_NOT_FOUND_BODY),
             "/v1/existing_catalog/namespaces": (200, json.dumps({"namespaces": []})),
         },
         post_responses={
@@ -275,8 +309,8 @@ def test_error_if_rest_namespace_does_not_exist_when_catalog_missing(
     """
     httpd, port, handler = _start_mock_server(
         get_responses={
-            "/v1/bad_catalog/namespaces/public": (404, '{"error": "not found"}'),
-            "/v1/bad_catalog/namespaces": (404, '{"error": "catalog not found"}'),
+            "/v1/bad_catalog/namespaces/public": (404, _NS_NOT_FOUND_BODY),
+            "/v1/bad_catalog/namespaces": (404, _CATALOG_NOT_FOUND_BODY),
         }
     )
     endpoint = f"http://127.0.0.1:{port}"
@@ -318,7 +352,7 @@ def test_error_if_rest_namespace_does_not_exist_when_catalog_exists(
     """
     httpd, port, handler = _start_mock_server(
         get_responses={
-            "/v1/good_catalog/namespaces/missing_ns": (404, '{"error": "not found"}'),
+            "/v1/good_catalog/namespaces/missing_ns": (404, _NS_NOT_FOUND_BODY),
             "/v1/good_catalog/namespaces": (200, json.dumps({"namespaces": []})),
         }
     )

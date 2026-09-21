@@ -106,17 +106,6 @@ def test_create_namespace(
     pg_conn.rollback()
 
     res = run_command(
-        f"SELECT lake_iceberg.register_namespace_to_named_catalog('rest', 'non_existing_catalog', '{namespace}')",
-        pg_conn,
-        raise_error=False,
-    )
-    assert (
-        'catalog "non_existing_catalog" does not exist in the rest catalog server'
-        in str(res)
-    )
-    pg_conn.rollback()
-
-    res = run_command(
         f"""CREATE TABLE "{namespace}".tbl_err(a int) USING iceberg WITH (catalog='rest', read_only=False, catalog_name='none', catalog_namespace='none', catalog_table_name='none')""",
         pg_conn,
         raise_error=False,
