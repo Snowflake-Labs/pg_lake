@@ -61,6 +61,7 @@
 
 
 static void CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
+static bool RestCatalogExists(RestCatalogOptions * opts, const char *catalogName);
 static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
 
 
@@ -318,6 +319,33 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 
 
 /*
+ * RestCatalogExists checks whether the catalog exists in the REST catalog
+ * server by listing its namespaces.  Per the Iceberg REST spec,
+ * GET /v1/{prefix}/namespaces returns 200 (with an array of namespaces,
+ * possibly empty) if the prefix/catalog exists, or 404 if the catalog does
+ * not exist.
+ */
+static bool
+RestCatalogExists(RestCatalogOptions * opts, const char *catalogName)
+{
+	char	   *catalogUrl =
+		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
+				 URLEncodePath(catalogName));
+	HttpResult	catalogResult =
+		SendRequestToRestCatalog(opts, HTTP_GET, catalogUrl, NULL,
+								 GetHeadersWithAuth(opts));
+
+	if (catalogResult.status == 200)
+		return true;
+	else if (catalogResult.status == 404)
+		return false;
+
+	ReportHTTPError(catalogResult, ERROR);
+	return false;
+}
+
+
+/*
 * Register a namespace in the Rest Catalog.
 * If the catalog exists, and the allowedLocations is different,
 * an error is raised. This  is used to ensure that the same
@@ -347,6 +375,21 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 				 * For debugging purposes
 				 */
 				ReportHTTPError(httpResult, DEBUG2);
+
+				/*
+				 * A 404 could mean the namespace doesn't exist, or the
+				 * catalog itself doesn't exist. Verify that the catalog
+				 * exists before attempting to create the namespace.
+				 */
+				if (!RestCatalogExists(opts, catalogName))
+				{
+					ereport(ERROR,
+							(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+							 errmsg("catalog \"%s\" does not exist in the rest catalog server",
+									catalogName),
+							 errhint("Create the catalog in the rest catalog server, "
+									 "or check the database name (used as the catalog name).")));
+				}
 
 				/*
 				 * Does not exists, we'll create it.
@@ -432,6 +475,20 @@ ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogN
 	/* namespace not found */
 	if (httpResult.status == 404)
 	{
+		/*
+		 * A 404 could mean the namespace doesn't exist, or the catalog itself
+		 * doesn't exist. Verify that the catalog exists first.
+		 */
+		if (!RestCatalogExists(opts, catalogName))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+					 errmsg("catalog \"%s\" does not exist in the rest catalog server",
+							catalogName),
+					 errhint("Create the catalog in the rest catalog server, "
+							 "or check the catalog_name option.")));
+		}
+
 		ereport(ERROR,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 				 errmsg("namespace \"%s\" does not exist in the rest catalog while creating on catalog \"%s\"",
