@@ -1,0 +1,102 @@
+Read varchar-cast leaves inside a composite instead of refusing the scan.
+
+Some Postgres types are read as their text form rather than as the structured
+value upstream would produce: the builtin geometric types (see
+geometric-types-as-varchar.patch) and anything the scanner cannot map at all.
+Until now that was only possible for a top-level column or an array element,
+because Postgres cannot cast a composite as a whole and the scan bailed out with
+"cast to varchar not implemented for composite column".  A table with, say, a
+composite holding a point was therefore unreadable, even though pg_lake stores
+that field as a string in the Iceberg struct and the pg_lake_replication
+change-log decoder happily writes it.
+
+Instead of refusing, rebuild the composite server-side field by field with ROW()
+and cast only the leaves that need it, recursing through nested composites.  The
+binary record Postgres then sends has one field per struct child, which is what
+the scanner's struct reader expects, and it ignores the per-field type OIDs.
+
+A NULL composite has to stay NULL: ROW() over the fields of a NULL composite
+would produce a row of NULLs, and a composite whose fields are all NULL is not
+itself NULL, so the CASE compares the text form, which is NULL only for a NULL
+composite.
+
+An array of composites cannot be expressed this way -- the cast would have to be
+applied per element -- and that case now throws.  It used to fall through and
+scan the column untouched, which handed the binary form of the leaf to the
+varchar reader and returned junk, so an error is what it should have been.
+
+--- a/src/postgres_scanner.cpp
++++ b/src/postgres_scanner.cpp
+@@ -236,6 +236,44 @@
+ 	return false;
+ }
+ 
++// Build a Postgres expression that reads a composite column that has leaves which
++// must be read as text.  Postgres cannot cast a composite as a whole, so the
++// composite is rebuilt field by field with ROW() and only the leaves that need it
++// are cast.  The CASE keeps a NULL composite NULL: ROW() over the fields of a NULL
++// composite yields a row of NULLs, and a composite whose fields are all NULL is not
++// itself NULL, so the text cast is what tells the two apart.
++static string BuildVarcharCastProjection(const string &expr, const LogicalType &type,
++                                         const PostgresType &postgres_type, const string &table_name,
++                                         const string &column_name) {
++	if (postgres_type.info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
++		return expr + "::VARCHAR";
++	}
++	if (!ContainsCastToVarchar(postgres_type)) {
++		return expr;
++	}
++	if (type.id() != LogicalTypeId::STRUCT) {
++		// An array of composites would need the cast applied per element.
++		throw NotImplementedException("Error reading table \"%s\" - cast to varchar not implemented below column "
++		                              "\"%s\" (type %s)",
++		                              table_name, column_name, type.ToString());
++	}
++	auto &children = StructType::GetChildTypes(type);
++	if (children.size() != postgres_type.children.size()) {
++		throw InternalException("Mismatch in struct child count while building the varchar cast for column \"%s\"",
++		                        column_name);
++	}
++	string row_args;
++	for (idx_t c = 0; c < children.size(); c++) {
++		if (c > 0) {
++			row_args += ", ";
++		}
++		auto child_expr = "(" + expr + ")." + KeywordHelper::WriteQuoted(children[c].first, '"');
++		row_args += BuildVarcharCastProjection(child_expr, children[c].second, postgres_type.children[c], table_name,
++		                                       column_name);
++	}
++	return "CASE WHEN (" + expr + ")::TEXT IS NULL THEN NULL ELSE ROW(" + row_args + ") END";
++}
++
+ static void PostgresInitInternal(ClientContext &context, const PostgresBindData *bind_data_p,
+                                  PostgresLocalState &lstate, idx_t task_min, idx_t task_max) {
+ 	D_ASSERT(bind_data_p);
+@@ -273,13 +311,23 @@
+ 				}
+ 				if (bind_data->postgres_types[column_id].children[0].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
+ 					col_names += "::VARCHAR[]";
++				} else if (ContainsCastToVarchar(bind_data->postgres_types[column_id])) {
++					// A varchar-read leaf below the element type would need the cast
++					// applied per element; reading the column as-is would hand the
++					// binary value of the leaf to the varchar reader.
++					throw NotImplementedException("Error reading table \"%s\" - cast to varchar not implemented below "
++					                              "column \"%s\" (type %s)",
++					                              bind_data->table_name, bind_data->names[column_id],
++					                              bind_data->types[column_id].ToString());
+ 				}
+ 			} else {
+ 				if (ContainsCastToVarchar(bind_data->postgres_types[column_id])) {
+-					throw NotImplementedException("Error reading table \"%s\" - cast to varchar not implemented for "
+-					                              "composite column \"%s\" (type %s)",
+-					                              bind_data->table_name, bind_data->names[column_id],
+-					                              bind_data->types[column_id].ToString());
++					auto projection = BuildVarcharCastProjection(
++					    quoted_name, bind_data->types[column_id], bind_data->postgres_types[column_id],
++					    bind_data->table_name, bind_data->names[column_id]);
++					// replace the plain column name appended above
++					col_names.resize(col_names.size() - quoted_name.size());
++					col_names += projection;
+ 				}
+ 			}
+ 		}

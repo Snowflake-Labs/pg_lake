@@ -1,0 +1,67 @@
+Read the builtin geometric types as their Postgres text form.
+
+Upstream maps point to STRUCT(x DOUBLE, y DOUBLE) and line, lseg, box, path,
+polygon and circle to LIST(DOUBLE). pg_lake has no Iceberg mapping for these
+types and stores them as a string holding the Postgres text form, which is
+also what the pg_lake_replication change-log decoder writes for them. A scan
+that returns a struct or a list therefore writes Parquet whose schema does not
+match the Iceberg column, and the read fails with "Parquet file schema node
+type does not match table column".
+
+We annotate these types CAST_TO_VARCHAR at type-resolution time, so the
+existing varchar path casts the column server-side (col::VARCHAR, or
+::VARCHAR[] for an array of them) and the scanned value is exactly what
+Postgres itself prints.
+
+The types are matched by pg_catalog OID rather than by the name upstream
+switches on: a user-defined type in its own schema may well be called "point",
+and it has to keep resolving as the composite or enum it is.  The type OID
+comes from composite-type-resolution.patch, which is applied before this one.
+
+Note: the coordinate-wise struct/list representation is no longer reachable
+through the scanner; a caller that wants coordinates has to parse the text.
+
+--- a/src/postgres_utils.cpp
++++ b/src/postgres_utils.cpp
+@@ -284,30 +284,17 @@
+ 		return LogicalType::INTERVAL;
+ 	} else if (pgtypename == "uuid") {
+ 		return LogicalType::UUID;
+-	} else if (pgtypename == "point") {
+-		postgres_type.info = PostgresTypeAnnotation::GEOM_POINT;
+-		child_list_t<LogicalType> point_struct;
+-		point_struct.emplace_back(make_pair("x", LogicalType::DOUBLE));
+-		point_struct.emplace_back(make_pair("y", LogicalType::DOUBLE));
+-		return LogicalType::STRUCT(point_struct);
+-	} else if (pgtypename == "line") {
+-		postgres_type.info = PostgresTypeAnnotation::GEOM_LINE;
+-		return LogicalType::LIST(LogicalType::DOUBLE);
+-	} else if (pgtypename == "lseg") {
+-		postgres_type.info = PostgresTypeAnnotation::GEOM_LINE_SEGMENT;
+-		return LogicalType::LIST(LogicalType::DOUBLE);
+-	} else if (pgtypename == "box") {
+-		postgres_type.info = PostgresTypeAnnotation::GEOM_BOX;
+-		return LogicalType::LIST(LogicalType::DOUBLE);
+-	} else if (pgtypename == "path") {
+-		postgres_type.info = PostgresTypeAnnotation::GEOM_PATH;
+-		return LogicalType::LIST(LogicalType::DOUBLE);
+-	} else if (pgtypename == "polygon") {
+-		postgres_type.info = PostgresTypeAnnotation::GEOM_POLYGON;
+-		return LogicalType::LIST(LogicalType::DOUBLE);
+-	} else if (pgtypename == "circle") {
+-		postgres_type.info = PostgresTypeAnnotation::GEOM_CIRCLE;
+-		return LogicalType::LIST(LogicalType::DOUBLE);
++	} else if (type_info.type_oid == 600 || type_info.type_oid == 601 || type_info.type_oid == 602 ||
++	           type_info.type_oid == 603 || type_info.type_oid == 604 || type_info.type_oid == 628 ||
++	           type_info.type_oid == 718) {
++		// point, lseg, path, box, polygon, line and circle.  Upstream maps point to a struct
++		// and the other six to a list of doubles, but pg_lake has no Iceberg mapping for them
++		// and stores their Postgres text form as a string, so read them the same way here.
++		// Matched by OID and not by name: a user-defined type called "point" in its own schema
++		// must keep resolving as the composite or enum it is.  A geometric type whose OID did
++		// not reach us falls through to the varchar fallback below, which is the same result.
++		postgres_type.info = PostgresTypeAnnotation::CAST_TO_VARCHAR;
++		return LogicalType::VARCHAR;
+ 	}
+ 
+ 	if (!transaction || !schema || type_info.type_schema.empty()) {
