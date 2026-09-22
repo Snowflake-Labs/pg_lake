@@ -102,7 +102,7 @@ def test_create_namespace(
         pg_conn,
         raise_error=False,
     )
-    assert "does not exist in the rest catalog while creating on catalog" in str(res)
+    assert 'catalog "none" does not exist in the rest catalog server' in str(res)
     pg_conn.rollback()
 
     res = run_command(
