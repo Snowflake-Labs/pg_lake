@@ -121,9 +121,6 @@ static bool is_transmit_query(const char *queryString);
 /* global flag on whether to exit on OOM */
 int			oom_is_fatal = true;
 
-/* global flag on whether to log a class for engine errors */
-bool		log_engine_errors = true;
-
 /*
  * Per-client entrance point for the pgsession logic.
  *
@@ -960,11 +957,8 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
 	 * Every reportable status passes through here, including the fatal ones
 	 * the caller exits on, so one line here covers all of them.
 	 */
-	if (log_engine_errors)
-	{
-		PGDUCK_SERVER_LOG(PGDUCK_ENGINE_ERROR_PREFIX "%s",
-						  error_class_for_sqlstate(sqlState));
-	}
+	PGDUCK_SERVER_LOG(PGDUCK_ENGINE_ERROR_PREFIX "%s",
+					  error_class_for_sqlstate(sqlState));
 
 	switch (status)
 	{

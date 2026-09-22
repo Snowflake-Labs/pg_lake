@@ -119,7 +119,6 @@ print_usage()
 	printf(" --extensions_dir <path>			Install and load extensions in the specified directory\n");
 	printf(" --pidfile <path>					Write the pid of this program to the given path\n");
 	printf(" --no_extension_install             Disable extension installation\n");
-	printf(" --no_log_engine_errors             Do not log an error class for failing queries\n");
 	printf(" --debug                            Include debug-level log messages (including full queries) in server output\n");
 	printf(" --verbose                     		Run in verbose mode\n");
 	printf(" --help                        		Display this help and exit\n");
@@ -147,7 +146,6 @@ parse_arguments(int argc, char *argv[])
 		.cache_dir = NULL,
 		.extensions_dir = NULL,
 		.no_extension_install = false,
-		.no_log_engine_errors = false,
 		.debug = false,
 	};
 	int			opt;
@@ -169,7 +167,6 @@ parse_arguments(int argc, char *argv[])
 		{"cache_dir", required_argument, NULL, 'C'},
 		{"extensions_dir", required_argument, NULL, 'E'},
 		{"no_extension_install", no_argument, NULL, 'n'},
-		{"no_log_engine_errors", no_argument, NULL, 'e'},
 		{"init_file_path", required_argument, NULL, 'i'},
 		{"pidfile", required_argument, NULL, 'p'},
 		{"debug", no_argument, NULL, 'd'},
@@ -235,9 +232,6 @@ parse_arguments(int argc, char *argv[])
 				break;
 			case 'n':
 				options.no_extension_install = true;
-				break;
-			case 'e':
-				options.no_log_engine_errors = true;
 				break;
 			case 'P':
 				{
@@ -325,9 +319,6 @@ parse_arguments(int argc, char *argv[])
 
 	if (options.no_extension_install)
 		PGDUCK_SERVER_LOG("Using local extension binaries only");
-
-	if (options.no_log_engine_errors)
-		PGDUCK_SERVER_LOG("Engine error classification is off; no pgduck_engine_error lines will be emitted");
 
 	if (options.debug)
 		PGDUCK_SERVER_LOG("Debugging mode on; will log all queries");

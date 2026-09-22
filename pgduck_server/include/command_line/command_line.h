@@ -43,7 +43,6 @@ typedef struct
 	char	   *cache_dir;
 	char	   *extensions_dir;
 	bool		no_extension_install;
-	bool		no_log_engine_errors;
 	bool		debug;
 	char	   *init_file_path;
 	char	   *pidfile_path;

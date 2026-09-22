@@ -172,38 +172,3 @@ def test_recoverable_out_of_memory_class_is_logged():
             server.socket_path
         ), "pgduck_server stopped accepting connections after a recoverable OOM"
         assert server.process.poll() is None, "pgduck_server process exited"
-
-
-def test_no_log_engine_errors_suppresses_the_class_line():
-    """--no_log_engine_errors drops the line but not the error itself."""
-    server = _start_server(extra_args=["--no_log_engine_errors"])
-    cur = _connect().cursor()
-    with pytest.raises(psycopg2.Error) as exc_info:
-        cur.execute(f"SELECT * FROM read_parquet('{MISSING_FILE}')")
-
-    # The client still learns what went wrong; only the log line is gone.
-    assert exc_info.value.pgcode == "58030"
-
-    assert not _class_lines(
-        server
-    ), "--no_log_engine_errors still logged a classified line"
-
-
-def test_no_log_engine_errors_is_announced_at_startup():
-    """Disabling classification must be visible, since silence otherwise reads
-    as "no errors occurred" rather than "nothing is being classified".
-
-    The announcement must also stay invisible to a collector allow-listing the
-    "pgduck_engine_error: " prefix, so it carries the bare name without the
-    colon.
-    """
-    server = _start_server(extra_args=["--no_log_engine_errors"])
-    output = get_server_output(server.output_queue)
-
-    assert (
-        "Engine error classification is off" in output
-    ), f"startup did not announce the disabled classification: {output!r}"
-
-    assert (
-        ENGINE_ERROR_PREFIX not in output
-    ), f"startup line matches the collected prefix {ENGINE_ERROR_PREFIX!r}: {output!r}"

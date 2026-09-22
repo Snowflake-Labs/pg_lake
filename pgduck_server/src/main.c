@@ -63,7 +63,6 @@ main(int argc, char *argv[])
 		pgduck_log_min_messages = DEBUG1;
 
 	oom_is_fatal = !options.continue_on_oom;
-	log_engine_errors = !options.no_log_engine_errors;
 
 	/* first, make sure duckdb is accessible */
 	DuckDBStatus duckDbStatus = duckdb_global_init(options.duckdb_database_file_path,
