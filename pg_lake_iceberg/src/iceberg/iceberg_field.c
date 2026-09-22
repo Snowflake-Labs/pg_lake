@@ -79,6 +79,7 @@ typedef enum IcebergType
 	ICEBERG_TYPE_LIST,
 	ICEBERG_TYPE_MAP,
 	ICEBERG_TYPE_STRUCT,
+
 	/*
 	 * Iceberg v3 variant, surfaced as PostgreSQL JSONB when
 	 * pg_lake_engine.variant_as_jsonb is enabled.

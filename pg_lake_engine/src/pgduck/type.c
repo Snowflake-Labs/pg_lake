@@ -670,10 +670,10 @@ GetPGTypeForDuckDBTypeNameBuiltin(const char *name, int *typeMod, bool isArray)
 				/*
 				 * VARIANT is gated behind pg_lake_engine.variant_as_jsonb so
 				 * the POC's user-facing surface stays small until the user
-				 * explicitly opts in. Without this gate, any FDW
-				 * (foreign parquet, foreign iceberg via metadata.json,
-				 * managed iceberg) would silently expose VARIANT columns as
-				 * JSONB; we'd rather fail loud and force the user to opt in.
+				 * explicitly opts in. Without this gate, any FDW (foreign
+				 * parquet, foreign iceberg via metadata.json, managed
+				 * iceberg) would silently expose VARIANT columns as JSONB;
+				 * we'd rather fail loud and force the user to opt in.
 				 */
 				if (!VariantAsJsonb)
 					ereport(ERROR,

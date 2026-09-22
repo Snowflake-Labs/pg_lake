@@ -20,8 +20,10 @@
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_representation.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
+#include "utils/guc.h"
 
 /*
  * State for the TypeHasUnrepresentableLeaf probe: what to look for, and
@@ -64,6 +66,29 @@ IcebergStorageFieldForColumnType(PGType declaredType,
 	Field	   *storageField = DeepCopyField(surfaceField);
 
 	ApplyCompatibilityStorageMapping(storageField, mode);
+
+	/*
+	 * Keep the ordinary PostgreSQL surface mapping as "string", while
+	 * persisting VARIANT as a storage override. That makes the creation-time
+	 * GUC choice survive later GUC changes and lets one schema contain JSONB
+	 * columns added under both settings.
+	 */
+	PGType		baseType = declaredType;
+
+	baseType.postgresTypeOid =
+		ResolveDomainBaseTypeAndTypmod(baseType.postgresTypeOid,
+									   &baseType.postgresTypeMod);
+
+	const char *variantAsJsonb =
+		GetConfigOption("pg_lake_engine.variant_as_jsonb", false, false);
+
+	if (strcmp(variantAsJsonb, "on") == 0 &&
+		(baseType.postgresTypeOid == JSONBOID ||
+		 baseType.postgresTypeOid == JSONOID))
+	{
+		Assert(storageField->type == FIELD_TYPE_SCALAR);
+		storageField->field.scalar.typeName = pstrdup("variant");
+	}
 
 	if (surfaceFieldOut != NULL)
 		*surfaceFieldOut = surfaceField;

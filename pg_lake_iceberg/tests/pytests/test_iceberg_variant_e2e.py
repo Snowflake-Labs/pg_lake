@@ -52,7 +52,12 @@ def _read_metadata_json(s3_client, metadata_location):
 
 
 def _column_field(metadata_json, column_name):
-    schema = metadata_json["schemas"][0]
+    current_schema_id = metadata_json["current-schema-id"]
+    schema = next(
+        schema
+        for schema in metadata_json["schemas"]
+        if schema["schema-id"] == current_schema_id
+    )
     for field in schema["fields"]:
         if field["name"] == column_name:
             return field
@@ -410,3 +415,215 @@ class TestDGucOffRegression:
         # JSONB is fully reconstructable from the string-stored value.
         assert rows[0][1] == json.loads(SETUP_DOC_A)
         assert rows[1][1] == json.loads(SETUP_DOC_B)
+
+
+# ---------------------------------------------------------------------------
+# Schema evolution and GUC flips
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def compatibility_tables(pg_conn, iceberg_extension, extension, s3):
+    old_location = f"s3://{TEST_BUCKET}/test_variant_compat/old/"
+    new_location = f"s3://{TEST_BUCKET}/test_variant_compat/new/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_compat;
+
+        SET pg_lake_engine.variant_as_jsonb = off;
+        CREATE FOREIGN TABLE test_variant_compat.old_t (
+            id INT,
+            string_doc JSONB
+        ) SERVER pg_lake_iceberg OPTIONS (location '{old_location}');
+        INSERT INTO test_variant_compat.old_t
+        VALUES (1, '{SETUP_DOC_A}'::jsonb);
+
+        SET pg_lake_engine.variant_as_jsonb = on;
+        ALTER TABLE test_variant_compat.old_t ADD COLUMN variant_doc JSONB;
+        INSERT INTO test_variant_compat.old_t
+        VALUES (2, '{SETUP_DOC_B}'::jsonb, '{SETUP_DOC_A}'::jsonb);
+
+        CREATE FOREIGN TABLE test_variant_compat.new_t (
+            id INT,
+            variant_doc JSONB
+        ) SERVER pg_lake_iceberg OPTIONS (location '{new_location}');
+        INSERT INTO test_variant_compat.new_t
+        VALUES (1, '{SETUP_DOC_A}'::jsonb);
+
+        SET pg_lake_engine.variant_as_jsonb = off;
+        ALTER TABLE test_variant_compat.new_t ADD COLUMN string_doc JSONB;
+        INSERT INTO test_variant_compat.new_t
+        VALUES (2, '{SETUP_DOC_B}'::jsonb, '{SETUP_DOC_A}'::jsonb);
+
+        SET pg_lake_engine.variant_as_jsonb = on;
+        INSERT INTO test_variant_compat.old_t
+        VALUES (3, '{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb);
+
+        SET pg_lake_engine.variant_as_jsonb = off;
+        INSERT INTO test_variant_compat.new_t
+        VALUES (3, '{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata = dict(
+        run_query(
+            """
+            SELECT table_name, metadata_location
+            FROM lake_iceberg.tables
+            WHERE table_namespace = 'test_variant_compat'
+            """,
+            pg_conn,
+        )
+    )
+
+    yield metadata
+
+    run_command("DROP SCHEMA IF EXISTS test_variant_compat CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+class TestSchemaEvolutionAndGucFlips:
+    def test_old_table_keeps_string_and_adds_variant(self, compatibility_tables, s3):
+        metadata = _read_metadata_json(s3, compatibility_tables["old_t"])
+        assert _column_field(metadata, "string_doc")["type"] == "string"
+        assert _column_field(metadata, "variant_doc")["type"] == "variant"
+
+    def test_new_table_keeps_variant_and_adds_string(self, compatibility_tables, s3):
+        metadata = _read_metadata_json(s3, compatibility_tables["new_t"])
+        assert _column_field(metadata, "variant_doc")["type"] == "variant"
+        assert _column_field(metadata, "string_doc")["type"] == "string"
+
+    @pytest.mark.parametrize("guc_value", ["on", "off"])
+    def test_mixed_storage_tables_read_after_guc_flip(
+        self, compatibility_tables, pg_conn, guc_value
+    ):
+        run_command(
+            f"SET pg_lake_engine.variant_as_jsonb = {guc_value}",
+            pg_conn,
+        )
+
+        old_rows = run_query(
+            """
+            SELECT id, string_doc, variant_doc
+            FROM test_variant_compat.old_t
+            ORDER BY id
+            """,
+            pg_conn,
+        )
+        new_rows = run_query(
+            """
+            SELECT id, variant_doc, string_doc
+            FROM test_variant_compat.new_t
+            ORDER BY id
+            """,
+            pg_conn,
+        )
+
+        assert [row[0] for row in old_rows] == [1, 2, 3]
+        assert old_rows[0][1] == json.loads(SETUP_DOC_A)
+        assert old_rows[0][2] is None
+        assert old_rows[1][1] == json.loads(SETUP_DOC_B)
+        assert old_rows[1][2] == json.loads(SETUP_DOC_A)
+        assert old_rows[2][1] == json.loads(SETUP_DOC_A)
+        assert old_rows[2][2] == json.loads(SETUP_DOC_B)
+
+        assert [row[0] for row in new_rows] == [1, 2, 3]
+        assert new_rows[0][1] == json.loads(SETUP_DOC_A)
+        assert new_rows[0][2] is None
+        assert new_rows[1][1] == json.loads(SETUP_DOC_B)
+        assert new_rows[1][2] == json.loads(SETUP_DOC_A)
+        assert new_rows[2][1] == json.loads(SETUP_DOC_A)
+        assert new_rows[2][2] == json.loads(SETUP_DOC_B)
+
+
+def test_heap_jsonb_insert_select_into_variant(
+    pg_conn, iceberg_extension, extension, s3
+):
+    pg_conn.rollback()
+    location = f"s3://{TEST_BUCKET}/test_variant_scanner/target/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_scanner;
+        CREATE TABLE test_variant_scanner.source_t (id INT, doc JSONB);
+        INSERT INTO test_variant_scanner.source_t VALUES
+            (1, '{SETUP_DOC_A}'::jsonb),
+            (2, '{SETUP_DOC_B}'::jsonb);
+
+        SET pg_lake_engine.variant_as_jsonb = on;
+        CREATE FOREIGN TABLE test_variant_scanner.target_t (
+            id INT,
+            doc JSONB
+        ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+
+        SET pg_lake_engine.variant_as_jsonb = off;
+        """,
+        pg_conn,
+    )
+
+    insert_sql = """
+        INSERT INTO test_variant_scanner.target_t
+        SELECT id, doc FROM test_variant_scanner.source_t
+    """
+    run_command(insert_sql, pg_conn)
+    rows = run_query(
+        "SELECT id, doc FROM test_variant_scanner.target_t ORDER BY id",
+        pg_conn,
+    )
+    assert rows == [
+        [1, json.loads(SETUP_DOC_A)],
+        [2, json.loads(SETUP_DOC_B)],
+    ]
+
+    run_command("DROP SCHEMA test_variant_scanner CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_large_jsonb_variant_round_trip(pg_conn, iceberg_extension, extension, s3):
+    pg_conn.rollback()
+    location = f"s3://{TEST_BUCKET}/test_variant_large/target/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_large;
+        SET pg_lake_engine.variant_as_jsonb = on;
+        CREATE FOREIGN TABLE test_variant_large.target_t (
+            id INT,
+            doc JSONB
+        ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+
+        INSERT INTO test_variant_large.target_t
+        SELECT size_kb,
+               jsonb_build_object(
+                   'payload', repeat(chr(64 + size_kb / 64), size_kb * 1024),
+                   'nested', jsonb_build_object(
+                       'size_kb', size_kb,
+                       'values', to_jsonb(ARRAY[1, 2, 3, 4])
+                   )
+               )
+        FROM unnest(ARRAY[64, 512]) AS sizes(size_kb);
+        """,
+        pg_conn,
+    )
+
+    rows = run_query(
+        """
+        SELECT id,
+               length(doc->>'payload'),
+               (doc->'nested'->>'size_kb')::int,
+               jsonb_array_length(doc->'nested'->'values')
+        FROM test_variant_large.target_t
+        ORDER BY id
+        """,
+        pg_conn,
+    )
+    assert rows == [
+        [64, 64 * 1024, 64, 4],
+        [512, 512 * 1024, 512, 4],
+    ]
+
+    run_command("DROP SCHEMA test_variant_large CASCADE", pg_conn)
+    pg_conn.commit()

@@ -11,15 +11,15 @@ docs/iceberg_v3_variant_poc_+_pg_lake_plumbing.plan.md for context):
   * JSON <-> VARIANT cast round-trips losslessly. This is the data path the
     pg_lake SQL builder will rely on.
   * variant_extract / [i] return the inner value directly.
-  * ->'k' and ->>'k' are NOT bound for VARIANT in DuckDB v1.5.1: they fall
+  * ->'k' and ->>'k' are NOT bound for VARIANT in DuckDB v1.5.5: they fall
     through to JSON-extension overloads that implicit-cast VARIANT->VARCHAR
     and then choke on the resulting string. The Phase 2 patch adds VARIANT
     overloads. Until then these are pinned here as expected failures so we
     catch the day DuckDB starts handling them natively.
-  * Default parquet write of VARIANT emits only metadata + value BLOB columns;
-    shredded `typed_value` children are opt-in via a COPY (shredding {...})
-    schema. We assert the unshredded shape so we notice if a future bump
-    flips the default.
+  * Default parquet writes of VARIANT are automatically shredded in DuckDB
+    v1.5.5: metadata + value BLOB columns are accompanied by typed_value
+    children. An explicit COPY (shredding {...}) schema still controls the
+    requested typed shape.
   * `variant_extract(col, 'k') = ...` does push into READ_PARQUET as a Filter
     (not as a post-scan projection). The Filter sits on the variant value so
     without typed_value columns it can't be vector-prefiltered, but the
@@ -126,18 +126,17 @@ class TestVariantParquetRoundtrip:
 
 
 class TestProbeBWriteShape:
-    """Probe B: what does DuckDB v1.5.1 emit for VARIANT into parquet at
+    """Probe B: what does DuckDB v1.5.5 emit for VARIANT into parquet at
     default settings?
 
     Findings encoded as assertions:
-      * The column has 2 children: `metadata` (BLOB) and `value` (BLOB).
-      * No `typed_value` children -> shredding is NOT automatic.
+      * The column has metadata, value, and typed_value children.
+      * Shredding is automatic.
       * `variant_minimum_shredding_size` is a checkpoint setting and does not
-        flip parquet writes; only the explicit `COPY ... (shredding {...})`
-        option produces typed_value subcolumns.
+        disable shredding in the Parquet writer.
     """
 
-    def test_default_write_is_unshredded(self, con, variant_parquet):
+    def test_default_write_is_shredded(self, con, variant_parquet):
         rows = con.execute(
             f"""
             SELECT name, type, num_children
@@ -145,21 +144,27 @@ class TestProbeBWriteShape:
             ORDER BY column_id
             """
         ).fetchall()
-        # rows: schema root, col, metadata, value
         names = [r[0] for r in rows]
-        assert names == ["duckdb_schema", "col", "metadata", "value"]
-        # `col` is a struct of 2 children (metadata+value), nothing typed_*.
+        assert names[:5] == [
+            "duckdb_schema",
+            "col",
+            "metadata",
+            "value",
+            "typed_value",
+        ]
+        # `col` has metadata, value, and a typed_value struct.
         col_row = next(r for r in rows if r[0] == "col")
-        assert col_row[2] == 2, "default write must be unshredded (2 children)"
+        assert col_row[2] == 3
         for child in ("metadata", "value"):
             child_row = next(r for r in rows if r[0] == child)
             assert child_row[1] == "BYTE_ARRAY"
 
-    def test_lowering_threshold_does_not_enable_shredded_parquet(self, con, tmp_path):
-        """Sanity: variant_minimum_shredding_size is a checkpoint knob, not
-        a parquet writer knob. Lowering it must not produce typed_value cols."""
-        con.execute("SET variant_minimum_shredding_size = 0")
-        p = str(tmp_path / "low.parquet")
+    def test_checkpoint_threshold_does_not_disable_parquet_shredding(
+        self, con, tmp_path
+    ):
+        """The checkpoint threshold does not control Parquet writer shredding."""
+        con.execute("SET variant_minimum_shredding_size = -1")
+        p = str(tmp_path / "checkpoint_threshold_disabled.parquet")
         con.execute("CREATE TEMP TABLE t2 (col VARIANT)")
         for i in range(50):
             con.execute(
@@ -171,15 +176,11 @@ class TestProbeBWriteShape:
             r[0]
             for r in con.execute(f"SELECT name FROM parquet_schema('{p}')").fetchall()
         ]
-        assert (
-            "typed_value" not in names
-        ), "If this fails, DuckDB started auto-shredding; revisit the plan."
+        assert "typed_value" in names
         con.execute("RESET variant_minimum_shredding_size")
 
-    def test_explicit_shredding_option_produces_typed_value(self, con, tmp_path):
-        """Pinning down the OPT-IN path: with an explicit shredding schema
-        the writer DOES emit typed_value children. This is the path that
-        future pg_lake versions could plug into; out of scope for this POC."""
+    def test_explicit_shredding_schema_produces_typed_value(self, con, tmp_path):
+        """An explicit schema still emits the requested typed_value shape."""
         p = str(tmp_path / "shredded.parquet")
         con.execute(
             f"""

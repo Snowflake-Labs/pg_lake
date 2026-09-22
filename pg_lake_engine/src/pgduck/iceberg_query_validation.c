@@ -1266,6 +1266,28 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 		}
 	}
 
+	/*
+	 * Iceberg VARIANT is a storage encoding of PostgreSQL json/jsonb. Drive
+	 * this cast from the persisted field type, not the current GUC: the GUC
+	 * decides the field type at CREATE TABLE / ADD COLUMN time, while later
+	 * writes must keep honoring that choice after the setting changes.
+	 *
+	 * This also covers pushed-down INSERT .. SELECT. postgres_scanner exposes
+	 * jsonb as VARCHAR after removing PostgreSQL's binary jsonb version byte,
+	 * so normalize every source through VARCHAR -> JSON -> VARIANT.
+	 */
+	if ((rewriteKinds & ICEBERG_REWRITE_STORAGE_CAST) &&
+		(typeOid == JSONBOID || typeOid == JSONOID) &&
+		storageField != NULL &&
+		storageField->type == FIELD_TYPE_SCALAR &&
+		strcmp(storageField->field.scalar.typeName, "variant") == 0)
+	{
+		appendStringInfo(buf,
+						 "CAST(CAST(CAST(%s AS VARCHAR) AS JSON) AS VARIANT)",
+						 expr);
+		return true;
+	}
+
 	/* scalar leaf: surface -> storage cast */
 	if ((rewriteKinds & ICEBERG_REWRITE_STORAGE_CAST) &&
 		ScalarLeafStorageDiverges(storageField, typeOid, typmod))

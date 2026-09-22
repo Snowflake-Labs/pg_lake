@@ -88,11 +88,12 @@ typedef enum DuckDBType
 	DUCKDB_TYPE_TIMESTAMP_TZ,
 	/* json extension */
 	DUCKDB_TYPE_JSON,
+
 	/*
 	 * VARIANT logical type (DuckDB v1.5+). pg_lake exposes this as JSONB on
 	 * the PG side, gated by pg_lake_engine.variant_as_jsonb.
 	 *
-	 * Note: DuckDB v1.5.1's C API enum (`duckdb_type` in duckdb.h) does NOT
+	 * Note: DuckDB v1.5.5's C API enum (`duckdb_type` in duckdb.h) does NOT
 	 * yet expose VARIANT; only the C++ LogicalTypeId does. We carry our own
 	 * enum value here purely for name-based reverse lookup
 	 * (GetOrCreatePGTypeForDuckDBTypeName) and for forward planning hints

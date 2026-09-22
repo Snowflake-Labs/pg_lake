@@ -236,13 +236,24 @@ ApplyStorageOverrideToField(Field * field, int fieldId, List *overrides)
 
 					if (override->fieldId == fieldId)
 					{
-						int			dummy = fieldId;
-						Field	   *storageField =
-							PostgresTypeToIcebergField(override->storagePgType,
-													   false, &dummy);
+						/*
+						 * VARIANT and its JSONB surface share a PostgreSQL
+						 * type OID. The presence of an override row is the
+						 * discriminator; no ordinary JSONB->JSONB override is
+						 * ever recorded.
+						 */
+						if (override->storagePgType.postgresTypeOid == JSONBOID)
+							field->field.scalar.typeName = pstrdup("variant");
+						else
+						{
+							int			dummy = fieldId;
+							Field	   *storageField =
+								PostgresTypeToIcebergField(override->storagePgType,
+														   false, &dummy);
 
-						field->field.scalar.typeName =
-							pstrdup(storageField->field.scalar.typeName);
+							field->field.scalar.typeName =
+								pstrdup(storageField->field.scalar.typeName);
+						}
 						break;
 					}
 				}
@@ -692,7 +703,8 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 					 "SELECT field_id, "
 					 "COALESCE(field_storage_pg_type, field_pg_type), "
 					 "COALESCE(field_storage_pg_typemod, field_pg_typemod), "
-					 "field_pg_type, field_pg_typemod, level "
+					 "field_pg_type, field_pg_typemod, level, "
+					 "field_storage_pg_type IS NOT NULL "
 					 "FROM field_hierarchy fh "
 					 "WHERE NOT EXISTS ("
 	/* If a field never appears as a parent, it's a leaf */
@@ -734,6 +746,7 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 		Oid			surfaceTypeOid = GET_SPI_VALUE(OIDOID, rowIndex, 4, &isNull);
 		int32		surfaceTypmod = GET_SPI_VALUE(INT4OID, rowIndex, 5, &isNull);
 		int32		level = GET_SPI_VALUE(INT4OID, rowIndex, 6, &isNull);
+		bool		hasStorageOverride = GET_SPI_VALUE(BOOLOID, rowIndex, 7, &isNull);
 
 		/* the iceberg leaf field reflects the storage type (e.g. string) */
 		PGType		storagePgType = MakePGType(storageTypeOid, storageTypmod);
@@ -746,6 +759,9 @@ GetLeafFieldsForInternalIcebergTable(Oid relationId)
 		Field	   *field = PostgresTypeToIcebergField(storagePgType, forAddColumn, &subFieldIndex);
 
 		Assert(field != NULL && field->type == FIELD_TYPE_SCALAR);
+
+		if (hasStorageOverride && storageTypeOid == JSONBOID)
+			field->field.scalar.typeName = pstrdup("variant");
 
 		LeafField  *leafField = palloc0(sizeof(LeafField));
 

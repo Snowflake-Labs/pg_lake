@@ -1798,16 +1798,16 @@ BuildColumnProjection(char *columnName,
 	/*
 	 * VARIANT (DuckDB v1.5+) cannot be transmitted directly over the
 	 * pgduck_server wire protocol because duckdb.h's `duckdb_type` enum
-	 * doesn't yet expose VARIANT, so the type-info lookup returns INVALID
-	 * and serialization aborts. Cast to JSON in DuckDB so the value reaches
-	 * pgduck_server as a JSON-typed text scalar, which is in the wire
-	 * mapping table.
+	 * doesn't yet expose VARIANT, so the type-info lookup returns INVALID and
+	 * serialization aborts. Cast to JSON in DuckDB so the value reaches
+	 * pgduck_server as a JSON-typed text scalar, which is in the wire mapping
+	 * table.
 	 *
 	 * Triggered on PG-side JSONB (DUCKDB_TYPE_JSON) for iceberg + parquet
-	 * sources, gated on pg_lake_engine.variant_as_jsonb. The cast is a
-	 * no-op for sources that already produce JSON / VARCHAR JSON-text, and
-	 * the only path that produces a true VARIANT column is the variant
-	 * write path, which is itself GUC-gated.
+	 * sources, gated on pg_lake_engine.variant_as_jsonb. The cast is a no-op
+	 * for sources that already produce JSON / VARCHAR JSON-text, and the only
+	 * path that produces a true VARIANT column is the variant write path,
+	 * which is itself GUC-gated.
 	 */
 	if (engineType.typeId == DUCKDB_TYPE_JSON &&
 		!engineType.isArrayType &&

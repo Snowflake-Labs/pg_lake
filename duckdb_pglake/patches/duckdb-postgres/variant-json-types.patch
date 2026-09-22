@@ -1,0 +1,27 @@
+Expose PostgreSQL json as DuckDB JSON and normalize jsonb as VARCHAR.
+
+JSON remains a VARCHAR-backed DuckDB JSON vector. jsonb is cast to VARCHAR by
+PostgreSQL before COPY because its binary representation is not JSON text.
+Iceberg's target-side rewrite parses that normalized text as JSON before
+casting it to VARIANT.
+
+diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
+--- a/src/postgres_utils.cpp
++++ b/src/postgres_utils.cpp
+@@ -263,11 +263,13 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+ 	} else if (pgtypename == "char" || pgtypename == "bpchar") {
+ 		postgres_type.info = PostgresTypeAnnotation::FIXED_LENGTH_CHAR;
+ 		return LogicalType::VARCHAR;
+-	} else if (pgtypename == "varchar" || pgtypename == "text" || pgtypename == "json") {
+-		return LogicalType::VARCHAR;
++	} else if (pgtypename == "varchar" || pgtypename == "text") {
++		return LogicalType::VARCHAR;
++	} else if (pgtypename == "json") {
++		return LogicalType::JSON();
+ 	} else if (pgtypename == "jsonb") {
+-		postgres_type.info = PostgresTypeAnnotation::JSONB;
++		postgres_type.info = PostgresTypeAnnotation::CAST_TO_VARCHAR;
+ 		return LogicalType::VARCHAR;
+ 	} else if (pgtypename == "geometry") {
+ 		postgres_type.info = PostgresTypeAnnotation::POSTGIS_GEOMETRY;
+ 		return GetGeometryType();
