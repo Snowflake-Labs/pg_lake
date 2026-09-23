@@ -23,6 +23,8 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
+
+#include "catalog/pg_type_d.h"
 #include "utils/guc.h"
 
 /*
