@@ -172,3 +172,32 @@ def test_recoverable_out_of_memory_class_is_logged():
             server.socket_path
         ), "pgduck_server stopped accepting connections after a recoverable OOM"
         assert server.process.poll() is None, "pgduck_server process exited"
+
+
+# Distinctive so a leak on the classified line cannot be a coincidence.
+SECRET_KEY_ID = "leaky-key-id-9f3c1d"
+SECRET_SECRET = "leaky-secret-9f3c1d"
+SECRET_TOKEN = "leaky-session-token-9f3c1d"
+
+
+def test_failed_create_secret_class_line_does_not_carry_credentials():
+    """A bad CREATE SECRET still logs a class, without KEY_ID/SECRET/token."""
+    server = _start_server()
+    cur = _connect().cursor()
+    with pytest.raises(psycopg2.Error):
+        cur.execute(
+            "CREATE SECRET leak_probe_9f3c1d ("
+            "TYPE NOT_A_SECRET_TYPE, "
+            f"KEY_ID '{SECRET_KEY_ID}', "
+            f"SECRET '{SECRET_SECRET}', "
+            f"SESSION_TOKEN '{SECRET_TOKEN}'"
+            ")"
+        )
+
+    _assert_class(
+        server,
+        "invalid_input",
+        SECRET_KEY_ID,
+        SECRET_SECRET,
+        SECRET_TOKEN,
+    )
