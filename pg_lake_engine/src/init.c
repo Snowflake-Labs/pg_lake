@@ -82,6 +82,13 @@ char	   *PgLakeAllowedAzureHostSuffixes = NULL;
  * The write side only consults this GUC when the column is created; the
  * resulting type is persisted as a storage override, so later flips do not
  * change how existing columns are read or written.
+ *
+ * Known deviation from the Iceberg spec: `variant` is a format-version 3
+ * type, but tables written here stay at format-version 2. The resulting
+ * metadata is therefore not spec-compliant and another engine may reject or
+ * misread it, so these tables should be treated as pg_lake-only for now.
+ * Emitting format-version 3 is deliberately left out of the POC because it
+ * pulls in the rest of the v3 surface (deletion vectors above all).
  */
 bool		EnableVariantType = false;
 
@@ -173,9 +180,14 @@ _PG_init(void)
 										  "column on the read path raises an error so the "
 										  "POC surface area stays narrow. Only consulted "
 										  "when a column is created; the chosen storage "
-										  "type is persisted per column. This is a POC "
-										  "switch; the long-term plan is to drive the same "
-										  "behavior off Iceberg format-version=3 detection."),
+										  "type is persisted per column. WARNING: `variant` "
+										  "is a format-version 3 Iceberg type but these "
+										  "tables stay at format-version 2, so the metadata "
+										  "is not spec-compliant and other engines may "
+										  "reject or misread it; treat such tables as "
+										  "pg_lake-only. This is a POC switch; the long-term "
+										  "plan is to drive the same behavior off Iceberg "
+										  "format-version=3 detection."),
 							 &EnableVariantType,
 							 false,
 							 PGC_USERSET,

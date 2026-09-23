@@ -1,6 +1,22 @@
 """
 Phase 3 end-to-end coverage for the Iceberg V3 Variant POC.
 
+KNOWN SPEC DEVIATION
+--------------------
+`variant` is an Iceberg format-version 3 type, but these tables are written at
+format-version 2 (asserted by test_format_version_remains_v2). The metadata is
+therefore not spec-compliant: another engine is entitled to reject or misread
+it, so a table with a variant column is pg_lake-only for now. Emitting v3 is
+out of scope for the POC because it pulls in the rest of the v3 surface,
+deletion vectors above all.
+
+This also means cross-engine interop is untestable here today, on two counts:
+the suite pins iceberg-spark-runtime 1.4.3 on Spark 3.5 and pyiceberg 0.10.0,
+neither of which can write variant (upstream needs Iceberg 1.10+ on Spark 4.0),
+and our v2 tables would be rejected on the version alone. Every assertion below
+is consequently pg_lake-against-itself, most usefully by comparing a
+variant-backed table against a string-backed one holding identical data.
+
 Four scenarios (mirroring the user's three asks plus a regression):
 
   Test A - managed iceberg: CREATE FOREIGN TABLE ... SERVER pg_lake_iceberg
@@ -156,8 +172,11 @@ class TestAManagedIceberg:
 
     def test_format_version_remains_v2(self, variant_managed_table, s3):
         """POC invariant: format-version stays 2 even with variant columns.
-        This is what makes the manifest non-spec-compliant for external
-        readers like Spark, but keeps pg_lake's read/write surface narrow."""
+
+        `variant` is a v3 type, so this metadata is deliberately outside the
+        Iceberg spec -- external readers are entitled to reject it. The trade
+        is that pg_lake avoids taking on the rest of v3 (deletion vectors in
+        particular) just to name a column type. See the module docstring."""
         meta = _read_metadata_json(s3, variant_managed_table["metadata_location"])
         assert meta["format-version"] == 2
 
