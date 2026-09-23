@@ -66,9 +66,10 @@ public:
 
 	/*
 	 * RemoveFiles deletes many files in as few requests as possible: for S3 it
-	 * batches keys into DeleteObjects requests (up to 1000 keys each), resolving
-	 * the region once per bucket. Paths that carry their own region or endpoint,
-	 * and non-S3 paths, fall back to per-file RemoveFile.
+	 * batches keys into DeleteObjects requests (up to 1000 keys each), one batch
+	 * per bucket and set of credentials, resolving the region once per batch.
+	 * Paths that carry their own region or endpoint, and non-S3 paths, fall back
+	 * to per-file RemoveFile.
 	 */
 	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener);
 

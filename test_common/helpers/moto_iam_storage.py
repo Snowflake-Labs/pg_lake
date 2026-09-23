@@ -228,6 +228,31 @@ class MotoEnforcingServer:
             )
         return self._create_user(name, statements)
 
+    def create_bucket_user(self, name):
+        """Create a user that can do anything inside the test bucket.
+
+        Unlike ``create_scoped_user``, this one can batch-delete: moto
+        authorizes a DeleteObjects request against the bucket itself
+        (``arn:aws:s3:::<bucket>``, in ``_bucket_response_post``) before
+        it checks the individual keys, so a user whose object rights
+        stop at a prefix is refused the whole request.  A test about
+        *which* credential a request carries needs one that is not
+        refused for that other reason.
+        """
+        return self._create_user(
+            name,
+            [
+                {
+                    "Effect": "Allow",
+                    "Action": "s3:*",
+                    "Resource": [
+                        f"arn:aws:s3:::{self.bucket}",
+                        f"arn:aws:s3:::{self.bucket}/*",
+                    ],
+                }
+            ],
+        )
+
     # -- teardown ----------------------------------------------------------
 
     def stop(self):

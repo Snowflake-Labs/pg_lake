@@ -269,6 +269,11 @@ ExtractXmlElementText(const string &xml, const string &tag)
  * POST targets /?delete, and every key must live in that bucket. The caller is
  * responsible for keeping the range within S3_DELETE_OBJECTS_MAX_KEYS.
  *
+ * credentialScopeUrl is the object URL the handle took its credentials from, so
+ * that a refresh looks up the same secret the request was signed with. It is not
+ * the bucket URL: a secret can be scoped to a prefix inside the bucket, and the
+ * bucket URL would then select a different one.
+ *
  * Throws on a malformed response or if S3 reports per-key <Error> entries.
  * Deleting a key that does not exist is not an error in S3, so a well-formed
  * DeleteResult that still carries an <Error> means a real failure (e.g. access
@@ -280,6 +285,7 @@ ExtractXmlElementText(const string &xml, const string &tag)
  */
 static void
 PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
+				  const string &credentialScopeUrl,
 				  const vector<string> &keys, idx_t begin, idx_t end)
 {
 	/*
@@ -297,8 +303,9 @@ PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
 
 	/* Perform the batch deletion */
 	unique_ptr<HTTPResponse> postResponse =
-		fs.PostRequest(*s3Handle->http_input, s3Handle->path, {}, responseBuffer,
-					   (char *) body.c_str(), body.length(), "delete=");
+		fs.PostRequestForCredentialScope(*s3Handle->http_input, s3Handle->path,
+										 credentialScopeUrl, responseBuffer,
+										 (char *) body.c_str(), body.length(), "delete=");
 
 	/* Body of the POST response */
 	const string &result = responseBuffer;
@@ -397,7 +404,7 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
 	/* Change the file handle to / to POST to /?delete */
 	s3Handle->path = bucketUrl + "/";
 
-	PostDeleteObjects(*this, s3Handle, keys, 0, keys.size());
+	PostDeleteObjects(*this, s3Handle, path, keys, 0, keys.size());
 
 	/*
 	 * Remove the file from HTTP metadata cache now that it has been deleted.
@@ -419,14 +426,16 @@ PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opene
  * per request. It is the bulk counterpart of RemoveFileFromS3 and is meant for
  * removing a whole prefix's worth of objects (e.g. a dropped Iceberg table).
  *
- * The request goes to bucketUrl, which is the only URL involved: the keys
- * travel in the request body. So bucketUrl is the one that has to carry the
- * query arguments the request needs, region included, and the paths can be
- * plain s3:// URLs. RegionAwareS3FileSystem::RemoveFiles groups them by bucket
- * and resolves the region.
+ * The request itself goes to the bucket URL, which is the only URL involved:
+ * the keys travel in the request body. Its credentials, on the other hand, are
+ * the ones an object under that bucket resolves to, since a secret can be scoped
+ * to a prefix rather than to the whole bucket. resolvedFirstPath is paths[0] with
+ * the query arguments the request needs, region included, so it stands in for
+ * both: RegionAwareS3FileSystem::RemoveFiles resolves the region on it and
+ * guarantees that every path in paths resolves to the same credentials.
  */
 void
-PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
+PgLakeS3FileSystem::RemoveFilesFromS3(const string &resolvedFirstPath,
 									  const vector<string> &paths,
 									  optional_ptr<FileOpener> opener)
 {
@@ -437,14 +446,15 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
 
 	/*
 	 * Read the auth parameters once instead of per path: ReadFrom does a dozen
-	 * secret manager and setting lookups, all paths are in the same bucket, and
-	 * the only field the bucket/key split reads is s3_url_compatibility_mode.
+	 * secret manager and setting lookups, the caller has grouped the paths so
+	 * that they all resolve to the same ones, and the only field the bucket/key
+	 * split reads is s3_url_compatibility_mode.
 	 */
-	FileOpenerInfo s3UrlInfo = {bucketUrl};
+	FileOpenerInfo s3UrlInfo = {resolvedFirstPath};
 	S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
 
-	ParsedS3Url parsedBucketUrl = S3UrlParse(bucketUrl, authParams);
-	string bareBucketUrl = parsedBucketUrl.prefix + parsedBucketUrl.bucket;
+	ParsedS3Url parsedFirstPath = S3UrlParse(resolvedFirstPath, authParams);
+	string bareBucketUrl = parsedFirstPath.prefix + parsedFirstPath.bucket;
 
 	vector<string> keys;
 
@@ -463,15 +473,15 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
 
 	/*
 	 * Build one POST-capable handle and reuse it for every batch. It comes from
-	 * the bucket URL, which is where the request goes and which carries the
-	 * region the caller resolved.
+	 * the first path, which selects the secret that authorizes the deletion and
+	 * carries the region the caller resolved.
 	 *
 	 * CreateHandle rather than OpenFile: we only need the auth and HTTP
 	 * parameters, and OpenFile would additionally HEAD the URL, which costs a
-	 * round trip and, on a bucket URL, has nothing to report anyway.
+	 * round trip and fails outright on an object that is already gone.
 	 */
 	unique_ptr<HTTPFileHandle> fileHandle =
-		CreateHandle(bucketUrl, FileFlags::FILE_FLAGS_READ, opener);
+		CreateHandle(resolvedFirstPath, FileFlags::FILE_FLAGS_READ, opener);
 
 	S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
 
@@ -490,9 +500,9 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
 	 * query string on the key.
 	 */
 	string querySuffix;
-	auto queryPos = bucketUrl.find('?');
+	auto queryPos = resolvedFirstPath.find('?');
 	if (queryPos != string::npos)
-		querySuffix = bucketUrl.substr(queryPos);
+		querySuffix = resolvedFirstPath.substr(queryPos);
 
 	auto evictBatch = [&](idx_t begin, idx_t end) {
 		for (idx_t i = begin; i < end; i++)
@@ -527,7 +537,7 @@ PgLakeS3FileSystem::RemoveFilesFromS3(const string &bucketUrl,
 		 */
 		evictBatch(begin, end);
 
-		PostDeleteObjects(*this, s3Handle, keys, begin, end);
+		PostDeleteObjects(*this, s3Handle, resolvedFirstPath, keys, begin, end);
 
 		evictBatch(begin, end);
 	}
@@ -830,6 +840,29 @@ PgLakeS3FileSystem::PostRequest(HTTPInput &input, string url, HTTPHeaders header
                                  string &buffer_out,
                                  char *buffer_in, idx_t buffer_in_len, string http_params)
 {
+	return PostRequestForCredentialScope(input, url, url, buffer_out, buffer_in, buffer_in_len,
+										 http_params);
+}
+
+
+/*
+ * PostRequestForCredentialScope is PostRequest with the URL that a credential
+ * refresh looks the secret up by given separately from the URL the request goes
+ * to. They are the same URL for every caller but DeleteObjects, whose request
+ * goes to the bucket while its credentials belong to the objects being deleted:
+ * DuckDB selects a secret by longest matching URL prefix, so refreshing on the
+ * bucket URL could pick up a different secret than the one the request was
+ * signed with and replace working credentials with credentials for another scope.
+ *
+ * header_map is absent because the copied upstream body ignores it: the headers
+ * are built from scratch below in order to sign them.
+ */
+unique_ptr<HTTPResponse>
+PgLakeS3FileSystem::PostRequestForCredentialScope(HTTPInput &input, string url,
+												  const string &credentialScopeUrl,
+												  string &buffer_out, char *buffer_in,
+												  idx_t buffer_in_len, string http_params)
+{
 	auto &s3_input = input.Cast<S3HTTPInput>();
 	auto auth_params = s3_input.auth_params;
 	auto parsed_s3_url = S3UrlParse(url, auth_params);
@@ -862,7 +895,8 @@ PgLakeS3FileSystem::PostRequest(HTTPInput &input, string url, HTTPHeaders header
 	auto response = sendRequest();
 
 	/* credentials can expire in the middle of a multi-part upload */
-	if (IsAuthError(*response) && TryRefreshAuthParams(LookupContext(&input), url, auth_params))
+	if (IsAuthError(*response) &&
+		TryRefreshAuthParams(LookupContext(&input), credentialScopeUrl, auth_params))
 		response = sendRequest();
 
 	return response;

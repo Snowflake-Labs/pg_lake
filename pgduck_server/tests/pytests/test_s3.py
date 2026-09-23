@@ -532,3 +532,153 @@ def test_pg_lake_remove_file_azure(azure, pgduck_conn):
     assert list(azure.list_blobs(name_starts_with=f"{prefix}/")) == []
 
     pgduck_conn.rollback()
+
+
+def _moto_s3_secret(name, key_id, secret, server, scope):
+    return f"""
+        CREATE OR REPLACE SECRET {name} (
+            TYPE S3, KEY_ID '{key_id}', SECRET '{secret}',
+            REGION '{server.region}', ENDPOINT '{server.endpoint}',
+            SCOPE '{scope}',
+            URL_STYLE 'path', USE_SSL false
+        );
+        """
+
+
+def test_batch_delete_signs_with_the_objects_own_secret(
+    enforcing_s3_server, pgduck_conn
+):
+    """A batch delete has to be signed with the credentials its objects resolve
+    to, not with the ones the bucket resolves to.
+
+    The keys of a DeleteObjects request travel in the body of a POST to the
+    bucket, so the bucket is the only URL the request itself names. But DuckDB
+    selects a secret by longest matching URL prefix, and a secret scoped to a
+    prefix inside the bucket does not match the bucket URL -- so reading the
+    credentials from there picks up whatever covers the bucket as a whole, and
+    the delete is refused even though the caller holds a credential for exactly
+    the objects it is deleting.
+
+    The bucket-wide secret here is the one that must not be chosen: its user can
+    only reach a sibling prefix."""
+    server = enforcing_s3_server
+    prefix = "delete_objects_prefix_scope"
+    keys = [f"{prefix}/data/{name}.parquet" for name in ("a", "b", "c")]
+
+    for key in keys:
+        server.client().put_object(Bucket=server.bucket, Key=key, Body=b"x")
+
+    scoped_key_id, scoped_secret = server.create_bucket_user("delete_prefix_scoped")
+    # deliberately powerless over the objects above
+    bucket_key_id, bucket_secret = server.create_scoped_user(
+        "delete_bucket_wide", [f"{prefix}_elsewhere"], actions=("s3:DeleteObject",)
+    )
+
+    create_secrets = _moto_s3_secret(
+        "deletebucketwide",
+        bucket_key_id,
+        bucket_secret,
+        server,
+        f"s3://{server.bucket}",
+    ) + _moto_s3_secret(
+        "deleteprefixscoped",
+        scoped_key_id,
+        scoped_secret,
+        server,
+        f"s3://{server.bucket}/{prefix}",
+    )
+
+    values = ", ".join(f"('s3://{server.bucket}/{key}')" for key in keys)
+    server.enforce()
+
+    try:
+        perform_query(create_secrets, pgduck_conn)
+        results = run_query(
+            f"SELECT count(*) AS removed FROM (VALUES {values}) removals(path) "
+            "WHERE pg_lake_remove_file(path)",
+            pgduck_conn,
+        )
+        assert results[0]["removed"] == len(keys)
+        assert list_objects(server.client(), server.bucket, prefix) == []
+    finally:
+        pgduck_conn.rollback()
+        server.relax()
+        perform_query(
+            "DROP SECRET IF EXISTS deletebucketwide; "
+            "DROP SECRET IF EXISTS deleteprefixscoped",
+            pgduck_conn,
+        )
+        pgduck_conn.rollback()
+
+
+def test_batch_delete_does_not_share_one_secret_across_scopes(
+    enforcing_s3_server, pgduck_conn
+):
+    """One bucket can hold several prefixes with a secret of their own, so the
+    first object's secret is not necessarily the right one for the whole set: a
+    request only carries one signature, which means one request per credential.
+
+    The second prefix's secret here names a key that is not a principal at all,
+    so a request signed with it is refused. If both prefixes went out in one
+    request, signed from whichever object came first, that refusal would never
+    happen and the second prefix's objects would be deleted with the first
+    prefix's credentials."""
+    server = enforcing_s3_server
+    prefix = "delete_objects_two_scopes"
+    known_keys = [f"{prefix}/known/{name}.parquet" for name in ("a", "b")]
+    unknown_keys = [f"{prefix}/unknown/{name}.parquet" for name in ("a", "b")]
+
+    for key in known_keys + unknown_keys:
+        server.client().put_object(Bucket=server.bucket, Key=key, Body=b"x")
+
+    known_key_id, known_secret = server.create_bucket_user("delete_known_scope")
+
+    create_secrets = _moto_s3_secret(
+        "deleteknownscope",
+        known_key_id,
+        known_secret,
+        server,
+        f"s3://{server.bucket}/{prefix}/known",
+    ) + _moto_s3_secret(
+        "deleteunknownscope",
+        "AKIAUNKNOWNPRINCIPAL",
+        "no-such-secret",
+        server,
+        f"s3://{server.bucket}/{prefix}/unknown",
+    )
+
+    values = ", ".join(
+        f"('s3://{server.bucket}/{key}')" for key in known_keys + unknown_keys
+    )
+    server.enforce()
+
+    try:
+        perform_query(create_secrets, pgduck_conn)
+        error = run_command(
+            f"SELECT count(*) FROM (VALUES {values}) removals(path) "
+            "WHERE pg_lake_remove_file(path)",
+            pgduck_conn,
+            raise_error=False,
+        )
+        pgduck_conn.rollback()
+
+        assert error is not None, "the unknown principal's batch was not refused"
+        # moto rejects the signature of a list whose Prefix contains a slash,
+        # so list the whole prefix and split the keys here
+        remaining = list_objects(server.client(), server.bucket, prefix)
+
+        # the refused batch's objects are still there: they were never part of a
+        # request signed with the other prefix's credentials
+        assert set(unknown_keys) <= set(remaining), f"deleted anyway: {remaining}"
+
+        # and the batch whose credentials do work went through. Batches go out in
+        # path order, so that one ran before the refusal ended the statement.
+        assert set(known_keys).isdisjoint(remaining), f"not deleted: {remaining}"
+    finally:
+        server.relax()
+        perform_query(
+            "DROP SECRET IF EXISTS deleteknownscope; "
+            "DROP SECRET IF EXISTS deleteunknownscope",
+            pgduck_conn,
+        )
+        pgduck_conn.rollback()
