@@ -582,6 +582,61 @@ def test_heap_jsonb_insert_select_into_variant(
     pg_conn.commit()
 
 
+def test_json_surface_type_also_stores_variant(
+    pg_conn, iceberg_extension, extension, s3
+):
+    """The storage override is keyed on the variant storage type, which is
+    JSONB for both surface types, so a `json` column must behave like `jsonb`."""
+    pg_conn.rollback()
+    location = f"s3://{TEST_BUCKET}/test_variant_json_surface/target/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_json_surface;
+        SET pg_lake_engine.variant_as_jsonb = on;
+        CREATE FOREIGN TABLE test_variant_json_surface.target_t (
+            id INT,
+            doc JSON
+        ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+
+        INSERT INTO test_variant_json_surface.target_t VALUES
+            (1, '{SETUP_DOC_A}'::json),
+            (2, '{SETUP_DOC_B}'::json);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        """
+        SELECT metadata_location FROM lake_iceberg.tables
+        WHERE table_namespace = 'test_variant_json_surface'
+          AND table_name = 'target_t'
+        """,
+        pg_conn,
+    )[0][0]
+    assert (
+        _column_field(_read_metadata_json(s3, metadata_location), "doc")["type"]
+        == "variant"
+    )
+
+    rows = run_query(
+        """
+        SELECT id, doc::jsonb, doc->>'label'
+        FROM test_variant_json_surface.target_t
+        ORDER BY id
+        """,
+        pg_conn,
+    )
+    assert rows == [
+        [1, json.loads(SETUP_DOC_A), "alpha"],
+        [2, json.loads(SETUP_DOC_B), "beta"],
+    ]
+
+    run_command("DROP SCHEMA test_variant_json_surface CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_large_jsonb_variant_round_trip(pg_conn, iceberg_extension, extension, s3):
     pg_conn.rollback()
     location = f"s3://{TEST_BUCKET}/test_variant_large/target/"

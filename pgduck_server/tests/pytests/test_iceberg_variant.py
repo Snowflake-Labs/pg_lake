@@ -100,6 +100,35 @@ class TestVariantCastRoundtrip:
         ).fetchall()
         assert r[0][0] == 1
 
+    def test_varchar_to_variant_does_not_parse_json(self, con):
+        """Casting JSON text straight to VARIANT wraps it as a single string
+        scalar instead of an object: variant_extract finds no keys and the
+        JSON rendering is a quoted string. This is why the write rewrite
+        cannot go VARCHAR -> VARIANT directly."""
+        r = con.execute(
+            f"""
+            SELECT variant_extract(v, 'a'), CAST(v AS JSON)
+            FROM (SELECT CAST(CAST('{JSON_DOC_A}' AS VARCHAR) AS VARIANT) AS v)
+            """
+        ).fetchall()
+        assert r[0][0] is None
+        assert json.loads(r[0][1]) == JSON_DOC_A
+
+    def test_varchar_via_json_to_variant_parses_structure(self, con):
+        """The interposed JSON cast is what turns the text into a structured
+        VARIANT. This is the exact chain the iceberg write rewrite emits."""
+        r = con.execute(
+            f"""
+            SELECT variant_extract(v, 'a'), CAST(v AS JSON)
+            FROM (
+                SELECT CAST(CAST(CAST('{JSON_DOC_A}' AS VARCHAR) AS JSON)
+                            AS VARIANT) AS v
+            )
+            """
+        ).fetchall()
+        assert r[0][0] == 1
+        assert json.loads(r[0][1]) == json.loads(JSON_DOC_A)
+
 
 class TestVariantParquetRoundtrip:
     """Phase 1 end-to-end on the parquet boundary, mirroring what the iceberg
