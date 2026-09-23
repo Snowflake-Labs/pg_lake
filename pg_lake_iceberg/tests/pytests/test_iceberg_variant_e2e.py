@@ -692,7 +692,7 @@ def test_invalid_jsonb_storage_option_is_rejected(
             CREATE FOREIGN TABLE public.bad_jsonb_storage (id INT, doc JSONB)
                 SERVER pg_lake_iceberg
                 OPTIONS (location 's3://{TEST_BUCKET}/test_variant_bad/',
-                         jsonb_storage 'varient');
+                         jsonb_storage 'binary');
             """,
             pg_conn,
         )
