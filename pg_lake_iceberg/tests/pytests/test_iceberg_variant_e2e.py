@@ -1007,6 +1007,97 @@ def test_update_and_delete_on_variant_column(pg_conn, iceberg_extension, extensi
     pg_conn.commit()
 
 
+def test_ctas_into_iceberg_uses_variant(pg_conn, iceberg_extension, extension, s3):
+    """CREATE TABLE ... USING iceberg AS SELECT from a heap jsonb column picks
+    up VARIANT storage the same way an explicit column list does."""
+    pg_conn.rollback()
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_ctas;
+        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_iceberg.default_location_prefix
+            TO 's3://{TEST_BUCKET}/test_variant_ctas/out';
+
+        CREATE TABLE test_variant_ctas.heap_t (id INT, doc JSONB);
+        INSERT INTO test_variant_ctas.heap_t VALUES
+            (1, '{SETUP_DOC_A}'::jsonb),
+            (2, '{SETUP_DOC_B}'::jsonb);
+
+        CREATE TABLE test_variant_ctas.target_t USING iceberg AS
+            SELECT * FROM test_variant_ctas.heap_t;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        """
+        SELECT metadata_location FROM lake_iceberg.tables
+        WHERE table_namespace = 'test_variant_ctas' AND table_name = 'target_t'
+        """,
+        pg_conn,
+    )[0][0]
+    assert (
+        _column_field(_read_metadata_json(s3, metadata_location), "doc")["type"]
+        == "variant"
+    )
+
+    assert run_query(
+        "SELECT id, doc FROM test_variant_ctas.target_t ORDER BY id", pg_conn
+    ) == [[1, json.loads(SETUP_DOC_A)], [2, json.loads(SETUP_DOC_B)]]
+
+    run_command("DROP SCHEMA test_variant_ctas CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_jsonb_inside_struct_keeps_string_storage(
+    pg_conn, iceberg_extension, extension, s3
+):
+    """VARIANT is only chosen for a top-level jsonb column, so a jsonb field
+    inside a composite keeps string storage and still round-trips."""
+    pg_conn.rollback()
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_struct;
+        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_iceberg.default_location_prefix
+            TO 's3://{TEST_BUCKET}/test_variant_struct/out';
+
+        CREATE TYPE test_variant_struct.wrapper AS (tag TEXT, doc JSONB);
+        CREATE TABLE test_variant_struct.target_t (
+            id INT,
+            w test_variant_struct.wrapper
+        ) USING iceberg;
+        INSERT INTO test_variant_struct.target_t VALUES
+            (1, ROW('x', '{SETUP_DOC_A}'::jsonb)::test_variant_struct.wrapper);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        """
+        SELECT metadata_location FROM lake_iceberg.tables
+        WHERE table_namespace = 'test_variant_struct' AND table_name = 'target_t'
+        """,
+        pg_conn,
+    )[0][0]
+    struct_field = _column_field(_read_metadata_json(s3, metadata_location), "w")
+    nested_doc = next(
+        field for field in struct_field["type"]["fields"] if field["name"] == "doc"
+    )
+    assert nested_doc["type"] == "string"
+
+    assert run_query(
+        "SELECT id, (w).tag, (w).doc FROM test_variant_struct.target_t", pg_conn
+    ) == [[1, "x", json.loads(SETUP_DOC_A)]]
+
+    run_command("DROP SCHEMA test_variant_struct CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_jsonb_array_column_keeps_string_storage(
     pg_conn, iceberg_extension, extension, s3
 ):
