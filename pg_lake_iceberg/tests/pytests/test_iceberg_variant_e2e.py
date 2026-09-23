@@ -131,6 +131,7 @@ def variant_managed_table(pg_conn, iceberg_extension, extension, s3):
     yield {
         "location": location,
         "metadata_location": metadata_location,
+        "relation": "test_variant_e2e.managed_t",
     }
 
     run_command(
@@ -730,6 +731,328 @@ def test_variant_jsonb_equality_is_not_pushed_down(
     )
 
     run_command("DROP SCHEMA test_variant_equality CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def _parquet_column_is_variant(pg_conn, path, probe_name):
+    """A VARIANT parquet column makes schema inference raise with the GUC off,
+    a string column does not. That is the cheapest discriminator available for
+    a bare parquet file, and it is the same signal TestBForeignParquet uses."""
+    pg_conn.rollback()
+    try:
+        run_command(
+            f"""
+            SET pg_lake_engine.enable_variant_type = off;
+            CREATE FOREIGN TABLE public.{probe_name} ()
+                SERVER pg_lake OPTIONS (path '{path}');
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+        run_command(f"DROP FOREIGN TABLE public.{probe_name}", pg_conn)
+        pg_conn.commit()
+        return False
+    except psycopg2.Error as e:
+        pg_conn.rollback()
+        assert "VARIANT" in str(e), f"unexpected inference failure: {e}"
+        return True
+
+
+def test_variant_column_preserves_sql_null(pg_conn, iceberg_extension, extension, s3):
+    """A SQL NULL must survive VARIANT storage as a SQL NULL.
+
+    DuckDB reports both a SQL NULL VARIANT and a VARIANT holding JSON `null`
+    as VARIANT_NULL, and casting either to JSON yields the text `null`, so the
+    two cannot be told apart once stored. We resolve that towards SQL NULL,
+    which means a jsonb 'null' scalar degrades to SQL NULL -- asserted here so
+    the limitation is visible rather than surprising."""
+    pg_conn.rollback()
+    location = f"s3://{TEST_BUCKET}/test_variant_null/target/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_null;
+        SET pg_lake_engine.enable_variant_type = on;
+        CREATE FOREIGN TABLE test_variant_null.target_t (
+            id INT,
+            doc JSONB
+        ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+
+        INSERT INTO test_variant_null.target_t VALUES
+            (1, '{SETUP_DOC_A}'::jsonb),
+            (2, NULL),
+            (3, 'null'::jsonb);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert run_query(
+        "SELECT id, doc IS NULL FROM test_variant_null.target_t ORDER BY id",
+        pg_conn,
+    ) == [[1, False], [2, True], [3, True]]
+
+    assert run_query(
+        "SELECT count(*) FROM test_variant_null.target_t WHERE doc IS NULL",
+        pg_conn,
+    ) == [[2]]
+
+    # the non-null document is unaffected
+    assert run_query(
+        "SELECT doc FROM test_variant_null.target_t WHERE id = 1", pg_conn
+    ) == [[json.loads(SETUP_DOC_A)]]
+
+    run_command("DROP SCHEMA test_variant_null CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_load_from_and_definition_from_variant_parquet(
+    pg_conn, variant_managed_table, s3
+):
+    """A parquet file with a VARIANT column can seed a new iceberg table
+    through either option: the column comes back as jsonb on the surface and
+    keeps `variant` storage, and load_from also carries the rows over."""
+    pg_conn.rollback()
+    source_parquet = _data_file_paths(s3, variant_managed_table["location"])[0]
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_seed;
+        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_iceberg.default_location_prefix
+            TO 's3://{TEST_BUCKET}/test_variant_seed/out';
+
+        CREATE TABLE test_variant_seed.def_t () USING iceberg
+            WITH (definition_from = '{source_parquet}');
+        CREATE TABLE test_variant_seed.load_t () USING iceberg
+            WITH (load_from = '{source_parquet}');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    for table in ("def_t", "load_t"):
+        assert (
+            run_query(
+                f"""
+            SELECT attname, atttypid::regtype::text FROM pg_attribute
+            WHERE attrelid = 'test_variant_seed.{table}'::regclass AND attnum > 0
+            ORDER BY attnum
+            """,
+                pg_conn,
+            )
+            == [["id", "integer"], ["doc", "jsonb"]]
+        )
+
+        metadata_location = run_query(
+            f"""
+            SELECT metadata_location FROM lake_iceberg.tables
+            WHERE table_namespace = 'test_variant_seed' AND table_name = '{table}'
+            """,
+            pg_conn,
+        )[0][0]
+        assert (
+            _column_field(_read_metadata_json(s3, metadata_location), "doc")["type"]
+            == "variant"
+        )
+
+    # definition_from copies the shape only, load_from brings the rows too
+    assert run_query("SELECT count(*) FROM test_variant_seed.def_t", pg_conn) == [[0]]
+    assert run_query(
+        "SELECT id, doc FROM test_variant_seed.load_t ORDER BY id", pg_conn
+    ) == [[1, json.loads(SETUP_DOC_A)], [2, json.loads(SETUP_DOC_B)]]
+
+    run_command("DROP SCHEMA test_variant_seed CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_copy_to_parquet_does_not_produce_variant(
+    pg_conn, variant_managed_table, extension, s3
+):
+    """COPY ... TO parquet writes the plain parquet type mapping, where jsonb
+    is a string. VARIANT is chosen by the iceberg storage layer, so exporting
+    either a heap table or a variant iceberg table yields string columns.
+    Pinned because an export silently changing type would be worse than the
+    current, uniform behaviour."""
+    pg_conn.rollback()
+    heap_out = f"s3://{TEST_BUCKET}/test_variant_copy/heap.parquet"
+    iceberg_out = f"s3://{TEST_BUCKET}/test_variant_copy/iceberg.parquet"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_copy;
+        SET pg_lake_engine.enable_variant_type = on;
+        CREATE TABLE test_variant_copy.heap_t (id INT, doc JSONB);
+        INSERT INTO test_variant_copy.heap_t VALUES (1, '{SETUP_DOC_A}'::jsonb);
+        COPY test_variant_copy.heap_t TO '{heap_out}';
+        COPY (SELECT * FROM {variant_managed_table["relation"]}) TO '{iceberg_out}';
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert _parquet_column_is_variant(pg_conn, heap_out, "probe_heap") is False
+    assert _parquet_column_is_variant(pg_conn, iceberg_out, "probe_iceberg") is False
+
+    run_command("DROP SCHEMA test_variant_copy CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_jsonb_operators_match_string_storage(
+    pg_conn, iceberg_extension, extension, s3
+):
+    """Every jsonb operator and function we ship must give the same answer over
+    a VARIANT-backed column as over the string-backed one. The two tables hold
+    identical data and differ only in storage."""
+    pg_conn.rollback()
+    doc_a = '{"id": 1, "label": "alpha", "tags": [1, 2], "nested": {"k": "v"}}'
+    doc_b = '{"id": 2, "label": "beta", "tags": []}'
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_ops;
+
+        SET pg_lake_engine.enable_variant_type = on;
+        CREATE FOREIGN TABLE test_variant_ops.as_variant (id INT, doc JSONB)
+            SERVER pg_lake_iceberg
+            OPTIONS (location 's3://{TEST_BUCKET}/test_variant_ops/v/');
+        INSERT INTO test_variant_ops.as_variant
+            VALUES (1, '{doc_a}'::jsonb), (2, '{doc_b}'::jsonb);
+
+        SET pg_lake_engine.enable_variant_type = off;
+        CREATE FOREIGN TABLE test_variant_ops.as_string (id INT, doc JSONB)
+            SERVER pg_lake_iceberg
+            OPTIONS (location 's3://{TEST_BUCKET}/test_variant_ops/s/');
+        INSERT INTO test_variant_ops.as_string
+            VALUES (1, '{doc_a}'::jsonb), (2, '{doc_b}'::jsonb);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    expressions = [
+        "doc->>'label'",
+        "doc->'nested'",
+        "doc->'tags'->0",
+        "doc#>>'{nested,k}'",
+        "doc#>'{nested}'",
+        "jsonb_typeof(doc)",
+        "jsonb_array_length(doc->'tags')",
+        "jsonb_extract_path_text(doc, 'label')",
+        "(doc ? 'label')",
+        "(doc ?| ARRAY['label','zzz'])",
+        "(doc @> '{\"id\": 1}'::jsonb)",
+        "('{\"id\": 1}'::jsonb <@ doc)",
+        "(doc @? '$.tags[*]')",
+        "jsonb_path_query_first(doc, '$.id')",
+        "jsonb_pretty(doc)",
+        "jsonb_strip_nulls(doc)",
+        # rendering the document as text must give PostgreSQL's canonical form,
+        # not DuckDB's minified one
+        "doc::text",
+        f"(doc = '{doc_a}'::jsonb)",
+    ]
+
+    for expression in expressions:
+        variant_rows = run_query(
+            f"SELECT {expression} FROM test_variant_ops.as_variant ORDER BY id",
+            pg_conn,
+        )
+        string_rows = run_query(
+            f"SELECT {expression} FROM test_variant_ops.as_string ORDER BY id",
+            pg_conn,
+        )
+        assert variant_rows == string_rows, f"mismatch for {expression}"
+
+    run_command("DROP SCHEMA test_variant_ops CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_update_and_delete_on_variant_column(pg_conn, iceberg_extension, extension, s3):
+    pg_conn.rollback()
+    location = f"s3://{TEST_BUCKET}/test_variant_dml/target/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_dml;
+        SET pg_lake_engine.enable_variant_type = on;
+        CREATE FOREIGN TABLE test_variant_dml.target_t (id INT, doc JSONB)
+            SERVER pg_lake_iceberg OPTIONS (location '{location}');
+        INSERT INTO test_variant_dml.target_t
+            VALUES (1, '{SETUP_DOC_A}'::jsonb), (2, '{SETUP_DOC_B}'::jsonb);
+
+        UPDATE test_variant_dml.target_t
+            SET doc = jsonb_set(doc, '{{label}}', '"updated"') WHERE id = 2;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert run_query(
+        "SELECT id, doc->>'label' FROM test_variant_dml.target_t ORDER BY id",
+        pg_conn,
+    ) == [[1, "alpha"], [2, "updated"]]
+
+    run_command(
+        "DELETE FROM test_variant_dml.target_t WHERE doc->>'label' = 'updated'",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert run_query(
+        "SELECT id FROM test_variant_dml.target_t ORDER BY id", pg_conn
+    ) == [[1]]
+
+    run_command("DROP SCHEMA test_variant_dml CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_jsonb_array_column_keeps_string_storage(
+    pg_conn, iceberg_extension, extension, s3
+):
+    """VARIANT is only chosen for a top-level jsonb column. A jsonb[] keeps the
+    list-of-string storage and reads back exactly as it does with the GUC
+    off, so turning the GUC on cannot change nested jsonb behaviour."""
+    pg_conn.rollback()
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_array;
+
+        SET pg_lake_engine.enable_variant_type = on;
+        CREATE FOREIGN TABLE test_variant_array.guc_on (id INT, docs JSONB[])
+            SERVER pg_lake_iceberg
+            OPTIONS (location 's3://{TEST_BUCKET}/test_variant_array/on/');
+        INSERT INTO test_variant_array.guc_on
+            VALUES (1, ARRAY['{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb]);
+
+        SET pg_lake_engine.enable_variant_type = off;
+        CREATE FOREIGN TABLE test_variant_array.guc_off (id INT, docs JSONB[])
+            SERVER pg_lake_iceberg
+            OPTIONS (location 's3://{TEST_BUCKET}/test_variant_array/off/');
+        INSERT INTO test_variant_array.guc_off
+            VALUES (1, ARRAY['{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb]);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    for table in ("guc_on", "guc_off"):
+        metadata_location = run_query(
+            f"""
+            SELECT metadata_location FROM lake_iceberg.tables
+            WHERE table_namespace = 'test_variant_array' AND table_name = '{table}'
+            """,
+            pg_conn,
+        )[0][0]
+        docs_field = _column_field(_read_metadata_json(s3, metadata_location), "docs")
+        assert docs_field["type"]["element"] == "string"
+
+    assert run_query(
+        "SELECT docs FROM test_variant_array.guc_on", pg_conn
+    ) == run_query("SELECT docs FROM test_variant_array.guc_off", pg_conn)
+
+    run_command("DROP SCHEMA test_variant_array CASCADE", pg_conn)
     pg_conn.commit()
 
 

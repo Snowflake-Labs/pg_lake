@@ -814,9 +814,14 @@ IsJsonEqualityOperator(Oid opno)
 
 
 /*
- * IsVariantUnsafeComparison returns true for a json/jsonb equality whose
- * operands include a VARIANT-backed column. See IsVariantBackedJsonbVar for
- * why the comparison cannot be evaluated remotely.
+ * IsVariantUnsafeComparison returns true for an expression over a
+ * VARIANT-backed column whose result depends on how the value is rendered as
+ * text: a json/jsonb equality, or a cast of the document to text. DuckDB
+ * minifies and reorders where PostgreSQL does not, so both have to be
+ * evaluated locally. See IsVariantBackedJsonbVar.
+ *
+ * Extraction, containment and key tests are unaffected -- they either return a
+ * scalar or compare structure -- and stay shippable.
  */
 bool
 IsVariantUnsafeComparison(Node *node, List *rtable)
@@ -827,20 +832,36 @@ IsVariantUnsafeComparison(Node *node, List *rtable)
 	if (node == NULL || rtable == NIL)
 		return false;
 
-	if (IsA(node, OpExpr))
+	if (IsA(node, CoerceViaIO))
 	{
-		opno = ((OpExpr *) node)->opno;
-		args = ((OpExpr *) node)->args;
+		CoerceViaIO *coerce = (CoerceViaIO *) node;
+		Oid			argType = exprType((Node *) coerce->arg);
+
+		if ((argType != JSONBOID && argType != JSONOID) ||
+			(coerce->resulttype != TEXTOID &&
+			 coerce->resulttype != VARCHAROID &&
+			 coerce->resulttype != BPCHAROID))
+			return false;
+
+		args = list_make1(coerce->arg);
 	}
-	else if (IsA(node, ScalarArrayOpExpr))
+	else if (IsA(node, OpExpr) || IsA(node, ScalarArrayOpExpr))
 	{
-		opno = ((ScalarArrayOpExpr *) node)->opno;
-		args = ((ScalarArrayOpExpr *) node)->args;
+		if (IsA(node, OpExpr))
+		{
+			opno = ((OpExpr *) node)->opno;
+			args = ((OpExpr *) node)->args;
+		}
+		else
+		{
+			opno = ((ScalarArrayOpExpr *) node)->opno;
+			args = ((ScalarArrayOpExpr *) node)->args;
+		}
+
+		if (!IsJsonEqualityOperator(opno))
+			return false;
 	}
 	else
-		return false;
-
-	if (!IsJsonEqualityOperator(opno))
 		return false;
 
 	VariantVarWalkerContext context = {.rtable = rtable,.found = false};

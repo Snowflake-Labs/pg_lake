@@ -1340,6 +1340,22 @@ BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
 	if (!TypeHasStorageDivergentLeaf(columnTypeId, columnTypeMod, storageField))
 		return NULL;
 
+	/*
+	 * Casting a SQL NULL VARIANT to JSON yields the *text* `null` rather than
+	 * NULL, so a guarded cast is the only way a missing value survives the
+	 * read as a missing value instead of a json null.
+	 */
+	if (storageField->type == FIELD_TYPE_SCALAR &&
+		storageField->field.scalar.typeName != NULL &&
+		strcmp(storageField->field.scalar.typeName, "variant") == 0)
+	{
+		char	   *quotedName = duckdb_quote_identifier(columnName);
+
+		return psprintf("CASE WHEN %s IS NULL THEN NULL "
+						"ELSE CAST(%s AS JSON) END AS %s",
+						quotedName, quotedName, quotedName);
+	}
+
 	const char *reconstruction = NULL;
 	const char *castTargetType = duckdbType.typeName;
 
@@ -1814,9 +1830,23 @@ BuildColumnProjection(char *columnName,
 		(sourceFormat == DATA_FORMAT_ICEBERG ||
 		 sourceFormat == DATA_FORMAT_PARQUET) &&
 		EnableVariantType)
-		return psprintf("CAST(%s AS JSON)%s",
-						duckdb_quote_identifier(columnName),
-						columnAliasString);
+	{
+		char	   *quotedName = duckdb_quote_identifier(columnName);
+
+		/*
+		 * Casting a SQL NULL VARIANT to JSON yields the *text* `null` rather
+		 * than NULL, which would silently turn a missing value into a json
+		 * null on the PostgreSQL side, so keep NULL out of the cast.
+		 *
+		 * The alias is unconditional here, unlike columnAliasString: a
+		 * pushed-down INSERT .. SELECT wraps this projection in a subquery
+		 * and refers to the column by name, which an unaliased expression
+		 * does not answer to.
+		 */
+		return psprintf("CASE WHEN %s IS NULL THEN NULL "
+						"ELSE CAST(%s AS JSON) END AS %s",
+						quotedName, quotedName, quotedName);
+	}
 
 	if (sourceFormat == DATA_FORMAT_LOG)
 	{

@@ -1045,6 +1045,13 @@ foreign_expr_walker(Node *node,
 				CoerceViaIO *coerceExpr = (CoerceViaIO *) node;
 
 				/*
+				 * Rendering a VARIANT-backed document as text remotely gives
+				 * DuckDB's minified form, not PostgreSQL's canonical one.
+				 */
+				if (IsVariantUnsafeComparison(node, glob_cxt->root->parse->rtable))
+					return false;
+
+				/*
 				 * Recurse to input subexpression.
 				 */
 				if (!foreign_expr_walker((Node *) coerceExpr->arg,
