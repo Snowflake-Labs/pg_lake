@@ -879,6 +879,46 @@ process_execute_message(PGSession * pgSession, StringInfo inputMessage)
 
 
 /*
+ * PGDUCK_ENGINE_ERROR_PREFIX marks log lines that carry only a canned error
+ * class, so a log collector can match on the prefix alone and collect nothing
+ * else from this process.  The text after the prefix must always come from the
+ * fixed literal set in error_class_for_sqlstate -- never interpolate DuckDB
+ * text, a statement, a URL, or client identity into it.  Every other log line
+ * here may carry all of those.
+ */
+#define PGDUCK_ENGINE_ERROR_PREFIX "pgduck_engine_error: "
+
+/*
+ * error_class_for_sqlstate maps a SQLSTATE this server reports to a PII-free
+ * class.  Codes we do not map are "other", and NULL is one of them.
+ *
+ * NULL means no error type was recorded; pgsession_send_postgres_error reports
+ * it to the client as feature_not_supported, which is not a category worth a
+ * class of its own.
+ */
+static const char *
+error_class_for_sqlstate(const char *sqlState)
+{
+	if (sqlState == NULL)
+		return "other";
+
+	if (strcmp(sqlState, PGDUCK_SQLSTATE_OUT_OF_MEMORY) == 0)
+		return "out_of_memory";
+
+	if (strcmp(sqlState, PGDUCK_SQLSTATE_IO_ERROR) == 0)
+		return "io_error";
+
+	if (strcmp(sqlState, PGDUCK_SQLSTATE_INVALID_PARAMETER) == 0)
+		return "invalid_input";
+
+	if (strcmp(sqlState, PGDUCK_SQLSTATE_INTERNAL_ERROR) == 0)
+		return "internal_error";
+
+	return "other";
+}
+
+
+/*
  * sqlstate_for_status maps the statuses that are raised without a DuckDB error
  * type, so no SQLSTATE was recorded on the session. NULL leaves the default.
  */
@@ -912,6 +952,13 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
 		sqlState = sqlstate_for_status(status);
 
 	pgSession->duckSession.errorSqlState = NULL;
+
+	/*
+	 * Every reportable status passes through here, including the fatal ones
+	 * the caller exits on, so one line here covers all of them.
+	 */
+	PGDUCK_SERVER_LOG(PGDUCK_ENGINE_ERROR_PREFIX "%s",
+					  error_class_for_sqlstate(sqlState));
 
 	switch (status)
 	{

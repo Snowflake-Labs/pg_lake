@@ -1,6 +1,7 @@
 import pytest
 import subprocess
 import os
+import re
 import signal
 import time
 import tempfile
@@ -691,6 +692,23 @@ def test_genuine_oom_over_extended_protocol_terminates_server():
         assert (
             "Out of Memory Error" in server_output
         ), f"expected the genuine OOM message to be surfaced, got: {server_output}"
+
+        # The class line must be written before exit(): after the process dies
+        # the client often only sees lost_connection, so this record is the
+        # one a collector can still attribute to OOM.
+        classified = [
+            line
+            for line in server_output.splitlines()
+            if re.match(r"^\S+ LOG pgduck_engine_error: out_of_memory$", line)
+        ]
+        assert classified, (
+            "expected a classified out_of_memory record before the fatal exit, "
+            f"got: {server_output}"
+        )
+        for line in classified:
+            assert (
+                "range(100000000)" not in line
+            ), f"classified line leaked the statement: {line!r}"
 
 
 # ---------------------------------------------------------------------------
