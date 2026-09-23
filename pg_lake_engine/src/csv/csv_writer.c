@@ -241,6 +241,20 @@ CopySendEndOfRow(CopyToState cstate)
 					   cstate->copy_file) != 1 ||
 				ferror(cstate->copy_file))
 			{
+				int			save_errno = errno;
+
+				/*
+				 * Drop the row we failed to write before reporting the error.
+				 * The cstate can outlive the failure: the caller may catch
+				 * the error and keep using the same DestReceiver, which for a
+				 * session-lifetime receiver survives the transaction. Leaving
+				 * the row in fe_msgbuf would prepend it to the next row
+				 * written, producing a line with more fields than the tuple
+				 * descriptor has columns.
+				 */
+				resetStringInfo(fe_msgbuf);
+				errno = save_errno;
+
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not write to COPY file: %m")));
