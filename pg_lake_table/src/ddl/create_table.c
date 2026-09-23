@@ -65,6 +65,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
+#include "pg_lake/iceberg/jsonb_storage.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/url_encode.h"
@@ -776,6 +777,27 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			lappend(createStmt->options,
 					makeDefElem(ICEBERG_COMPATIBILITY_MODE_OPTION,
 								(Node *) makeString(pstrdup(modeName)), -1));
+	}
+
+	/*
+	 * Seed jsonb_storage from pg_lake_engine.jsonb_storage the same way, and
+	 * for the same reason: the table then carries the encoding its jsonb
+	 * columns get, so adding a column later does not depend on whatever the
+	 * session happens to be set to. Only the non-default ('variant') value is
+	 * persisted, since an absent option already means string.
+	 *
+	 * Unlike compatibility_mode the option is not frozen afterwards -- see
+	 * jsonb_storage.c for why a table needs to be able to change its mind.
+	 */
+	if (GetOption(createStmt->options, ICEBERG_JSONB_STORAGE_OPTION) == NULL &&
+		DefaultJsonbStorage != JSONB_STORAGE_STRING)
+	{
+		const char *storageName = JsonbStorageName(DefaultJsonbStorage);
+
+		createStmt->options =
+			lappend(createStmt->options,
+					makeDefElem(ICEBERG_JSONB_STORAGE_OPTION,
+								(Node *) makeString(pstrdup(storageName)), -1));
 	}
 
 	bool		hasRestCatalogOption = HasRestCatalogTableOption(createStmt->options);

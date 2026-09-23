@@ -47,6 +47,7 @@
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_representation.h"
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
+#include "pg_lake/iceberg/jsonb_storage.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -200,6 +201,13 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 	 */
 	IcebergCompatibilityMode compatMode = IcebergCompatibilityModeFromRelation(relationId);
 
+	/*
+	 * jsonb_storage is consulted here for the same reason, and only here: it
+	 * picks the encoding for the jsonb columns being registered now. Later
+	 * changes to the option affect later columns only.
+	 */
+	JsonbStorage jsonbStorage = IcebergJsonbStorageFromRelation(relationId);
+
 	foreach(columnDefCell, columnDefList)
 	{
 		ColumnDef  *columnDef = (ColumnDef *) lfirst(columnDefCell);
@@ -252,8 +260,9 @@ CreatePostgresColumnMappingsForColumnDefs(Oid relationId, List *columnDefList, b
 		 */
 		Field	   *surfaceFieldTree = NULL;
 
-		field->type = IcebergStorageFieldForColumnType(pgType, compatMode, forAddColumn,
-													   &subFieldIndex, &surfaceFieldTree);
+		field->type = IcebergStorageFieldForColumnType(pgType, compatMode, jsonbStorage,
+													   forAddColumn, &subFieldIndex,
+													   &surfaceFieldTree);
 
 		List	   *storageOverrides =
 			CollectStorageDivergences(surfaceFieldTree, field->type, fieldId);

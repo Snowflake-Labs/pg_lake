@@ -1,5 +1,17 @@
 """
-Phase 3 end-to-end coverage for the Iceberg V3 Variant POC.
+End-to-end coverage for storing PostgreSQL jsonb as the Iceberg variant type.
+
+The encoding is chosen when a column is created and then persisted per column,
+so the rules under test are:
+
+  * `pg_lake_engine.jsonb_storage` decides what a new *table* adopts, and what
+    COPY TO a Parquet file writes.
+  * `WITH (jsonb_storage = ...)` on an iceberg table overrides it, and is what
+    a later ADD COLUMN follows -- never the session setting.
+  * Reads follow the file. A variant column surfaces as jsonb whatever the
+    setting says, because we did not necessarily write it.
+  * Only a top-level jsonb column is eligible: json, jsonb[] and jsonb nested
+    in a composite stay string-encoded.
 
 KNOWN SPEC DEVIATION
 --------------------
@@ -7,8 +19,8 @@ KNOWN SPEC DEVIATION
 format-version 2 (asserted by test_format_version_remains_v2). The metadata is
 therefore not spec-compliant: another engine is entitled to reject or misread
 it, so a table with a variant column is pg_lake-only for now. Emitting v3 is
-out of scope for the POC because it pulls in the rest of the v3 surface,
-deletion vectors above all.
+out of scope here because it pulls in the rest of the v3 surface, deletion
+vectors above all.
 
 This also means cross-engine interop is untestable here today, on two counts:
 the suite pins iceberg-spark-runtime 1.4.3 on Spark 3.5 and pyiceberg 0.10.0,
@@ -16,29 +28,6 @@ neither of which can write variant (upstream needs Iceberg 1.10+ on Spark 4.0),
 and our v2 tables would be rejected on the version alone. Every assertion below
 is consequently pg_lake-against-itself, most usefully by comparing a
 variant-backed table against a string-backed one holding identical data.
-
-Four scenarios (mirroring the user's three asks plus a regression):
-
-  Test A - managed iceberg: CREATE FOREIGN TABLE ... SERVER pg_lake_iceberg
-           with a JSONB column. With pg_lake_engine.enable_variant_type=on the
-           manifest must tag the column as `variant`, the parquet files must
-           carry the VARIANT logical type, and INSERT/SELECT must round-trip
-           losslessly.
-
-  Test B - foreign parquet over Test A's data files: with the GUC on, a
-           foreign parquet table over Test A's parquet output must surface
-           VARIANT columns as JSONB. With the GUC off, schema inference must
-           raise the configured ereport(ERROR).
-
-  Test C - foreign iceberg via metadata.json path: pointing a
-           CREATE FOREIGN TABLE ... OPTIONS (path '<metadata.json>',
-           format 'iceberg') at Test A's metadata must round-trip the JSONB
-           contents. GUC-off path must error.
-
-  Test D - GUC-off regression: a vanilla iceberg table with JSONB and the
-           GUC off must keep behaving exactly like today (manifest tag is
-           `string`, no VARIANT round-trip), so we have not regressed anyone
-           who hasn't opted in.
 
 Run with:
   PYTHONPATH=../test_common pipenv run pytest -v tests/pytests/test_iceberg_variant_e2e.py
@@ -110,14 +99,14 @@ def _data_file_paths(s3_client, location):
 
 @pytest.fixture(scope="module")
 def variant_managed_table(pg_conn, iceberg_extension, extension, s3):
-    """Set up a managed iceberg foreign table with the GUC on, JSONB column,
-    and two rows of data. Yields (location, metadata_location)."""
+    """Set up a managed iceberg foreign table asking for variant storage, a
+    JSONB column and two rows of data. Yields (location, metadata_location)."""
 
     location = f"s3://{TEST_BUCKET}/test_variant_e2e/managed/"
 
     run_command(
         f"""
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE SCHEMA test_variant_e2e;
         SET search_path TO test_variant_e2e;
 
@@ -161,14 +150,14 @@ def variant_managed_table(pg_conn, iceberg_extension, extension, s3):
 
 
 class TestAManagedIceberg:
-    """Round-trip JSONB through a managed iceberg table when the GUC is on."""
+    """Round-trip JSONB through a variant-backed managed iceberg table."""
 
     def test_manifest_tags_jsonb_column_as_variant(self, variant_managed_table, s3):
         meta = _read_metadata_json(s3, variant_managed_table["metadata_location"])
         doc_field = _column_field(meta, "doc")
         assert (
             doc_field["type"] == "variant"
-        ), f"Expected `variant` tag with the GUC on; got {doc_field['type']!r}"
+        ), f"Expected a `variant` tag; got {doc_field['type']!r}"
 
     def test_format_version_remains_v2(self, variant_managed_table, s3):
         """POC invariant: format-version stays 2 even with variant columns.
@@ -183,7 +172,7 @@ class TestAManagedIceberg:
     def test_select_round_trips_via_jsonb(self, variant_managed_table, pg_conn):
         rows = run_query(
             """
-            SET pg_lake_engine.enable_variant_type = on;
+            SET pg_lake_engine.jsonb_storage = 'variant';
             SELECT id, doc FROM test_variant_e2e.managed_t ORDER BY id
             """,
             pg_conn,
@@ -203,7 +192,7 @@ class TestAManagedIceberg:
         plan via shippable-function pushdown)."""
         plan = run_query(
             """
-            SET pg_lake_engine.enable_variant_type = on;
+            SET pg_lake_engine.jsonb_storage = 'variant';
             EXPLAIN (verbose, format text)
             SELECT count(*)
             FROM test_variant_e2e.managed_t
@@ -227,16 +216,18 @@ class TestBForeignParquet:
     """The same parquet files Test A produced must be readable as a foreign
     parquet table, with VARIANT columns surfacing as JSONB."""
 
-    def test_schema_inference_with_guc_on(self, variant_managed_table, pg_conn, s3):
+    def test_schema_inference_surfaces_variant_as_jsonb(
+        self, variant_managed_table, pg_conn, s3
+    ):
         """Empty column list -> schema is inferred from the parquet file.
-        With the GUC on, the inferred VARIANT column must surface as JSONB."""
+        An inferred VARIANT column must surface as JSONB."""
         data_files = _data_file_paths(s3, variant_managed_table["location"])
         assert len(data_files) >= 1
         path = data_files[0]
 
         run_command(
             f"""
-            SET pg_lake_engine.enable_variant_type = on;
+            SET pg_lake_engine.jsonb_storage = 'variant';
             CREATE FOREIGN TABLE test_variant_e2e.foreign_pq_inferred ()
             SERVER pg_lake OPTIONS (path '{path}', format 'parquet');
             """,
@@ -258,7 +249,7 @@ class TestBForeignParquet:
         cols = dict(col_types)
         assert (
             cols.get("doc") == "jsonb"
-        ), f"With GUC on, inferred VARIANT must surface as JSONB; got {cols}"
+        ), f"Inferred VARIANT must surface as JSONB; got {cols}"
 
         rows = run_query(
             "SELECT count(*)::int FROM test_variant_e2e.foreign_pq_inferred",
@@ -274,26 +265,48 @@ class TestBForeignParquet:
         )
         pg_conn.commit()
 
-    def test_schema_inference_with_guc_off_errors(
+    def test_reading_variant_does_not_depend_on_the_setting(
         self, variant_managed_table, pg_conn, s3
     ):
-        """When the GUC is off, schema inference for a VARIANT column must
-        raise the configured ereport(ERROR) — the POC keeps the read surface
-        narrow until the user explicitly opts in."""
+        """jsonb_storage decides how we encode what we write. A variant column
+        in a file someone else wrote must be readable regardless, so 'string'
+        must not turn reading one into an error."""
         data_files = _data_file_paths(s3, variant_managed_table["location"])
         path = data_files[0]
 
-        with pytest.raises(psycopg2.Error) as ei:
-            run_command(
-                f"""
-                SET pg_lake_engine.enable_variant_type = off;
-                CREATE FOREIGN TABLE test_variant_e2e.foreign_pq_off ()
-                SERVER pg_lake OPTIONS (path '{path}', format 'parquet');
+        run_command(
+            f"""
+            SET pg_lake_engine.jsonb_storage = 'string';
+            CREATE FOREIGN TABLE test_variant_e2e.foreign_pq_off ()
+            SERVER pg_lake OPTIONS (path '{path}', format 'parquet');
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        cols = dict(
+            run_query(
+                """
+                SELECT attname, format_type(atttypid, atttypmod)
+                FROM pg_attribute
+                WHERE attrelid = 'test_variant_e2e.foreign_pq_off'::regclass
+                  AND attnum > 0 AND NOT attisdropped
                 """,
                 pg_conn,
             )
-        assert "VARIANT" in str(ei.value), str(ei.value)
-        pg_conn.rollback()
+        )
+        assert cols.get("doc") == "jsonb"
+
+        assert (
+            run_query(
+                "SELECT count(*)::int FROM test_variant_e2e.foreign_pq_off",
+                pg_conn,
+            )[0][0]
+            >= 1
+        )
+
+        run_command("DROP FOREIGN TABLE test_variant_e2e.foreign_pq_off", pg_conn)
+        pg_conn.commit()
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +323,7 @@ class TestCForeignIceberg:
 
         run_command(
             f"""
-            SET pg_lake_engine.enable_variant_type = on;
+            SET pg_lake_engine.jsonb_storage = 'variant';
             CREATE FOREIGN TABLE test_variant_e2e.foreign_iceberg ()
             SERVER pg_lake OPTIONS (path '{meta_path}', format 'iceberg');
             """,
@@ -345,28 +358,39 @@ class TestCForeignIceberg:
         )
         pg_conn.commit()
 
-    def test_metadata_json_with_guc_off_errors(self, variant_managed_table, pg_conn):
+    def test_metadata_json_does_not_depend_on_the_setting(
+        self, variant_managed_table, pg_conn
+    ):
+        """An external iceberg table carrying a variant column reads the same
+        with jsonb_storage = 'string'."""
         meta_path = variant_managed_table["metadata_location"]
-        with pytest.raises(psycopg2.Error) as ei:
-            run_command(
-                f"""
-                SET pg_lake_engine.enable_variant_type = off;
-                CREATE FOREIGN TABLE test_variant_e2e.foreign_iceberg_off ()
-                SERVER pg_lake OPTIONS (path '{meta_path}', format 'iceberg');
-                """,
-                pg_conn,
-            )
-        assert "VARIANT" in str(ei.value), str(ei.value)
-        pg_conn.rollback()
+
+        run_command(
+            f"""
+            SET pg_lake_engine.jsonb_storage = 'string';
+            CREATE FOREIGN TABLE test_variant_e2e.foreign_iceberg_off ()
+            SERVER pg_lake OPTIONS (path '{meta_path}', format 'iceberg');
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        assert run_query(
+            "SELECT id, doc FROM test_variant_e2e.foreign_iceberg_off ORDER BY id",
+            pg_conn,
+        ) == [[1, json.loads(SETUP_DOC_A)], [2, json.loads(SETUP_DOC_B)]]
+
+        run_command("DROP FOREIGN TABLE test_variant_e2e.foreign_iceberg_off", pg_conn)
+        pg_conn.commit()
 
 
 # ---------------------------------------------------------------------------
-# Test D - regression: GUC off + JSONB on iceberg keeps today's behavior
+# Test D - regression: the default keeps today's iceberg + JSONB behavior
 # ---------------------------------------------------------------------------
 
 
-class TestDGucOffRegression:
-    """A user who never sets the GUC must see the exact same iceberg + JSONB
+class TestDDefaultRegression:
+    """A user who never touches jsonb_storage must see the exact same iceberg
     behavior they had before this change: manifest tags JSONB columns as
     `string`, no VARIANT round-trip, no errors."""
 
@@ -376,7 +400,7 @@ class TestDGucOffRegression:
 
         run_command(
             f"""
-            SET pg_lake_engine.enable_variant_type = off;
+            SET pg_lake_engine.jsonb_storage = 'string';
             CREATE SCHEMA IF NOT EXISTS test_variant_e2e_regression;
             SET search_path TO test_variant_e2e_regression;
 
@@ -414,18 +438,18 @@ class TestDGucOffRegression:
         )
         pg_conn.commit()
 
-    def test_manifest_keeps_string_tag_with_guc_off(self, regression_table, s3):
+    def test_manifest_keeps_string_tag_by_default(self, regression_table, s3):
         meta = _read_metadata_json(s3, regression_table)
         doc_field = _column_field(meta, "doc")
         assert doc_field["type"] == "string", (
-            f"GUC-off regression failed: doc tagged as {doc_field['type']!r} "
+            f"Default regression failed: doc tagged as {doc_field['type']!r} "
             "instead of string."
         )
 
     def test_select_returns_jsonb_textually(self, regression_table, pg_conn):
         rows = run_query(
             """
-            SET pg_lake_engine.enable_variant_type = off;
+            SET pg_lake_engine.jsonb_storage = 'string';
             SELECT id, doc FROM test_variant_e2e_regression.regress_t
             ORDER BY id
             """,
@@ -438,7 +462,7 @@ class TestDGucOffRegression:
 
 
 # ---------------------------------------------------------------------------
-# Schema evolution and GUC flips
+# Schema evolution and storage flips
 # ---------------------------------------------------------------------------
 
 
@@ -451,7 +475,7 @@ def compatibility_tables(pg_conn, iceberg_extension, extension, s3):
         f"""
         CREATE SCHEMA test_variant_compat;
 
-        SET pg_lake_engine.enable_variant_type = off;
+        SET pg_lake_engine.jsonb_storage = 'string';
         CREATE FOREIGN TABLE test_variant_compat.old_t (
             id INT,
             string_doc JSONB
@@ -459,11 +483,17 @@ def compatibility_tables(pg_conn, iceberg_extension, extension, s3):
         INSERT INTO test_variant_compat.old_t
         VALUES (1, '{SETUP_DOC_A}'::jsonb);
 
-        SET pg_lake_engine.enable_variant_type = on;
+        -- a table created before variant existed can opt in later; the
+        -- column already written keeps the encoding it was created with
+        ALTER FOREIGN TABLE test_variant_compat.old_t
+            OPTIONS (ADD jsonb_storage 'variant');
         ALTER TABLE test_variant_compat.old_t ADD COLUMN variant_doc JSONB;
         INSERT INTO test_variant_compat.old_t
         VALUES (2, '{SETUP_DOC_B}'::jsonb, '{SETUP_DOC_A}'::jsonb);
 
+        -- created while the session default says variant, so the option is
+        -- seeded onto the table and the first column is variant-encoded
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE FOREIGN TABLE test_variant_compat.new_t (
             id INT,
             variant_doc JSONB
@@ -471,16 +501,18 @@ def compatibility_tables(pg_conn, iceberg_extension, extension, s3):
         INSERT INTO test_variant_compat.new_t
         VALUES (1, '{SETUP_DOC_A}'::jsonb);
 
-        SET pg_lake_engine.enable_variant_type = off;
+        ALTER FOREIGN TABLE test_variant_compat.new_t
+            OPTIONS (SET jsonb_storage 'string');
         ALTER TABLE test_variant_compat.new_t ADD COLUMN string_doc JSONB;
         INSERT INTO test_variant_compat.new_t
         VALUES (2, '{SETUP_DOC_B}'::jsonb, '{SETUP_DOC_A}'::jsonb);
 
-        SET pg_lake_engine.enable_variant_type = on;
+        -- writes follow each column's persisted encoding, not the session
+        SET pg_lake_engine.jsonb_storage = 'variant';
         INSERT INTO test_variant_compat.old_t
         VALUES (3, '{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb);
 
-        SET pg_lake_engine.enable_variant_type = off;
+        SET pg_lake_engine.jsonb_storage = 'string';
         INSERT INTO test_variant_compat.new_t
         VALUES (3, '{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb);
         """,
@@ -505,7 +537,7 @@ def compatibility_tables(pg_conn, iceberg_extension, extension, s3):
     pg_conn.commit()
 
 
-class TestSchemaEvolutionAndGucFlips:
+class TestSchemaEvolutionAndStorageFlips:
     def test_old_table_keeps_string_and_adds_variant(self, compatibility_tables, s3):
         metadata = _read_metadata_json(s3, compatibility_tables["old_t"])
         assert _column_field(metadata, "string_doc")["type"] == "string"
@@ -516,12 +548,12 @@ class TestSchemaEvolutionAndGucFlips:
         assert _column_field(metadata, "variant_doc")["type"] == "variant"
         assert _column_field(metadata, "string_doc")["type"] == "string"
 
-    @pytest.mark.parametrize("guc_value", ["on", "off"])
-    def test_mixed_storage_tables_read_after_guc_flip(
-        self, compatibility_tables, pg_conn, guc_value
+    @pytest.mark.parametrize("storage", ["variant", "string"])
+    def test_mixed_storage_tables_read_after_setting_flip(
+        self, compatibility_tables, pg_conn, storage
     ):
         run_command(
-            f"SET pg_lake_engine.enable_variant_type = {guc_value}",
+            f"SET pg_lake_engine.jsonb_storage = '{storage}'",
             pg_conn,
         )
 
@@ -559,6 +591,115 @@ class TestSchemaEvolutionAndGucFlips:
         assert new_rows[2][2] == json.loads(SETUP_DOC_B)
 
 
+def _doc_storage(pg_conn, s3, namespace, table, column="doc"):
+    """The iceberg type persisted for a column, read from table metadata."""
+    metadata_location = run_query(
+        f"""
+        SELECT metadata_location FROM lake_iceberg.tables
+        WHERE table_namespace = '{namespace}' AND table_name = '{table}'
+        """,
+        pg_conn,
+    )[0][0]
+    return _column_field(_read_metadata_json(s3, metadata_location), column)["type"]
+
+
+class TestTableOptionOverridesTheSetting:
+    """`WITH (jsonb_storage = ...)` names the encoding for one table, so a
+    session default is only a default."""
+
+    @pytest.fixture(scope="class")
+    def option_tables(self, pg_conn, iceberg_extension, extension, s3):
+        pg_conn.rollback()
+        prefix = f"s3://{TEST_BUCKET}/test_variant_option"
+
+        run_command(
+            f"""
+            CREATE SCHEMA test_variant_option;
+
+            -- option wins over a session default that says otherwise
+            SET pg_lake_engine.jsonb_storage = 'string';
+            CREATE FOREIGN TABLE test_variant_option.opt_variant (id INT, doc JSONB)
+                SERVER pg_lake_iceberg
+                OPTIONS (location '{prefix}/v/', jsonb_storage 'variant');
+
+            SET pg_lake_engine.jsonb_storage = 'variant';
+            CREATE FOREIGN TABLE test_variant_option.opt_string (id INT, doc JSONB)
+                SERVER pg_lake_iceberg
+                OPTIONS (location '{prefix}/s/', jsonb_storage 'string');
+
+            INSERT INTO test_variant_option.opt_variant
+                VALUES (1, '{SETUP_DOC_A}'::jsonb);
+            INSERT INTO test_variant_option.opt_string
+                VALUES (1, '{SETUP_DOC_A}'::jsonb);
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        yield
+
+        run_command("DROP SCHEMA test_variant_option CASCADE", pg_conn)
+        pg_conn.commit()
+
+    def test_option_beats_the_session_default(self, option_tables, pg_conn, s3):
+        assert (
+            _doc_storage(pg_conn, s3, "test_variant_option", "opt_variant") == "variant"
+        )
+        assert (
+            _doc_storage(pg_conn, s3, "test_variant_option", "opt_string") == "string"
+        )
+
+    def test_both_encodings_round_trip(self, option_tables, pg_conn):
+        for table in ("opt_variant", "opt_string"):
+            assert run_query(
+                f"SELECT id, doc FROM test_variant_option.{table}", pg_conn
+            ) == [[1, json.loads(SETUP_DOC_A)]], table
+
+    def test_add_column_follows_the_table_not_the_session(
+        self, option_tables, pg_conn, s3
+    ):
+        """The encoding is a property of the table, so adding a column must
+        be reproducible no matter what the session happens to be set to."""
+        run_command(
+            """
+            SET pg_lake_engine.jsonb_storage = 'variant';
+            ALTER TABLE test_variant_option.opt_string ADD COLUMN later_doc JSONB;
+
+            SET pg_lake_engine.jsonb_storage = 'string';
+            ALTER TABLE test_variant_option.opt_variant ADD COLUMN later_doc JSONB;
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        assert (
+            _doc_storage(pg_conn, s3, "test_variant_option", "opt_string", "later_doc")
+            == "string"
+        )
+        assert (
+            _doc_storage(pg_conn, s3, "test_variant_option", "opt_variant", "later_doc")
+            == "variant"
+        )
+
+
+def test_invalid_jsonb_storage_option_is_rejected(
+    pg_conn, iceberg_extension, extension, s3
+):
+    pg_conn.rollback()
+    with pytest.raises(psycopg2.Error) as ei:
+        run_command(
+            f"""
+            CREATE FOREIGN TABLE public.bad_jsonb_storage (id INT, doc JSONB)
+                SERVER pg_lake_iceberg
+                OPTIONS (location 's3://{TEST_BUCKET}/test_variant_bad/',
+                         jsonb_storage 'varient');
+            """,
+            pg_conn,
+        )
+    assert "jsonb_storage" in str(ei.value), str(ei.value)
+    pg_conn.rollback()
+
+
 def test_heap_jsonb_insert_select_into_variant(
     pg_conn, iceberg_extension, extension, s3
 ):
@@ -573,13 +714,13 @@ def test_heap_jsonb_insert_select_into_variant(
             (1, '{SETUP_DOC_A}'::jsonb),
             (2, '{SETUP_DOC_B}'::jsonb);
 
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE FOREIGN TABLE test_variant_scanner.target_t (
             id INT,
             doc JSONB
         ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
 
-        SET pg_lake_engine.enable_variant_type = off;
+        SET pg_lake_engine.jsonb_storage = 'string';
         """,
         pg_conn,
     )
@@ -613,14 +754,15 @@ def test_json_surface_type_keeps_string_storage(
     pg_conn, iceberg_extension, extension, s3
 ):
     """VARIANT storage is only chosen for jsonb. A json column keeps the
-    lossless string storage even with the GUC on, so its text survives."""
+    lossless string storage even when the table asks for variant, so its
+    text survives."""
     pg_conn.rollback()
     location = f"s3://{TEST_BUCKET}/test_variant_json_surface/target/"
 
     run_command(
         f"""
         CREATE SCHEMA test_variant_json_surface;
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE FOREIGN TABLE test_variant_json_surface.target_t (
             id INT,
             doc JSON
@@ -667,7 +809,7 @@ def test_variant_jsonb_equality_is_not_pushed_down(
     run_command(
         f"""
         CREATE SCHEMA test_variant_equality;
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE FOREIGN TABLE test_variant_equality.target_t (
             id INT,
             doc JSONB
@@ -753,28 +895,17 @@ def test_variant_jsonb_equality_is_not_pushed_down(
     pg_conn.commit()
 
 
-def _parquet_column_is_variant(pg_conn, path, probe_name):
-    """A VARIANT parquet column makes schema inference raise with the GUC off,
-    a string column does not. That is the cheapest discriminator available for
-    a bare parquet file, and it is the same signal TestBForeignParquet uses."""
-    pg_conn.rollback()
-    try:
-        run_command(
-            f"""
-            SET pg_lake_engine.enable_variant_type = off;
-            CREATE FOREIGN TABLE public.{probe_name} ()
-                SERVER pg_lake OPTIONS (path '{path}');
-            """,
-            pg_conn,
-        )
-        pg_conn.commit()
-        run_command(f"DROP FOREIGN TABLE public.{probe_name}", pg_conn)
-        pg_conn.commit()
-        return False
-    except psycopg2.Error as e:
-        pg_conn.rollback()
-        assert "VARIANT" in str(e), f"unexpected inference failure: {e}"
-        return True
+def _parquet_column_types(pgduck_conn, path):
+    """Physical column types of a parquet file, read straight from DuckDB.
+
+    pg_lake surfaces both encodings as jsonb by design, so the PostgreSQL side
+    cannot tell them apart; asking the engine what is actually in the file is
+    the only honest discriminator."""
+    rows = run_query(
+        f"DESCRIBE SELECT * FROM read_parquet('{path}')",
+        pgduck_conn,
+    )
+    return {row[0]: row[1] for row in rows}
 
 
 def test_variant_column_preserves_sql_null(pg_conn, iceberg_extension, extension, s3):
@@ -791,7 +922,7 @@ def test_variant_column_preserves_sql_null(pg_conn, iceberg_extension, extension
     run_command(
         f"""
         CREATE SCHEMA test_variant_null;
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE FOREIGN TABLE test_variant_null.target_t (
             id INT,
             doc JSONB
@@ -837,7 +968,7 @@ def test_load_from_and_definition_from_variant_parquet(
     run_command(
         f"""
         CREATE SCHEMA test_variant_seed;
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         SET pg_lake_iceberg.default_location_prefix
             TO 's3://{TEST_BUCKET}/test_variant_seed/out';
 
@@ -885,33 +1016,57 @@ def test_load_from_and_definition_from_variant_parquet(
     pg_conn.commit()
 
 
-def test_copy_to_parquet_does_not_produce_variant(
-    pg_conn, variant_managed_table, extension, s3
+def test_copy_to_parquet_follows_the_setting(
+    pg_conn, pgduck_conn, variant_managed_table, extension, s3
 ):
-    """COPY ... TO parquet writes the plain parquet type mapping, where jsonb
-    is a string. VARIANT is chosen by the iceberg storage layer, so exporting
-    either a heap table or a variant iceberg table yields string columns.
-    Pinned because an export silently changing type would be worse than the
-    current, uniform behaviour."""
+    """A plain parquet file has no table to carry an option, so COPY TO reads
+    pg_lake_engine.jsonb_storage directly. The source does not matter: a heap
+    table and a variant-backed iceberg table both follow the setting in force
+    when the export runs."""
     pg_conn.rollback()
-    heap_out = f"s3://{TEST_BUCKET}/test_variant_copy/heap.parquet"
-    iceberg_out = f"s3://{TEST_BUCKET}/test_variant_copy/iceberg.parquet"
+    prefix = f"s3://{TEST_BUCKET}/test_variant_copy"
+    heap_string = f"{prefix}/heap_string.parquet"
+    heap_variant = f"{prefix}/heap_variant.parquet"
+    iceberg_string = f"{prefix}/iceberg_string.parquet"
+    iceberg_variant = f"{prefix}/iceberg_variant.parquet"
+    relation = variant_managed_table["relation"]
 
     run_command(
         f"""
         CREATE SCHEMA test_variant_copy;
-        SET pg_lake_engine.enable_variant_type = on;
         CREATE TABLE test_variant_copy.heap_t (id INT, doc JSONB);
         INSERT INTO test_variant_copy.heap_t VALUES (1, '{SETUP_DOC_A}'::jsonb);
-        COPY test_variant_copy.heap_t TO '{heap_out}';
-        COPY (SELECT * FROM {variant_managed_table["relation"]}) TO '{iceberg_out}';
+
+        SET pg_lake_engine.jsonb_storage = 'string';
+        COPY test_variant_copy.heap_t TO '{heap_string}';
+        COPY (SELECT * FROM {relation}) TO '{iceberg_string}';
+
+        SET pg_lake_engine.jsonb_storage = 'variant';
+        COPY test_variant_copy.heap_t TO '{heap_variant}';
+        COPY (SELECT * FROM {relation}) TO '{iceberg_variant}';
         """,
         pg_conn,
     )
     pg_conn.commit()
 
-    assert _parquet_column_is_variant(pg_conn, heap_out, "probe_heap") is False
-    assert _parquet_column_is_variant(pg_conn, iceberg_out, "probe_iceberg") is False
+    for path in (heap_string, iceberg_string):
+        assert _parquet_column_types(pgduck_conn, path)["doc"] != "VARIANT", path
+    for path in (heap_variant, iceberg_variant):
+        assert _parquet_column_types(pgduck_conn, path)["doc"] == "VARIANT", path
+
+    # whichever way it was written, reading it back gives the same documents
+    for index, path in enumerate((heap_string, heap_variant)):
+        run_command(
+            f"""
+            CREATE FOREIGN TABLE test_variant_copy.readback_{index} ()
+                SERVER pg_lake OPTIONS (path '{path}', format 'parquet');
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+        assert run_query(
+            f"SELECT id, doc FROM test_variant_copy.readback_{index}", pg_conn
+        ) == [[1, json.loads(SETUP_DOC_A)]], path
 
     run_command("DROP SCHEMA test_variant_copy CASCADE", pg_conn)
     pg_conn.commit()
@@ -931,14 +1086,14 @@ def test_jsonb_operators_match_string_storage(
         f"""
         CREATE SCHEMA test_variant_ops;
 
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE FOREIGN TABLE test_variant_ops.as_variant (id INT, doc JSONB)
             SERVER pg_lake_iceberg
             OPTIONS (location 's3://{TEST_BUCKET}/test_variant_ops/v/');
         INSERT INTO test_variant_ops.as_variant
             VALUES (1, '{doc_a}'::jsonb), (2, '{doc_b}'::jsonb);
 
-        SET pg_lake_engine.enable_variant_type = off;
+        SET pg_lake_engine.jsonb_storage = 'string';
         CREATE FOREIGN TABLE test_variant_ops.as_string (id INT, doc JSONB)
             SERVER pg_lake_iceberg
             OPTIONS (location 's3://{TEST_BUCKET}/test_variant_ops/s/');
@@ -994,7 +1149,7 @@ def test_update_and_delete_on_variant_column(pg_conn, iceberg_extension, extensi
     run_command(
         f"""
         CREATE SCHEMA test_variant_dml;
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE FOREIGN TABLE test_variant_dml.target_t (id INT, doc JSONB)
             SERVER pg_lake_iceberg OPTIONS (location '{location}');
         INSERT INTO test_variant_dml.target_t
@@ -1034,7 +1189,7 @@ def test_ctas_into_iceberg_uses_variant(pg_conn, iceberg_extension, extension, s
     run_command(
         f"""
         CREATE SCHEMA test_variant_ctas;
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         SET pg_lake_iceberg.default_location_prefix
             TO 's3://{TEST_BUCKET}/test_variant_ctas/out';
 
@@ -1080,7 +1235,7 @@ def test_jsonb_inside_struct_keeps_string_storage(
     run_command(
         f"""
         CREATE SCHEMA test_variant_struct;
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         SET pg_lake_iceberg.default_location_prefix
             TO 's3://{TEST_BUCKET}/test_variant_struct/out';
 
@@ -1120,34 +1275,34 @@ def test_jsonb_inside_struct_keeps_string_storage(
 def test_jsonb_array_column_keeps_string_storage(
     pg_conn, iceberg_extension, extension, s3
 ):
-    """VARIANT is only chosen for a top-level jsonb column. A jsonb[] keeps the
-    list-of-string storage and reads back exactly as it does with the GUC
-    off, so turning the GUC on cannot change nested jsonb behaviour."""
+    """VARIANT is only chosen for a top-level jsonb column. A jsonb[] keeps
+    the list-of-string storage and reads back identically either way, so
+    asking for variant cannot change nested jsonb behaviour."""
     pg_conn.rollback()
 
     run_command(
         f"""
         CREATE SCHEMA test_variant_array;
 
-        SET pg_lake_engine.enable_variant_type = on;
-        CREATE FOREIGN TABLE test_variant_array.guc_on (id INT, docs JSONB[])
+        SET pg_lake_engine.jsonb_storage = 'variant';
+        CREATE FOREIGN TABLE test_variant_array.as_variant (id INT, docs JSONB[])
             SERVER pg_lake_iceberg
             OPTIONS (location 's3://{TEST_BUCKET}/test_variant_array/on/');
-        INSERT INTO test_variant_array.guc_on
+        INSERT INTO test_variant_array.as_variant
             VALUES (1, ARRAY['{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb]);
 
-        SET pg_lake_engine.enable_variant_type = off;
-        CREATE FOREIGN TABLE test_variant_array.guc_off (id INT, docs JSONB[])
+        SET pg_lake_engine.jsonb_storage = 'string';
+        CREATE FOREIGN TABLE test_variant_array.as_string (id INT, docs JSONB[])
             SERVER pg_lake_iceberg
             OPTIONS (location 's3://{TEST_BUCKET}/test_variant_array/off/');
-        INSERT INTO test_variant_array.guc_off
+        INSERT INTO test_variant_array.as_string
             VALUES (1, ARRAY['{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb]);
         """,
         pg_conn,
     )
     pg_conn.commit()
 
-    for table in ("guc_on", "guc_off"):
+    for table in ("as_variant", "as_string"):
         metadata_location = run_query(
             f"""
             SELECT metadata_location FROM lake_iceberg.tables
@@ -1159,8 +1314,8 @@ def test_jsonb_array_column_keeps_string_storage(
         assert docs_field["type"]["element"] == "string"
 
     assert run_query(
-        "SELECT docs FROM test_variant_array.guc_on", pg_conn
-    ) == run_query("SELECT docs FROM test_variant_array.guc_off", pg_conn)
+        "SELECT docs FROM test_variant_array.as_variant", pg_conn
+    ) == run_query("SELECT docs FROM test_variant_array.as_string", pg_conn)
 
     run_command("DROP SCHEMA test_variant_array CASCADE", pg_conn)
     pg_conn.commit()
@@ -1173,7 +1328,7 @@ def test_large_jsonb_variant_round_trip(pg_conn, iceberg_extension, extension, s
     run_command(
         f"""
         CREATE SCHEMA test_variant_large;
-        SET pg_lake_engine.enable_variant_type = on;
+        SET pg_lake_engine.jsonb_storage = 'variant';
         CREATE FOREIGN TABLE test_variant_large.target_t (
             id INT,
             doc JSONB

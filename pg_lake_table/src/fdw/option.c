@@ -36,6 +36,7 @@
 #include "foreign/foreign.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
+#include "pg_lake/iceberg/jsonb_storage.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/copy/copy_format.h"
@@ -588,6 +589,12 @@ InitPgLakeIcebergOptions(void)
 		 */
 		{ICEBERG_COMPATIBILITY_MODE_OPTION, ForeignTableRelationId},
 
+		/*
+		 * encoding for the table's jsonb columns: 'string' (default) or
+		 * 'variant'
+		 */
+		{ICEBERG_JSONB_STORAGE_OPTION, ForeignTableRelationId},
+
 		{NULL, InvalidOid}
 	};
 
@@ -906,6 +913,12 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		{
 			/* errors on an unrecognized value; single source of truth */
 			(void) ParseIcebergCompatibilityMode(defGetString(def));
+		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, ICEBERG_JSONB_STORAGE_OPTION) == 0)
+		{
+			/* errors on an unrecognized value; single source of truth */
+			(void) ParseJsonbStorage(defGetString(def));
 		}
 	}
 

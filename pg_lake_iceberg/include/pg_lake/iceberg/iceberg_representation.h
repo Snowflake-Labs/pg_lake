@@ -41,6 +41,7 @@
 
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
+#include "pg_lake/iceberg/jsonb_storage.h"
 #include "pg_lake/pgduck/type.h"
 
 /*
@@ -60,8 +61,9 @@ extern PGDLLEXPORT PGType IcebergStoredPostgresType(PGType type);
 
 /*
  * IcebergStorageFieldForColumnType - the Iceberg field tree the create path
- * stores for a declared column type under a table's compatibility mode: the
- * structural derivation followed by the compatibility storage mapping.
+ * stores for a declared column type under a table's compatibility mode and
+ * jsonb storage encoding: the structural derivation followed by the
+ * compatibility storage mapping and the jsonb -> variant mapping.
  *
  * This IS the create path's shaping, not a model of it: registration
  * (CreatePostgresColumnMappingsForColumnDefs) calls this, so a comparison
@@ -73,7 +75,8 @@ extern PGDLLEXPORT PGType IcebergStoredPostgresType(PGType type);
  * per-leaf surface->storage divergences.
  */
 extern PGDLLEXPORT Field * IcebergStorageFieldForColumnType(
-															PGType declaredType, IcebergCompatibilityMode mode, bool forAddColumn,
+															PGType declaredType, IcebergCompatibilityMode mode,
+															JsonbStorage jsonbStorage, bool forAddColumn,
 															int *subFieldIndex, Field * *surfaceFieldOut);
 
 /*

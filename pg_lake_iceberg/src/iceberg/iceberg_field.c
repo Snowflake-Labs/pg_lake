@@ -81,8 +81,8 @@ typedef enum IcebergType
 	ICEBERG_TYPE_STRUCT,
 
 	/*
-	 * Iceberg v3 variant, surfaced as PostgreSQL JSONB when
-	 * pg_lake_engine.enable_variant_type is enabled.
+	 * Iceberg v3 variant, surfaced as PostgreSQL JSONB. Chosen for a new
+	 * jsonb column by the table's jsonb_storage option.
 	 */
 	ICEBERG_TYPE_VARIANT,
 }			IcebergType;

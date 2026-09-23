@@ -27,6 +27,7 @@
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parquet/geoparquet.h"
@@ -496,6 +497,25 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		 */
 		if (columnTypeId == TIMETZOID && destinationFormat == DATA_FORMAT_ICEBERG)
 			appendStringInfo(&projection, "CAST(%s AS TIME) AS ",
+							 duckdb_quote_identifier(columnName));
+
+		/*
+		 * A plain Parquet file has no catalog to record a per-column storage
+		 * decision, so pg_lake_engine.jsonb_storage decides it directly. The
+		 * cast is all it takes: read_csv already parsed the column as JSON
+		 * (see ChooseDuckDBEngineTypeForWrite), and casting JSON to VARIANT
+		 * yields the parsed value, whereas casting the text would give a
+		 * variant holding one string.
+		 *
+		 * Iceberg is excluded: its jsonb columns carry a persisted storage
+		 * type, applied by IcebergWrapQueryWithRewrites, so a table written
+		 * while this setting says otherwise still gets the encoding its
+		 * columns were created with.
+		 */
+		if (columnTypeId == JSONBOID &&
+			destinationFormat == DATA_FORMAT_PARQUET &&
+			DefaultJsonbStorage == JSONB_STORAGE_VARIANT)
+			appendStringInfo(&projection, "CAST(%s AS VARIANT) AS ",
 							 duckdb_quote_identifier(columnName));
 
 		/*

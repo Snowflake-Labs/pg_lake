@@ -72,6 +72,7 @@ Iceberg tables support the following options when creating the table:
 | location             | URL prefix for the Iceberg table (e.g. `s3://mybucket/measurements`) |
 | max_snapshot_age     | Maximum age (in seconds) of snapshots to retain. When set to `0`, old snapshots are automatically expired during writes. Overrides the `pg_lake_iceberg.max_snapshot_age` GUC for this table. |
 | out_of_range_values  | How to handle values that fall outside the Iceberg-representable range. Valid values: `error` (default), `clamp`. See [Out-of-range value handling](#out-of-range-value-handling). |
+| jsonb_storage        | How `jsonb` columns are encoded in the data files. Valid values: `string` (default), `variant`. See [Storing jsonb as variant](#storing-jsonb-as-variant). |
 
 Additionally, when creating the Iceberg table from a file, the following options are supported along with the format-specific options listed in the [data lake formats](../docs/file-formats-reference) section:
 
@@ -183,6 +184,55 @@ The default `error` mode ensures data integrity by catching unexpected values ea
 - Your pipeline produces sentinel values like `infinity` that you want silently mapped to the Iceberg boundary
 - You are migrating data from PostgreSQL heap tables that might contain `infinity` or extreme dates and want to complete the migration without errors
 - You prefer silent adjustments over strict error handling
+
+
+## Storing jsonb as variant
+
+By default a `jsonb` column is written to Parquet as a string holding the JSON
+text. Setting `jsonb_storage` to `variant` writes it using the Iceberg/Parquet
+`variant` type instead, which stores the document parsed rather than as text:
+
+```sql
+CREATE TABLE events (id bigint, payload jsonb)
+USING iceberg WITH (jsonb_storage = 'variant');
+```
+
+Either way the column is still `jsonb` in PostgreSQL and every jsonb operator
+and function behaves identically. Only the physical encoding differs, and
+reading is unaffected: a variant column is always surfaced as `jsonb`,
+including in files written by another engine.
+
+The encoding is recorded per column when that column is created, so changing
+the option later affects only columns added afterwards. That lets an existing
+table start using variant for new columns without rewriting the old ones:
+
+```sql
+ALTER TABLE events OPTIONS (ADD jsonb_storage 'variant');
+ALTER TABLE events ADD COLUMN details jsonb;  -- variant; payload stays string
+```
+
+`pg_lake_engine.jsonb_storage` sets the default for tables created without the
+option, and also controls `COPY ... TO` a Parquet file, which has no table to
+carry one:
+
+```sql
+SET pg_lake_engine.jsonb_storage TO 'variant';
+COPY events TO 's3://mybucket/events.parquet';
+```
+
+Some things to be aware of before choosing `variant`:
+
+- **`variant` is an Iceberg format-version 3 type, but pg_lake writes
+  format-version 2 tables.** The resulting metadata is not spec-compliant, and
+  another engine is entitled to reject or misread it. Treat a table with
+  variant columns as pg_lake-only for now.
+- Only a top-level `jsonb` column is eligible. A `json` column is always
+  stored as a string, because it preserves its input text verbatim —
+  whitespace, key order and duplicate keys — none of which a parsed variant
+  can represent. `jsonb[]` and `jsonb` inside a composite are also stored as
+  strings.
+- A `jsonb` `'null'` scalar is read back as SQL `NULL`, because the engine
+  cannot distinguish the two once they are stored as variant.
 
 
 ## Loading data into an Iceberg table

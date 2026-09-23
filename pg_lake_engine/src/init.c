@@ -70,27 +70,72 @@ char	   *PgLakeStageLocation = NULL;
 char	   *PgLakeAllowedAzureHostSuffixes = NULL;
 
 /*
- * pg_lake_engine.enable_variant_type setting.
+ * pg_lake_engine.jsonb_storage setting.
  *
- * POC switch for the VARIANT type as a whole, in both directions: reads
- * surface VARIANT columns to PostgreSQL as JSONB, and CREATE TABLE / ADD
- * COLUMN give JSONB columns the Iceberg `variant` type tag instead of
- * `string`. When off (default), encountering a VARIANT column on the read
- * path raises an ereport(ERROR) so the surface area stays small until the
- * user explicitly opts in.
+ * Decides how a jsonb value is encoded when we write it and have no
+ * per-column decision to follow.  That is the case for a new iceberg column
+ * whose table carries no jsonb_storage option, and for COPY TO a Parquet
+ * file, which has no table to carry one.
  *
- * The write side only consults this GUC when the column is created; the
- * resulting type is persisted as a storage override, so later flips do not
- * change how existing columns are read or written.
+ * Writes into an existing iceberg column follow the storage type persisted
+ * for that column at creation, so changing this setting never reinterprets
+ * data already written, and one table can hold jsonb columns in both
+ * encodings.  Reads always follow the file: a variant column is surfaced as
+ * jsonb whatever this is set to.
  *
  * Known deviation from the Iceberg spec: `variant` is a format-version 3
  * type, but tables written here stay at format-version 2. The resulting
  * metadata is therefore not spec-compliant and another engine may reject or
  * misread it, so these tables should be treated as pg_lake-only for now.
- * Emitting format-version 3 is deliberately left out of the POC because it
- * pulls in the rest of the v3 surface (deletion vectors above all).
+ * Emitting format-version 3 is deliberately left out because it pulls in the
+ * rest of the v3 surface (deletion vectors above all).
  */
-bool		EnableVariantType = false;
+int			DefaultJsonbStorage = JSONB_STORAGE_STRING;
+
+/* pg_lake_engine.jsonb_storage */
+static const struct config_enum_entry JsonbStorageOptions[] = {
+	{"string", JSONB_STORAGE_STRING, false},
+	{"variant", JSONB_STORAGE_VARIANT, false},
+	{NULL, 0, false},
+};
+
+
+/*
+ * JsonbStorageName returns the canonical lowercase name of a jsonb storage
+ * encoding, as accepted by the GUC and the per-table option.
+ */
+const char *
+JsonbStorageName(JsonbStorage storage)
+{
+	for (int i = 0; JsonbStorageOptions[i].name != NULL; i++)
+	{
+		if (JsonbStorageOptions[i].val == (int) storage)
+			return JsonbStorageOptions[i].name;
+	}
+
+	elog(ERROR, "unexpected jsonb storage %d", (int) storage);
+}
+
+
+/*
+ * ParseJsonbStorage maps an option string to a JsonbStorage, erroring on
+ * anything the GUC would not accept either.  NULL means "unset", which the
+ * caller resolves; it is not a valid spelling of the default.
+ */
+JsonbStorage
+ParseJsonbStorage(const char *optionValue)
+{
+	for (int i = 0; JsonbStorageOptions[i].name != NULL; i++)
+	{
+		if (pg_strcasecmp(optionValue, JsonbStorageOptions[i].name) == 0)
+			return (JsonbStorage) JsonbStorageOptions[i].val;
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("invalid value for jsonb_storage: \"%s\"", optionValue),
+			 errhint("Valid values are \"string\" and \"variant\".")));
+}
 
 
 /*
@@ -170,26 +215,23 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
-	DefineCustomBoolVariable(
-							 "pg_lake_engine.enable_variant_type",
-							 gettext_noop("Enables the VARIANT type: VARIANT columns are "
-										  "read as JSONB, and new JSONB columns of iceberg "
-										  "tables are stored as `variant` rather than "
-										  "`string`."),
-							 gettext_noop("When off (default), encountering a VARIANT "
-										  "column on the read path raises an error so the "
-										  "POC surface area stays narrow. Only consulted "
-										  "when a column is created; the chosen storage "
-										  "type is persisted per column. WARNING: `variant` "
-										  "is a format-version 3 Iceberg type but these "
-										  "tables stay at format-version 2, so the metadata "
-										  "is not spec-compliant and other engines may "
-										  "reject or misread it; treat such tables as "
-										  "pg_lake-only. This is a POC switch; the long-term "
-										  "plan is to drive the same behavior off Iceberg "
-										  "format-version=3 detection."),
-							 &EnableVariantType,
-							 false,
+	DefineCustomEnumVariable("pg_lake_engine.jsonb_storage",
+							 gettext_noop("How jsonb values are encoded in data files we "
+										  "write: as `string` (the default) or as the "
+										  "Iceberg/Parquet `variant` type."),
+							 gettext_noop("Consulted for a new iceberg column whose table "
+										  "has no jsonb_storage option, and for COPY TO a "
+										  "Parquet file. Writes into an existing iceberg "
+										  "column follow the storage type persisted for that "
+										  "column, and a variant column is always read back "
+										  "as jsonb. WARNING: `variant` is a format-version 3 "
+										  "Iceberg type but these tables stay at "
+										  "format-version 2, so the metadata is not "
+										  "spec-compliant and other engines may reject or "
+										  "misread it; treat such tables as pg_lake-only."),
+							 &DefaultJsonbStorage,
+							 JSONB_STORAGE_STRING,
+							 JsonbStorageOptions,
 							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);

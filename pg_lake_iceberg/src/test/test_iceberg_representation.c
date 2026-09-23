@@ -117,6 +117,10 @@ pg_lake_same_iceberg_representation(PG_FUNCTION_ARGS)
  * StorageFieldForTypeString parses a Postgres type string (e.g. 'varchar(50)',
  * 'numeric(50,2)[]', 'uuid[]') and returns the field the create path stores for
  * it, applying the same two steps registration does.
+ *
+ * jsonb storage is pinned to `string` here: these entry points exist to pin
+ * the compatibility_mode and numeric derivations, and the jsonb -> variant
+ * mapping is covered end-to-end against real tables instead.
  */
 static Field *
 StorageFieldForTypeString(const char *typeString,
@@ -131,7 +135,8 @@ StorageFieldForTypeString(const char *typeString,
 	PGType		storedType =
 		IcebergStoredPostgresType(MakePGType(typeOid, typeMod));
 
-	return IcebergStorageFieldForColumnType(storedType, mode, false,
+	return IcebergStorageFieldForColumnType(storedType, mode,
+											JSONB_STORAGE_STRING, false,
 											&subFieldIndex, NULL);
 }
 

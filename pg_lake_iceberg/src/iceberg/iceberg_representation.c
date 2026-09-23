@@ -60,6 +60,7 @@ IcebergStoredPostgresType(PGType type)
 Field *
 IcebergStorageFieldForColumnType(PGType declaredType,
 								 IcebergCompatibilityMode mode,
+								 JsonbStorage jsonbStorage,
 								 bool forAddColumn, int *subFieldIndex,
 								 Field * *surfaceFieldOut)
 {
@@ -71,13 +72,17 @@ IcebergStorageFieldForColumnType(PGType declaredType,
 
 	/*
 	 * Keep the ordinary PostgreSQL surface mapping as "string", while
-	 * persisting VARIANT as a storage override. That makes the creation-time
-	 * GUC choice survive later GUC changes and lets one schema contain JSONB
-	 * columns added under both settings.
+	 * persisting VARIANT as a storage override. That records the encoding on
+	 * the column itself, so changing the table's jsonb_storage option later
+	 * leaves this column (and its data files) alone, and one schema can hold
+	 * jsonb columns in both encodings.
 	 *
-	 * Only jsonb qualifies. json is defined to preserve its input text
-	 * verbatim -- whitespace, key order and duplicate keys -- which a parsed
-	 * VARIANT cannot represent, so json keeps the lossless "string" storage.
+	 * Only a top-level jsonb qualifies. json is defined to preserve its input
+	 * text verbatim -- whitespace, key order and duplicate keys -- none of
+	 * which a parsed VARIANT can represent, so json keeps the lossless
+	 * "string" storage. jsonb nested in an array or composite is left as
+	 * string too: the read and write codecs only translate a variant leaf at
+	 * the top level today.
 	 */
 	PGType		baseType = declaredType;
 
@@ -85,10 +90,7 @@ IcebergStorageFieldForColumnType(PGType declaredType,
 		ResolveDomainBaseTypeAndTypmod(baseType.postgresTypeOid,
 									   &baseType.postgresTypeMod);
 
-	const char *enableVariantType =
-		GetConfigOption("pg_lake_engine.enable_variant_type", false, false);
-
-	if (strcmp(enableVariantType, "on") == 0 &&
+	if (jsonbStorage == JSONB_STORAGE_VARIANT &&
 		baseType.postgresTypeOid == JSONBOID)
 	{
 		Assert(storageField->type == FIELD_TYPE_SCALAR);

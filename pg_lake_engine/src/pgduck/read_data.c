@@ -1820,16 +1820,16 @@ BuildColumnProjection(char *columnName,
 	 * table.
 	 *
 	 * Triggered on PG-side JSONB (DUCKDB_TYPE_JSON) for iceberg + parquet
-	 * sources, gated on pg_lake_engine.enable_variant_type. The cast is a
-	 * no-op for sources that already produce JSON / VARCHAR JSON-text, and
-	 * the only path that produces a true VARIANT column is the variant write
-	 * path, which is itself GUC-gated.
+	 * sources, whose files may carry a variant column we did not write. We
+	 * cannot tell from here which ones do -- this is the path taken when
+	 * there is no persisted field mapping to consult -- but the cast is a
+	 * no-op for sources that already produce JSON / VARCHAR JSON-text, so it
+	 * is applied unconditionally rather than guessing.
 	 */
 	if (engineType.typeId == DUCKDB_TYPE_JSON &&
 		!engineType.isArrayType &&
 		(sourceFormat == DATA_FORMAT_ICEBERG ||
-		 sourceFormat == DATA_FORMAT_PARQUET) &&
-		EnableVariantType)
+		 sourceFormat == DATA_FORMAT_PARQUET))
 	{
 		char	   *quotedName = duckdb_quote_identifier(columnName);
 
