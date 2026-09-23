@@ -1267,10 +1267,14 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 	}
 
 	/*
-	 * Iceberg VARIANT is a storage encoding of PostgreSQL json/jsonb. Drive
-	 * this cast from the persisted field type, not the current GUC: the GUC
+	 * Iceberg VARIANT is a storage encoding of PostgreSQL jsonb. Drive this
+	 * cast from the persisted field type, not the current GUC: the GUC
 	 * decides the field type at CREATE TABLE / ADD COLUMN time, while later
 	 * writes must keep honoring that choice after the setting changes.
+	 *
+	 * json is accepted here even though we never choose VARIANT storage for
+	 * it -- a foreign table may declare a json column over a VARIANT column
+	 * written by another engine, and then the cast is the only way to write.
 	 *
 	 * This also covers pushed-down INSERT .. SELECT. postgres_scanner exposes
 	 * jsonb as VARCHAR after removing PostgreSQL's binary jsonb version byte,

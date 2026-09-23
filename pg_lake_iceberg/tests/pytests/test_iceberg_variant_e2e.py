@@ -582,11 +582,18 @@ def test_heap_jsonb_insert_select_into_variant(
     pg_conn.commit()
 
 
-def test_json_surface_type_also_stores_variant(
+# json preserves its input text exactly -- whitespace, key order and duplicate
+# keys -- which a parsed VARIANT cannot represent. Stored as a variant this
+# document comes back as {"a":2,"b":1}: reformatted, reordered, and with the
+# duplicate "b" resolved first-wins, matching neither json nor jsonb.
+JSON_VERBATIM_DOC = '{"b":   1,   "a": 2,   "b": 3}'
+
+
+def test_json_surface_type_keeps_string_storage(
     pg_conn, iceberg_extension, extension, s3
 ):
-    """The storage override is keyed on the variant storage type, which is
-    JSONB for both surface types, so a `json` column must behave like `jsonb`."""
+    """VARIANT storage is only chosen for jsonb. A json column keeps the
+    lossless string storage even with the GUC on, so its text survives."""
     pg_conn.rollback()
     location = f"s3://{TEST_BUCKET}/test_variant_json_surface/target/"
 
@@ -600,8 +607,7 @@ def test_json_surface_type_also_stores_variant(
         ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
 
         INSERT INTO test_variant_json_surface.target_t VALUES
-            (1, '{SETUP_DOC_A}'::json),
-            (2, '{SETUP_DOC_B}'::json);
+            (1, '{JSON_VERBATIM_DOC}'::json);
         """,
         pg_conn,
     )
@@ -617,23 +623,113 @@ def test_json_surface_type_also_stores_variant(
     )[0][0]
     assert (
         _column_field(_read_metadata_json(s3, metadata_location), "doc")["type"]
-        == "variant"
+        == "string"
     )
 
     rows = run_query(
-        """
-        SELECT id, doc::jsonb, doc->>'label'
-        FROM test_variant_json_surface.target_t
-        ORDER BY id
+        "SELECT doc::text FROM test_variant_json_surface.target_t", pg_conn
+    )
+    assert rows == [[JSON_VERBATIM_DOC]]
+
+    run_command("DROP SCHEMA test_variant_json_surface CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_variant_jsonb_equality_is_not_pushed_down(
+    pg_conn, iceberg_extension, extension, s3
+):
+    """DuckDB re-renders a VARIANT when reading it, minifying the JSON text, so
+    shipping jsonb equality would compare that rendering against PostgreSQL's
+    own and never match. Equality must be evaluated locally instead."""
+    pg_conn.rollback()
+    location = f"s3://{TEST_BUCKET}/test_variant_equality/target/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_equality;
+        SET pg_lake_engine.enable_variant_type = on;
+        CREATE FOREIGN TABLE test_variant_equality.target_t (
+            id INT,
+            doc JSONB
+        ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+
+        INSERT INTO test_variant_equality.target_t VALUES
+            (1, '{SETUP_DOC_A}'::jsonb),
+            (2, '{SETUP_DOC_B}'::jsonb);
         """,
         pg_conn,
     )
-    assert rows == [
-        [1, json.loads(SETUP_DOC_A), "alpha"],
-        [2, json.loads(SETUP_DOC_B), "beta"],
-    ]
+    pg_conn.commit()
 
-    run_command("DROP SCHEMA test_variant_json_surface CASCADE", pg_conn)
+    # equality against a PostgreSQL-rendered literal
+    assert (
+        run_query(
+            f"""
+        SELECT id FROM test_variant_equality.target_t
+        WHERE doc = '{SETUP_DOC_A}'::jsonb
+        """,
+            pg_conn,
+        )
+        == [[1]]
+    )
+
+    # the same via IN (ScalarArrayOpExpr) and via <>
+    assert (
+        run_query(
+            f"""
+        SELECT id FROM test_variant_equality.target_t
+        WHERE doc IN ('{SETUP_DOC_B}'::jsonb)
+        """,
+            pg_conn,
+        )
+        == [[2]]
+    )
+    assert (
+        run_query(
+            f"""
+        SELECT id FROM test_variant_equality.target_t
+        WHERE doc <> '{SETUP_DOC_A}'::jsonb ORDER BY id
+        """,
+            pg_conn,
+        )
+        == [[2]]
+    )
+
+    # joining a variant column against heap jsonb
+    assert (
+        run_query(
+            f"""
+        SELECT f.id FROM test_variant_equality.target_t f
+        JOIN (VALUES ('{SETUP_DOC_A}'::jsonb)) AS h(d) ON f.doc = h.d
+        """,
+            pg_conn,
+        )
+        == [[1]]
+    )
+
+    # operators that do not depend on the rendering stay pushed down and correct
+    assert (
+        run_query(
+            """
+        SELECT count(*) FROM test_variant_equality.target_t
+        WHERE doc @> '{"label": "alpha"}'::jsonb
+        """,
+            pg_conn,
+        )
+        == [[1]]
+    )
+    assert (
+        run_query(
+            """
+        SELECT id FROM test_variant_equality.target_t
+        WHERE doc->>'label' = 'beta'
+        """,
+            pg_conn,
+        )
+        == [[2]]
+    )
+
+    run_command("DROP SCHEMA test_variant_equality CASCADE", pg_conn)
     pg_conn.commit()
 
 

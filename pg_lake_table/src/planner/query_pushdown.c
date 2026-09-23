@@ -894,6 +894,15 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 									NOT_SHIPPABLE_TYPE);
 	}
 
+	if (IsVariantUnsafeComparison(node, context->rtable))
+	{
+		if (context->stopAtFirstNotShippable)
+			return true;
+
+		TryRecordNotShippableObject(context, JSONBOID, TypeRelationId,
+									NOT_SHIPPABLE_TYPE);
+	}
+
 	return expression_tree_walker(node,
 								  ProcessNotShippableExpressionWalker,
 								  context);

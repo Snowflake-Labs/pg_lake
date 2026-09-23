@@ -614,6 +614,14 @@ foreign_expr_walker(Node *node,
 					return false;
 
 				/*
+				 * A json/jsonb equality over a VARIANT-backed column compares
+				 * DuckDB's rendering of the value against PostgreSQL's, which
+				 * never matches.
+				 */
+				if (IsVariantUnsafeComparison(node, glob_cxt->root->parse->rtable))
+					return false;
+
+				/*
 				 * Recurse to input subexpressions.
 				 */
 				if (!foreign_expr_walker((Node *) oe->args,
@@ -651,6 +659,9 @@ foreign_expr_walker(Node *node,
 				 * Again, only shippable operators can be sent to remote.
 				 */
 				if (!is_shippable(oe->opno, OperatorRelationId, node))
+					return false;
+
+				if (IsVariantUnsafeComparison(node, glob_cxt->root->parse->rtable))
 					return false;
 
 				/*

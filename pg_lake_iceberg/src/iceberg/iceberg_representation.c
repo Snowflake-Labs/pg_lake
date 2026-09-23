@@ -74,6 +74,10 @@ IcebergStorageFieldForColumnType(PGType declaredType,
 	 * persisting VARIANT as a storage override. That makes the creation-time
 	 * GUC choice survive later GUC changes and lets one schema contain JSONB
 	 * columns added under both settings.
+	 *
+	 * Only jsonb qualifies. json is defined to preserve its input text
+	 * verbatim -- whitespace, key order and duplicate keys -- which a parsed
+	 * VARIANT cannot represent, so json keeps the lossless "string" storage.
 	 */
 	PGType		baseType = declaredType;
 
@@ -85,8 +89,7 @@ IcebergStorageFieldForColumnType(PGType declaredType,
 		GetConfigOption("pg_lake_engine.enable_variant_type", false, false);
 
 	if (strcmp(enableVariantType, "on") == 0 &&
-		(baseType.postgresTypeOid == JSONBOID ||
-		 baseType.postgresTypeOid == JSONOID))
+		baseType.postgresTypeOid == JSONBOID)
 	{
 		Assert(storageField->type == FIELD_TYPE_SCALAR);
 		storageField->field.scalar.typeName = pstrdup("variant");
