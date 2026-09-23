@@ -70,15 +70,20 @@ char	   *PgLakeStageLocation = NULL;
 char	   *PgLakeAllowedAzureHostSuffixes = NULL;
 
 /*
- * pg_lake_engine.variant_as_jsonb setting.
+ * pg_lake_engine.enable_variant_type setting.
  *
- * POC switch: when on, DuckDB VARIANT-typed columns surface to PostgreSQL as
- * JSONB. When off (default), encountering a VARIANT column on the read path
- * raises an ereport(ERROR) so the surface area stays small until the user
- * explicitly opts in. This GUC also unlocks the iceberg-side write path that
- * maps JSONB columns to the Iceberg `variant` type tag.
+ * POC switch for the VARIANT type as a whole, in both directions: reads
+ * surface VARIANT columns to PostgreSQL as JSONB, and CREATE TABLE / ADD
+ * COLUMN give JSONB columns the Iceberg `variant` type tag instead of
+ * `string`. When off (default), encountering a VARIANT column on the read
+ * path raises an ereport(ERROR) so the surface area stays small until the
+ * user explicitly opts in.
+ *
+ * The write side only consults this GUC when the column is created; the
+ * resulting type is persisted as a storage override, so later flips do not
+ * change how existing columns are read or written.
  */
-bool		VariantAsJsonb = false;
+bool		EnableVariantType = false;
 
 
 /*
@@ -159,16 +164,19 @@ _PG_init(void)
 							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
-							 "pg_lake_engine.variant_as_jsonb",
-							 gettext_noop("Surface DuckDB VARIANT columns to PostgreSQL "
-										  "as JSONB on read, and map JSONB to the Iceberg "
-										  "`variant` type tag on write for iceberg tables."),
+							 "pg_lake_engine.enable_variant_type",
+							 gettext_noop("Enables the VARIANT type: VARIANT columns are "
+										  "read as JSONB, and new JSONB columns of iceberg "
+										  "tables are stored as `variant` rather than "
+										  "`string`."),
 							 gettext_noop("When off (default), encountering a VARIANT "
 										  "column on the read path raises an error so the "
-										  "POC surface area stays narrow. This is a POC "
+										  "POC surface area stays narrow. Only consulted "
+										  "when a column is created; the chosen storage "
+										  "type is persisted per column. This is a POC "
 										  "switch; the long-term plan is to drive the same "
 										  "behavior off Iceberg format-version=3 detection."),
-							 &VariantAsJsonb,
+							 &EnableVariantType,
 							 false,
 							 PGC_USERSET,
 							 0,

@@ -1804,16 +1804,16 @@ BuildColumnProjection(char *columnName,
 	 * table.
 	 *
 	 * Triggered on PG-side JSONB (DUCKDB_TYPE_JSON) for iceberg + parquet
-	 * sources, gated on pg_lake_engine.variant_as_jsonb. The cast is a no-op
-	 * for sources that already produce JSON / VARCHAR JSON-text, and the only
-	 * path that produces a true VARIANT column is the variant write path,
-	 * which is itself GUC-gated.
+	 * sources, gated on pg_lake_engine.enable_variant_type. The cast is a
+	 * no-op for sources that already produce JSON / VARCHAR JSON-text, and
+	 * the only path that produces a true VARIANT column is the variant write
+	 * path, which is itself GUC-gated.
 	 */
 	if (engineType.typeId == DUCKDB_TYPE_JSON &&
 		!engineType.isArrayType &&
 		(sourceFormat == DATA_FORMAT_ICEBERG ||
 		 sourceFormat == DATA_FORMAT_PARQUET) &&
-		VariantAsJsonb)
+		EnableVariantType)
 		return psprintf("CAST(%s AS JSON)%s",
 						duckdb_quote_identifier(columnName),
 						columnAliasString);

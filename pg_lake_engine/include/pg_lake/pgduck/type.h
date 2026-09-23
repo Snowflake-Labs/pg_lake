@@ -91,7 +91,7 @@ typedef enum DuckDBType
 
 	/*
 	 * VARIANT logical type (DuckDB v1.5+). pg_lake exposes this as JSONB on
-	 * the PG side, gated by pg_lake_engine.variant_as_jsonb.
+	 * the PG side, gated by pg_lake_engine.enable_variant_type.
 	 *
 	 * Note: DuckDB v1.5.5's C API enum (`duckdb_type` in duckdb.h) does NOT
 	 * yet expose VARIANT; only the C++ LogicalTypeId does. We carry our own

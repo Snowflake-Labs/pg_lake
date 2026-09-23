@@ -39,7 +39,7 @@
 extern PGDLLEXPORT bool EnableHeavyAsserts;
 extern PGDLLEXPORT char *PgLakeStageLocation;
 extern PGDLLEXPORT char *PgLakeAllowedAzureHostSuffixes;
-extern PGDLLEXPORT bool VariantAsJsonb;
+extern PGDLLEXPORT bool EnableVariantType;
 
 /* cached extension IDs for pg_lake_engine */
 extern PGDLLEXPORT CachedExtensionIds * PgLakeEngine;

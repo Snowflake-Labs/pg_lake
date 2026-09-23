@@ -343,7 +343,7 @@ static DuckDBTypeMap TypeMap[] =
 
 	/*
 	 * VARIANT (DuckDB v1.5+) maps to PG JSONB when the GUC
-	 * pg_lake_engine.variant_as_jsonb is on. The GUC gate is enforced in
+	 * pg_lake_engine.enable_variant_type is on. The GUC gate is enforced in
 	 * GetPGTypeForDuckDBTypeNameBuiltin so the schema-inference path errors
 	 * loudly when off; the mapping itself has only one shape.
 	 */
@@ -668,20 +668,20 @@ GetPGTypeForDuckDBTypeNameBuiltin(const char *name, int *typeMod, bool isArray)
 			else if (typeMapEntry->duckDBType == DUCKDB_TYPE_VARIANT)
 			{
 				/*
-				 * VARIANT is gated behind pg_lake_engine.variant_as_jsonb so
-				 * the POC's user-facing surface stays small until the user
+				 * VARIANT is gated behind pg_lake_engine.enable_variant_type
+				 * so the POC's user-facing surface stays small until the user
 				 * explicitly opts in. Without this gate, any FDW (foreign
 				 * parquet, foreign iceberg via metadata.json, managed
 				 * iceberg) would silently expose VARIANT columns as JSONB;
 				 * we'd rather fail loud and force the user to opt in.
 				 */
-				if (!VariantAsJsonb)
+				if (!EnableVariantType)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("DuckDB VARIANT columns are not enabled"),
 							 errdetail("Encountered a column of type VARIANT but "
-									   "pg_lake_engine.variant_as_jsonb is off."),
-							 errhint("SET pg_lake_engine.variant_as_jsonb = on "
+									   "pg_lake_engine.enable_variant_type is off."),
+							 errhint("SET pg_lake_engine.enable_variant_type = on "
 									 "to expose VARIANT columns to PostgreSQL as JSONB.")));
 
 				return isArray ? typeMapEntry->postgresArrayTypeId : typeMapEntry->postgresTypeId;

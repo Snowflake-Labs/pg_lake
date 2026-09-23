@@ -4,7 +4,7 @@ Phase 3 end-to-end coverage for the Iceberg V3 Variant POC.
 Four scenarios (mirroring the user's three asks plus a regression):
 
   Test A - managed iceberg: CREATE FOREIGN TABLE ... SERVER pg_lake_iceberg
-           with a JSONB column. With pg_lake_engine.variant_as_jsonb=on the
+           with a JSONB column. With pg_lake_engine.enable_variant_type=on the
            manifest must tag the column as `variant`, the parquet files must
            carry the VARIANT logical type, and INSERT/SELECT must round-trip
            losslessly.
@@ -101,7 +101,7 @@ def variant_managed_table(pg_conn, iceberg_extension, extension, s3):
 
     run_command(
         f"""
-        SET pg_lake_engine.variant_as_jsonb = on;
+        SET pg_lake_engine.enable_variant_type = on;
         CREATE SCHEMA test_variant_e2e;
         SET search_path TO test_variant_e2e;
 
@@ -163,7 +163,7 @@ class TestAManagedIceberg:
     def test_select_round_trips_via_jsonb(self, variant_managed_table, pg_conn):
         rows = run_query(
             """
-            SET pg_lake_engine.variant_as_jsonb = on;
+            SET pg_lake_engine.enable_variant_type = on;
             SELECT id, doc FROM test_variant_e2e.managed_t ORDER BY id
             """,
             pg_conn,
@@ -183,7 +183,7 @@ class TestAManagedIceberg:
         plan via shippable-function pushdown)."""
         plan = run_query(
             """
-            SET pg_lake_engine.variant_as_jsonb = on;
+            SET pg_lake_engine.enable_variant_type = on;
             EXPLAIN (verbose, format text)
             SELECT count(*)
             FROM test_variant_e2e.managed_t
@@ -216,7 +216,7 @@ class TestBForeignParquet:
 
         run_command(
             f"""
-            SET pg_lake_engine.variant_as_jsonb = on;
+            SET pg_lake_engine.enable_variant_type = on;
             CREATE FOREIGN TABLE test_variant_e2e.foreign_pq_inferred ()
             SERVER pg_lake OPTIONS (path '{path}', format 'parquet');
             """,
@@ -266,7 +266,7 @@ class TestBForeignParquet:
         with pytest.raises(psycopg2.Error) as ei:
             run_command(
                 f"""
-                SET pg_lake_engine.variant_as_jsonb = off;
+                SET pg_lake_engine.enable_variant_type = off;
                 CREATE FOREIGN TABLE test_variant_e2e.foreign_pq_off ()
                 SERVER pg_lake OPTIONS (path '{path}', format 'parquet');
                 """,
@@ -290,7 +290,7 @@ class TestCForeignIceberg:
 
         run_command(
             f"""
-            SET pg_lake_engine.variant_as_jsonb = on;
+            SET pg_lake_engine.enable_variant_type = on;
             CREATE FOREIGN TABLE test_variant_e2e.foreign_iceberg ()
             SERVER pg_lake OPTIONS (path '{meta_path}', format 'iceberg');
             """,
@@ -330,7 +330,7 @@ class TestCForeignIceberg:
         with pytest.raises(psycopg2.Error) as ei:
             run_command(
                 f"""
-                SET pg_lake_engine.variant_as_jsonb = off;
+                SET pg_lake_engine.enable_variant_type = off;
                 CREATE FOREIGN TABLE test_variant_e2e.foreign_iceberg_off ()
                 SERVER pg_lake OPTIONS (path '{meta_path}', format 'iceberg');
                 """,
@@ -356,7 +356,7 @@ class TestDGucOffRegression:
 
         run_command(
             f"""
-            SET pg_lake_engine.variant_as_jsonb = off;
+            SET pg_lake_engine.enable_variant_type = off;
             CREATE SCHEMA IF NOT EXISTS test_variant_e2e_regression;
             SET search_path TO test_variant_e2e_regression;
 
@@ -405,7 +405,7 @@ class TestDGucOffRegression:
     def test_select_returns_jsonb_textually(self, regression_table, pg_conn):
         rows = run_query(
             """
-            SET pg_lake_engine.variant_as_jsonb = off;
+            SET pg_lake_engine.enable_variant_type = off;
             SELECT id, doc FROM test_variant_e2e_regression.regress_t
             ORDER BY id
             """,
@@ -431,7 +431,7 @@ def compatibility_tables(pg_conn, iceberg_extension, extension, s3):
         f"""
         CREATE SCHEMA test_variant_compat;
 
-        SET pg_lake_engine.variant_as_jsonb = off;
+        SET pg_lake_engine.enable_variant_type = off;
         CREATE FOREIGN TABLE test_variant_compat.old_t (
             id INT,
             string_doc JSONB
@@ -439,7 +439,7 @@ def compatibility_tables(pg_conn, iceberg_extension, extension, s3):
         INSERT INTO test_variant_compat.old_t
         VALUES (1, '{SETUP_DOC_A}'::jsonb);
 
-        SET pg_lake_engine.variant_as_jsonb = on;
+        SET pg_lake_engine.enable_variant_type = on;
         ALTER TABLE test_variant_compat.old_t ADD COLUMN variant_doc JSONB;
         INSERT INTO test_variant_compat.old_t
         VALUES (2, '{SETUP_DOC_B}'::jsonb, '{SETUP_DOC_A}'::jsonb);
@@ -451,16 +451,16 @@ def compatibility_tables(pg_conn, iceberg_extension, extension, s3):
         INSERT INTO test_variant_compat.new_t
         VALUES (1, '{SETUP_DOC_A}'::jsonb);
 
-        SET pg_lake_engine.variant_as_jsonb = off;
+        SET pg_lake_engine.enable_variant_type = off;
         ALTER TABLE test_variant_compat.new_t ADD COLUMN string_doc JSONB;
         INSERT INTO test_variant_compat.new_t
         VALUES (2, '{SETUP_DOC_B}'::jsonb, '{SETUP_DOC_A}'::jsonb);
 
-        SET pg_lake_engine.variant_as_jsonb = on;
+        SET pg_lake_engine.enable_variant_type = on;
         INSERT INTO test_variant_compat.old_t
         VALUES (3, '{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb);
 
-        SET pg_lake_engine.variant_as_jsonb = off;
+        SET pg_lake_engine.enable_variant_type = off;
         INSERT INTO test_variant_compat.new_t
         VALUES (3, '{SETUP_DOC_A}'::jsonb, '{SETUP_DOC_B}'::jsonb);
         """,
@@ -501,7 +501,7 @@ class TestSchemaEvolutionAndGucFlips:
         self, compatibility_tables, pg_conn, guc_value
     ):
         run_command(
-            f"SET pg_lake_engine.variant_as_jsonb = {guc_value}",
+            f"SET pg_lake_engine.enable_variant_type = {guc_value}",
             pg_conn,
         )
 
@@ -553,13 +553,13 @@ def test_heap_jsonb_insert_select_into_variant(
             (1, '{SETUP_DOC_A}'::jsonb),
             (2, '{SETUP_DOC_B}'::jsonb);
 
-        SET pg_lake_engine.variant_as_jsonb = on;
+        SET pg_lake_engine.enable_variant_type = on;
         CREATE FOREIGN TABLE test_variant_scanner.target_t (
             id INT,
             doc JSONB
         ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
 
-        SET pg_lake_engine.variant_as_jsonb = off;
+        SET pg_lake_engine.enable_variant_type = off;
         """,
         pg_conn,
     )
@@ -593,7 +593,7 @@ def test_json_surface_type_also_stores_variant(
     run_command(
         f"""
         CREATE SCHEMA test_variant_json_surface;
-        SET pg_lake_engine.variant_as_jsonb = on;
+        SET pg_lake_engine.enable_variant_type = on;
         CREATE FOREIGN TABLE test_variant_json_surface.target_t (
             id INT,
             doc JSON
@@ -644,7 +644,7 @@ def test_large_jsonb_variant_round_trip(pg_conn, iceberg_extension, extension, s
     run_command(
         f"""
         CREATE SCHEMA test_variant_large;
-        SET pg_lake_engine.variant_as_jsonb = on;
+        SET pg_lake_engine.enable_variant_type = on;
         CREATE FOREIGN TABLE test_variant_large.target_t (
             id INT,
             doc JSONB

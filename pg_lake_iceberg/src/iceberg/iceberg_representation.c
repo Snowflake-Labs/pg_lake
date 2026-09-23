@@ -81,10 +81,10 @@ IcebergStorageFieldForColumnType(PGType declaredType,
 		ResolveDomainBaseTypeAndTypmod(baseType.postgresTypeOid,
 									   &baseType.postgresTypeMod);
 
-	const char *variantAsJsonb =
-		GetConfigOption("pg_lake_engine.variant_as_jsonb", false, false);
+	const char *enableVariantType =
+		GetConfigOption("pg_lake_engine.enable_variant_type", false, false);
 
-	if (strcmp(variantAsJsonb, "on") == 0 &&
+	if (strcmp(enableVariantType, "on") == 0 &&
 		(baseType.postgresTypeOid == JSONBOID ||
 		 baseType.postgresTypeOid == JSONOID))
 	{
