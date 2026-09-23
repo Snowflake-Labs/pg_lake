@@ -49,6 +49,19 @@ InternalCSVOptions(bool includeHeader)
 	options = lappend(options,
 					  makeDefElem("null", (Node *) makeString("\\N"), -1));
 
+	/*
+	 * Pin the encoding.  Without an explicit ENCODING the CSV writer falls
+	 * back to the session's client_encoding, while the readers of these files
+	 * always decode them as UTF-8 (DuckDB's read_csv() defaults to UTF-8 and
+	 * we do not pass an encoding on the read side).  In a session whose
+	 * client_encoding is not UTF-8 that mismatch corrupts the exchanged data,
+	 * and for client-only encodings that can embed an ASCII byte in a
+	 * multi-byte character it can also produce bytes the reader takes for
+	 * delimiters or quotes.
+	 */
+	options = lappend(options,
+					  makeDefElem("encoding", (Node *) makeString("UTF8"), -1));
+
 	return options;
 }
 
