@@ -1201,8 +1201,10 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		return;
 	}
 
+	int			totalFilesClaimed = 0;
 	int			totalFilesRemoved = 0;
 
+	List	   *claimedFiles = NIL;
 	List	   *removedFiles = NIL;
 	volatile bool hasRemainingFiles = true;
 	MemoryContext savedContext = CurrentMemoryContext;
@@ -1224,7 +1226,8 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			char	   *locationPrefix = GetMetadataLocationPrefixForRelationId(relationId);
 
-			hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull, isVerbose, &removedFiles);
+			hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull, isVerbose,
+													  &removedFiles, &claimedFiles);
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -1254,13 +1257,18 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		PG_END_TRY();
 
 		/*
-		 * Rows claimed, unlike the deletion queue loop, which charges rows
-		 * removed. Safe here because RemoveInProgressFiles drops the catalog
+		 * The budget is charged rows claimed, unlike the deletion queue loop,
+		 * which charges rows removed. RemoveInProgressFiles drops the catalog
 		 * row whatever the remote outcome, so a claimed row is gone from the
-		 * queue either way: an in-progress path cannot fail forever, cannot
-		 * be re-claimed by the next pass, and so cannot spend a budget
-		 * without making progress.
+		 * queue either way: charging removals instead would let a path that
+		 * failed be re-claimed by the next iteration without ever advancing
+		 * the budget, and the loop would stop terminating.
+		 *
+		 * What is reported is removals, which is the smaller number whenever
+		 * a remote delete failed. Its own warning says so; the summary below
+		 * has no business also claiming the file.
 		 */
+		totalFilesClaimed += list_length(claimedFiles);
 		totalFilesRemoved += list_length(removedFiles);
 
 		/* rotate into a new transaction to release locks and save progress */
@@ -1269,11 +1277,23 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		StartTransactionCommand();
 	}
 	while (!isFull				/* when isFull, we'll remove all files */
-		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
+		   && totalFilesClaimed < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
 
-	if (hasRemainingFiles && totalFilesRemoved >= MaxFileRemovalsPerVacuum)
+	if (hasRemainingFiles && totalFilesClaimed >= MaxFileRemovalsPerVacuum)
 		VacuumStoppedWithFilesQueued = true;
+
+	if (totalFilesRemoved > 0)
+	{
+		if (relationId != InvalidOid)
+			ereport(LOG,
+					(errmsg("pg_lake: cleaned up %d orphaned files from iceberg table %s",
+							totalFilesRemoved, GetQualifiedRelationName(relationId))));
+		else
+			ereport(LOG,
+					(errmsg("pg_lake: cleaned up %d orphaned files from dropped iceberg tables",
+							totalFilesRemoved)));
+	}
 }
 
 

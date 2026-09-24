@@ -138,7 +138,7 @@ flush_in_progress_queue(PG_FUNCTION_ARGS)
 	char	   *location = "";
 	bool		isVerbose = false;
 
-	RemoveInProgressFiles(location, true, isVerbose, &removedFiles);
+	RemoveInProgressFiles(location, true, isVerbose, &removedFiles, NULL);
 
 	ListCell   *fileCell;
 
@@ -159,14 +159,35 @@ flush_in_progress_queue(PG_FUNCTION_ARGS)
  * RemoveInProgressFiles removes all files that are no longer
  * in progress. This includes removing from the remote storage
  * and deleting the record from the IN_PROGRESS_FILES_TABLE.
+ *
+ * The two outputs do not answer the same question. *removedPaths is the paths
+ * remote storage confirmed gone, which is what a caller reporting a number of
+ * files cleaned up wants. *claimedPaths is every path this pass took off the
+ * queue, which is more: a path whose removal failed still loses its catalog row
+ * (see the DeleteInProgressFileRecords call below), so it is claimed without
+ * being removed. A caller charging a per-vacuum budget wants that one, because
+ * it is the number that bounds how much work the pass did. *claimedPaths may be
+ * NULL when the caller has no use for it.
  */
 bool
-RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **deletedPaths)
+RemoveInProgressFiles(char *location, bool isFull, bool isVerbose,
+					  List **removedPaths, List **claimedPaths)
 {
 	List	   *inProgressFileRecords = NIL;
 	bool		hasRemainingFiles = GetInProgressFileRecords(location, isFull, &inProgressFileRecords);
 
-	*deletedPaths = NIL;
+	*removedPaths = NIL;
+
+	/*
+	 * Both outputs start empty so that an error leaves the caller with what
+	 * this pass achieved rather than what the previous one did. Nothing is
+	 * claimed until the catalog DELETE below, and an error takes the whole
+	 * subtransaction with it, so an interrupted pass claimed nothing.
+	 */
+	if (claimedPaths != NULL)
+		*claimedPaths = NIL;
+
+	List	   *claimedFiles = NIL;
 
 	ListCell   *fileCell = NULL;
 
@@ -175,6 +196,13 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 	 * object-store request per batch, so that draining a long in-progress
 	 * queue does not cost a request per file. Prefix entries expand into an
 	 * unbounded listing plus delete, so they stay a request of their own.
+	 *
+	 * Asking DeleteRemoteFileBatch for the removed paths means a failed batch
+	 * is retried a path at a time, because pgduck reports one status for the
+	 * whole request and does not say which path was at fault. Only a failure
+	 * pays for that, and PER_LOOP_IN_PROGRESS_FILE_CLEANUP_LIMIT is well
+	 * below FILE_DELETION_BATCH_SIZE, so the retry is bounded by the paths
+	 * one pass claimed rather than by a full batch.
 	 */
 	List	   *deletionBatch = NIL;
 
@@ -205,7 +233,8 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 
 		if (entry->isPrefix)
 		{
-			DeleteRemotePrefix(entry->path);
+			if (DeleteRemotePrefix(entry->path))
+				*removedPaths = lappend(*removedPaths, entry->path);
 		}
 		else
 		{
@@ -213,7 +242,7 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 
 			if (list_length(deletionBatch) >= FILE_DELETION_BATCH_SIZE)
 			{
-				DeleteRemoteFileBatch(deletionBatch, NULL, NULL);
+				DeleteRemoteFileBatch(deletionBatch, removedPaths, NULL);
 				deletionBatch = NIL;
 
 				/*
@@ -224,23 +253,27 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 			}
 		}
 
-		*deletedPaths = lappend(*deletedPaths, entry->path);
+		claimedFiles = lappend(claimedFiles, entry->path);
 	}
 
 	/* whatever did not fill a batch */
-	DeleteRemoteFileBatch(deletionBatch, NULL, NULL);
+	DeleteRemoteFileBatch(deletionBatch, removedPaths, NULL);
 
 	/*
-	 * Drop the catalog rows for the paths we just unlinked from remote
-	 * storage in a single DELETE. Per-row DeleteInProgressFileRecord would
-	 * take a fresh plan-cache + snapshot per file, which on large backlogs (a
-	 * stuck VACUUM walk of a long in-progress queue) was a notable share of
-	 * the loop. The per-iteration semantics are preserved because the catalog
-	 * DELETE is idempotent against missing paths and remote removal is
-	 * idempotent against missing remote objects, so a mid-loop error still
-	 * recovers via the next VACUUM cycle.
+	 * Drop the catalog rows for every path this pass claimed in a single
+	 * DELETE, whatever remote storage made of them. Per-row
+	 * DeleteInProgressFileRecord would take a fresh plan-cache + snapshot per
+	 * file, which on large backlogs (a stuck VACUUM walk of a long
+	 * in-progress queue) was a notable share of the loop. The per-iteration
+	 * semantics are preserved because the catalog DELETE is idempotent
+	 * against missing paths and remote removal is idempotent against missing
+	 * remote objects, so a mid-loop error still recovers via the next VACUUM
+	 * cycle.
 	 */
-	DeleteInProgressFileRecords(*deletedPaths);
+	DeleteInProgressFileRecords(claimedFiles);
+
+	if (claimedPaths != NULL)
+		*claimedPaths = claimedFiles;
 
 	return hasRemainingFiles;
 }

@@ -635,6 +635,60 @@ def test_in_progress_files_9(
     assert len(in_progress_file_paths) == 0
 
 
+def test_flush_reports_only_the_files_it_removed(s3, superuser_conn, extension):
+    """flush_in_progress_queue reports the paths remote storage removed, not the
+    rows it claimed.
+
+    A path whose removal fails still loses its in-progress row -- the table has
+    nowhere to record an attempt -- so a caller counting claimed rows would
+    report a file it had not removed, right next to the warning saying the
+    removal failed.
+    """
+    prefix = f"s3://{TEST_BUCKET}/test_in_progress_files_removed_only"
+    removable_path = f"{prefix}/removable.parquet"
+
+    bucket, key = parse_s3_path(removable_path)
+    s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+
+    # A path no filesystem can remove: an unknown scheme falls through to the
+    # local filesystem, where removing something absent is an error rather than
+    # the no-op it is on an object store. Keeping the failure local also keeps
+    # the test off the network.
+    unremovable_path = (
+        "nosuchfs://test_in_progress_files_removed_only/unremovable.parquet"
+    )
+
+    values = ",".join(
+        f"('{path}', 0, false)" for path in (removable_path, unremovable_path)
+    )
+    run_command(
+        f"INSERT INTO lake_engine.in_progress_files (path, operation_id, is_prefix) "
+        f"VALUES {values}",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    flushed = run_query(
+        "SELECT * FROM lake_engine.flush_in_progress_queue()", superuser_conn
+    )
+    reported = {row[0] for row in flushed}
+
+    assert removable_path in reported
+    assert unremovable_path not in reported
+
+    # the file the flush reported is the one that actually went
+    assert "Contents" not in s3.list_objects_v2(Bucket=bucket, Prefix=key)
+
+    # both rows are claimed either way, so neither is left to retry
+    remaining = run_query(
+        f"SELECT path FROM lake_engine.in_progress_files "
+        f"WHERE path IN ('{removable_path}', '{unremovable_path}')",
+        superuser_conn,
+    )
+    assert remaining == []
+    superuser_conn.commit()
+
+
 # Sequence number to generate unique table names
 table_counter = 0
 
