@@ -93,10 +93,14 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
     """One unremovable path does not take its batch down with it.
 
     A batch is one request and its failure does not say which path was at
-    fault, so a failed batch is retried one path at a time. Without that, the
-    healthy paths sharing the request would collect retry_count for a failure
-    that was never theirs and eventually be abandoned at
-    VacuumFileRemoveMaxRetries.
+    fault, so a failed batch is retried one path at a time up to the path that
+    fails again. Without that, the healthy paths sharing the request would
+    collect retry_count for a failure that was never theirs and eventually be
+    abandoned at VacuumFileRemoveMaxRetries.
+
+    The failing path is queued last because the walk stops there: rows are
+    claimed in the order they were queued, and the ones behind a failure are
+    left for a later pass rather than removed by this one.
     """
     prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/isolate"
 
@@ -307,6 +311,8 @@ def test_autovacuum_does_not_spin_on_unremovable_paths(
         )
         superuser_conn.commit()
 
+        # the removable rows are queued first: the drain stops at the first row
+        # it cannot remove, so rows queued behind one wait for a later pass
         _queue_paths(superuser_conn, good_paths + bad_paths, table=table)
 
         # wait for the worker to run a cycle, which we see by the removable
@@ -347,6 +353,7 @@ def test_autovacuum_does_not_spin_on_unremovable_paths(
 
         after = max_retry_count()
 
+        # only the first failing row is reached, so this is its retry_count
         assert after - before <= 2, (
             f"retry_count on the failing rows went {before} -> {after} in "
             f"{quiet_seconds}s with a {naptime_seconds}s naptime, so the worker "

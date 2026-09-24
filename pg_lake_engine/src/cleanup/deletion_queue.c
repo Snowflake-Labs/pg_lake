@@ -115,7 +115,15 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 
 /*
  * RemoveDeletionQueueRecords removes all files that are no longer referenced .
- * Returns true if at least one file was successfully removed.
+ * Returns true if at least one file was successfully removed and nothing
+ * failed, which is the signal to the caller that another pass is worth doing.
+ *
+ * The walk stops at the first record it could not remove: whatever the object
+ * store is unhappy about is rarely specific to one path, so trying the rest
+ * mostly buys a failed request and a retry_count per record. The records left
+ * unattempted keep their row and their retry_count, so the next pass picks them
+ * up; the one that failed is held back by IncrementDeletionQueueRetryCount
+ * until VacuumFileRemoveRetryInterval has passed.
  *
  * When filesRemoved is given it reports how many of the records were actually
  * removed, which is fewer than the number of records whenever a removal failed.
@@ -135,6 +143,9 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 	 * draining.
 	 */
 	bool		producedNewDeletionRows = false;
+
+	/* set once a record could not be removed, which ends the walk */
+	bool		removalFailed = false;
 
 	ListCell   *cleanupRecordCell = NULL;
 
@@ -178,6 +189,8 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 				 * the row and retry later.
 				 */
 				failedFilePathList = lappend(failedFilePathList, entry->path);
+				removalFailed = true;
+				break;
 			}
 
 			continue;
@@ -189,10 +202,14 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 			 * A prefix row expands into an unbounded listing plus delete, so
 			 * it stays a request of its own.
 			 */
-			if (DeleteQueuedPrefix(entry->path, isVerbose))
-				deletedFilePathList = lappend(deletedFilePathList, entry->path);
-			else
+			if (!DeleteQueuedPrefix(entry->path, isVerbose))
+			{
 				failedFilePathList = lappend(failedFilePathList, entry->path);
+				removalFailed = true;
+				break;
+			}
+
+			deletedFilePathList = lappend(deletedFilePathList, entry->path);
 
 			continue;
 		}
@@ -204,8 +221,13 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 
 		if (list_length(deletionBatch) >= FILE_DELETION_BATCH_SIZE)
 		{
-			DeleteRemoteFileBatch(deletionBatch, &deletedFilePathList,
-								  &failedFilePathList);
+			if (!DeleteRemoteFileBatch(deletionBatch, &deletedFilePathList,
+									   &failedFilePathList))
+			{
+				removalFailed = true;
+				break;
+			}
+
 			deletionBatch = NIL;
 
 			/*
@@ -216,8 +238,12 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 		}
 	}
 
-	/* whatever did not fill a batch */
-	DeleteRemoteFileBatch(deletionBatch, &deletedFilePathList, &failedFilePathList);
+	if (!removalFailed)
+	{
+		/* whatever did not fill a batch */
+		removalFailed = !DeleteRemoteFileBatch(deletionBatch, &deletedFilePathList,
+											   &failedFilePathList);
+	}
 
 	if (list_length(deletedFilePathList) > 0)
 	{
@@ -236,8 +262,15 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 
 	/*
 	 * Keep draining if we deleted something, or if we produced new per-file
-	 * rows that the next pass still has to delete.
+	 * rows that the next pass still has to delete -- but not if a removal
+	 * failed, in which case the paths this pass did not get to wait for the
+	 * next cleanup cycle.
 	 */
+	if (removalFailed)
+	{
+		return false;
+	}
+
 	return list_length(deletedFilePathList) > 0 || producedNewDeletionRows;
 }
 
@@ -573,6 +606,58 @@ InsertMetadataResolveRecord(char *metadataPath, Oid relationId, TimestampTz orph
 	InsertDeletionQueueRecordExtended(metadataPath, relationId, orphanedAt,
 									  isPrefix, resolveMetadata);
 }
+
+/*
+ * RequeueFailedRemovals hands paths whose removal from remote storage failed to
+ * the deletion queue, so a failed removal is retried rather than lost. The
+ * in-progress file queue has nowhere to record an attempt (see
+ * RemoveInProgressFiles), while this queue has retry_count, the retry interval
+ * and the cap that eventually retires a path, so a path that keeps failing
+ * stays visible in a table instead of being left behind in the object store
+ * with nothing pointing at it.
+ *
+ * The rows carry no table, because a path is all the in-progress queue knows
+ * about them, and an untabled row is claimed by the dropped-table pass, which
+ * the autovacuum worker runs ahead of the per-table ones. orphaned_at stays
+ * NULL, since a path that reached the in-progress queue is already orphaned and
+ * has no retention period left to wait out. The attempt that just failed is
+ * recorded as the first one, so the next is held off for
+ * VacuumFileRemoveRetryInterval rather than made again in the following pass.
+ *
+ * A path already in the queue is left as it is. The two queues are independent,
+ * so the same path can be in both, and a unique violation here would abort the
+ * whole pass -- including the removals that did succeed.
+ */
+void
+RequeueFailedRemovals(List *paths, bool isPrefix)
+{
+	if (paths == NIL)
+	{
+		return;
+	}
+
+	char	   *query =
+		"insert into " DELETION_QUEUE_TABLE " "
+		"(path, table_name, is_prefix, retry_count, last_attempt_at) "
+		"select requeued.path, $2, $3, 1, pg_catalog.now() "
+		"from pg_catalog.unnest($1) AS requeued(path) "
+		"on conflict (path) do nothing";
+
+	DECLARE_SPI_ARGS(3);
+	SPI_ARG_VALUE(1, TEXTARRAYOID, StringListToArray(paths), false);
+	SPI_ARG_VALUE(2, OIDOID, InvalidOid, false);
+	SPI_ARG_VALUE(3, BOOLOID, isPrefix, false);
+
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	SPI_END();
+}
+
 
 /*
 * InsertDeletionQueueRecordExtended is the internal function to insert

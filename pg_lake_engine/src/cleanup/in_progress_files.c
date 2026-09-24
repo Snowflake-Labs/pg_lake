@@ -32,6 +32,7 @@
 #include "access/genam.h"
 #include "catalog/namespace.h"
 #include "commands/sequence.h"
+#include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
@@ -156,14 +157,28 @@ flush_in_progress_queue(PG_FUNCTION_ARGS)
  * RemoveInProgressFiles removes all files that are no longer
  * in progress. This includes removing from the remote storage
  * and deleting the record from the IN_PROGRESS_FILES_TABLE.
+ *
+ * Only paths remote storage confirmed gone are reported in *removedPaths. A path
+ * whose removal failed is handed to the deletion queue, which is the queue with
+ * retry state, and this pass stops there: it reports no remaining files so that
+ * the caller does not go straight on to the paths behind it.
  */
 bool
-RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **deletedPaths)
+RemoveInProgressFiles(char *location, bool isFull, bool isVerbose,
+					  List **removedPaths)
 {
 	List	   *inProgressFileRecords = NIL;
 	bool		hasRemainingFiles = GetInProgressFileRecords(location, isFull, &inProgressFileRecords);
 
-	*deletedPaths = NIL;
+	/*
+	 * Start empty so that an error leaves the caller with what this pass
+	 * achieved rather than what the previous one did. An error takes the
+	 * whole subtransaction with it, so nothing an interrupted pass removed is
+	 * claimed either.
+	 */
+	*removedPaths = NIL;
+
+	bool		removalFailed = false;
 
 	ListCell   *fileCell = NULL;
 
@@ -172,8 +187,17 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 	 * object-store request per batch, so that draining a long in-progress
 	 * queue does not cost a request per file. Prefix entries expand into an
 	 * unbounded listing plus delete, so they stay a request of their own.
+	 *
+	 * Asking DeleteRemoteFileBatch which paths went and which one did not is
+	 * what makes a failed batch attributable, because pgduck reports one
+	 * status for the whole request and does not say which path was at fault.
+	 * That retry stops at the first path that fails again, so only the paths
+	 * ahead of the failure are told apart, and a batch that fails wholesale
+	 * costs one extra request rather than one per path.
 	 */
 	List	   *deletionBatch = NIL;
+	List	   *failedFiles = NIL;
+	List	   *failedPrefixes = NIL;
 
 	foreach(fileCell, inProgressFileRecords)
 	{
@@ -202,7 +226,14 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 
 		if (entry->isPrefix)
 		{
-			DeleteRemotePrefix(entry->path);
+			if (!DeleteRemotePrefix(entry->path))
+			{
+				failedPrefixes = lappend(failedPrefixes, entry->path);
+				removalFailed = true;
+				break;
+			}
+
+			*removedPaths = lappend(*removedPaths, entry->path);
 		}
 		else
 		{
@@ -210,7 +241,13 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 
 			if (list_length(deletionBatch) >= FILE_DELETION_BATCH_SIZE)
 			{
-				DeleteRemoteFileBatch(deletionBatch, NULL, NULL);
+				if (!DeleteRemoteFileBatch(deletionBatch, removedPaths,
+										   &failedFiles))
+				{
+					removalFailed = true;
+					break;
+				}
+
 				deletionBatch = NIL;
 
 				/*
@@ -220,26 +257,57 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose, List **delete
 				CHECK_FOR_INTERRUPTS();
 			}
 		}
-
-		*deletedPaths = lappend(*deletedPaths, entry->path);
 	}
 
-	/* whatever did not fill a batch */
-	DeleteRemoteFileBatch(deletionBatch, NULL, NULL);
+	if (!removalFailed)
+	{
+		/* whatever did not fill a batch */
+		removalFailed = !DeleteRemoteFileBatch(deletionBatch, removedPaths,
+											   &failedFiles);
+	}
 
 	/*
-	 * Drop the catalog rows for the paths we just unlinked from remote
-	 * storage in a single DELETE. Per-row DeleteInProgressFileRecord would
-	 * take a fresh plan-cache + snapshot per file, which on large backlogs (a
-	 * stuck VACUUM walk of a long in-progress queue) was a notable share of
-	 * the loop. The per-iteration semantics are preserved because the catalog
-	 * DELETE is idempotent against missing paths and remote removal is
-	 * idempotent against missing remote objects, so a mid-loop error still
-	 * recovers via the next VACUUM cycle.
+	 * Hand the path remote storage refused to the deletion queue before its
+	 * row here goes away. This table has nowhere to record an attempt, so a
+	 * row that stayed would be retried by every pass with nothing to space
+	 * the attempts out, and would hold up the rows behind it for as long as
+	 * it kept failing. The deletion queue keeps a retry count, holds the next
+	 * attempt off for VacuumFileRemoveRetryInterval and retires a path that
+	 * keeps failing. Both queues are written in the caller's subtransaction
+	 * along with the DELETE below, so a path cannot leave one without
+	 * arriving in the other.
 	 */
-	DeleteInProgressFileRecords(*deletedPaths);
+	RequeueFailedRemovals(failedFiles, false);
+	RequeueFailedRemovals(failedPrefixes, true);
 
-	return hasRemainingFiles;
+	/*
+	 * Drop the catalog rows for the paths this queue is done with in a single
+	 * DELETE: the ones that are gone, and the one the deletion queue has
+	 * taken over. Per-row DeleteInProgressFileRecord would take a fresh
+	 * plan-cache + snapshot per file, which on large backlogs (a stuck VACUUM
+	 * walk of a long in-progress queue) was a notable share of the loop. The
+	 * per-iteration semantics are preserved because the catalog DELETE is
+	 * idempotent against missing paths and remote removal is idempotent
+	 * against missing remote objects, so a mid-loop error still recovers via
+	 * the next VACUUM cycle.
+	 *
+	 * The paths the pass never reached are not in either list, so they keep
+	 * their rows and are claimed again by a later cycle.
+	 */
+	List	   *retiredPaths = list_copy(*removedPaths);
+
+	retiredPaths = list_concat(retiredPaths, failedFiles);
+	retiredPaths = list_concat(retiredPaths, failedPrefixes);
+
+	DeleteInProgressFileRecords(retiredPaths);
+
+	/*
+	 * A pass that could not remove a file reports nothing remaining, so the
+	 * caller stops rather than working through the paths behind the failure:
+	 * whatever the object store is unhappy about is rarely specific to one
+	 * key, and a path left in place is claimed again by the next cycle.
+	 */
+	return hasRemainingFiles && !removalFailed;
 }
 
 

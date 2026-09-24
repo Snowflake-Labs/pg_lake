@@ -311,7 +311,7 @@ _PG_init(void)
 							"during a single vacuum operation.",
 							NULL,
 							&MaxFileRemovalsPerVacuum,
-							100000,
+							10000,
 							0,
 							INT_MAX,
 							PGC_SUSET,

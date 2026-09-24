@@ -43,7 +43,7 @@ public:
 
 	/* Custom functions */
 	void RemoveFileFromS3(string path, optional_ptr<FileOpener> opener);
-	void RemoveFilesFromS3(const string &bucketUrl, const vector<string> &paths,
+	void RemoveFilesFromS3(const string &resolvedFirstPath, const vector<string> &paths,
 						   optional_ptr<FileOpener> opener);
 	int64_t Download(ClientContext &context, FileHandle &inputHandle, FileHandle &outputHandle);
 	vector<OpenFileInfo> List(const string &glob_pattern, bool is_glob, FileOpener *opener);
@@ -55,6 +55,18 @@ public:
 	unique_ptr<HTTPResponse> PutRequest(HTTPInput &input, string s3_url, HTTPHeaders header_map,
 	                                    char *buffer_in, idx_t buffer_in_len,
 	                                    string http_params = "") override;
+
+	/*
+	 * PostRequest with the URL a credential refresh looks the secret up by given
+	 * separately from the URL the request goes to, for DeleteObjects requests,
+	 * which target a bucket but are signed with the credentials of the objects
+	 * they delete.
+	 */
+	unique_ptr<HTTPResponse> PostRequestForCredentialScope(HTTPInput &input, string s3_url,
+	                                                      const string &credentialScopeUrl,
+	                                                      string &buffer_out, char *buffer_in,
+	                                                      idx_t buffer_in_len,
+	                                                      string http_params = "");
 
 	/* Overrides that are not in S3FileSystem */
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;

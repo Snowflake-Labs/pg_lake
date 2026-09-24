@@ -635,6 +635,106 @@ def test_in_progress_files_9(
     assert len(in_progress_file_paths) == 0
 
 
+def test_flush_requeues_the_files_it_could_not_remove(s3, superuser_conn, extension):
+    """flush_in_progress_queue reports the paths remote storage removed, and
+    hands a path it could not remove to the deletion queue.
+
+    The in-progress row is the only record that the file exists, so dropping it
+    after a failed attempt would leave the object behind with nothing left to
+    retry it. This table has nowhere to record an attempt, so the retry belongs
+    to the deletion queue, which has a retry count and a clock. Reporting the
+    path would be wrong either way -- the warning right above says the removal
+    failed.
+    """
+    prefix = f"s3://{TEST_BUCKET}/test_in_progress_files_removed_only"
+    removable_path = f"{prefix}/removable.parquet"
+
+    bucket, key = parse_s3_path(removable_path)
+    s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+
+    run_command(
+        f"INSERT INTO lake_engine.in_progress_files (path, operation_id, is_prefix) "
+        f"VALUES ('{removable_path}', 0, false)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    flushed = run_query(
+        "SELECT * FROM lake_engine.flush_in_progress_queue()", superuser_conn
+    )
+    assert {row[0] for row in flushed} == {removable_path}
+
+    # the file the flush reported is the one that actually went
+    assert "Contents" not in s3.list_objects_v2(Bucket=bucket, Prefix=key)
+
+    remaining = run_query(
+        f"SELECT path FROM lake_engine.in_progress_files "
+        f"WHERE path OPERATOR(pg_catalog.=) '{removable_path}'",
+        superuser_conn,
+    )
+    assert remaining == []
+    superuser_conn.commit()
+
+    # A path no filesystem can remove: an unknown scheme falls through to the
+    # local filesystem, where removing something absent is an error rather than
+    # the no-op it is on an object store. Keeping the failure local also keeps
+    # the test off the network.
+    unremovable_path = (
+        "nosuchfs://test_in_progress_files_removed_only/unremovable.parquet"
+    )
+
+    run_command(
+        f"INSERT INTO lake_engine.in_progress_files (path, operation_id, is_prefix) "
+        f"VALUES ('{unremovable_path}', 0, false)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        flushed = run_query(
+            "SELECT * FROM lake_engine.flush_in_progress_queue()", superuser_conn
+        )
+        assert {row[0] for row in flushed} == set()
+
+        # the in-progress queue is done with the path, having handed it over
+        remaining = run_query(
+            f"SELECT path FROM lake_engine.in_progress_files "
+            f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
+            superuser_conn,
+        )
+        assert remaining == []
+
+        # the deletion queue has it, with the failed attempt recorded and no
+        # table of its own, so the dropped-table pass retries it on the retry
+        # interval
+        requeued = run_query(
+            f"SELECT table_name::pg_catalog.oid, retry_count, is_prefix, "
+            f"last_attempt_at IS NOT NULL "
+            f"FROM lake_engine.deletion_queue "
+            f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
+            superuser_conn,
+        )
+        assert requeued == [[0, 1, False, True]]
+    finally:
+        # Leave nothing behind, whether or not the assertions above held. A
+        # path that cannot be removed stops a drain before it reaches the
+        # paths behind it, and VACUUM FULL skips the retry interval, so a row
+        # left here would fail every later test in this database that waits
+        # for its own files to go.
+        superuser_conn.rollback()
+        run_command(
+            f"DELETE FROM lake_engine.in_progress_files "
+            f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
+            superuser_conn,
+        )
+        run_command(
+            f"DELETE FROM lake_engine.deletion_queue "
+            f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
 # Sequence number to generate unique table names
 table_counter = 0
 
