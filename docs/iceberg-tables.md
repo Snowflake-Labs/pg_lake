@@ -201,7 +201,10 @@ Either way the column is still `jsonb` in PostgreSQL. pg_lake keeps operations
 whose result depends on PostgreSQL's canonical rendering or sort order local,
 while extraction and containment can still be pushed down. Only the physical
 encoding differs, and reading is unaffected by the setting: a variant column
-is surfaced as `jsonb`, including in files written by another engine.
+is surfaced as `jsonb`, including in files written by another engine. For an
+external Parquet or Iceberg table without a local field mapping, pg_lake
+conservatively keeps rendering-dependent `jsonb` operations local because the
+physical column may be variant-backed.
 
 The encoding is recorded per column when that column is created, so changing
 the option later affects only columns added afterwards. That lets an existing
