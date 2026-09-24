@@ -76,8 +76,18 @@ int			MaxCompactionsPerVacuum = 100;
 /* case insensitive */
 #define PG_LAKE_ICEBERG_VACUUM_FLAG "iceberg"
 
-/* managed by a GUC, not exposed to the user, see note in VacuumRemoveInProgressFiles */
-int			MaxFileRemovalsPerVacuum = 100000;
+/*
+ * Managed by a GUC, not exposed to the user, see note in
+ * VacuumRemoveInProgressFiles.
+ *
+ * It also bounds how long the removal stages can run before the autovacuum loop
+ * comes back around to the object store catalog export, which is serialized
+ * behind them (see pg_lake_iceberg_vacuum). Removals are batched, so a budget
+ * this size is a few requests worth of work when the object store is healthy;
+ * when a batch fails it is retried a path at a time, and then the budget is what
+ * keeps the retries from holding up the export for hours.
+ */
+int			MaxFileRemovalsPerVacuum = 10000;
 
 /*
  * Set when a file removal loop stopped at MaxFileRemovalsPerVacuum with files
@@ -1201,9 +1211,8 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		return;
 	}
 
-	int			totalFilesRemoved = 0;
+	volatile int totalFilesRemoved = 0;
 
-	List	   *removedFiles = NIL;
 	volatile bool hasRemainingFiles = true;
 	MemoryContext savedContext = CurrentMemoryContext;
 
@@ -1224,7 +1233,26 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			char	   *locationPrefix = GetMetadataLocationPrefixForRelationId(relationId);
 
-			hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull, isVerbose, &removedFiles);
+			/*
+			 * The paths live in the transaction this iteration commits below,
+			 * so they are counted here rather than carried out of the pass
+			 * that produced them.
+			 */
+			List	   *removedFiles = NIL;
+
+			hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull, isVerbose,
+													  &removedFiles);
+
+			/*
+			 * Removals are what the budget is charged and what the summary
+			 * below reports: a path whose removal failed is handed to the
+			 * deletion queue, which is not a file this vacuum got rid of. A
+			 * pass that failed reports no remaining files, so the loop ends
+			 * there rather than carrying on through the paths behind the
+			 * failure, and a pass that threw reports nothing at all, its
+			 * removals having gone back with the subtransaction.
+			 */
+			totalFilesRemoved += list_length(removedFiles);
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -1252,16 +1280,6 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 			hasRemainingFiles = false;
 		}
 		PG_END_TRY();
-
-		/*
-		 * Rows claimed, unlike the deletion queue loop, which charges rows
-		 * removed. Safe here because RemoveInProgressFiles drops the catalog
-		 * row whatever the remote outcome, so a claimed row is gone from the
-		 * queue either way: an in-progress path cannot fail forever, cannot
-		 * be re-claimed by the next pass, and so cannot spend a budget
-		 * without making progress.
-		 */
-		totalFilesRemoved += list_length(removedFiles);
 
 		/* rotate into a new transaction to release locks and save progress */
 		PopActiveSnapshot();

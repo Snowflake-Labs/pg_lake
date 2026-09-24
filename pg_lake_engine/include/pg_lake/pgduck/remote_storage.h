@@ -50,6 +50,6 @@ extern PGDLLEXPORT List *ListRemoteFileNames(char *pattern);
 extern PGDLLEXPORT bool RemoteFileExists(char *path);
 extern PGDLLEXPORT bool DeleteRemoteFile(char *path);
 extern PGDLLEXPORT bool DeleteRemoteFiles(List *paths);
-extern PGDLLEXPORT void DeleteRemoteFileBatch(List *paths, List **deletedPaths,
+extern PGDLLEXPORT bool DeleteRemoteFileBatch(List *paths, List **deletedPaths,
 											  List **failedPaths);
 extern PGDLLEXPORT bool DeleteRemotePrefix(char *path);
