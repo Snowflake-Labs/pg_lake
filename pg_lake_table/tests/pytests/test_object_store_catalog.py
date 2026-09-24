@@ -1993,18 +1993,36 @@ def set_catalog_prefixes(read_only_prefix="_catalog", read_write_prefix="_catalo
 
 # The object store catalog export resolves the schema and name of every table it
 # publishes with lake_table.get_table_schema() and lake_table.get_table_name().
-# Those two used to be VOLATILE, so each call took a fresh snapshot: a DROP TABLE
-# that committed while the export query was running made them return NULL for a
-# table that same query could still see, and the export published an entry with
-# an empty namespace and table name. A reader that validates the entries rejects
-# the whole file, so one dropped table stopped the refresh of every table in the
-# database.
+# Those two used to be VOLATILE, so each call took a fresh snapshot of its own and
+# a DDL that committed while the export query was running changed what they
+# returned. A DROP TABLE made both return NULL for a table that same query could
+# still see, and the export published an entry with an empty namespace and table
+# name; a reader that validates the entries rejects the whole file, so one dropped
+# table stopped the refresh of every table in the database. A transaction that
+# renamed a table and moved it to another schema was worse than stale: the two
+# calls could land on either side of that commit and publish a namespace and name
+# pair that never existed together.
 #
 # A row lock makes the window deterministic. The lookup query takes its snapshot
-# before it blocks on the gate row, and the DROP commits while it waits.
-def test_table_lookups_use_the_caller_snapshot(pg_conn, extension):
-    run_command("DROP SCHEMA IF EXISTS lookup_snapshot CASCADE", pg_conn)
+# before it blocks on the gate row, and the DDL commits while it waits, so both
+# lookups must still report the state that snapshot saw.
+@pytest.mark.parametrize(
+    "concurrent_ddl",
+    [
+        "DROP TABLE lookup_snapshot.victim",
+        # one transaction, two catalog changes: with a snapshot per call the
+        # lookups can pick up the rename without the schema change
+        "ALTER TABLE lookup_snapshot.victim RENAME TO moved;"
+        " ALTER TABLE lookup_snapshot.moved SET SCHEMA lookup_snapshot_other",
+    ],
+    ids=["drop", "rename_and_move"],
+)
+def test_table_lookups_use_the_caller_snapshot(pg_conn, extension, concurrent_ddl):
+    run_command(
+        "DROP SCHEMA IF EXISTS lookup_snapshot, lookup_snapshot_other CASCADE", pg_conn
+    )
     run_command("CREATE SCHEMA lookup_snapshot", pg_conn)
+    run_command("CREATE SCHEMA lookup_snapshot_other", pg_conn)
     run_command("CREATE TABLE lookup_snapshot.victim(a int)", pg_conn)
     run_command("CREATE TABLE lookup_snapshot.gate(id int PRIMARY KEY)", pg_conn)
     run_command("INSERT INTO lookup_snapshot.gate VALUES (1)", pg_conn)
@@ -2023,8 +2041,8 @@ def test_table_lookups_use_the_caller_snapshot(pg_conn, extension):
 
     def run_lookup():
         try:
-            # pass the oid rather than the name: the name is gone by the time
-            # this query is unblocked, and we want to reach the lookups
+            # pass the oid rather than the name: the name may be gone or changed
+            # by the time this query is unblocked, and we want to reach the lookups
             lookup_result.extend(
                 run_query(
                     f"""
@@ -2064,7 +2082,7 @@ def test_table_lookups_use_the_caller_snapshot(pg_conn, extension):
 
         # this commits while the lookup query waits, so it is invisible to that
         # query's snapshot but visible to any snapshot taken after it
-        run_command("DROP TABLE lookup_snapshot.victim", pg_conn)
+        run_command(concurrent_ddl, pg_conn)
         pg_conn.commit()
 
         lookup.join(timeout=30)
@@ -2074,9 +2092,11 @@ def test_table_lookups_use_the_caller_snapshot(pg_conn, extension):
 
     assert not lookup_error, f"lookup query failed: {lookup_error}"
     assert lookup_result == ["lookup_snapshot", "victim"], (
-        f"concurrent DROP TABLE changed the table lookups to {lookup_result}, "
-        f"which the catalog export would publish as empty strings"
+        f"concurrent DDL changed the table lookups to {lookup_result}, which the "
+        f"catalog export would publish as a table that never existed"
     )
 
-    run_command("DROP SCHEMA lookup_snapshot CASCADE", pg_conn)
+    run_command(
+        "DROP SCHEMA IF EXISTS lookup_snapshot, lookup_snapshot_other CASCADE", pg_conn
+    )
     pg_conn.commit()
