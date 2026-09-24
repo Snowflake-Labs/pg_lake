@@ -258,8 +258,9 @@ DeleteRemoteFiles(List *paths)
 /*
  * DeleteRemoteFileBatch deletes the given files in one pgduck request and
  * records the per-path outcome: paths that were removed are appended to
- * *deletedPaths and paths that were not to *failedPaths. Either output list
- * may be NULL when the caller does not track that outcome.
+ * *deletedPaths and the path that was not to *failedPaths. Either output list
+ * may be NULL when the caller does not track that outcome. It returns whether
+ * every path was removed.
  *
  * pgduck reports one status for the whole request and does not say which path
  * was at fault, so a failed batch is retried one path at a time. Without that,
@@ -269,33 +270,34 @@ DeleteRemoteFiles(List *paths)
  * Removing a file twice is a no-op, so re-issuing paths the failed batch had
  * already deleted is safe.
  *
- * A request per path is the cost batching exists to avoid, but only a failed
- * batch pays it, and a path that failed is not claimed again for
- * VacuumFileRemoveRetryInterval (see GetDeletionQueueRecords), so the retry is
- * repeated on that clock rather than by every pass.
+ * The retry stops at the first path that fails again, leaving the rest of the
+ * batch unattempted rather than recorded as unremovable. Whatever the object
+ * store is unhappy about is rarely specific to one key, so walking the rest of
+ * the batch mostly buys a request and a failure count per path; the caller
+ * comes back for them on its own clock.
  *
  * A caller that tracks neither outcome has nothing to tell apart, so it skips
  * the retry entirely: producing a verdict nobody reads is the per-file cost this
  * batching exists to remove.
  */
-void
+bool
 DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
 {
 	if (paths == NIL)
-		return;
+		return true;
 
 	if (DeleteRemoteFiles(paths))
 	{
 		if (deletedPaths != NULL)
 			*deletedPaths = list_concat(*deletedPaths, paths);
 
-		return;
+		return true;
 	}
 
 	if (deletedPaths == NULL && failedPaths == NULL)
 	{
 		/* no outcome to record, so no reason to find out which path failed */
-		return;
+		return false;
 	}
 
 	ListCell   *pathCell = NULL;
@@ -304,15 +306,24 @@ DeleteRemoteFileBatch(List *paths, List **deletedPaths, List **failedPaths)
 	{
 		char	   *path = lfirst(pathCell);
 
-		if (DeleteRemoteFile(path))
+		if (!DeleteRemoteFile(path))
 		{
-			if (deletedPaths != NULL)
-				*deletedPaths = lappend(*deletedPaths, path);
+			if (failedPaths != NULL)
+				*failedPaths = lappend(*failedPaths, path);
+
+			return false;
 		}
-		else if (failedPaths != NULL)
-			*failedPaths = lappend(*failedPaths, path);
+
+		if (deletedPaths != NULL)
+			*deletedPaths = lappend(*deletedPaths, path);
 
 		/* a retried batch is a request per path, so stay cancellable */
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	/*
+	 * Every path went through on its own, so the batch statement failed for a
+	 * reason that has since cleared. Nothing is left unremoved.
+	 */
+	return true;
 }
