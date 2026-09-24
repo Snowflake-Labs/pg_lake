@@ -1266,10 +1266,10 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 		/*
 		 * Removals are what the budget is charged and what the summary below
-		 * reports: a path whose removal failed keeps its row, so it is not
-		 * work this vacuum got done. A pass that failed reports no remaining
-		 * files, so the loop ends there rather than re-claiming that path
-		 * without advancing the budget.
+		 * reports: a path whose removal failed is handed to the deletion
+		 * queue, which is not a file this vacuum got rid of. A pass that
+		 * failed reports no remaining files, so the loop ends there rather
+		 * than carrying on through the paths behind the failure.
 		 */
 		totalFilesRemoved += list_length(removedFiles);
 

@@ -610,6 +610,58 @@ InsertMetadataResolveRecord(char *metadataPath, Oid relationId, TimestampTz orph
 }
 
 /*
+ * RequeueFailedRemovals hands paths whose removal from remote storage failed to
+ * the deletion queue, so a failed removal is retried rather than lost. The
+ * in-progress file queue has nowhere to record an attempt (see
+ * RemoveInProgressFiles), while this queue has retry_count, the retry interval
+ * and the cap that eventually retires a path, so a path that keeps failing
+ * stays visible in a table instead of being left behind in the object store
+ * with nothing pointing at it.
+ *
+ * The rows carry no table, because a path is all the in-progress queue knows
+ * about them, and an untabled row is claimed by the dropped-table pass, which
+ * the autovacuum worker runs ahead of the per-table ones. orphaned_at stays
+ * NULL, since a path that reached the in-progress queue is already orphaned and
+ * has no retention period left to wait out. The attempt that just failed is
+ * recorded as the first one, so the next is held off for
+ * VacuumFileRemoveRetryInterval rather than made again in the following pass.
+ *
+ * A path already in the queue is left as it is. The two queues are independent,
+ * so the same path can be in both, and a unique violation here would abort the
+ * whole pass -- including the removals that did succeed.
+ */
+void
+RequeueFailedRemovals(List *paths, bool isPrefix)
+{
+	if (paths == NIL)
+	{
+		return;
+	}
+
+	char	   *query =
+		"insert into " DELETION_QUEUE_TABLE " "
+		"(path, table_name, is_prefix, retry_count, last_attempt_at) "
+		"select requeued.path, $2, $3, 1, pg_catalog.now() "
+		"from pg_catalog.unnest($1) AS requeued(path) "
+		"on conflict (path) do nothing";
+
+	DECLARE_SPI_ARGS(3);
+	SPI_ARG_VALUE(1, TEXTARRAYOID, StringListToArray(paths), false);
+	SPI_ARG_VALUE(2, OIDOID, InvalidOid, false);
+	SPI_ARG_VALUE(3, BOOLOID, isPrefix, false);
+
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	SPI_END();
+}
+
+
+/*
 * InsertDeletionQueueRecordExtended is the internal function to insert
 * a record into the deletion queue. is_prefix marks a whole-prefix delete and
 * resolve_metadata marks a metadata.json to be resolved into referenced files

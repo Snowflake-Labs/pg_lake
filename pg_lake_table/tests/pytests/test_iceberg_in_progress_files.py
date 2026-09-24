@@ -635,16 +635,16 @@ def test_in_progress_files_9(
     assert len(in_progress_file_paths) == 0
 
 
-def test_flush_reports_and_retires_only_the_files_it_removed(
-    s3, superuser_conn, extension
-):
+def test_flush_requeues_the_files_it_could_not_remove(s3, superuser_conn, extension):
     """flush_in_progress_queue reports the paths remote storage removed, and
-    leaves the row of a path it could not remove in place.
+    hands a path it could not remove to the deletion queue.
 
     The in-progress row is the only record that the file exists, so dropping it
-    after a failed attempt leaves the object behind with nothing left to retry
-    it. Reporting the path would be wrong for the same reason -- the warning
-    right above says the removal failed.
+    after a failed attempt would leave the object behind with nothing left to
+    retry it. This table has nowhere to record an attempt, so the retry belongs
+    to the deletion queue, which has a retry count and a clock. Reporting the
+    path would be wrong either way -- the warning right above says the removal
+    failed.
     """
     prefix = f"s3://{TEST_BUCKET}/test_in_progress_files_removed_only"
     removable_path = f"{prefix}/removable.parquet"
@@ -695,18 +695,29 @@ def test_flush_reports_and_retires_only_the_files_it_removed(
     )
     assert {row[0] for row in flushed} == set()
 
-    # the row survives its failed attempt, so a later cycle tries again
+    # the in-progress queue is done with the path, having handed it over
     remaining = run_query(
         f"SELECT path FROM lake_engine.in_progress_files "
         f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
         superuser_conn,
     )
-    assert remaining == [(unremovable_path,)]
+    assert remaining == []
 
-    # leave nothing behind: every later cleanup pass in this database would
-    # stop at this path
+    # the deletion queue has it, with the failed attempt recorded and no table
+    # of its own, so the dropped-table pass retries it on the retry interval
+    requeued = run_query(
+        f"SELECT table_name::pg_catalog.oid, retry_count, is_prefix, "
+        f"last_attempt_at IS NOT NULL "
+        f"FROM lake_engine.deletion_queue "
+        f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
+        superuser_conn,
+    )
+    assert requeued == [(0, 1, False, True)]
+
+    # leave nothing behind: every later dropped-table drain in this database
+    # would stop at this path
     run_command(
-        f"DELETE FROM lake_engine.in_progress_files "
+        f"DELETE FROM lake_engine.deletion_queue "
         f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
         superuser_conn,
     )
