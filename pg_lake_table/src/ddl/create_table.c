@@ -779,6 +779,10 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 								(Node *) makeString(pstrdup(modeName)), -1));
 	}
 
+	bool		hasReadOnlyOption = HasReadOnlyOption(createStmt->options);
+	DefElem    *jsonbStorageOption =
+		GetOption(createStmt->options, ICEBERG_JSONB_STORAGE_OPTION);
+
 	/*
 	 * Seed jsonb_storage from pg_lake_engine.jsonb_storage the same way, and
 	 * for the same reason: the table then carries the encoding its jsonb
@@ -787,9 +791,21 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	 * persisted, since an absent option already means string.
 	 *
 	 * Unlike compatibility_mode the option is not frozen afterwards -- see
-	 * jsonb_storage.c for why a table needs to be able to change its mind.
+	 * jsonb_storage.c for why a table needs to be able to change its mind. A
+	 * read-only external catalog table carries the source table's storage
+	 * rather than a policy for future writes, so the option is meaningless
+	 * there and is neither accepted nor seeded.
 	 */
-	if (GetOption(createStmt->options, ICEBERG_JSONB_STORAGE_OPTION) == NULL &&
+	if (hasReadOnlyOption && jsonbStorageOption != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("read-only external catalog iceberg tables do not "
+						"allow the %s option",
+						ICEBERG_JSONB_STORAGE_OPTION),
+				 errdetail("The column encoding is determined by the source table.")));
+
+	if (!hasReadOnlyOption &&
+		jsonbStorageOption == NULL &&
 		DefaultJsonbStorage != JSONB_STORAGE_STRING)
 	{
 		const char *storageName = JsonbStorageName(DefaultJsonbStorage);
@@ -838,7 +854,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * catalogs. When the table is queried, its metadata is fetched on
 		 * demand from the external catalog.
 		 */
-		bool		hasExternalCatalogReadOnlyOption = HasReadOnlyOption(createStmt->options);
+		bool		hasExternalCatalogReadOnlyOption = hasReadOnlyOption;
 
 		if (hasExternalCatalogReadOnlyOption &&
 			GetOption(createStmt->options, "partition_by") != NULL)

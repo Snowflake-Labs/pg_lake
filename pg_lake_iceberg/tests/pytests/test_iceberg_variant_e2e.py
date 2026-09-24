@@ -160,7 +160,7 @@ class TestAManagedIceberg:
         ), f"Expected a `variant` tag; got {doc_field['type']!r}"
 
     def test_format_version_remains_v2(self, variant_managed_table, s3):
-        """POC invariant: format-version stays 2 even with variant columns.
+        """Current invariant: format-version stays 2 even with variant columns.
 
         `variant` is a v3 type, so this metadata is deliberately outside the
         Iceberg spec -- external readers are entitled to reject it. The trade
@@ -304,6 +304,27 @@ class TestBForeignParquet:
             )[0][0]
             >= 1
         )
+
+        # External tables have no persisted field mapping on the PostgreSQL
+        # side. Comparisons therefore have to be conservative: this physical
+        # column is VARIANT, and pushing equality as rendered JSON text would
+        # silently return no row.
+        rows = run_query(
+            "SELECT id, doc FROM test_variant_e2e.foreign_pq_off ORDER BY id",
+            pg_conn,
+        )
+        for row_id, document in rows:
+            literal = json.dumps(document).replace("'", "''")
+            assert (
+                run_query(
+                    f"""
+                SELECT id FROM test_variant_e2e.foreign_pq_off
+                WHERE doc = '{literal}'::jsonb
+                """,
+                    pg_conn,
+                )
+                == [[row_id]]
+            )
 
         run_command("DROP FOREIGN TABLE test_variant_e2e.foreign_pq_off", pg_conn)
         pg_conn.commit()
@@ -681,6 +702,40 @@ class TestTableOptionOverridesTheSetting:
             == "variant"
         )
 
+    def test_dropping_option_returns_future_columns_to_string(
+        self, option_tables, pg_conn, s3
+    ):
+        """Dropping the policy does not reinterpret existing columns.
+
+        An absent option means the default string policy for this already
+        created table; the session setting is not consulted again.
+        """
+        run_command(
+            """
+            SET pg_lake_engine.jsonb_storage = 'variant';
+            ALTER FOREIGN TABLE test_variant_option.opt_variant
+                OPTIONS (DROP jsonb_storage);
+            ALTER TABLE test_variant_option.opt_variant
+                ADD COLUMN after_drop JSONB;
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        assert (
+            _doc_storage(pg_conn, s3, "test_variant_option", "opt_variant") == "variant"
+        )
+        assert (
+            _doc_storage(
+                pg_conn,
+                s3,
+                "test_variant_option",
+                "opt_variant",
+                "after_drop",
+            )
+            == "string"
+        )
+
 
 def test_invalid_jsonb_storage_option_is_rejected(
     pg_conn, iceberg_extension, extension, s3
@@ -697,6 +752,25 @@ def test_invalid_jsonb_storage_option_is_rejected(
             pg_conn,
         )
     assert "jsonb_storage" in str(ei.value), str(ei.value)
+    pg_conn.rollback()
+
+
+def test_jsonb_storage_guc_default_reset_and_validation(pg_conn, extension):
+    pg_conn.rollback()
+
+    run_command("RESET pg_lake_engine.jsonb_storage", pg_conn)
+    assert run_query("SHOW pg_lake_engine.jsonb_storage", pg_conn) == [["string"]]
+
+    run_command("SET pg_lake_engine.jsonb_storage = 'variant'", pg_conn)
+    assert run_query("SHOW pg_lake_engine.jsonb_storage", pg_conn) == [["variant"]]
+
+    run_command("RESET pg_lake_engine.jsonb_storage", pg_conn)
+    assert run_query("SHOW pg_lake_engine.jsonb_storage", pg_conn) == [["string"]]
+
+    with pytest.raises(psycopg2.Error) as ei:
+        run_command("SET pg_lake_engine.jsonb_storage = 'binary'", pg_conn)
+    assert "invalid value for parameter" in str(ei.value)
+    assert "pg_lake_engine.jsonb_storage" in str(ei.value)
     pg_conn.rollback()
 
 
@@ -740,6 +814,55 @@ def test_heap_jsonb_insert_select_into_variant(
     ]
 
     run_command("DROP SCHEMA test_variant_scanner CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_jsonb_domain_uses_variant_for_iceberg_and_copy(
+    pg_conn, pgduck_conn, iceberg_extension, extension, s3
+):
+    """A domain over jsonb has jsonb storage semantics.
+
+    In particular, postgres_scanner exposes the value as VARCHAR during a
+    pushed INSERT .. SELECT. It must still go through VARCHAR -> JSON ->
+    VARIANT; a direct VARCHAR -> VARIANT cast stores one string scalar."""
+    pg_conn.rollback()
+    location = f"s3://{TEST_BUCKET}/test_variant_domain/target/"
+    parquet_path = f"s3://{TEST_BUCKET}/test_variant_domain/copy.parquet"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_variant_domain;
+        CREATE DOMAIN test_variant_domain.document AS jsonb;
+        CREATE TABLE test_variant_domain.source_t (
+            id INT,
+            doc test_variant_domain.document
+        );
+        INSERT INTO test_variant_domain.source_t
+        VALUES (1, '{SETUP_DOC_A}'::jsonb);
+
+        SET pg_lake_engine.jsonb_storage = 'variant';
+        CREATE FOREIGN TABLE test_variant_domain.target_t (
+            id INT,
+            doc test_variant_domain.document
+        ) SERVER pg_lake_iceberg OPTIONS (location '{location}');
+
+        INSERT INTO test_variant_domain.target_t
+        SELECT * FROM test_variant_domain.source_t;
+
+        COPY test_variant_domain.source_t TO '{parquet_path}';
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert _doc_storage(pg_conn, s3, "test_variant_domain", "target_t") == "variant"
+    assert run_query(
+        "SELECT id, doc->>'id' FROM test_variant_domain.target_t",
+        pg_conn,
+    ) == [[1, "1"]]
+    assert _parquet_column_types(pgduck_conn, parquet_path)["doc"] == "VARIANT"
+
+    run_command("DROP SCHEMA test_variant_domain CASCADE", pg_conn)
     pg_conn.commit()
 
 
@@ -797,12 +920,11 @@ def test_json_surface_type_keeps_string_storage(
     pg_conn.commit()
 
 
-def test_variant_jsonb_equality_is_not_pushed_down(
+def test_variant_jsonb_rendering_dependent_operations_stay_local(
     pg_conn, iceberg_extension, extension, s3
 ):
     """DuckDB re-renders a VARIANT when reading it, minifying the JSON text, so
-    shipping jsonb equality would compare that rendering against PostgreSQL's
-    own and never match. Equality must be evaluated locally instead."""
+    comparisons, text rendering, and ordering must use PostgreSQL semantics."""
     pg_conn.rollback()
     location = f"s3://{TEST_BUCKET}/test_variant_equality/target/"
 
@@ -817,7 +939,21 @@ def test_variant_jsonb_equality_is_not_pushed_down(
 
         INSERT INTO test_variant_equality.target_t VALUES
             (1, '{SETUP_DOC_A}'::jsonb),
-            (2, '{SETUP_DOC_B}'::jsonb);
+            (2, '{SETUP_DOC_B}'::jsonb),
+            (3, '"text"'::jsonb),
+            (4, '[1, 2]'::jsonb);
+
+        CREATE TABLE test_variant_equality.reference_t (
+            id INT,
+            doc JSONB
+        );
+        INSERT INTO test_variant_equality.reference_t
+        SELECT * FROM (VALUES
+            (1, '{SETUP_DOC_A}'::jsonb),
+            (2, '{SETUP_DOC_B}'::jsonb),
+            (3, '"text"'::jsonb),
+            (4, '[1, 2]'::jsonb)
+        ) AS source(id, doc);
         """,
         pg_conn,
     )
@@ -835,7 +971,9 @@ def test_variant_jsonb_equality_is_not_pushed_down(
         == [[1]]
     )
 
-    # the same via IN (ScalarArrayOpExpr) and via <>
+    # The same via IN (ScalarArrayOpExpr), <>, range comparisons and
+    # IS DISTINCT FROM. Compare against a heap table so PostgreSQL itself is
+    # the oracle for its jsonb ordering rules.
     assert (
         run_query(
             f"""
@@ -846,6 +984,47 @@ def test_variant_jsonb_equality_is_not_pushed_down(
         )
         == [[2]]
     )
+    for operator in ("<", "<=", ">", ">="):
+        variant_rows = run_query(
+            f"""
+            SELECT id FROM test_variant_equality.target_t
+            WHERE doc {operator} '{SETUP_DOC_B}'::jsonb ORDER BY id
+            """,
+            pg_conn,
+        )
+        reference_rows = run_query(
+            f"""
+            SELECT id FROM test_variant_equality.reference_t
+            WHERE doc {operator} '{SETUP_DOC_B}'::jsonb ORDER BY id
+            """,
+            pg_conn,
+        )
+        assert variant_rows == reference_rows, operator
+
+    assert (
+        run_query(
+            f"""
+        SELECT id FROM test_variant_equality.target_t
+        WHERE doc IS DISTINCT FROM '{SETUP_DOC_A}'::jsonb ORDER BY id
+        """,
+            pg_conn,
+        )
+        == run_query(
+            f"""
+        SELECT id FROM test_variant_equality.reference_t
+        WHERE doc IS DISTINCT FROM '{SETUP_DOC_A}'::jsonb ORDER BY id
+        """,
+            pg_conn,
+        )
+    )
+
+    assert run_query(
+        "SELECT id FROM test_variant_equality.target_t ORDER BY doc, id",
+        pg_conn,
+    ) == run_query(
+        "SELECT id FROM test_variant_equality.reference_t ORDER BY doc, id",
+        pg_conn,
+    )
     assert (
         run_query(
             f"""
@@ -854,7 +1033,7 @@ def test_variant_jsonb_equality_is_not_pushed_down(
         """,
             pg_conn,
         )
-        == [[2]]
+        == [[2], [3], [4]]
     )
 
     # joining a variant column against heap jsonb
@@ -913,9 +1092,9 @@ def test_variant_column_preserves_sql_null(pg_conn, iceberg_extension, extension
 
     DuckDB reports both a SQL NULL VARIANT and a VARIANT holding JSON `null`
     as VARIANT_NULL, and casting either to JSON yields the text `null`, so the
-    two cannot be told apart once stored. We resolve that towards SQL NULL,
-    which means a jsonb 'null' scalar degrades to SQL NULL -- asserted here so
-    the limitation is visible rather than surprising."""
+    two cannot be told apart once stored. We preserve SQL NULL and reject a
+    top-level jsonb null rather than silently changing its meaning. Nested JSON
+    nulls remain ordinary document content and are supported."""
     pg_conn.rollback()
     location = f"s3://{TEST_BUCKET}/test_variant_null/target/"
 
@@ -931,7 +1110,7 @@ def test_variant_column_preserves_sql_null(pg_conn, iceberg_extension, extension
         INSERT INTO test_variant_null.target_t VALUES
             (1, '{SETUP_DOC_A}'::jsonb),
             (2, NULL),
-            (3, 'null'::jsonb);
+            (3, '{{"nested": null}}'::jsonb);
         """,
         pg_conn,
     )
@@ -940,17 +1119,46 @@ def test_variant_column_preserves_sql_null(pg_conn, iceberg_extension, extension
     assert run_query(
         "SELECT id, doc IS NULL FROM test_variant_null.target_t ORDER BY id",
         pg_conn,
-    ) == [[1, False], [2, True], [3, True]]
+    ) == [[1, False], [2, True], [3, False]]
 
     assert run_query(
         "SELECT count(*) FROM test_variant_null.target_t WHERE doc IS NULL",
         pg_conn,
-    ) == [[2]]
+    ) == [[1]]
 
-    # the non-null document is unaffected
     assert run_query(
-        "SELECT doc FROM test_variant_null.target_t WHERE id = 1", pg_conn
-    ) == [[json.loads(SETUP_DOC_A)]]
+        "SELECT doc->'nested' FROM test_variant_null.target_t WHERE id = 3",
+        pg_conn,
+    ) == [[None]]
+
+    with pytest.raises(psycopg2.Error) as ei:
+        run_command(
+            "INSERT INTO test_variant_null.target_t VALUES (4, 'null'::jsonb)",
+            pg_conn,
+        )
+    assert "top-level JSON null cannot be stored as VARIANT" in str(ei.value)
+    pg_conn.rollback()
+
+    run_command(
+        """
+        SET pg_lake_engine.jsonb_storage = 'variant';
+        CREATE TABLE test_variant_null.heap_t (doc JSONB);
+        INSERT INTO test_variant_null.heap_t VALUES ('null'::jsonb);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    with pytest.raises(psycopg2.Error) as ei:
+        run_command(
+            f"""
+            COPY test_variant_null.heap_t
+            TO 's3://{TEST_BUCKET}/test_variant_null/null.parquet'
+            """,
+            pg_conn,
+        )
+    assert "top-level JSON null cannot be stored as VARIANT" in str(ei.value)
+    pg_conn.rollback()
 
     run_command("DROP SCHEMA test_variant_null CASCADE", pg_conn)
     pg_conn.commit()
@@ -960,8 +1168,9 @@ def test_load_from_and_definition_from_variant_parquet(
     pg_conn, variant_managed_table, s3
 ):
     """A parquet file with a VARIANT column can seed a new iceberg table
-    through either option: the column comes back as jsonb on the surface and
-    keeps `variant` storage, and load_from also carries the rows over."""
+    through either option: the column comes back as jsonb on the surface.
+    These commands create new columns, so the target table's policy chooses
+    their encoding rather than inheriting the source file's encoding."""
     pg_conn.rollback()
     source_parquet = _data_file_paths(s3, variant_managed_table["location"])[0]
 
@@ -976,12 +1185,18 @@ def test_load_from_and_definition_from_variant_parquet(
             WITH (definition_from = '{source_parquet}');
         CREATE TABLE test_variant_seed.load_t () USING iceberg
             WITH (load_from = '{source_parquet}');
+
+        SET pg_lake_engine.jsonb_storage = 'string';
+        CREATE TABLE test_variant_seed.def_string_t () USING iceberg
+            WITH (definition_from = '{source_parquet}');
+        CREATE TABLE test_variant_seed.load_string_t () USING iceberg
+            WITH (load_from = '{source_parquet}');
         """,
         pg_conn,
     )
     pg_conn.commit()
 
-    for table in ("def_t", "load_t"):
+    for table in ("def_t", "load_t", "def_string_t", "load_string_t"):
         assert (
             run_query(
                 f"""
@@ -1001,15 +1216,23 @@ def test_load_from_and_definition_from_variant_parquet(
             """,
             pg_conn,
         )[0][0]
+        expected_storage = "variant" if table in ("def_t", "load_t") else "string"
         assert (
             _column_field(_read_metadata_json(s3, metadata_location), "doc")["type"]
-            == "variant"
+            == expected_storage
         )
 
     # definition_from copies the shape only, load_from brings the rows too
     assert run_query("SELECT count(*) FROM test_variant_seed.def_t", pg_conn) == [[0]]
     assert run_query(
+        "SELECT count(*) FROM test_variant_seed.def_string_t", pg_conn
+    ) == [[0]]
+    assert run_query(
         "SELECT id, doc FROM test_variant_seed.load_t ORDER BY id", pg_conn
+    ) == [[1, json.loads(SETUP_DOC_A)], [2, json.loads(SETUP_DOC_B)]]
+    assert run_query(
+        "SELECT id, doc FROM test_variant_seed.load_string_t ORDER BY id",
+        pg_conn,
     ) == [[1, json.loads(SETUP_DOC_A)], [2, json.loads(SETUP_DOC_B)]]
 
     run_command("DROP SCHEMA test_variant_seed CASCADE", pg_conn)
@@ -1035,7 +1258,9 @@ def test_copy_to_parquet_follows_the_setting(
         f"""
         CREATE SCHEMA test_variant_copy;
         CREATE TABLE test_variant_copy.heap_t (id INT, doc JSONB);
-        INSERT INTO test_variant_copy.heap_t VALUES (1, '{SETUP_DOC_A}'::jsonb);
+        INSERT INTO test_variant_copy.heap_t VALUES
+            (1, '{SETUP_DOC_A}'::jsonb),
+            (2, '{{"duplicate": 1, "duplicate": 2}}'::jsonb);
 
         SET pg_lake_engine.jsonb_storage = 'string';
         COPY test_variant_copy.heap_t TO '{heap_string}';
@@ -1064,9 +1289,20 @@ def test_copy_to_parquet_follows_the_setting(
             pg_conn,
         )
         pg_conn.commit()
-        assert run_query(
-            f"SELECT id, doc FROM test_variant_copy.readback_{index}", pg_conn
-        ) == [[1, json.loads(SETUP_DOC_A)]], path
+        assert (
+            run_query(
+                f"""
+            SELECT id, doc, doc->>'duplicate'
+            FROM test_variant_copy.readback_{index}
+            ORDER BY id
+            """,
+                pg_conn,
+            )
+            == [
+                [1, json.loads(SETUP_DOC_A), None],
+                [2, {"duplicate": 2}, "2"],
+            ]
+        ), path
 
     run_command("DROP SCHEMA test_variant_copy CASCADE", pg_conn)
     pg_conn.commit()
@@ -1137,6 +1373,34 @@ def test_jsonb_operators_match_string_storage(
             pg_conn,
         )
         assert variant_rows == string_rows, f"mismatch for {expression}"
+
+    # PostgreSQL jsonb considers numerically equal values equal even when
+    # their displayed scale differs. GROUP BY may execute remotely, so pin
+    # DuckDB VARIANT grouping to the same semantics.
+    run_command(
+        """
+        INSERT INTO test_variant_ops.as_variant
+            VALUES (3, '{"number": 1}'::jsonb),
+                   (4, '{"number": 1.0}'::jsonb);
+        INSERT INTO test_variant_ops.as_string
+            VALUES (3, '{"number": 1}'::jsonb),
+                   (4, '{"number": 1.0}'::jsonb);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    assert (
+        run_query(
+            """
+        SELECT count(*) FROM test_variant_ops.as_variant
+        WHERE doc ? 'number'
+        GROUP BY doc
+        """,
+            pg_conn,
+        )
+        == [[2]]
+    )
 
     run_command("DROP SCHEMA test_variant_ops CASCADE", pg_conn)
     pg_conn.commit()

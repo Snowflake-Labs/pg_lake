@@ -718,7 +718,7 @@ IsGDALGeometryVar(Var *var, List *rtable)
 
 /*
  * IsVariantBackedJsonbVar
- *	   Is this Var a jsonb column that Iceberg stores as VARIANT?
+ *	   Is this Var a jsonb column that is, or may be, stored as VARIANT?
  *
  * pg_lake ships jsonb equality to DuckDB as a comparison of the JSON text, and
  * that is only faithful to jsonb semantics while the stored text is the exact
@@ -727,11 +727,16 @@ IsGDALGeometryVar(Var *var, List *rtable)
  * on read by DuckDB, which minifies, so `{"a": 2}` comes back as `{"a":2}` and
  * every comparison against a PostgreSQL-produced jsonb value is silently false.
  *
- * Callers use this to keep such comparisons local. Only equality is affected --
- * containment, member extraction and grouping either do not depend on the
- * rendering or compare VARIANT against VARIANT -- so the check is deliberately
- * applied to comparison operators rather than to the column as a whole, which
- * would also disable the projection pushdown that makes VARIANT worth having.
+ * For an internal Iceberg table the persisted field mapping answers exactly.
+ * An external Parquet/Iceberg relation has no local field mapping, so a jsonb
+ * surface column is treated conservatively as potentially variant-backed.
+ * Losing some pushdown for an external string-backed column is preferable to
+ * silently returning a wrong comparison for a variant column.
+ *
+ * Callers keep rendering-dependent comparisons and ordering local.
+ * Containment, member extraction and grouping either do not depend on the
+ * rendering or compare VARIANT against VARIANT, so those operations remain
+ * shippable.
  */
 bool
 IsVariantBackedJsonbVar(Var *var, List *rtable)
@@ -741,7 +746,9 @@ IsVariantBackedJsonbVar(Var *var, List *rtable)
 		var->varno > (Index) list_length(rtable))
 		return false;
 
-	if (var->vartype != JSONBOID && var->vartype != JSONOID)
+	Oid			baseType = getBaseType(var->vartype);
+
+	if (baseType != JSONBOID && baseType != JSONOID)
 		return false;
 
 	/* whole-row and system columns have no field mapping */
@@ -753,17 +760,24 @@ IsVariantBackedJsonbVar(Var *var, List *rtable)
 	if (rte->rtekind != RTE_RELATION)
 		return false;
 
-	/* only managed iceberg tables carry the field-id mapping */
-	if (!IsInternalIcebergTable(rte->relid))
+	if (IsInternalIcebergTable(rte->relid))
+	{
+		DataFileSchemaField *field =
+			GetRegisteredFieldForAttribute(rte->relid, var->varattno);
+
+		return field != NULL && field->type != NULL &&
+			field->type->type == FIELD_TYPE_SCALAR &&
+			field->type->field.scalar.typeName != NULL &&
+			strcmp(field->type->field.scalar.typeName, "variant") == 0;
+	}
+
+	if (!IsAnyLakeForeignTableById(rte->relid))
 		return false;
 
-	DataFileSchemaField *field =
-		GetRegisteredFieldForAttribute(rte->relid, var->varattno);
+	PgLakeTableProperties properties = GetPgLakeTableProperties(rte->relid);
 
-	return field != NULL && field->type != NULL &&
-		field->type->type == FIELD_TYPE_SCALAR &&
-		field->type->field.scalar.typeName != NULL &&
-		strcmp(field->type->field.scalar.typeName, "variant") == 0;
+	return properties.format == DATA_FORMAT_PARQUET ||
+		properties.format == DATA_FORMAT_ICEBERG;
 }
 
 
@@ -772,6 +786,43 @@ typedef struct VariantVarWalkerContext
 	List	   *rtable;
 	bool		found;
 }			VariantVarWalkerContext;
+
+static bool
+PotentiallyVariantExternalVarWalker(Node *node,
+									VariantVarWalkerContext * context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (var->varlevelsup == 0 && var->varno > 0 &&
+			var->varno <= (Index) list_length(context->rtable))
+		{
+			RangeTblEntry *rte = rt_fetch(var->varno, context->rtable);
+
+			if (rte->rtekind == RTE_RELATION &&
+				!IsInternalIcebergTable(rte->relid) &&
+				IsAnyLakeForeignTableById(rte->relid))
+			{
+				PgLakeTableProperties properties =
+					GetPgLakeTableProperties(rte->relid);
+
+				if (properties.format == DATA_FORMAT_PARQUET ||
+					properties.format == DATA_FORMAT_ICEBERG)
+				{
+					context->found = true;
+					return true;
+				}
+			}
+		}
+	}
+
+	return expression_tree_walker(node, PotentiallyVariantExternalVarWalker,
+								  context);
+}
 
 static bool
 VariantBackedJsonbVarWalker(Node *node, VariantVarWalkerContext * context)
@@ -790,13 +841,57 @@ VariantBackedJsonbVarWalker(Node *node, VariantVarWalkerContext * context)
 
 
 /*
- * IsJsonEqualityOperator returns true for the json/jsonb equality operators,
- * the only ones whose pushed-down form is a comparison of the rendered text.
+ * ContainsVariantBackedJsonbVar returns true when an expression refers to a
+ * jsonb column whose physical value is, or may be, VARIANT.
+ */
+bool
+ContainsVariantBackedJsonbVar(Node *node, List *rtable)
+{
+	VariantVarWalkerContext context = {.rtable = rtable,.found = false};
+
+	VariantBackedJsonbVarWalker(node, &context);
+
+	if (context.found)
+		return true;
+
+	/*
+	 * A nested VARIANT in an external struct surfaces through an expression
+	 * such as (payload).doc, so there is no jsonb Var for the walker above to
+	 * recognize. External files have no persisted field mapping to inspect;
+	 * conservatively treat any jsonb-valued expression over such a file as
+	 * potentially variant-backed.
+	 */
+	if (IsA(node, List))
+	{
+		ListCell   *cell;
+
+		foreach(cell, (List *) node)
+		{
+			if (ContainsVariantBackedJsonbVar((Node *) lfirst(cell), rtable))
+				return true;
+		}
+
+		return false;
+	}
+
+	Oid			resultType = getBaseType(exprType(node));
+
+	if (resultType != JSONBOID && resultType != JSONOID)
+		return false;
+
+	PotentiallyVariantExternalVarWalker(node, &context);
+	return context.found;
+}
+
+
+/*
+ * IsJsonComparisonOperator returns true for json/jsonb comparison operators,
+ * whose pushed-down form depends on the rendered text.
  * Containment and extraction operators are excluded on purpose: they do not
  * depend on the exact rendering, so they stay shippable over VARIANT.
  */
 static bool
-IsJsonEqualityOperator(Oid opno)
+IsJsonComparisonOperator(Oid opno)
 {
 	Oid			leftType;
 	Oid			rightType;
@@ -809,16 +904,21 @@ IsJsonEqualityOperator(Oid opno)
 	char	   *opName = get_opname(opno);
 
 	return opName != NULL &&
-		(strcmp(opName, "=") == 0 || strcmp(opName, "<>") == 0);
+		(strcmp(opName, "=") == 0 ||
+		 strcmp(opName, "<>") == 0 ||
+		 strcmp(opName, "<") == 0 ||
+		 strcmp(opName, "<=") == 0 ||
+		 strcmp(opName, ">") == 0 ||
+		 strcmp(opName, ">=") == 0);
 }
 
 
 /*
  * IsVariantUnsafeComparison returns true for an expression over a
  * VARIANT-backed column whose result depends on how the value is rendered as
- * text: a json/jsonb equality, or a cast of the document to text. DuckDB
- * minifies and reorders where PostgreSQL does not, so both have to be
- * evaluated locally. See IsVariantBackedJsonbVar.
+ * text: a json/jsonb comparison, IS DISTINCT FROM, or a cast of the document
+ * to text. DuckDB minifies and reorders where PostgreSQL does not, so these
+ * have to be evaluated locally. See IsVariantBackedJsonbVar.
  *
  * Extraction, containment and key tests are unaffected -- they either return a
  * scalar or compare structure -- and stay shippable.
@@ -835,7 +935,7 @@ IsVariantUnsafeComparison(Node *node, List *rtable)
 	if (IsA(node, CoerceViaIO))
 	{
 		CoerceViaIO *coerce = (CoerceViaIO *) node;
-		Oid			argType = exprType((Node *) coerce->arg);
+		Oid			argType = getBaseType(exprType((Node *) coerce->arg));
 
 		if ((argType != JSONBOID && argType != JSONOID) ||
 			(coerce->resulttype != TEXTOID &&
@@ -845,9 +945,10 @@ IsVariantUnsafeComparison(Node *node, List *rtable)
 
 		args = list_make1(coerce->arg);
 	}
-	else if (IsA(node, OpExpr) || IsA(node, ScalarArrayOpExpr))
+	else if (IsA(node, OpExpr) || IsA(node, DistinctExpr) ||
+			 IsA(node, ScalarArrayOpExpr))
 	{
-		if (IsA(node, OpExpr))
+		if (IsA(node, OpExpr) || IsA(node, DistinctExpr))
 		{
 			opno = ((OpExpr *) node)->opno;
 			args = ((OpExpr *) node)->args;
@@ -858,17 +959,13 @@ IsVariantUnsafeComparison(Node *node, List *rtable)
 			args = ((ScalarArrayOpExpr *) node)->args;
 		}
 
-		if (!IsJsonEqualityOperator(opno))
+		if (!IsJsonComparisonOperator(opno))
 			return false;
 	}
 	else
 		return false;
 
-	VariantVarWalkerContext context = {.rtable = rtable,.found = false};
-
-	VariantBackedJsonbVarWalker((Node *) args, &context);
-
-	return context.found;
+	return ContainsVariantBackedJsonbVar((Node *) args, rtable);
 }
 
 

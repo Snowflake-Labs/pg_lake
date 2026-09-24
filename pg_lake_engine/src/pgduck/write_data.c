@@ -487,6 +487,7 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 
 		char	   *columnName = NameStr(column->attname);
 		Oid			columnTypeId = column->atttypid;
+		Oid			columnBaseTypeId = getBaseType(columnTypeId);
 
 		if (hasColumns)
 			appendStringInfoString(&projection, ", ");
@@ -512,11 +513,27 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		 * while this setting says otherwise still gets the encoding its
 		 * columns were created with.
 		 */
-		if (columnTypeId == JSONBOID &&
+		if (columnBaseTypeId == JSONBOID &&
 			destinationFormat == DATA_FORMAT_PARQUET &&
 			DefaultJsonbStorage == JSONB_STORAGE_VARIANT)
-			appendStringInfo(&projection, "CAST(%s AS VARIANT) AS ",
-							 duckdb_quote_identifier(columnName));
+		{
+			const char *quotedName = duckdb_quote_identifier(columnName);
+
+			/*
+			 * As on the Iceberg write path, keep SQL NULL and reject a
+			 * top-level JSON null: DuckDB's VARIANT representation cannot
+			 * distinguish them after the cast.  Domains over jsonb qualify
+			 * too; ChooseDuckDBEngineTypeForWrite already unwraps the domain
+			 * and has read_csv parse this column as JSON.
+			 */
+			appendStringInfo(&projection,
+							 "CASE WHEN %s IS NULL THEN NULL "
+							 "WHEN json_type(%s) = 'NULL' "
+							 "THEN error('top-level JSON null cannot be stored as "
+							 "VARIANT because it is indistinguishable from SQL NULL') "
+							 "ELSE CAST(%s AS VARIANT) END AS ",
+							 quotedName, quotedName, quotedName);
+		}
 
 		/*
 		 * In case of geometry, we write WKT in csv_writer.c and parse it as

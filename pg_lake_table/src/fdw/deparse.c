@@ -1230,7 +1230,23 @@ is_foreign_pathkey(PlannerInfo *root,
 		return false;
 
 	/* can push if a suitable EC member exists */
-	return (find_em_for_rel(root, pathkey_ec, baserel) != NULL);
+	EquivalenceMember *em = find_em_for_rel(root, pathkey_ec, baserel);
+
+	if (em == NULL)
+		return false;
+
+	/*
+	 * PostgreSQL's jsonb B-tree order is not DuckDB VARIANT's order (nor a
+	 * textual JSON order).  A remotely sorted path can therefore return rows
+	 * in the wrong order, and becomes a wrong-result bug when paired with
+	 * LIMIT or a merge join.  Keep ordering over a variant-backed document
+	 * local while still allowing ordering over extracted scalar values.
+	 */
+	if (ContainsVariantBackedJsonbVar((Node *) em->em_expr,
+									  root->parse->rtable))
+		return false;
+
+	return true;
 }
 
 /*

@@ -72,10 +72,10 @@ char	   *PgLakeAllowedAzureHostSuffixes = NULL;
 /*
  * pg_lake_engine.jsonb_storage setting.
  *
- * Decides how a jsonb value is encoded when we write it and have no
- * per-column decision to follow.  That is the case for a new iceberg column
- * whose table carries no jsonb_storage option, and for COPY TO a Parquet
- * file, which has no table to carry one.
+ * Decides the policy adopted by a newly created iceberg table, and how COPY
+ * TO a standalone Parquet file encodes jsonb.  Table creation persists the
+ * non-default policy as a table option; later ADD COLUMN operations consult
+ * that table policy, not this session setting.
  *
  * Writes into an existing iceberg column follow the storage type persisted
  * for that column at creation, so changing this setting never reinterprets
@@ -219,9 +219,10 @@ _PG_init(void)
 							 gettext_noop("How jsonb values are encoded in data files we "
 										  "write: as `string` (the default) or as the "
 										  "Iceberg/Parquet `variant` type."),
-							 gettext_noop("Consulted for a new iceberg column whose table "
-										  "has no jsonb_storage option, and for COPY TO a "
-										  "Parquet file. Writes into an existing iceberg "
+							 gettext_noop("Consulted when creating an iceberg table, and "
+										  "for COPY TO a Parquet file. Later ADD COLUMN "
+										  "operations follow the table's jsonb_storage "
+										  "policy, and writes into an existing iceberg "
 										  "column follow the storage type persisted for that "
 										  "column, and a variant column is always read back "
 										  "as jsonb. WARNING: `variant` is a format-version 3 "

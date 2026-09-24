@@ -1237,6 +1237,22 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 						int rewriteKinds, Field * storageField)
 {
 	/*
+	 * Resolve a scalar domain before applying a storage cast.  In particular,
+	 * a domain over jsonb must take the JSON -> VARIANT path below rather
+	 * than the generic CAST(expr AS VARIANT): postgres_scanner exposes jsonb
+	 * as VARCHAR, and DuckDB interprets a direct VARCHAR -> VARIANT cast as a
+	 * variant string scalar instead of parsing the document.
+	 *
+	 * Containers are handled later because maps are domains and array domains
+	 * need their element traversal.  A top-level domain over a scalar has a
+	 * scalar storage field, which is the case this early unwrap covers.
+	 */
+	if (get_typtype(typeOid) == TYPTYPE_DOMAIN &&
+		storageField != NULL &&
+		storageField->type == FIELD_TYPE_SCALAR)
+		typeOid = ResolveDomainBaseTypeAndTypmod(typeOid, &typmod);
+
+	/*
 	 * A single scalar leaf is claimed by at most one rewrite family.  The
 	 * native leaves (INTERVAL/TIMETZ) are bespoke shapes Iceberg has no type
 	 * for, so they are never recorded with a storage divergence in
@@ -1268,9 +1284,9 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 
 	/*
 	 * Iceberg VARIANT is a storage encoding of PostgreSQL jsonb. Drive this
-	 * cast from the persisted field type, not the current GUC: the GUC
-	 * decides the field type at CREATE TABLE / ADD COLUMN time, while later
-	 * writes must keep honoring that choice after the setting changes.
+	 * cast from the persisted field type, not the current GUC: the table
+	 * policy decides the field type at CREATE TABLE / ADD COLUMN time, while
+	 * later writes must keep honoring that choice after the setting changes.
 	 *
 	 * json is accepted here even though we never choose VARIANT storage for
 	 * it -- a foreign table may declare a json column over a VARIANT column
@@ -1279,6 +1295,11 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 	 * This also covers pushed-down INSERT .. SELECT. postgres_scanner exposes
 	 * jsonb as VARCHAR after removing PostgreSQL's binary jsonb version byte,
 	 * so normalize every source through VARCHAR -> JSON -> VARIANT.
+	 *
+	 * DuckDB collapses a top-level JSON null and SQL NULL into the same
+	 * VARIANT_NULL value.  We preserve SQL NULL, and reject JSON null rather
+	 * than silently returning it later as SQL NULL.  Nulls nested inside an
+	 * object or array remain distinguishable and are supported.
 	 */
 	if ((rewriteKinds & ICEBERG_REWRITE_STORAGE_CAST) &&
 		(typeOid == JSONBOID || typeOid == JSONOID) &&
@@ -1287,8 +1308,12 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 		strcmp(storageField->field.scalar.typeName, "variant") == 0)
 	{
 		appendStringInfo(buf,
-						 "CAST(CAST(CAST(%s AS VARCHAR) AS JSON) AS VARIANT)",
-						 expr);
+						 "CASE WHEN %s IS NULL THEN NULL "
+						 "WHEN json_type(CAST(%s AS JSON)) = 'NULL' "
+						 "THEN error('top-level JSON null cannot be stored as "
+						 "VARIANT because it is indistinguishable from SQL NULL') "
+						 "ELSE CAST(CAST(CAST(%s AS VARCHAR) AS JSON) AS VARIANT) END",
+						 expr, expr, expr);
 		return true;
 	}
 

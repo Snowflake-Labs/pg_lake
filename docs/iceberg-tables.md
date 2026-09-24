@@ -197,10 +197,11 @@ CREATE TABLE events (id bigint, payload jsonb)
 USING iceberg WITH (jsonb_storage = 'variant');
 ```
 
-Either way the column is still `jsonb` in PostgreSQL and every jsonb operator
-and function behaves identically. Only the physical encoding differs, and
-reading is unaffected: a variant column is always surfaced as `jsonb`,
-including in files written by another engine.
+Either way the column is still `jsonb` in PostgreSQL. pg_lake keeps operations
+whose result depends on PostgreSQL's canonical rendering or sort order local,
+while extraction and containment can still be pushed down. Only the physical
+encoding differs, and reading is unaffected by the setting: a variant column
+is surfaced as `jsonb`, including in files written by another engine.
 
 The encoding is recorded per column when that column is created, so changing
 the option later affects only columns added afterwards. That lets an existing
@@ -220,19 +221,28 @@ SET pg_lake_engine.jsonb_storage TO 'variant';
 COPY events TO 's3://mybucket/events.parquet';
 ```
 
+The setting does not change CSV or JSON exports. `load_from`,
+`definition_from`, `CREATE TABLE ... AS`, and `LIKE` create new target
+columns, so the target table's policy chooses their encoding; they do not
+inherit the source column's physical encoding.
+
 Some things to be aware of before choosing `variant`:
 
 - **`variant` is an Iceberg format-version 3 type, but pg_lake writes
   format-version 2 tables.** The resulting metadata is not spec-compliant, and
   another engine is entitled to reject or misread it. Treat a table with
   variant columns as pg_lake-only for now.
-- Only a top-level `jsonb` column is eligible. A `json` column is always
+- Only a top-level `jsonb` column (including a domain over `jsonb`) is
+  eligible. A `json` column is always
   stored as a string, because it preserves its input text verbatim —
   whitespace, key order and duplicate keys — none of which a parsed variant
   can represent. `jsonb[]` and `jsonb` inside a composite are also stored as
   strings.
-- A `jsonb` `'null'` scalar is read back as SQL `NULL`, because the engine
-  cannot distinguish the two once they are stored as variant.
+- A top-level `jsonb` `'null'` scalar is rejected on write. DuckDB cannot
+  distinguish it from SQL `NULL` once it is stored as variant, so accepting it
+  would silently change its meaning. JSON nulls nested inside objects and
+  arrays are supported. For the same reason, a top-level variant null in a
+  file written by another engine is surfaced as SQL `NULL`.
 
 
 ## Loading data into an Iceberg table

@@ -1049,7 +1049,18 @@ get_useful_pathkeys_for_relation(PlannerInfo *root, RelOptInfo *rel)
 			continue;
 
 		/* If no pushable expression for this rel, skip it. */
-		if (find_em_for_rel(root, cur_ec, rel) == NULL)
+		EquivalenceMember *em = find_em_for_rel(root, cur_ec, rel);
+
+		if (em == NULL)
+			continue;
+
+		/*
+		 * VARIANT ordering is not PostgreSQL jsonb ordering.  This mirrors
+		 * is_foreign_pathkey for speculative merge-join pathkeys, which are
+		 * built here without going through that helper.
+		 */
+		if (ContainsVariantBackedJsonbVar((Node *) em->em_expr,
+										  root->parse->rtable))
 			continue;
 
 		/* Looks like we can generate a pathkey, so let's do it. */
