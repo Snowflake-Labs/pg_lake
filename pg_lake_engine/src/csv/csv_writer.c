@@ -138,6 +138,9 @@ typedef struct CopyToStateData
 
 	/* whether the CSV writer should survive multiple transactions */
 	bool		sessionLifetime;
+
+	/* whether EndCopy already released the per-copy resources */
+	bool		ended;
 } CopyToStateData;
 
 /* DestReceiver for COPY (query) TO */
@@ -241,6 +244,20 @@ CopySendEndOfRow(CopyToState cstate)
 					   cstate->copy_file) != 1 ||
 				ferror(cstate->copy_file))
 			{
+				int			save_errno = errno;
+
+				/*
+				 * Drop the row we failed to write before reporting the error.
+				 * The cstate can outlive the failure: the caller may catch
+				 * the error and keep using the same DestReceiver, which for a
+				 * session-lifetime receiver survives the transaction. Leaving
+				 * the row in fe_msgbuf would prepend it to the next row
+				 * written, producing a line with more fields than the tuple
+				 * descriptor has columns.
+				 */
+				resetStringInfo(fe_msgbuf);
+				errno = save_errno;
+
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not write to COPY file: %m")));
@@ -293,7 +310,23 @@ CopySendInt16(CopyToState cstate, int16 val)
 static void
 EndCopy(CopyToState cstate)
 {
-	if (CopyOptsIsBinary(cstate->opts))
+	/*
+	 * EndCopy can be reached more than once for the same cstate, because the
+	 * DestReceiver calls it from both rShutdown and rDestroy, and a receiver
+	 * may be destroyed without being shut down at all.  Closing the file and
+	 * deleting the memory contexts twice would release resources we no longer
+	 * own, so do the work only once.
+	 */
+	if (cstate->ended)
+		return;
+
+	cstate->ended = true;
+
+	/*
+	 * copy_file and rowcontext are only set up by StartCopyTo, so they are
+	 * NULL when the copy is ended without ever having been started.
+	 */
+	if (CopyOptsIsBinary(cstate->opts) && cstate->copy_file != NULL)
 	{
 		/* Generate trailer for a binary copy */
 		CopySendInt16(cstate, -1);
@@ -301,15 +334,19 @@ EndCopy(CopyToState cstate)
 		CopySendEndOfRow(cstate);
 	}
 
-	if (cstate->filename != NULL)
+	if (cstate->copy_file != NULL)
 	{
+		FILE	   *copyFile = cstate->copy_file;
+
+		cstate->copy_file = NULL;
+
 		if (cstate->sessionLifetime)
 		{
-			fclose(cstate->copy_file);
+			fclose(copyFile);
 		}
 		else
 		{
-			if (FreeFile(cstate->copy_file))
+			if (FreeFile(copyFile))
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not close file \"%s\": %m",
@@ -317,7 +354,8 @@ EndCopy(CopyToState cstate)
 		}
 	}
 
-	MemoryContextDelete(cstate->rowcontext);
+	if (cstate->rowcontext != NULL)
+		MemoryContextDelete(cstate->rowcontext);
 	MemoryContextDelete(cstate->copycontext);
 }
 
@@ -1310,6 +1348,17 @@ static void
 copy_dest_destroy(DestReceiver *self)
 {
 	DR_copy    *myState = (DR_copy *) self;
+
+	/*
+	 * Usually rShutdown already ended the copy, and EndCopy is idempotent. A
+	 * receiver can also be destroyed without being shut down, though (for
+	 * instance when the caller abandons a partially initialized receiver
+	 * after an error), and then this is the only chance to close the file and
+	 * free the per-copy memory contexts.  Without it the FILE * and its stdio
+	 * buffer leak for the rest of the session and the buffered tail of the
+	 * file is never written.
+	 */
+	EndCopy(myState->cstate);
 
 	pfree(myState->cstate);
 	pfree(self);
