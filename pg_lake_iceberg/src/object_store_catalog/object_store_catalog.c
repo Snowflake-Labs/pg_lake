@@ -62,6 +62,7 @@ static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
 static bool CheckIfExternalObjectStoreCatalogExists(const char *catalogName);
 static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogNamespace, char **catalogTableName);
 static void FormatCurrentTimestampUTC(char *buf, size_t bufsize);
+static bool IsBlankCatalogField(const char *value);
 
 /*
 * Lists all tables registered in the given object store catalog.
@@ -412,6 +413,8 @@ PushMetadataLocationToObjectStoreCatalog(void)
 
 	SPI_execute(fetchObjectStoreMetadata->data, readOnly, 0);
 
+	int			entriesWritten = 0;
+
 	for (int i = 0; i < SPI_processed; i++)
 	{
 		char	   *metadataLocation = SPI_getvalue(SPI_tuptable->vals[i],
@@ -424,7 +427,25 @@ PushMetadataLocationToObjectStoreCatalog(void)
 													SPI_tuptable->tupdesc,
 													3);
 
-		if (i > 0)
+		/*
+		 * A reader cannot do anything with an entry that has no name, and a
+		 * reader that validates the file rejects every table in it, so leave
+		 * the entry out and let the next export publish it.
+		 */
+		if (IsBlankCatalogField(metadataLocation) ||
+			IsBlankCatalogField(catalogTableName) ||
+			IsBlankCatalogField(catalogNamespace))
+		{
+			ereport(WARNING,
+					(errmsg("skipping incomplete object store catalog entry"),
+					 errdetail("metadata location \"%s\", table name \"%s\", namespace \"%s\"",
+							   metadataLocation ? metadataLocation : "",
+							   catalogTableName ? catalogTableName : "",
+							   catalogNamespace ? catalogNamespace : "")));
+			continue;
+		}
+
+		if (entriesWritten++ > 0)
 			appendStringInfoString(objectStoreCatalogFileContent, ",\n");
 
 		appendStringInfoString(objectStoreCatalogFileContent, "{");
@@ -649,6 +670,17 @@ FormatCurrentTimestampUTC(char *buf, size_t bufsize)
 	snprintf(buf, bufsize, "%04d-%02d-%02dT%02d:%02d:%02dZ",
 			 tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
 			 tm->tm_hour, tm->tm_min, tm->tm_sec);
+}
+
+
+/*
+ * IsBlankCatalogField returns whether a catalog entry field is missing or empty,
+ * in which case the entry cannot identify a table.
+ */
+static bool
+IsBlankCatalogField(const char *value)
+{
+	return value == NULL || value[0] == '\0';
 }
 
 
