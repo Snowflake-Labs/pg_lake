@@ -1211,22 +1211,13 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		return;
 	}
 
-	int			totalFilesRemoved = 0;
+	volatile int totalFilesRemoved = 0;
 
-	List	   *removedFiles = NIL;
 	volatile bool hasRemainingFiles = true;
 	MemoryContext savedContext = CurrentMemoryContext;
 
 	do
 	{
-		/*
-		 * Start each iteration with an empty list: the paths are allocated in
-		 * the transaction this iteration commits below, so a list carried
-		 * into the next one would be appended to and read after its memory is
-		 * gone, and counted a second time on top of that.
-		 */
-		removedFiles = NIL;
-
 		if (!ActiveSnapshotSet())
 			PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -1242,8 +1233,26 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			char	   *locationPrefix = GetMetadataLocationPrefixForRelationId(relationId);
 
+			/*
+			 * The paths live in the transaction this iteration commits below,
+			 * so they are counted here rather than carried out of the pass
+			 * that produced them.
+			 */
+			List	   *removedFiles = NIL;
+
 			hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull, isVerbose,
 													  &removedFiles);
+
+			/*
+			 * Removals are what the budget is charged and what the summary
+			 * below reports: a path whose removal failed is handed to the
+			 * deletion queue, which is not a file this vacuum got rid of. A
+			 * pass that failed reports no remaining files, so the loop ends
+			 * there rather than carrying on through the paths behind the
+			 * failure, and a pass that threw reports nothing at all, its
+			 * removals having gone back with the subtransaction.
+			 */
+			totalFilesRemoved += list_length(removedFiles);
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -1267,22 +1276,10 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			ThrowErrorData(edata);
 
-			/* the removals went back with the subtransaction */
-			removedFiles = NIL;
-
 			/* do not continue in case of failure */
 			hasRemainingFiles = false;
 		}
 		PG_END_TRY();
-
-		/*
-		 * Removals are what the budget is charged and what the summary below
-		 * reports: a path whose removal failed is handed to the deletion
-		 * queue, which is not a file this vacuum got rid of. A pass that
-		 * failed reports no remaining files, so the loop ends there rather
-		 * than carrying on through the paths behind the failure.
-		 */
-		totalFilesRemoved += list_length(removedFiles);
 
 		/* rotate into a new transaction to release locks and save progress */
 		PopActiveSnapshot();
