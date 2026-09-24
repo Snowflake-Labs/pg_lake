@@ -1274,18 +1274,6 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 	if (hasRemainingFiles && totalFilesRemoved >= MaxFileRemovalsPerVacuum)
 		VacuumStoppedWithFilesQueued = true;
-
-	if (totalFilesRemoved > 0)
-	{
-		if (relationId != InvalidOid)
-			ereport(LOG,
-					(errmsg("pg_lake: cleaned up %d orphaned files from iceberg table %s",
-							totalFilesRemoved, GetQualifiedRelationName(relationId))));
-		else
-			ereport(LOG,
-					(errmsg("pg_lake: cleaned up %d orphaned files from dropped iceberg tables",
-							totalFilesRemoved)));
-	}
 }
 
 
