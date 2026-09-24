@@ -1219,6 +1219,14 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 	do
 	{
+		/*
+		 * Start each iteration with an empty list: the paths are allocated in
+		 * the transaction this iteration commits below, so a list carried
+		 * into the next one would be appended to and read after its memory is
+		 * gone, and counted a second time on top of that.
+		 */
+		removedFiles = NIL;
+
 		if (!ActiveSnapshotSet())
 			PushActiveSnapshot(GetTransactionSnapshot());
 
@@ -1258,6 +1266,9 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 				edata->elevel = WARNING;
 
 			ThrowErrorData(edata);
+
+			/* the removals went back with the subtransaction */
+			removedFiles = NIL;
 
 			/* do not continue in case of failure */
 			hasRemainingFiles = false;
