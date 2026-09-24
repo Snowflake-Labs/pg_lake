@@ -1989,3 +1989,94 @@ def set_catalog_prefixes(read_only_prefix="_catalog", read_write_prefix="_catalo
     )
 
     run_command("SELECT pg_reload_conf()", superuser_conn)
+
+
+# The object store catalog export resolves the schema and name of every table it
+# publishes with lake_table.get_table_schema() and lake_table.get_table_name().
+# Those two used to be VOLATILE, so each call took a fresh snapshot: a DROP TABLE
+# that committed while the export query was running made them return NULL for a
+# table that same query could still see, and the export published an entry with
+# an empty namespace and table name. A reader that validates the entries rejects
+# the whole file, so one dropped table stopped the refresh of every table in the
+# database.
+#
+# A row lock makes the window deterministic. The lookup query takes its snapshot
+# before it blocks on the gate row, and the DROP commits while it waits.
+def test_table_lookups_use_the_caller_snapshot(pg_conn, extension):
+    run_command("DROP SCHEMA IF EXISTS lookup_snapshot CASCADE", pg_conn)
+    run_command("CREATE SCHEMA lookup_snapshot", pg_conn)
+    run_command("CREATE TABLE lookup_snapshot.victim(a int)", pg_conn)
+    run_command("CREATE TABLE lookup_snapshot.gate(id int PRIMARY KEY)", pg_conn)
+    run_command("INSERT INTO lookup_snapshot.gate VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    victim_oid = run_query("SELECT 'lookup_snapshot.victim'::regclass::oid", pg_conn)[
+        0
+    ][0]
+
+    # hold the gate row, so the lookup query below blocks on it
+    run_query("SELECT id FROM lookup_snapshot.gate WHERE id = 1 FOR UPDATE", pg_conn)
+
+    reader_conn = open_pg_conn()
+    lookup_result = []
+    lookup_error = []
+
+    def run_lookup():
+        try:
+            # pass the oid rather than the name: the name is gone by the time
+            # this query is unblocked, and we want to reach the lookups
+            lookup_result.extend(
+                run_query(
+                    f"""
+                    SELECT lake_table.get_table_schema({victim_oid}::regclass),
+                           lake_table.get_table_name({victim_oid}::regclass)
+                    FROM (
+                        SELECT id FROM lookup_snapshot.gate WHERE id = 1 FOR UPDATE
+                    ) gate
+                    """,
+                    reader_conn,
+                )[0]
+            )
+        except Exception as error:
+            lookup_error.append(error)
+
+    lookup = threading.Thread(target=run_lookup)
+    lookup.start()
+
+    try:
+        waiting = 0
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            waiting = run_query(
+                """
+                SELECT count(*) FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND pid <> pg_backend_pid()
+                  AND cardinality(pg_blocking_pids(pid)) > 0
+                """,
+                pg_conn,
+            )[0][0]
+            if waiting > 0:
+                break
+            time.sleep(0.1)
+
+        assert waiting > 0, "lookup query never blocked on the gate row"
+
+        # this commits while the lookup query waits, so it is invisible to that
+        # query's snapshot but visible to any snapshot taken after it
+        run_command("DROP TABLE lookup_snapshot.victim", pg_conn)
+        pg_conn.commit()
+
+        lookup.join(timeout=30)
+        assert not lookup.is_alive(), "lookup query did not finish"
+    finally:
+        reader_conn.close()
+
+    assert not lookup_error, f"lookup query failed: {lookup_error}"
+    assert lookup_result == ["lookup_snapshot", "victim"], (
+        f"concurrent DROP TABLE changed the table lookups to {lookup_result}, "
+        f"which the catalog export would publish as empty strings"
+    )
+
+    run_command("DROP SCHEMA lookup_snapshot CASCADE", pg_conn)
+    pg_conn.commit()
