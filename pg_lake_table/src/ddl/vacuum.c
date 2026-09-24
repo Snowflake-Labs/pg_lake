@@ -76,8 +76,18 @@ int			MaxCompactionsPerVacuum = 100;
 /* case insensitive */
 #define PG_LAKE_ICEBERG_VACUUM_FLAG "iceberg"
 
-/* managed by a GUC, not exposed to the user, see note in VacuumRemoveInProgressFiles */
-int			MaxFileRemovalsPerVacuum = 100000;
+/*
+ * Managed by a GUC, not exposed to the user, see note in
+ * VacuumRemoveInProgressFiles.
+ *
+ * It also bounds how long the removal stages can run before the autovacuum loop
+ * comes back around to the object store catalog export, which is serialized
+ * behind them (see pg_lake_iceberg_vacuum). Removals are batched, so a budget
+ * this size is a few requests worth of work when the object store is healthy;
+ * when a batch fails it is retried a path at a time, and then the budget is what
+ * keeps the retries from holding up the export for hours.
+ */
+int			MaxFileRemovalsPerVacuum = 10000;
 
 /*
  * Set when a file removal loop stopped at MaxFileRemovalsPerVacuum with files
