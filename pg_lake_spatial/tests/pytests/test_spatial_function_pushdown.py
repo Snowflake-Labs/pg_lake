@@ -243,7 +243,14 @@ def test_spatial_function_pushdown(
 ):
     query = "SELECT * FROM test_spatial_function_pushdown.tbl " + operator_expression
 
-    assert_remote_query_contains_expression(query, expected_expression, user_conn)
+    if test_id == "ST_GeomFromGeoJSON(text)":
+        # Rendering an external JSON value as text stays local because the
+        # physical Parquet column may be VARIANT.
+        assert_remote_query_not_contains_expression(
+            query, expected_expression, user_conn
+        )
+    else:
+        assert_remote_query_contains_expression(query, expected_expression, user_conn)
     assert_query_results_on_tables(
         query,
         user_conn,

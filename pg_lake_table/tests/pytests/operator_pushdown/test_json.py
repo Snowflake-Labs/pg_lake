@@ -82,7 +82,12 @@ def test_json_operator_pushdown(
     expected_expression,
 ):
     query = "SELECT * FROM json_operator_pushdown.tbl " + operator_expression
-    assert_remote_query_contains_expression(query, expected_expression, pg_conn)
+    if test_id == "col_jsonb_literal":
+        # An external Parquet jsonb column may be physically VARIANT. Its
+        # rendered text is not safe for PostgreSQL jsonb comparisons.
+        assert_remote_query_not_contains_expression(query, expected_expression, pg_conn)
+    else:
+        assert_remote_query_contains_expression(query, expected_expression, pg_conn)
     assert_query_results_on_tables(
         query,
         pg_conn,
