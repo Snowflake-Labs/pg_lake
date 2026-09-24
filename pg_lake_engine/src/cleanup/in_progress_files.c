@@ -138,7 +138,7 @@ flush_in_progress_queue(PG_FUNCTION_ARGS)
 	char	   *location = "";
 	bool		isVerbose = false;
 
-	RemoveInProgressFiles(location, true, isVerbose, &removedFiles, NULL);
+	RemoveInProgressFiles(location, true, isVerbose, &removedFiles);
 
 	ListCell   *fileCell;
 
@@ -160,34 +160,30 @@ flush_in_progress_queue(PG_FUNCTION_ARGS)
  * in progress. This includes removing from the remote storage
  * and deleting the record from the IN_PROGRESS_FILES_TABLE.
  *
- * The two outputs do not answer the same question. *removedPaths is the paths
- * remote storage confirmed gone, which is what a caller reporting a number of
- * files cleaned up wants. *claimedPaths is every path this pass took off the
- * queue, which is more: a path whose removal failed still loses its catalog row
- * (see the DeleteInProgressFileRecords call below), so it is claimed without
- * being removed. A caller charging a per-vacuum budget wants that one, because
- * it is the number that bounds how much work the pass did. *claimedPaths may be
- * NULL when the caller has no use for it.
+ * Only paths remote storage confirmed gone are reported in *removedPaths and
+ * only those lose their catalog row. A path whose removal failed keeps its row,
+ * because that row is the only record that the file exists: dropping it would
+ * leave the object behind with nothing left to retry it. There is no retry state
+ * on these rows, so the retry is simply the next cleanup pass, and this pass
+ * stops at the first failure and reports no remaining files so that the caller
+ * does not come straight back to the same path.
  */
 bool
 RemoveInProgressFiles(char *location, bool isFull, bool isVerbose,
-					  List **removedPaths, List **claimedPaths)
+					  List **removedPaths)
 {
 	List	   *inProgressFileRecords = NIL;
 	bool		hasRemainingFiles = GetInProgressFileRecords(location, isFull, &inProgressFileRecords);
 
+	/*
+	 * Start empty so that an error leaves the caller with what this pass
+	 * achieved rather than what the previous one did. An error takes the
+	 * whole subtransaction with it, so nothing an interrupted pass removed is
+	 * claimed either.
+	 */
 	*removedPaths = NIL;
 
-	/*
-	 * Both outputs start empty so that an error leaves the caller with what
-	 * this pass achieved rather than what the previous one did. Nothing is
-	 * claimed until the catalog DELETE below, and an error takes the whole
-	 * subtransaction with it, so an interrupted pass claimed nothing.
-	 */
-	if (claimedPaths != NULL)
-		*claimedPaths = NIL;
-
-	List	   *claimedFiles = NIL;
+	bool		removalFailed = false;
 
 	ListCell   *fileCell = NULL;
 
@@ -199,10 +195,10 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose,
 	 *
 	 * Asking DeleteRemoteFileBatch for the removed paths means a failed batch
 	 * is retried a path at a time, because pgduck reports one status for the
-	 * whole request and does not say which path was at fault. Only a failure
-	 * pays for that, and PER_LOOP_IN_PROGRESS_FILE_CLEANUP_LIMIT is well
-	 * below FILE_DELETION_BATCH_SIZE, so the retry is bounded by the paths
-	 * one pass claimed rather than by a full batch.
+	 * whole request and does not say which path was at fault. That retry
+	 * stops at the first path that fails again, so only the paths ahead of
+	 * the failure are told apart, and a batch that fails wholesale costs one
+	 * extra request rather than one per path.
 	 */
 	List	   *deletionBatch = NIL;
 
@@ -233,8 +229,13 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose,
 
 		if (entry->isPrefix)
 		{
-			if (DeleteRemotePrefix(entry->path))
-				*removedPaths = lappend(*removedPaths, entry->path);
+			if (!DeleteRemotePrefix(entry->path))
+			{
+				removalFailed = true;
+				break;
+			}
+
+			*removedPaths = lappend(*removedPaths, entry->path);
 		}
 		else
 		{
@@ -242,7 +243,12 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose,
 
 			if (list_length(deletionBatch) >= FILE_DELETION_BATCH_SIZE)
 			{
-				DeleteRemoteFileBatch(deletionBatch, removedPaths, NULL);
+				if (!DeleteRemoteFileBatch(deletionBatch, removedPaths, NULL))
+				{
+					removalFailed = true;
+					break;
+				}
+
 				deletionBatch = NIL;
 
 				/*
@@ -252,30 +258,34 @@ RemoveInProgressFiles(char *location, bool isFull, bool isVerbose,
 				CHECK_FOR_INTERRUPTS();
 			}
 		}
-
-		claimedFiles = lappend(claimedFiles, entry->path);
 	}
 
-	/* whatever did not fill a batch */
-	DeleteRemoteFileBatch(deletionBatch, removedPaths, NULL);
+	if (!removalFailed)
+	{
+		/* whatever did not fill a batch */
+		removalFailed = !DeleteRemoteFileBatch(deletionBatch, removedPaths, NULL);
+	}
 
 	/*
-	 * Drop the catalog rows for every path this pass claimed in a single
-	 * DELETE, whatever remote storage made of them. Per-row
-	 * DeleteInProgressFileRecord would take a fresh plan-cache + snapshot per
-	 * file, which on large backlogs (a stuck VACUUM walk of a long
-	 * in-progress queue) was a notable share of the loop. The per-iteration
-	 * semantics are preserved because the catalog DELETE is idempotent
-	 * against missing paths and remote removal is idempotent against missing
-	 * remote objects, so a mid-loop error still recovers via the next VACUUM
-	 * cycle.
+	 * Drop the catalog rows for the paths that are gone in a single DELETE.
+	 * Per-row DeleteInProgressFileRecord would take a fresh plan-cache +
+	 * snapshot per file, which on large backlogs (a stuck VACUUM walk of a
+	 * long in-progress queue) was a notable share of the loop. The
+	 * per-iteration semantics are preserved because the catalog DELETE is
+	 * idempotent against missing paths and remote removal is idempotent
+	 * against missing remote objects, so a mid-loop error still recovers via
+	 * the next VACUUM cycle.
 	 */
-	DeleteInProgressFileRecords(claimedFiles);
+	DeleteInProgressFileRecords(*removedPaths);
 
-	if (claimedPaths != NULL)
-		*claimedPaths = claimedFiles;
-
-	return hasRemainingFiles;
+	/*
+	 * A pass that could not remove a file reports nothing remaining, so the
+	 * caller stops here instead of re-claiming the path it just failed on.
+	 * Since there is nothing on these rows to space the attempts out, the
+	 * interval between them is however long it takes for cleanup to come
+	 * round again.
+	 */
+	return hasRemainingFiles && !removalFailed;
 }
 
 

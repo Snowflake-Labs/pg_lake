@@ -1211,10 +1211,8 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		return;
 	}
 
-	int			totalFilesClaimed = 0;
 	int			totalFilesRemoved = 0;
 
-	List	   *claimedFiles = NIL;
 	List	   *removedFiles = NIL;
 	volatile bool hasRemainingFiles = true;
 	MemoryContext savedContext = CurrentMemoryContext;
@@ -1237,7 +1235,7 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 			char	   *locationPrefix = GetMetadataLocationPrefixForRelationId(relationId);
 
 			hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull, isVerbose,
-													  &removedFiles, &claimedFiles);
+													  &removedFiles);
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -1267,18 +1265,12 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		PG_END_TRY();
 
 		/*
-		 * The budget is charged rows claimed, unlike the deletion queue loop,
-		 * which charges rows removed. RemoveInProgressFiles drops the catalog
-		 * row whatever the remote outcome, so a claimed row is gone from the
-		 * queue either way: charging removals instead would let a path that
-		 * failed be re-claimed by the next iteration without ever advancing
-		 * the budget, and the loop would stop terminating.
-		 *
-		 * What is reported is removals, which is the smaller number whenever
-		 * a remote delete failed. Its own warning says so; the summary below
-		 * has no business also claiming the file.
+		 * Removals are what the budget is charged and what the summary below
+		 * reports: a path whose removal failed keeps its row, so it is not
+		 * work this vacuum got done. A pass that failed reports no remaining
+		 * files, so the loop ends there rather than re-claiming that path
+		 * without advancing the budget.
 		 */
-		totalFilesClaimed += list_length(claimedFiles);
 		totalFilesRemoved += list_length(removedFiles);
 
 		/* rotate into a new transaction to release locks and save progress */
@@ -1287,10 +1279,10 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		StartTransactionCommand();
 	}
 	while (!isFull				/* when isFull, we'll remove all files */
-		   && totalFilesClaimed < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
+		   && totalFilesRemoved < MaxFileRemovalsPerVacuum	/* per-vacuum limit */
 		   && hasRemainingFiles /* no more files to remove */ );
 
-	if (hasRemainingFiles && totalFilesClaimed >= MaxFileRemovalsPerVacuum)
+	if (hasRemainingFiles && totalFilesRemoved >= MaxFileRemovalsPerVacuum)
 		VacuumStoppedWithFilesQueued = true;
 
 	if (totalFilesRemoved > 0)

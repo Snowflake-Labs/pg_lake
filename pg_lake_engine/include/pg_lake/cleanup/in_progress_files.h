@@ -24,7 +24,7 @@
 #define PER_LOOP_IN_PROGRESS_FILE_CLEANUP_LIMIT 50
 
 extern PGDLLEXPORT bool RemoveInProgressFiles(char *location, bool isFull, bool isVerbose,
-											  List **removedPaths, List **claimedPaths);
+											  List **removedPaths);
 extern PGDLLEXPORT void InsertInProgressFileRecord(char *path);
 extern PGDLLEXPORT void InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRecord);
 extern PGDLLEXPORT void DeleteInProgressFileRecord(char *path);

@@ -635,20 +635,45 @@ def test_in_progress_files_9(
     assert len(in_progress_file_paths) == 0
 
 
-def test_flush_reports_only_the_files_it_removed(s3, superuser_conn, extension):
-    """flush_in_progress_queue reports the paths remote storage removed, not the
-    rows it claimed.
+def test_flush_reports_and_retires_only_the_files_it_removed(
+    s3, superuser_conn, extension
+):
+    """flush_in_progress_queue reports the paths remote storage removed, and
+    leaves the row of a path it could not remove in place.
 
-    A path whose removal fails still loses its in-progress row -- the table has
-    nowhere to record an attempt -- so a caller counting claimed rows would
-    report a file it had not removed, right next to the warning saying the
-    removal failed.
+    The in-progress row is the only record that the file exists, so dropping it
+    after a failed attempt leaves the object behind with nothing left to retry
+    it. Reporting the path would be wrong for the same reason -- the warning
+    right above says the removal failed.
     """
     prefix = f"s3://{TEST_BUCKET}/test_in_progress_files_removed_only"
     removable_path = f"{prefix}/removable.parquet"
 
     bucket, key = parse_s3_path(removable_path)
     s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+
+    run_command(
+        f"INSERT INTO lake_engine.in_progress_files (path, operation_id, is_prefix) "
+        f"VALUES ('{removable_path}', 0, false)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    flushed = run_query(
+        "SELECT * FROM lake_engine.flush_in_progress_queue()", superuser_conn
+    )
+    assert {row[0] for row in flushed} == {removable_path}
+
+    # the file the flush reported is the one that actually went
+    assert "Contents" not in s3.list_objects_v2(Bucket=bucket, Prefix=key)
+
+    remaining = run_query(
+        f"SELECT path FROM lake_engine.in_progress_files "
+        f"WHERE path OPERATOR(pg_catalog.=) '{removable_path}'",
+        superuser_conn,
+    )
+    assert remaining == []
+    superuser_conn.commit()
 
     # A path no filesystem can remove: an unknown scheme falls through to the
     # local filesystem, where removing something absent is an error rather than
@@ -658,12 +683,9 @@ def test_flush_reports_only_the_files_it_removed(s3, superuser_conn, extension):
         "nosuchfs://test_in_progress_files_removed_only/unremovable.parquet"
     )
 
-    values = ",".join(
-        f"('{path}', 0, false)" for path in (removable_path, unremovable_path)
-    )
     run_command(
         f"INSERT INTO lake_engine.in_progress_files (path, operation_id, is_prefix) "
-        f"VALUES {values}",
+        f"VALUES ('{unremovable_path}', 0, false)",
         superuser_conn,
     )
     superuser_conn.commit()
@@ -671,21 +693,23 @@ def test_flush_reports_only_the_files_it_removed(s3, superuser_conn, extension):
     flushed = run_query(
         "SELECT * FROM lake_engine.flush_in_progress_queue()", superuser_conn
     )
-    reported = {row[0] for row in flushed}
+    assert {row[0] for row in flushed} == set()
 
-    assert removable_path in reported
-    assert unremovable_path not in reported
-
-    # the file the flush reported is the one that actually went
-    assert "Contents" not in s3.list_objects_v2(Bucket=bucket, Prefix=key)
-
-    # both rows are claimed either way, so neither is left to retry
+    # the row survives its failed attempt, so a later cycle tries again
     remaining = run_query(
         f"SELECT path FROM lake_engine.in_progress_files "
-        f"WHERE path IN ('{removable_path}', '{unremovable_path}')",
+        f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
         superuser_conn,
     )
-    assert remaining == []
+    assert remaining == [(unremovable_path,)]
+
+    # leave nothing behind: every later cleanup pass in this database would
+    # stop at this path
+    run_command(
+        f"DELETE FROM lake_engine.in_progress_files "
+        f"WHERE path OPERATOR(pg_catalog.=) '{unremovable_path}'",
+        superuser_conn,
+    )
     superuser_conn.commit()
 
 
