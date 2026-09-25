@@ -724,10 +724,10 @@ def test_autovacuum_lock_timeout(s3, pg_conn, extension, installcheck):
     holder = None
 
     try:
-        # The worker walks the tables in catalog order, so creating the table
-        # we are going to lock first is what makes the pass reach it before
-        # the other one -- otherwise the other one would already be compacted
-        # by the time the worker ever blocks.
+        # The order the worker walks the tables in is whatever the join in
+        # GetAllInternalIcebergRelationIds happens to emit, so neither table
+        # can be assumed to come first.  Both facts this test checks are
+        # waited for separately below rather than in one pass-ordered read.
         for table in (blocked, other):
             run_command(
                 f"""
@@ -763,16 +763,28 @@ def test_autovacuum_lock_timeout(s3, pg_conn, extension, installcheck):
             f"autovacuum did not compact {other} while {blocked} was locked; "
             "one contended table must not hold up the rest of the pass"
         )
-        assert (
-            data_file_count(pg_conn, blocked) == 3
-        ), f"expected {blocked} to be left alone while its update lock was held"
 
-        with open(logfile) as f:
-            f.seek(offset)
-            delta = f.read()
+        # Compacting the other table says nothing about whether the worker has
+        # reached the locked one yet: if the pass visited the other table
+        # first, the wait above returns while the lock wait on the locked table
+        # is still running, and the timeout is a whole autovacuum_lock_timeout
+        # away.  Wait for it on its own deadline.
+        delta = ""
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            with open(logfile) as f:
+                f.seek(offset)
+                delta = f.read()
+            if "canceling statement due to lock timeout" in delta:
+                break
+            time.sleep(2)
+
         assert "canceling statement due to lock timeout" in delta, (
             "expected the worker to report a lock timeout, got: " + delta
         )
+        assert (
+            data_file_count(pg_conn, blocked) == 3
+        ), f"expected {blocked} to be left alone while its update lock was held"
 
         # Once the writer commits, the skipped table is picked up again.
         holder.commit()
