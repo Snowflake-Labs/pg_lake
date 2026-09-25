@@ -333,6 +333,24 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 		 * that prefix.
 		 */
 		ForgetStorageCredentials(objectId);
+
+		/*
+		 * A read-only internal iceberg table (one flipped by
+		 * lake_table.finish_postgres_recovery, e.g. on a PITR fork) still
+		 * owns its row in lake_iceberg.tables_internal. ApplyDDLChanges skips
+		 * file deletion for read-only tables but still removes the catalog
+		 * row; without it the row is orphaned once the pg_class entry is gone
+		 * (OAT_DROP fires before the actual deletion, so the catalog lookups
+		 * inside still resolve here).
+		 */
+		if (IsInternalIcebergTable(objectId))
+		{
+			IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
+
+			ddlOperation->type = DDL_TABLE_DROP;
+
+			ApplyDDLChanges(objectId, list_make1(ddlOperation));
+		}
 	}
 	else if (get_rel_type_id(objectId) != InvalidOid && subId != 0)
 	{
