@@ -205,18 +205,62 @@ TryGetInodeStats(const string &path, int64_t &freeInodes, int64_t &totalInodes)
 static int64_t
 DeriveInodeFloor(int64_t totalInodes)
 {
-	int64_t inodeFloor = totalInodes / DEFAULT_FREE_INODE_FRACTION;
+  int64_t inodeFloor = totalInodes / DEFAULT_FREE_INODE_FRACTION;
 
-	if (inodeFloor < DEFAULT_MIN_FREE_INODES)
-		inodeFloor = DEFAULT_MIN_FREE_INODES;
+  if (inodeFloor < DEFAULT_MIN_FREE_INODES)
+    inodeFloor = DEFAULT_MIN_FREE_INODES;
 
-	if (inodeFloor > DEFAULT_MAX_FREE_INODES)
-		inodeFloor = DEFAULT_MAX_FREE_INODES;
+  if (inodeFloor > DEFAULT_MAX_FREE_INODES)
+    inodeFloor = DEFAULT_MAX_FREE_INODES;
 
-	if (inodeFloor > totalInodes / 2)
-		inodeFloor = totalInodes / 2;
+  if (inodeFloor > totalInodes / 2)
+    inodeFloor = totalInodes / 2;
 
-	return inodeFloor;
+  return inodeFloor;
+}
+
+
+/*
+ * DerivePurgeTarget returns the number of inodes to evict toward once floor
+ * is breached, rather than evicting only up to floor itself.
+ *
+ * Cache-on-write is not reflected anywhere in this budget: it creates files
+ * outside of a ManageCache round, with no reservation of its own the way a
+ * queued download gets one. Evicting exactly to floor leaves nothing to
+ * absorb that, so the next round is back under floor as soon as writes
+ * between the two rounds outpace what aged out. Evicting to a target well
+ * above floor instead means a round of eviction buys headroom for however
+ * many rounds it takes cache-on-write to eat through the gap, rather than
+ * re-triggering immediately.
+ *
+ * DEFAULT_PURGE_FRACTION mirrors DEFAULT_FREE_INODE_FRACTION's shape (a
+ * fraction of the file system, bounded both ways) but five times as large,
+ * so the gap between floor and purgeTarget is itself a usable margin rather
+ * than rounding error.
+ */
+static const int64_t DEFAULT_PURGE_FRACTION = 20;
+static const int64_t DEFAULT_MIN_PURGE_TARGET = 5000;
+static const int64_t DEFAULT_MAX_PURGE_TARGET = 500000;
+
+static int64_t
+DerivePurgeTarget(int64_t totalInodes, int64_t floor)
+{
+  int64_t purgeTarget = totalInodes / DEFAULT_PURGE_FRACTION;
+
+  if (purgeTarget < DEFAULT_MIN_PURGE_TARGET)
+    purgeTarget = DEFAULT_MIN_PURGE_TARGET;
+
+  if (purgeTarget > DEFAULT_MAX_PURGE_TARGET)
+    purgeTarget = DEFAULT_MAX_PURGE_TARGET;
+
+  if (purgeTarget > totalInodes / 2)
+    purgeTarget = totalInodes / 2;
+
+  /* an explicit, small pg_lake_min_free_cache_inodes still has to win */
+  if (purgeTarget < floor)
+    purgeTarget = floor;
+
+  return purgeTarget;
 }
 
 
@@ -349,16 +393,27 @@ GetInodeBudget(ClientContext &context, FileSystem &fileSystem,
 		/* manage the cache by size only */
 		return budget;
 
-	int64_t minFreeInodes = GetMinFreeInodes(context);
+  int64_t minFreeInodes = GetMinFreeInodes(context);
+  bool isAutoFloor = minFreeInodes == MIN_FREE_INODES_AUTO;
 
-	budget.floor = minFreeInodes == MIN_FREE_INODES_AUTO ?
-		DeriveInodeFloor(budget.totalInodes) : minFreeInodes;
+  budget.floor = isAutoFloor ?
+    DeriveInodeFloor(budget.totalInodes) : minFreeInodes;
 
-	if (budget.floor <= 0)
-		/* inode management is off, so there is nothing left to count */
-		return budget;
+  if (budget.floor <= 0)
+    /* inode management is off, so there is nothing left to count */
+    return budget;
 
-	int64_t queuedFiles = 0;
+  /*
+   * Only widen the target past the floor for the derived AUTO floor.
+   * Somebody who names an explicit pg_lake_min_free_cache_inodes picked that
+   * number on purpose (as does this file's own inode-pressure test, which
+   * sizes a floor its padding can just reach) and evicting past it would
+   * defeat the point of naming it.
+   */
+  budget.purgeTarget = isAutoFloor ?
+    DerivePurgeTarget(budget.totalInodes, budget.floor) : budget.floor;
+
+  int64_t queuedFiles = 0;
 
 	for (const CacheItem& cacheFile : cacheFiles)
 	{
@@ -402,21 +457,23 @@ LogInodePressure(const string &cacheDir, InodeBudget budget,
 		budget.totalInodes = measuredTotalInodes;
 	}
 
-	PGDUCK_SERVER_LOG("cache directory %s is low on inodes: %" PRIu64
-					  "/%" PRIu64 " available, keeping %" PRIu64
-					  " available; freed %" PRIu64 " inodes this round by "
-					  "evicting %" PRIu64 " files and %" PRIu64 " empty "
-					  "directories%s",
-					  cacheDir.c_str(),
-					  (uint64_t) budget.freeInodes,
-					  (uint64_t) budget.totalInodes,
-					  (uint64_t) budget.floor,
-					  (uint64_t) budget.freed,
-					  (uint64_t) evictedFiles,
-					  (uint64_t) prunedDirectories,
-					  skippedDownloads ?
-					  ", cache files alone cannot free enough inodes so "
-					  "nothing was added" : "");
+  PGDUCK_SERVER_LOG("cache directory %s is low on inodes: %" PRIu64
+            "/%" PRIu64 " available, keeping %" PRIu64
+            " available (evicting toward %" PRIu64
+            "); freed %" PRIu64 " inodes this round by "
+            "evicting %" PRIu64 " files and %" PRIu64 " empty "
+            "directories%s",
+            cacheDir.c_str(),
+            (uint64_t) budget.freeInodes,
+            (uint64_t) budget.totalInodes,
+            (uint64_t) budget.floor,
+            (uint64_t) budget.purgeTarget,
+            (uint64_t) budget.freed,
+            (uint64_t) evictedFiles,
+            (uint64_t) prunedDirectories,
+            skippedDownloads ?
+            ", cache files alone cannot free enough inodes so "
+            "nothing was added" : "");
 }
 
 } // namespace duckdb
