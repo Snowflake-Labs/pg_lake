@@ -23,6 +23,7 @@
 
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
+#include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"
@@ -89,6 +90,9 @@ typedef struct RestCatalogRequestPerTable
 /* GUC: see pg_lake_table.commit_time_analyze_threshold in init.c. */
 int			CommitTimeCatalogAnalyzeThreshold = 1000;
 
+/* GUC: see pg_lake_table.enable_append_only_commit_fast_path in init.c. */
+bool		EnableAppendOnlyCommitFastPath = true;
+
 static void ApplyTrackedIcebergMetadataChanges(bool isVerbose);
 static void RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType);
 static void InitTableMetadataTrackerHashIfNeeded(void);
@@ -104,6 +108,12 @@ static List *FindNewPartitionSpecsSinceMetadata(HTAB *currentSpecs, IcebergTable
 static IcebergTableMetadata * GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker);
 static List *GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 										   List *allTransforms);
+static List *GetAddedOnlyDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
+													List *allTransforms);
+#ifdef USE_ASSERT_CHECKING
+static void AssertAddedOnlyOperationsMatchDiff(const TableMetadataOperationTracker * opTracker,
+											   List *allTransforms, List *metadataOperations);
+#endif
 static TableMetadataOperation * CopyAddDataFileOperation(const TableDataFile * dataFile);
 static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
 static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
@@ -529,8 +539,12 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 			opTracker->relationPartitionByChanged = true;
 			break;
 		case DATA_FILE_ADD:
+			opTracker->relationDataFileChanged = true;
+			opTracker->dataFileChangeCount++;
+			break;
 		case DATA_FILE_REMOVE:
 			opTracker->relationDataFileChanged = true;
+			opTracker->relationDataFileRemoveSeen = true;
 			opTracker->dataFileChangeCount++;
 			break;
 		case DATA_FILE_REMOVE_ALL:
@@ -1411,6 +1425,17 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 							  List *allTransforms)
 {
 	/*
+	 * A transaction that removed no data file does not need the diff below.
+	 * The files it added are the ones the catalog records for this
+	 * transaction, and there is nothing to remove, so the last pushed
+	 * metadata has no answer left to give.
+	 */
+	if (EnableAppendOnlyCommitFastPath &&
+		!opTracker->relationDataFileRemoveSeen &&
+		!opTracker->relationDataFilesRemoveAllSeen)
+		return GetAddedOnlyDataFileMetadataOperations(opTracker, allTransforms);
+
+	/*
 	 * The catalog read below is proportional to the number of files in the
 	 * table, while the operations we return are proportional to the number of
 	 * files this transaction changed. Read into a scratch context so the
@@ -1481,6 +1506,9 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	List	   *addedFiles = NIL;
 	List	   *removedFilePaths = NIL;
 
+	/* tests attach here to check which commits need the diff */
+	INJECTION_POINT_COMPAT("commit-data-file-diff");
+
 	FindChangedFilesSinceMetadata(opTracker, currentFilesMap, &addedFiles, &removedFilePaths);
 
 	/*
@@ -1546,6 +1574,165 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 
 	return metadataOperations;
 }
+
+
+/*
+ * GetAddedOnlyDataFileMetadataOperations returns the metadata operations for a
+ * transaction that added data files to the relation and removed none.
+ *
+ * The general path reconstructs what changed by reading every file of the table
+ * from the catalog and every manifest entry of the last pushed metadata, then
+ * diffing the two. Both sides of that diff grow with the number of files in the
+ * table, which is what makes a commit on a table with many files expensive even
+ * when the commit only appended one file.
+ *
+ * Nothing of that is needed to describe an append. The catalog tracks the file
+ * ids this transaction added, so reading only those files gives the added set
+ * directly, and the removed set is empty by construction. What is left is
+ * proportional to the files the transaction wrote.
+ */
+static List *
+GetAddedOnlyDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
+									   List *allTransforms)
+{
+	MemoryContext resultContext = CurrentMemoryContext;
+	MemoryContext catalogContext =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "pg_lake pre-commit added data files",
+							  ALLOCSET_DEFAULT_SIZES);
+
+	MemoryContextSwitchTo(catalogContext);
+
+	/*
+	 * Read per-column stats along with the files. The general path defers
+	 * them to a targeted second call because it reads every file of the table
+	 * and only needs stats for the added ones. Here every file we read is an
+	 * added file, so the first read is already the targeted one.
+	 */
+	bool		dataOnly = false;
+	bool		newFilesOnly = true;
+	bool		forUpdate = false;
+	char	   *orderBy = NULL;
+	Snapshot	snapshot = GetTransactionSnapshot();
+
+	HTAB	   *addedFilesMap =
+		GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
+											   forUpdate, orderBy, snapshot, allTransforms,
+											   false /* skipColumnStats */ );
+
+	List	   *addedFiles = NIL;
+	HASH_SEQ_STATUS addedFilesStatus;
+
+	hash_seq_init(&addedFilesStatus, addedFilesMap);
+
+	TableDataFileHashEntry *addedFileEntry = NULL;
+
+	while ((addedFileEntry = hash_seq_search(&addedFilesStatus)) != NULL)
+		addedFiles = lappend(addedFiles, &addedFileEntry->dataFile);
+
+	DeleteInProgressAddedFiles(opTracker->relationId, addedFiles);
+
+	MemoryContextSwitchTo(resultContext);
+
+	List	   *metadataOperations = NIL;
+	ListCell   *addedFileCell = NULL;
+
+	foreach(addedFileCell, addedFiles)
+	{
+		TableDataFile *addedFile = lfirst(addedFileCell);
+
+		metadataOperations = lappend(metadataOperations,
+									 CopyAddDataFileOperation(addedFile));
+	}
+
+#ifdef USE_ASSERT_CHECKING
+	if (EnableHeavyAsserts)
+		AssertAddedOnlyOperationsMatchDiff(opTracker, allTransforms, metadataOperations);
+#endif
+
+	MemoryContextDelete(catalogContext);
+
+	return metadataOperations;
+}
+
+
+#ifdef USE_ASSERT_CHECKING
+
+/*
+ * AssertAddedOnlyOperationsMatchDiff errors out when the operations that
+ * GetAddedOnlyDataFileMetadataOperations built differ from what the general
+ * diff against the last pushed metadata would have produced.
+ *
+ * The add-only path trusts two things the diff establishes by reading: that the
+ * relation lost no file in this transaction, and that every catalog file the
+ * metadata does not have yet is one this transaction added. A transaction that
+ * breaks either one would silently leave a data file out of the Iceberg
+ * metadata, so the check runs the diff and compares, under assertions with
+ * pg_lake_engine.enable_heavy_asserts on.
+ */
+static void
+AssertAddedOnlyOperationsMatchDiff(const TableMetadataOperationTracker * opTracker,
+								   List *allTransforms, List *metadataOperations)
+{
+	MemoryContext callerContext = CurrentMemoryContext;
+	MemoryContext diffContext =
+		AllocSetContextCreate(CurrentMemoryContext,
+							  "pg_lake add-only commit check",
+							  ALLOCSET_DEFAULT_SIZES);
+
+	MemoryContextSwitchTo(diffContext);
+
+	bool		dataOnly = false;
+	bool		newFilesOnly = false;
+	bool		forUpdate = false;
+	char	   *orderBy = NULL;
+	Snapshot	snapshot = GetTransactionSnapshot();
+
+	HTAB	   *currentFilesMap =
+		GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
+											   forUpdate, orderBy, snapshot, allTransforms,
+											   true /* skipColumnStats */ );
+
+	List	   *addedFiles = NIL;
+	List	   *removedFilePaths = NIL;
+
+	FindChangedFilesSinceMetadata(opTracker, currentFilesMap, &addedFiles, &removedFilePaths);
+
+	if (removedFilePaths != NIL)
+		elog(ERROR, "pg_lake: relation %u lost %d data files in a transaction that recorded no removal",
+			 opTracker->relationId, list_length(removedFilePaths));
+
+	if (list_length(addedFiles) != list_length(metadataOperations))
+		elog(ERROR, "pg_lake: relation %u added %d data files but the diff found %d",
+			 opTracker->relationId, list_length(metadataOperations), list_length(addedFiles));
+
+	HTAB	   *operationPaths = CreateFilesHash();
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, metadataOperations)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		Assert(operation->type == DATA_FILE_ADD);
+		AppendFileToHash(operation->path, operationPaths);
+	}
+
+	ListCell   *addedFileCell = NULL;
+
+	foreach(addedFileCell, addedFiles)
+	{
+		TableDataFile *addedFile = lfirst(addedFileCell);
+
+		if (!PathHashSearch(operationPaths, addedFile->path, HASH_FIND, NULL))
+			elog(ERROR, "pg_lake: data file \"%s\" of relation %u is missing from the commit",
+				 addedFile->path, opTracker->relationId);
+	}
+
+	MemoryContextSwitchTo(callerContext);
+	MemoryContextDelete(diffContext);
+}
+
+#endif
 
 
 /*
