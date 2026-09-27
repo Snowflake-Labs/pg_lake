@@ -245,6 +245,17 @@ ValidateRestCatalogOptions(const RestCatalogOptions * opts,
 	if (isBuiltin && RestCatalogAuthProviderIsRegistered())
 		return;
 
+	/*
+	 * "none" is an explicit operator choice to talk to an unauthenticated
+	 * REST catalog (e.g. a Lakekeeper or Nessie instance run without OAuth
+	 * for local development/testing).  Unlike the provider bypass above, this
+	 * applies to both the built-in catalog and user-created servers -- there
+	 * is no credential surface to defer to either way, so skipping the check
+	 * here is final, not deferred.
+	 */
+	if (opts->authType == REST_CATALOG_AUTH_TYPE_NONE)
+		return;
+
 	bool		missingSecret = (opts->clientSecret == NULL || opts->clientSecret[0] == '\0');
 	bool		missingId = (opts->authType != REST_CATALOG_AUTH_TYPE_HORIZON) &&
 		(opts->clientId == NULL || opts->clientId[0] == '\0');

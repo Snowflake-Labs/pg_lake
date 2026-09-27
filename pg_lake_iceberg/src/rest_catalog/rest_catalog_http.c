@@ -209,12 +209,17 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
  * SendRequestToRestCatalog sends a request carrying the catalog's current
  * credential, which it will refresh and retry with once if the catalog
  * rejects it as expired.
+ *
+ * A NONE-auth catalog carries no credential to refresh -- refresh would
+ * dead-end in FetchOAuth2AccessToken's missing-credential error instead of
+ * surfacing whatever actually caused the 401, so canRefreshCredential is
+ * forced false for it, same as the credential request itself below.
  */
 HttpResult
 SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
 						 const char *body, List *headers)
 {
-	bool		canRefreshCredential = true;
+	bool		canRefreshCredential = (opts->authType != REST_CATALOG_AUTH_TYPE_NONE);
 
 	return SendRestCatalogRequest(opts, canRefreshCredential, method, url, body, headers);
 }

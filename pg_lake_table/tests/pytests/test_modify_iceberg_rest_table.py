@@ -948,6 +948,192 @@ def test_catalog_name_auto_detected_from_v1_config(
         superuser_conn.commit()
 
 
+def test_rest_auth_type_none_sends_no_authorization_header(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    set_polaris_gucs,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """rest_auth_type 'none' (issue #217) talks to an unauthenticated REST
+    catalog: no USER MAPPING is created at all, and every request the mock
+    catalog receives must carry no Authorization header.
+
+    Reuses the same real-Polaris-metadata-location relay trick as
+    test_catalog_name_auto_detected_from_v1_config, so the read path is
+    exercised end-to-end without needing an actually-unauthenticated Polaris
+    instance (Polaris itself always requires OAuth in this test environment)."""
+    if installcheck:
+        return
+
+    SCHEMA = "no_auth_schema"
+    TABLE = "no_auth_tbl"
+    RO_TABLE = "no_auth_ro_tbl"
+    SERVER_NAME = "no_auth_server"
+
+    # -- 1. Create a writable Polaris table and stage a row, exactly as the
+    #       config-discovery test does, so there is a real metadata-location
+    #       for the mock to relay.
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}", pg_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA}.{TABLE} (id bigint, v text) USING iceberg WITH (catalog='rest')",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {SCHEMA}.{TABLE} SELECT i, i::text FROM generate_series(1,5) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    endpoint = (
+        f"http://{server_params.POLARIS_HOSTNAME}"
+        f":{server_params.POLARIS_PORT}/api/catalog"
+    )
+    load_url = (
+        f"{endpoint}/v1/{server_params.PG_DATABASE}"
+        f"/namespaces/{SCHEMA}/tables/{TABLE}"
+    )
+    polaris_token = get_polaris_access_token()
+    resp = requests.get(load_url, headers={"Authorization": f"Bearer {polaris_token}"})
+    assert resp.status_code == 200, f"Polaris loadTable failed: {resp.text}"
+    real_metadata_location = resp.json()["metadata-location"]
+
+    # -- 2. Start a mock REST catalog that serves namespace-exists and
+    #       loadTable (relaying the real metadata-location), and records
+    #       every incoming request's headers so the test can assert none of
+    #       them ever carry an Authorization header.  Also serves /v1/config
+    #       so catalog_name auto-detection (FetchRestCatalogConfigPrefix, the
+    #       same header builder) is exercised too, not just namespace/table
+    #       lookups.
+    received_headers = []
+    NO_AUTH_MOCK_PREFIX = "no-auth-prefix"
+
+    def _make_no_auth_handler(metadata_location):
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def _json(self, status, body):
+                encoded = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def _handle(self):
+                received_headers.append(dict(self.headers.items()))
+
+                if self.path.endswith("/v1/config"):
+                    self._json(
+                        200,
+                        {"overrides": {}, "defaults": {"prefix": NO_AUTH_MOCK_PREFIX}},
+                    )
+                    return
+
+                if "/namespaces/" not in self.path:
+                    # Anything unexpected here -- e.g. an /oauth/tokens
+                    # request -- would mean rest_auth_type 'none' regressed
+                    # into trying to authenticate.  Fail with a clear 404
+                    # instead of an unhandled IndexError in the server thread.
+                    self._json(404, {"error": f"unexpected path: {self.path}"})
+                    return
+
+                if "/tables" not in self.path:
+                    ns = self.path.split("/namespaces/", 1)[1].split("?")[0].rstrip("/")
+                    self._json(200, {"namespace": [ns], "properties": {}})
+                    return
+
+                self._json(200, {"metadata-location": metadata_location})
+
+            def do_GET(self):
+                self._handle()
+
+            def do_POST(self):
+                self._handle()
+
+        return _Handler
+
+    port = _cfg_disc_free_port()
+    httpd = _HTTPServer(
+        ("127.0.0.1", port), _make_no_auth_handler(real_metadata_location)
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        # -- 3. Create a SERVER with rest_auth_type 'none'.  No USER MAPPING
+        #       is created at all -- proving ValidateRestCatalogOptions'
+        #       credential check is skipped for this auth type.  catalog_name
+        #       is deliberately left unset so CREATE TABLE also exercises
+        #       /v1/config auto-detection (FetchRestCatalogConfigPrefix)
+        #       through the same unauthenticated mock.
+        run_command(
+            f"""
+            CREATE SERVER {SERVER_NAME} TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (
+                    rest_endpoint 'http://127.0.0.1:{port}',
+                    rest_auth_type 'none',
+                    location_prefix 's3://{TEST_BUCKET}/'
+                )
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        run_command(
+            f"""
+            CREATE TABLE {SCHEMA}.{RO_TABLE} ()
+                USING iceberg
+                WITH (
+                    catalog='{SERVER_NAME}',
+                    read_only='true',
+                    catalog_namespace='{SCHEMA}',
+                    catalog_table_name='{TABLE}'
+                )
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # -- 4. SELECT exercises the full read path (namespace-exists check +
+        #       loadTable) against the unauthenticated mock catalog.
+        results = run_query(f"SELECT count(*) FROM {SCHEMA}.{RO_TABLE}", pg_conn)
+        assert results[0][0] == 5, (
+            f"Expected 5 rows from the unauthenticated read-only table, "
+            f"got {results[0][0]}"
+        )
+
+        # -- 5. The real assertion: no request to the mock catalog ever
+        #       carried an Authorization header.
+        assert received_headers, "mock catalog received no requests at all"
+        for headers in received_headers:
+            assert "Authorization" not in headers, (
+                f"rest_auth_type 'none' must not send an Authorization header, "
+                f"got headers: {headers}"
+            )
+
+        pg_conn.rollback()
+
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=5)
+
+        run_command(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE", pg_conn)
+        pg_conn.commit()
+
+        run_command(f"DROP SERVER IF EXISTS {SERVER_NAME} CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
 def test_rest_endpoint_path_is_honored(
     installcheck,
     superuser_conn,

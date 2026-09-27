@@ -114,6 +114,34 @@ def test_create_server_horizon_auth(superuser_conn, extension):
     superuser_conn.rollback()
 
 
+def test_create_server_none_auth_requires_no_credentials(superuser_conn, extension):
+    """rest_auth_type 'none' is accepted at the SERVER level with no USER
+    MAPPING at all -- matching the DDL-level scope of
+    test_create_server_horizon_auth above, which likewise only exercises
+    CREATE SERVER / GRANT and does not resolve the catalog.  (Resolution-time
+    validation is deferred for every auth type, so CREATE SERVER alone does
+    not prove the credential check is skipped; that end-to-end proof is
+    test_rest_auth_type_none_sends_no_authorization_header in
+    test_modify_iceberg_rest_table.py, which resolves and queries through a
+    real catalog with no credentials configured.)"""
+    run_command(
+        """
+        CREATE SERVER test_no_auth TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (
+                rest_endpoint 'http://localhost:8181',
+                rest_auth_type 'none'
+            )
+        """,
+        superuser_conn,
+    )
+    run_command(
+        "GRANT USAGE ON FOREIGN SERVER test_no_auth TO PUBLIC",
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+
 # ── CREATE SERVER with invalid options ─────────────────────────────────────
 
 

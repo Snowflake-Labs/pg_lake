@@ -188,11 +188,12 @@ ValidateCatalogOptionValue(const IcebergCatalogOptionDesc * desc, DefElem *def)
 
 				if (pg_strcasecmp(authType, "default") != 0 &&
 					pg_strcasecmp(authType, "oauth2") != 0 &&
-					pg_strcasecmp(authType, "horizon") != 0)
+					pg_strcasecmp(authType, "horizon") != 0 &&
+					pg_strcasecmp(authType, "none") != 0)
 					ereport(ERROR,
 							(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 							 errmsg("invalid rest_auth_type option: \"%s\"", authType),
-							 errhint("Valid values are \"default\", \"oauth2\", and \"horizon\".")));
+							 errhint("Valid values are \"default\", \"oauth2\", \"horizon\", and \"none\".")));
 				return;
 			}
 		case CATALOG_OPT_BOOL:
@@ -241,11 +242,16 @@ ApplyCatalogOptionValue(RestCatalogOptions * opts,
 		case CATALOG_OPT_AUTH_TYPE:
 			{
 				char	   *authType = defGetString(def);
+				int			resolvedAuthType;
 
-				*(int *) ((char *) opts + desc->offset) =
-					(pg_strcasecmp(authType, "horizon") == 0)
-					? REST_CATALOG_AUTH_TYPE_HORIZON
-					: REST_CATALOG_AUTH_TYPE_OAUTH2;
+				if (pg_strcasecmp(authType, "horizon") == 0)
+					resolvedAuthType = REST_CATALOG_AUTH_TYPE_HORIZON;
+				else if (pg_strcasecmp(authType, "none") == 0)
+					resolvedAuthType = REST_CATALOG_AUTH_TYPE_NONE;
+				else
+					resolvedAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
+
+				*(int *) ((char *) opts + desc->offset) = resolvedAuthType;
 				break;
 			}
 		case CATALOG_OPT_LOCATION_PREFIX:

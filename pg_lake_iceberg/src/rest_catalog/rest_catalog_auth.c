@@ -493,25 +493,38 @@ EncodeBasicAuth(const char *clientId, const char *clientSecret)
 
 
 /*
-* Creates the headers for a POST request with authentication.
+* Creates the headers for a POST request with authentication.  The
+* Authorization header is added by prepending, rather than duplicating the
+* Accept/Content-Type construction per branch; it is omitted entirely when
+* the catalog's auth type is NONE, since there is no credential to send.
 */
 List *
 PostHeadersWithAuth(RestCatalogOptions * opts)
 {
+	List	   *headers = list_make2(pstrdup("Accept: application/json"),
+									 pstrdup("Content-Type: application/json"));
+
+	if (opts->authType == REST_CATALOG_AUTH_TYPE_NONE)
+		return headers;
+
 	bool		forceRefreshToken = false;
 
-	return list_make3(psprintf("Authorization: %s", GetRestCatalogAuthorization(opts, forceRefreshToken)),
-					  pstrdup("Accept: application/json"),
-					  pstrdup("Content-Type: application/json"));
+	return lcons(psprintf("Authorization: %s", GetRestCatalogAuthorization(opts, forceRefreshToken)),
+				 headers);
 }
 
 
 /*
-* Creates the headers for a DELETE request with authentication.
+* Creates the headers for a DELETE request with authentication.  When the
+* catalog's auth type is NONE, no Authorization header is added -- there is
+* no credential to send.
 */
 List *
 DeleteHeadersWithAuth(RestCatalogOptions * opts)
 {
+	if (opts->authType == REST_CATALOG_AUTH_TYPE_NONE)
+		return NIL;
+
 	bool		forceRefreshToken = false;
 
 	return list_make1(psprintf("Authorization: %s", GetRestCatalogAuthorization(opts, forceRefreshToken)));
@@ -519,13 +532,21 @@ DeleteHeadersWithAuth(RestCatalogOptions * opts)
 
 
 /*
-* Creates the headers for a GET request with authentication.
+* Creates the headers for a GET request with authentication.  The
+* Authorization header is added by prepending, rather than duplicating the
+* Accept construction per branch; it is omitted entirely when the catalog's
+* auth type is NONE, since there is no credential to send.
 */
 List *
 GetHeadersWithAuth(RestCatalogOptions * opts)
 {
+	List	   *headers = list_make1(pstrdup("Accept: application/json"));
+
+	if (opts->authType == REST_CATALOG_AUTH_TYPE_NONE)
+		return headers;
+
 	bool		forceRefreshToken = false;
 
-	return list_make2(psprintf("Authorization: %s", GetRestCatalogAuthorization(opts, forceRefreshToken)),
-					  pstrdup("Accept: application/json"));
+	return lcons(psprintf("Authorization: %s", GetRestCatalogAuthorization(opts, forceRefreshToken)),
+				 headers);
 }

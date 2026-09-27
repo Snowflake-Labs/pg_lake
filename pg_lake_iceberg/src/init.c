@@ -71,6 +71,7 @@ static const struct config_enum_entry RestCatalogAuthTypeOptions[] = {
 	{"oauth2", REST_CATALOG_AUTH_TYPE_OAUTH2, false},
 	{"default", REST_CATALOG_AUTH_TYPE_OAUTH2, false},
 	{"horizon", REST_CATALOG_AUTH_TYPE_HORIZON, false},
+	{"none", REST_CATALOG_AUTH_TYPE_NONE, false},
 	{NULL, 0, false},
 };
 
