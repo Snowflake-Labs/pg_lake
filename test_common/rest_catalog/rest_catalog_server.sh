@@ -79,9 +79,18 @@ if [[ "$PURGE" == "true" ]]; then
   psql -tAX -c "drop schema polaris_schema cascade" || true
 fi
 
-BOOTSTRAPPED=$(psql -tAX -c "select count(*) > 0 from pg_namespace where nspname = 'polaris_schema'")
+# The metadata schema alone no longer means the realm is bootstrapped: we create
+# the schema ourselves below, so use the schema-version table the bootstrap
+# writes into it as the marker instead.
+BOOTSTRAPPED=$(psql -tAX -c "select count(*) > 0 from pg_tables where schemaname = 'polaris_schema' and tablename = 'version'")
 
 if [[ "$BOOTSTRAPPED" != "t" ]]; then
+  # The relational-jdbc backend does not issue CREATE SCHEMA, so the schema its
+  # connections resolve to (the currentSchema JDBC property, POLARIS_SCHEMA by
+  # default) has to exist before the admin tool can bootstrap into it.
+  echo "Creating metadata schema."
+  psql -tAX -c "create schema if not exists polaris_schema"
+
   echo "Bootstrapping metadata database."
   java -jar "$POLARIS_ADMIN_JAR" bootstrap --realm=$REALM_NAME --credential=$REALM_NAME,$CLIENT_ID,$CLIENT_SECRET
 fi
