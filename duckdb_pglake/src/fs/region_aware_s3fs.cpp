@@ -628,7 +628,22 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 	if (!response->headers.HasHeader("x-amz-bucket-region"))
 		return string();
 
-	return response->headers.GetHeaderValue("x-amz-bucket-region");
+	string region = response->headers.GetHeaderValue("x-amz-bucket-region");
+
+	/*
+	 * The endpoint that answered is whichever one the secret or setting covering
+	 * this URL names, and the region it reports is cached per bucket and reused
+	 * for later requests. Only accept a plain region name, and treat anything
+	 * else like a response with no region header at all, so nothing is cached.
+	 */
+	if (!PgLakeIsValidS3Region(region))
+	{
+		PGDUCK_SERVER_WARN("ignoring invalid x-amz-bucket-region \"%s\" returned for %s",
+						   region.c_str(), url.c_str());
+		return string();
+	}
+
+	return region;
 }
 
 
