@@ -55,14 +55,39 @@ pg_lake_finish_postgres_recovery(PG_FUNCTION_ARGS)
 
 		StringInfo	command = makeStringInfo();
 
+		/*
+		 * Only call the recovery procedure when it is a genuine member of the
+		 * pg_lake_table extension in the target database: the join to
+		 * pg_depend/pg_extension requires an extension-member dependency
+		 * (deptype 'e'), which only the extension install creates. Matching
+		 * on the schema and procedure name alone is not enough, because this
+		 * command runs in every connectable database, including the ones
+		 * where the extension was never installed.
+		 *
+		 * Keep every catalog reference, cast and operator
+		 * pg_catalog-qualified. The command is parsed and executed in the
+		 * target database, whose search_path and non-pg_catalog objects are
+		 * outside our control.
+		 */
 		appendStringInfo(command,
 						 "DO $$ BEGIN "
-						 "IF EXISTS (select 1 from pg_catalog.pg_proc where pronamespace::regnamespace::text operator(pg_catalog.=) %s AND proname operator(pg_catalog.=) %s) THEN "
+						 "IF EXISTS ("
+						 "select 1 from pg_catalog.pg_proc p "
+						 "join pg_catalog.pg_depend d on "
+						 "d.classid operator(pg_catalog.=) 'pg_catalog.pg_proc'::pg_catalog.regclass "
+						 "and d.objid operator(pg_catalog.=) p.oid "
+						 "and d.refclassid operator(pg_catalog.=) 'pg_catalog.pg_extension'::pg_catalog.regclass "
+						 "and d.deptype operator(pg_catalog.=) 'e' "
+						 "join pg_catalog.pg_extension e on e.oid operator(pg_catalog.=) d.refobjid "
+						 "where p.pronamespace::pg_catalog.regnamespace::pg_catalog.text operator(pg_catalog.=) %s "
+						 "and p.proname operator(pg_catalog.=) %s "
+						 "and e.extname operator(pg_catalog.=) %s) THEN "
 						 "CALL lake_table.finish_postgres_recovery_in_db();"
 						 "END IF; "
 						 "END $$;",
 						 quote_literal_cstr(PG_LAKE_TABLE_SCHEMA),
-						 quote_literal_cstr("finish_postgres_recovery_in_db"));
+						 quote_literal_cstr("finish_postgres_recovery_in_db"),
+						 quote_literal_cstr(PG_LAKE_TABLE));
 		RunAttachedCommand(command->data, databaseName);
 	}
 
