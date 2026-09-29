@@ -1701,25 +1701,27 @@ _ADLS_HOST = "acct.dfs.core.windows.net"
 
 # An ADLS credential names the storage account in the key itself, so
 # these cannot be looked up by a fixed key the way the S3 ones are.
+_ADLS_CASE = (
+    "Azure Data Lake Storage",
+    f"abfss://container@{_ADLS_HOST}/ns/tbl",
+    {
+        f"adls.sas-token.{_ADLS_HOST}": "sv=2021-08-06&sig=not-a-signature",
+        f"adls.sas-token-expires-at-ms.{_ADLS_HOST}": "9999999999000",
+    },
+)
+
+_GCS_CASE = (
+    "Google Cloud Storage",
+    "gs://gcs-bucket/ns/tbl",
+    {
+        "gcs.oauth2.token": "not-a-token",
+        "gcs.oauth2.token-expires-at": "9999999999000",
+    },
+)
+
 _UNSUPPORTED_PROVIDERS = [
-    pytest.param(
-        "Azure Data Lake Storage",
-        f"abfss://container@{_ADLS_HOST}/ns/tbl",
-        {
-            f"adls.sas-token.{_ADLS_HOST}": "sv=2021-08-06&sig=not-a-signature",
-            f"adls.sas-token-expires-at-ms.{_ADLS_HOST}": "9999999999000",
-        },
-        id="adls",
-    ),
-    pytest.param(
-        "Google Cloud Storage",
-        "gs://gcs-bucket/ns/tbl",
-        {
-            "gcs.oauth2.token": "not-a-token",
-            "gcs.oauth2.token-expires-at": "9999999999000",
-        },
-        id="gcs",
-    ),
+    pytest.param(*_ADLS_CASE, id="adls"),
+    pytest.param(*_GCS_CASE, id="gcs"),
 ]
 
 
@@ -1846,7 +1848,7 @@ def test_vended_credentials_unsupported_provider_reported_alongside_s3(
     if installcheck:
         return
 
-    provider, location, vended_config = _UNSUPPORTED_PROVIDERS[0].values
+    provider, location, vended_config = _ADLS_CASE
     httpd, thread = _serve_provider_case(
         "storage-credentials",
         location,
@@ -1868,6 +1870,45 @@ def test_vended_credentials_unsupported_provider_reported_alongside_s3(
         assert any(
             "ignoring vended credentials" in n and provider in n
             for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread)
+
+
+@pytest.mark.parametrize("shape", ["storage-credentials", "config"])
+def test_vended_credentials_provider_settings_are_not_a_credential(
+    superuser_conn, iceberg_extension, installcheck, shape
+):
+    """
+    Provider settings that are not credentials must not be reported.
+
+    A table's config map states things like "gcs.project-id" and
+    "adls.account-host" whether or not anything was vended, so matching
+    a bare "gcs."/"adls." prefix would announce a substitution the
+    catalog never made.  Only a key carrying a credential counts.
+    """
+    if installcheck:
+        return
+
+    httpd, thread = _serve_provider_case(
+        shape,
+        "gs://gcs-bucket/ns/tbl",
+        {
+            "gcs.project-id": "some-project",
+            "gcs.service.host": "storage.googleapis.com",
+            "adls.account-host": _ADLS_HOST,
+            "adls.account-name": "acct",
+        },
+    )
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        assert summary is None, f"expected no credential, got {summary!r}"
+        assert not any(
+            "ignoring vended credentials" in n for n in superuser_conn.notices
         ), "\n".join(superuser_conn.notices)
 
     finally:
