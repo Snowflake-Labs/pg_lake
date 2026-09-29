@@ -283,8 +283,21 @@ def test_autovac_compacts_when_option_default(
         run_command("CREATE EXTENSION pg_lake CASCADE", conn)
 
         location = f"s3://{TEST_BUCKET}/test_autovac_compact_on/"
+        # The fixture leaves a worker waking once a second and compacting
+        # anything with at least one data file, so the five inserts below race
+        # it: a pass landing in the middle of them takes the starting state
+        # away before we can read it.  Write the files with compaction turned
+        # off for this table, then drop the option again -- the table is back
+        # to the option-absent state this test is about, and the wait below is
+        # the first chance the worker has had to compact it.
         run_command(
-            f"CREATE TABLE t (id int) USING iceberg WITH (location = '{location}');",
+            f"""
+            CREATE TABLE t (id int) USING iceberg
+                WITH (
+                    location = '{location}',
+                    autovacuum_compact_data_files = false
+                );
+            """,
             conn,
         )
 
@@ -292,6 +305,11 @@ def test_autovac_compacts_when_option_default(
             run_command(f"INSERT INTO t VALUES ({i})", conn)
 
         assert _data_file_count(conn, "t") == 5
+
+        run_command(
+            "ALTER FOREIGN TABLE t OPTIONS (DROP autovacuum_compact_data_files)",
+            conn,
+        )
 
         _wait_until(lambda: _data_file_count(conn, "t") == 1, timeout=10)
 
