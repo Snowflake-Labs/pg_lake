@@ -33,6 +33,18 @@ extern const string MANAGED_STORAGE_KEY_ID_SETTING;
 
 
 /*
+ * PgLakeIsValidS3Region returns whether region is a syntactically valid AWS
+ * region name: a non-empty token of lowercase letters, digits, and single
+ * hyphens (e.g. "us-east-1").
+ *
+ * A region is interpolated into an S3 endpoint host as
+ * "s3.<region>.amazonaws.com", so it has to be a single host label. Check it
+ * before caching a region or formatting one into a URL.
+ */
+bool PgLakeIsValidS3Region(const string &region);
+
+
+/*
  * PgLakeS3FileSystem extends S3FileSystem to override certain functions
  * with the goal of injecting customer headers.
  */

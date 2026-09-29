@@ -1,5 +1,8 @@
 import os
 import pytest
+import re
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from moto.server import ThreadedMotoServer
 import boto3
 from utils_pytest import *
@@ -505,6 +508,143 @@ def test_pg_lake_remove_file_already_gone(s3, pgduck_conn):
     )
 
     pgduck_conn.rollback()
+
+
+def test_poisoned_bucket_region_header_is_rejected(pgduck_conn):
+    """Region discovery must only accept a plain AWS region name from the
+    x-amz-bucket-region response header, and cache nothing otherwise.
+
+    The endpoint is configured through a scoped secret rather than an
+    ?s3_endpoint= query argument, because the probe builds its URL from the
+    ParsedS3Url host that S3UrlParse derives from the endpoint before
+    ReadQueryParams applies the query string. A URL-level override would never
+    reach the probe at all. The assertion that the local server was contacted is
+    what keeps this test from passing without exercising the header path.
+    """
+    poison = "attacker.example/evil"
+    bucket = "region-poison-victim"
+    hits = []
+
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def _respond(self):
+            # Mimic S3: the bucket-region header is returned even for an
+            # unauthenticated HEAD, which is exactly the response the region
+            # discovery reads.
+            hits.append((self.command, self.path))
+            self.send_response(200)
+            self.send_header("x-amz-bucket-region", poison)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_HEAD(self):
+            self._respond()
+
+        def do_GET(self):
+            self._respond()
+
+        def log_message(self, *args):
+            pass
+
+    # Bind port 0 and read back the assigned port, so nothing else can claim
+    # it between choosing and listening.
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    url = f"s3://{bucket}/object"
+
+    try:
+        # Point region discovery at our endpoint over plain HTTP with
+        # path-style addressing, so the host stays 127.0.0.1 and the HEAD
+        # lands on "/".
+        run_command(
+            f"""
+            CREATE OR REPLACE SECRET region_poison_endpoint (
+                TYPE S3,
+                KEY_ID 'AKIAIOSFODNN7EXAMPLE',
+                SECRET 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+                SCOPE 's3://{bucket}',
+                ENDPOINT '127.0.0.1:{port}',
+                USE_SSL false,
+                URL_STYLE 'path'
+            );
+            """,
+            pgduck_conn,
+        )
+        pgduck_conn.commit()
+
+        # Ensure we exercise GetBucketRegionFromS3 rather than a cached entry
+        # left by an earlier test on this module-scoped connection.
+        run_command(f"SELECT pg_lake_clear_region_cache('{url}')", pgduck_conn)
+
+        region = run_query(
+            f"SELECT pg_lake_get_bucket_region('{url}') AS region",
+            pgduck_conn,
+        )[0]["region"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=10)
+        run_command(
+            "DROP SECRET IF EXISTS region_poison_endpoint",
+            pgduck_conn,
+            raise_error=False,
+        )
+        pgduck_conn.commit()
+
+    # The probe has to have reached us, or the header under test was never
+    # served in the first place.
+    assert hits, (
+        "region discovery never contacted the local endpoint, so this test did "
+        "not exercise the x-amz-bucket-region path at all"
+    )
+
+    # The value must not be returned, and must not be cached.
+    assert region != poison, f"invalid x-amz-bucket-region {region!r} was accepted"
+
+    # Only a plain region name, or an empty result meaning "no usable region",
+    # is acceptable here.
+    assert region == "" or re.fullmatch(
+        r"[a-z0-9]+(-[a-z0-9]+)*", region
+    ), f"region discovery returned a value that is not a region: {region!r}"
+
+
+def test_direct_s3_region_override_is_rejected(pgduck_conn):
+    """A region set directly in the URL as ?s3_region= must be refused too.
+
+    That value skips region discovery, since RegionAwareS3FileSystem passes an
+    explicit-region URL straight to the underlying S3 file system, so
+    RewriteAmazonEndpointForRegion is what has to check it. No s3_endpoint
+    override is given here, which keeps the endpoint on *.amazonaws.com so the
+    region rewrite is the path exercised.
+    """
+    poison = "attacker.example/evil"
+
+    # glob() reaches PgLakeS3FileSystem::List, one of the two sites that rewrite
+    # an .amazonaws.com endpoint to s3.<region>.amazonaws.com.
+    url = f"s3://region-poison-victim/**?s3_region={poison}"
+
+    error = run_command(
+        f"SELECT count(*) FROM glob('{url}')",
+        pgduck_conn,
+        raise_error=False,
+    )
+    pgduck_conn.rollback()
+
+    # The region has to be refused with a validation error, before any request
+    # is built from it. Without the check the statement still fails, but with a
+    # connection error naming the host the region was formatted into, which is
+    # what the second assertion looks for.
+    assert error is not None and "invalid S3 region" in error, (
+        "an ?s3_region= value that is not a region was not rejected before "
+        f"endpoint construction; got: {error!r}"
+    )
+    assert (
+        error is None or "s3.attacker.example" not in error
+    ), f"the region was formatted into the endpoint host: {error!r}"
 
 
 def test_pg_lake_remove_file_azure(azure, pgduck_conn):

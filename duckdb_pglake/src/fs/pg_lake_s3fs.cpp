@@ -94,6 +94,58 @@ PgLakeS3FileSystem::LookupContext(HTTPInput *input)
 }
 
 /*
+ * PgLakeIsValidS3Region returns whether region is a syntactically valid AWS
+ * region name: a non-empty run of lowercase letters and digits, separated by
+ * single hyphens (e.g. "us-east-1", "eu-west-3", "us-gov-east-1").
+ *
+ * A region is interpolated into the S3 endpoint host as
+ * "s3.<region>.amazonaws.com", so it has to be a single host label. Anything
+ * carrying a delimiter such as '/', '.', ':' or '@' is rejected, as is a value
+ * too long to be a region name.
+ */
+bool
+PgLakeIsValidS3Region(const string &region)
+{
+	/* one or more alnum segments joined by single hyphens; no other chars */
+	static const std::regex regionPattern("^[a-z0-9]+(-[a-z0-9]+)*$");
+
+	/* keep it bounded; a real region is short, this only guards pathological input */
+	if (region.empty() || region.size() > 64)
+		return false;
+
+	return std::regex_match(region, regionPattern);
+}
+
+
+/*
+ * RewriteAmazonEndpointForRegion adapts an ".amazonaws.com" endpoint to the
+ * resolved region, i.e. turns it into "s3.<region>.amazonaws.com".
+ *
+ * This works around an incomplete change made in
+ * https://github.com/duckdb/duckdb-httpfs/pull/83/files: the endpoint is not
+ * adapted to the s3_region query parameter, which we rely on for region
+ * injection.
+ *
+ * A non-empty region that is not a valid region name is refused rather than
+ * formatted into the host.
+ */
+static void
+RewriteAmazonEndpointForRegion(S3AuthParams &auth_params)
+{
+	if (!StringUtil::EndsWith(auth_params.endpoint, ".amazonaws.com"))
+		return;
+
+	if (!auth_params.region.empty() && !PgLakeIsValidS3Region(auth_params.region))
+		throw InvalidInputException(
+			"invalid S3 region \"%s\": a region name may only contain "
+			"lowercase letters, digits, and hyphens",
+			auth_params.region);
+
+	auth_params.endpoint = StringUtil::Format("s3.%s.amazonaws.com", auth_params.region);
+}
+
+
+/*
  * CreateHandle is copy-pasted from s3fs.cpp, but using PgLakeS3FileHandle which includes
  * a pointer to the ClientContext.
  */
@@ -112,9 +164,8 @@ unique_ptr<HTTPFileHandle> PgLakeS3FileSystem::CreateHandle(const OpenFileInfo &
 
 	// Work around incomplete change made in https://github.com/duckdb/duckdb-httpfs/pull/83/files
 	// The endpoint is not adapted to the s3_region query parameter, which we rely on for
-	// region injection.
-	if (StringUtil::EndsWith(auth_params.endpoint, ".amazonaws.com"))
-		auth_params.endpoint = StringUtil::Format("s3.%s.amazonaws.com", auth_params.region);
+	// region injection. The region is validated before it is formatted into the host.
+	RewriteAmazonEndpointForRegion(auth_params);
 
 	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
 	auto params = http_util.InitializeParameters(opener, info);
@@ -1130,9 +1181,8 @@ PgLakeS3FileSystem::List(const string &glob_pattern, bool is_glob, FileOpener *o
 
 	// Work around incomplete change made in https://github.com/duckdb/duckdb-httpfs/pull/83/files
 	// The endpoint is not adapted to the s3_region query parameter, which we rely on for
-	// region injection.
-	if (StringUtil::EndsWith(s3_auth_params.endpoint, ".amazonaws.com"))
-		s3_auth_params.endpoint = StringUtil::Format("s3.%s.amazonaws.com", s3_auth_params.region);
+	// region injection. The region is validated before it is formatted into the host.
+	RewriteAmazonEndpointForRegion(s3_auth_params);
 
 	// Do main listobjectsv2 request
 	vector<OpenFileInfo> s3_file_descs;
