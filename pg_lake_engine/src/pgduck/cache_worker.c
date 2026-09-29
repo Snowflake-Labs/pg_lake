@@ -238,23 +238,33 @@ ManageCache(void)
 		if (columnCount < 3)
 			ereport(ERROR, (errmsg("unexpected column count %d", columnCount)));
 
+		int			filesAdded = 0;
+		int			filesRemoved = 0;
+		int64		bytesAdded = 0;
+		int64		bytesRemoved = 0;
+
 		for (int rowIndex = 0; rowIndex < rowCount; rowIndex++)
 		{
 			char	   *url = PQgetvalue(result, rowIndex, 0);
 			char	   *fileSizeStr = PQgetvalue(result, rowIndex, 1);
 			char	   *action = PQgetvalue(result, rowIndex, 2);
+			int64		fileSize = strtoll(fileSizeStr, NULL, 10);
 
 			if (strcmp(action, "added") == 0)
 			{
-				ereport(LOG, (errmsg(BACKGROUND_WORKER_NAME ": "
-									 "added %s (%s bytes) to cache",
-									 url, fileSizeStr)));
+				ereport(DEBUG1, (errmsg(BACKGROUND_WORKER_NAME ": "
+										"added %s (%s bytes) to cache",
+										url, fileSizeStr)));
+				filesAdded++;
+				bytesAdded += fileSize;
 			}
 			else if (strcmp(action, "removed") == 0)
 			{
-				ereport(LOG, (errmsg(BACKGROUND_WORKER_NAME ": "
-									 "removed %s (%s bytes) from cache",
-									 url, fileSizeStr)));
+				ereport(DEBUG1, (errmsg(BACKGROUND_WORKER_NAME ": "
+										"removed %s (%s bytes) from cache",
+										url, fileSizeStr)));
+				filesRemoved++;
+				bytesRemoved += fileSize;
 			}
 			else
 			{
@@ -263,6 +273,15 @@ ManageCache(void)
 				 * excessive noise if a large file is read frequently
 				 */
 			}
+		}
+
+		if (filesAdded > 0 || filesRemoved > 0)
+		{
+			ereport(LOG, (errmsg(BACKGROUND_WORKER_NAME ": "
+								 "added %d file(s) (" INT64_FORMAT " bytes), "
+								 "removed %d file(s) (" INT64_FORMAT " bytes)",
+								 filesAdded, bytesAdded,
+								 filesRemoved, bytesRemoved)));
 		}
 
 		manageCacheResult = MANAGE_CACHE_SUCCESS;
