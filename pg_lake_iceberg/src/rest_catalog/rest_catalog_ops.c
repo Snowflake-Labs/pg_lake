@@ -1000,34 +1000,48 @@ ResolveVendedScope(const char *scopePrefix, char *tableRoot)
 
 
 /*
- * The storage providers an Iceberg catalog can vend credentials for
- * that pg_lake has no support for, and the name to report each by.
+ * The vended credential keys pg_lake has no support for, and the
+ * provider to report each by.
+ *
+ * Only keys that carry a credential belong here.  A table's config map
+ * states provider settings that are not credentials at all --
+ * "gcs.project-id", "adls.account-host" -- and matching those would
+ * announce a substitution the catalog never made.
+ *
+ * Matching is by prefix because ADLS names the storage account in the
+ * key itself, as in "adls.sas-token.<account>.dfs.core.windows.net".
  */
 static const struct
 {
 	const char *keyPrefix;
 	const char *providerName;
-}			UnsupportedVendedProviders[] = {
-	{"adls.", "Azure Data Lake Storage"},
-	{"gcs.", "Google Cloud Storage"},
+}			UnsupportedVendedCredentialKeys[] = {
+	{"adls.sas-token", "Azure Data Lake Storage"},
+	{"adls.connection-string", "Azure Data Lake Storage"},
+	{"adls.account-key", "Azure Data Lake Storage"},
+	{"adls.client-secret", "Azure Data Lake Storage"},
+	{"adls.credential", "Azure Data Lake Storage"},
+	{"adls.token", "Azure Data Lake Storage"},
+	{"gcs.oauth2.token", "Google Cloud Storage"},
 };
 
 
 /*
- * UnsupportedVendedProvider names the provider a config map vends for
- * when it is one pg_lake cannot use, and returns NULL when the map
- * describes no provider it recognizes.  Only meaningful once the S3
+ * UnsupportedVendedProvider names the provider a config map vends a
+ * credential for when it is one pg_lake cannot use, and returns NULL
+ * when the map carries no such credential.  Only meaningful once the S3
  * keys are known to be absent.  See GetVendedConfigString for the
  * mapKey convention.
  */
 static const char *
 UnsupportedVendedProvider(Jsonb *body, const char *mapKey)
 {
-	for (int i = 0; i < lengthof(UnsupportedVendedProviders); i++)
+	for (int i = 0; i < lengthof(UnsupportedVendedCredentialKeys); i++)
 	{
-		if (JsonbObjectHasKeyPrefix(body, mapKey,
-									UnsupportedVendedProviders[i].keyPrefix))
-			return UnsupportedVendedProviders[i].providerName;
+		const char *keyPrefix = UnsupportedVendedCredentialKeys[i].keyPrefix;
+
+		if (JsonbObjectHasKeyPrefix(body, mapKey, keyPrefix))
+			return UnsupportedVendedCredentialKeys[i].providerName;
 	}
 
 	return NULL;
