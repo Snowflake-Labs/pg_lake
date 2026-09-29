@@ -571,6 +571,7 @@ InitPgLakeIcebergOptions(void)
 		{"partition_by", ForeignTableRelationId},
 		{"catalog", ForeignTableRelationId},
 		{"read_only", ForeignTableRelationId},
+		{"cache_data_on_write", ForeignTableRelationId},
 
 		{"catalog_name", ForeignTableRelationId},
 		{"catalog_table_name", ForeignTableRelationId},
@@ -825,6 +826,11 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			catalogName = defGetString(def);
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "row_ids") == 0)
+		{
+			/* only accept boolean */
+			(void) defGetBoolean(def);
+		}
+		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "cache_data_on_write") == 0)
 		{
 			/* only accept boolean */
 			(void) defGetBoolean(def);

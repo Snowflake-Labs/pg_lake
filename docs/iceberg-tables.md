@@ -72,6 +72,7 @@ Iceberg tables support the following options when creating the table:
 | location             | URL prefix for the Iceberg table (e.g. `s3://mybucket/measurements`) |
 | max_snapshot_age     | Maximum age (in seconds) of snapshots to retain. When set to `0`, old snapshots are automatically expired during writes. Overrides the `pg_lake_iceberg.max_snapshot_age` GUC for this table. |
 | out_of_range_values  | How to handle values that fall outside the Iceberg-representable range. Valid values: `error` (default), `clamp`. See [Out-of-range value handling](#out-of-range-value-handling). |
+| cache_data_on_write  | Whether newly written data files are kept in the local pgduck cache (`true`, default). Set to `false` for tables whose data files are written here but read elsewhere, so they don't evict hotter cache entries. Metadata files are cached regardless, since they are read back to build the next snapshot. |
 
 Additionally, when creating the Iceberg table from a file, the following options are supported along with the format-specific options listed in the [data lake formats](../docs/file-formats-reference) section:
 
