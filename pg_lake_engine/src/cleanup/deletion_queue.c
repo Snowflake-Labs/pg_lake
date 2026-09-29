@@ -171,6 +171,8 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 	 * vacuum cycle, and therefore catalog publication, waiting behind it.
 	 */
 	List	   *deletionBatch = NIL;
+	int			prefixesDeleted = 0;
+	int			metadataResolved = 0;
 
 	foreach(cleanupRecordCell, deletionQueueRecords)
 	{
@@ -178,12 +180,15 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 
 		if (entry->resolveMetadata)
 		{
-			ereport(isVerbose ? INFO : LOG,
+			ereport(isVerbose ? INFO : DEBUG1,
 					(errmsg("resolving referenced files of dropped table metadata %s",
 							entry->path)));
 
 			if (ExpandMetadataResolveRecord(entry->path))
+			{
 				producedNewDeletionRows = true;
+				metadataResolved++;
+			}
 			else
 			{
 				/*
@@ -212,11 +217,12 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 			}
 
 			deletedFilePathList = lappend(deletedFilePathList, entry->path);
+			prefixesDeleted++;
 
 			continue;
 		}
 
-		ereport(isVerbose ? INFO : LOG,
+		ereport(isVerbose ? INFO : DEBUG1,
 				(errmsg("deleting expired file %s", entry->path)));
 
 		deletionBatch = lappend(deletionBatch, entry->path);
@@ -262,6 +268,22 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 		*filesRemoved = list_length(deletedFilePathList);
 	}
 
+	/* log a summary of what we did at LOG level */
+	{
+		int			totalDeleted = list_length(deletedFilePathList);
+		int			totalFailed = list_length(failedFilePathList);
+		int			filesDeleted = totalDeleted - prefixesDeleted;
+
+		if (totalDeleted > 0 || totalFailed > 0 || metadataResolved > 0)
+		{
+			ereport(LOG,
+					(errmsg("deletion queue: removed %d file(s) and %d prefix(es), "
+							"resolved %d metadata record(s), %d failure(s)",
+							filesDeleted, prefixesDeleted,
+							metadataResolved, totalFailed)));
+		}
+	}
+
 	/*
 	 * Keep draining if we deleted something, or if we produced new per-file
 	 * rows that the next pass still has to delete -- but not if a removal
@@ -285,7 +307,7 @@ RemoveDeletionQueueRecords(List *deletionQueueRecords, bool isVerbose, int *file
 static bool
 DeleteQueuedPrefix(char *path, bool isVerbose)
 {
-	ereport(isVerbose ? INFO : LOG,
+	ereport(isVerbose ? INFO : DEBUG1,
 			(errmsg("deleting expired prefix %s", path)));
 
 	return DeleteRemotePrefix(path);
