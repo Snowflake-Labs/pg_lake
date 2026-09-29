@@ -1057,6 +1057,41 @@ ResolveVendedScope(const char *scopePrefix, char *tableRoot)
 
 
 /*
+ * The storage providers an Iceberg catalog can vend credentials for
+ * that pg_lake has no support for, and the name to report each by.
+ */
+static const struct
+{
+	const char *keyPrefix;
+	const char *providerName;
+}			UnsupportedVendedProviders[] = {
+	{"adls.", "Azure Data Lake Storage"},
+	{"gcs.", "Google Cloud Storage"},
+};
+
+
+/*
+ * UnsupportedVendedProvider names the provider a config map vends for
+ * when it is one pg_lake cannot use, and returns NULL when the map
+ * describes no provider it recognizes.  Only meaningful once the S3
+ * keys are known to be absent.  See GetVendedConfigString for the
+ * mapKey convention.
+ */
+static const char *
+UnsupportedVendedProvider(Jsonb *body, const char *mapKey)
+{
+	for (int i = 0; i < lengthof(UnsupportedVendedProviders); i++)
+	{
+		if (JsonbObjectHasKeyPrefix(body, mapKey,
+									UnsupportedVendedProviders[i].keyPrefix))
+			return UnsupportedVendedProviders[i].providerName;
+	}
+
+	return NULL;
+}
+
+
+/*
  * ExtractVendedCredentials parses S3 vended credentials from a REST
  * catalog loadTable response body, returning one VendedCredentials per
  * scope the catalog vended for.
@@ -1072,6 +1107,13 @@ ResolveVendedScope(const char *scopePrefix, char *tableRoot)
  * are skipped: DuckDB selects one secret per path, so a second one at
  * the same scope could only shadow the first.
  *
+ * A credential for any other provider is reported with a WARNING.
+ * Passing over it quietly is the worst outcome available: the table
+ * does not fail here but falls back to whatever secret pgduck_server
+ * was configured with, which is scoped and expires on its own terms
+ * rather than the catalog's, so the table either fails much later at
+ * scan time or reads with access the catalog never granted.
+ *
  * Returns NIL when the response carries no usable credential.
  */
 static List *
@@ -1082,6 +1124,7 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
 
 	char	   *tableRoot = TableRootFromLoadTableResponse(response);
 	List	   *credentials = NIL;
+	const char *unsupportedProvider = NULL;
 	List	   *elements =
 		JsonbGetArrayElementObjects(response, "storage-credentials",
 									"config", "prefix");
@@ -1107,7 +1150,12 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
 			ParseVendedCredsFromConfig(element->object, NULL, opts->serverOid);
 
 		if (creds == NULL)
+		{
+			if (unsupportedProvider == NULL)
+				unsupportedProvider = UnsupportedVendedProvider(element->object,
+																NULL);
 			continue;
+		}
 
 		if (creds->region == NULL)
 			creds->region = tableRegion;
@@ -1133,23 +1181,38 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
 			credentials = lappend(credentials, creds);
 	}
 
-	if (credentials != NIL)
-		return credentials;
-
-	/* Fall back to the legacy top-level "config" map. */
-	VendedCredentials *legacyCreds =
-		ParseVendedCredsFromConfig(response, "config", opts->serverOid);
-
-	if (legacyCreds == NULL)
+	if (credentials == NIL)
 	{
-		elog(DEBUG2, "REST catalog loadTable response did not contain "
-			 "vended S3 credentials");
-		return NIL;
+		/* Fall back to the legacy top-level "config" map. */
+		VendedCredentials *legacyCreds =
+			ParseVendedCredsFromConfig(response, "config", opts->serverOid);
+
+		if (legacyCreds != NULL)
+		{
+			legacyCreds->scope = ResolveVendedScope(NULL, tableRoot);
+			credentials = list_make1(legacyCreds);
+		}
+		else if (unsupportedProvider == NULL)
+			unsupportedProvider = UnsupportedVendedProvider(response, "config");
 	}
 
-	legacyCreds->scope = ResolveVendedScope(NULL, tableRoot);
+	if (unsupportedProvider != NULL)
+		ereport(WARNING,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("ignoring vended credentials for %s",
+						unsupportedProvider),
+				 errdetail("Vended credentials are only supported for S3.  "
+						   "This table falls back to the credentials "
+						   "pgduck_server is already configured with, whose "
+						   "scope and lifetime may differ from the ones the "
+						   "catalog vended."),
+				 errhint("Configure a secret in pgduck_server for this "
+						 "table's storage location.")));
+	else if (credentials == NIL)
+		elog(DEBUG2, "REST catalog loadTable response did not contain "
+			 "vended S3 credentials");
 
-	return list_make1(legacyCreds);
+	return credentials;
 }
 
 

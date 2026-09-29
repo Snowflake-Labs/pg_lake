@@ -471,6 +471,47 @@ JsonbGetObject(Jsonb *jb, const char *key)
 
 
 /*
+ * JsonbObjectHasKeyPrefix reports whether an object holds any key that
+ * begins with keyPrefix.  When mapKey is NULL the object is jb itself;
+ * otherwise it is the object stored under jb->mapKey.
+ *
+ * This answers which storage provider an Iceberg config map describes
+ * in the cases where there is no fixed key to look for: an ADLS
+ * credential names the storage account in the key itself, as in
+ * "adls.sas-token.<account>.dfs.core.windows.net".
+ */
+bool
+JsonbObjectHasKeyPrefix(Jsonb *jb, const char *mapKey, const char *keyPrefix)
+{
+	if (jb == NULL || keyPrefix == NULL || keyPrefix[0] == '\0')
+		return false;
+
+	Jsonb	   *object = mapKey == NULL ? jb : JsonbGetObject(jb, mapKey);
+
+	if (object == NULL || !JsonContainerIsObject(&object->root))
+		return false;
+
+	int			prefixLen = strlen(keyPrefix);
+	JsonbIterator *it = JsonbIteratorInit(&object->root);
+	JsonbValue	value;
+	JsonbIteratorToken token;
+
+	/* skipNested confines this to the object's own keys */
+	while ((token = JsonbIteratorNext(&it, &value, true)) != WJB_DONE)
+	{
+		if (token != WJB_KEY || value.type != jbvString)
+			continue;
+
+		if (value.val.string.len >= prefixLen &&
+			strncmp(value.val.string.val, keyPrefix, prefixLen) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+
+/*
  * JsonbGetArrayElementObjects navigates a top-level object key
  * `arrayKey` that holds a JSON array and returns one JsonbArrayElement
  * per array element, in order.  Each element's `objectKey` nested

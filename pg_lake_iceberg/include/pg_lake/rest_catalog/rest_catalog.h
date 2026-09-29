@@ -376,6 +376,9 @@ typedef struct JsonbArrayElement
 
 Jsonb	   *JsonbGetObject(Jsonb *jb, const char *key);
 
+bool		JsonbObjectHasKeyPrefix(Jsonb *jb, const char *mapKey,
+									const char *keyPrefix);
+
 List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 										const char *objectKey,
 										const char *elementStringKey);
