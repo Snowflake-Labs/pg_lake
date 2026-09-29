@@ -12,6 +12,8 @@ tests verify that:
 3. The credential cache works correctly (no redundant REST calls).
 4. Disabling vended credentials suppresses the header and secret creation.
 5. ALTER/DROP SERVER invalidates the vended credential cache.
+6. Credentials vended for a provider other than S3 are reported rather
+   than passed over in silence.
 """
 
 import json
@@ -1689,3 +1691,208 @@ def test_vended_credentials_scope_below_table_root_preserved(
 
     scope = _scope_for_prefix(superuser_conn, "s3://wh-bucket/ns/tbl/data/")
     assert scope == "s3://wh-bucket/ns/tbl/data/"
+
+
+# ---------------------------------------------------------------------------
+# Providers other than S3
+# ---------------------------------------------------------------------------
+
+_ADLS_HOST = "acct.dfs.core.windows.net"
+
+# An ADLS credential names the storage account in the key itself, so
+# these cannot be looked up by a fixed key the way the S3 ones are.
+_UNSUPPORTED_PROVIDERS = [
+    pytest.param(
+        "Azure Data Lake Storage",
+        f"abfss://container@{_ADLS_HOST}/ns/tbl",
+        {
+            f"adls.sas-token.{_ADLS_HOST}": "sv=2021-08-06&sig=not-a-signature",
+            f"adls.sas-token-expires-at-ms.{_ADLS_HOST}": "9999999999000",
+        },
+        id="adls",
+    ),
+    pytest.param(
+        "Google Cloud Storage",
+        "gs://gcs-bucket/ns/tbl",
+        {
+            "gcs.oauth2.token": "not-a-token",
+            "gcs.oauth2.token-expires-at": "9999999999000",
+        },
+        id="gcs",
+    ),
+]
+
+
+def _serve_provider_case(shape, location, vended_config, s3_credential=None):
+    """
+    Mock catalog for a table at ``location`` vending ``vended_config``,
+    either as a "storage-credentials" element or as the legacy top-level
+    "config" map.  ``s3_credential``, when given, is vended as a second
+    storage-credentials element covering the table's data directory.
+    """
+
+    class _Handler(BaseHTTPRequestHandler):
+        def _handle(self):
+            length = int(self.headers.get("Content-Length", 0))
+            if length > 0:
+                self.rfile.read(length)
+            if _oauth_or_none(self):
+                return
+            if "/tables/" in self.path and self.command == "GET":
+                payload = {
+                    "metadata-location": f"{location}/metadata/v1.metadata.json",
+                    "metadata": {
+                        "format-version": 2,
+                        "table-uuid": str(uuid.uuid4()),
+                        "location": location,
+                    },
+                }
+
+                if shape == "storage-credentials":
+                    payload["storage-credentials"] = [
+                        {"prefix": f"{location}/", "config": vended_config}
+                    ]
+                    if s3_credential is not None:
+                        payload["storage-credentials"].append(
+                            {"prefix": f"{location}/data/", "config": s3_credential}
+                        )
+                else:
+                    payload["config"] = vended_config
+
+                _reply(self, payload)
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        do_GET = _handle
+        do_POST = _handle
+
+        def log_message(self, fmt, *args):
+            pass
+
+    return _serve(_Handler)
+
+
+def _drop_vended_creds_fn(superuser_conn):
+    run_command(
+        "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
+@pytest.mark.parametrize("shape", ["storage-credentials", "config"])
+@pytest.mark.parametrize("provider,location,vended_config", _UNSUPPORTED_PROVIDERS)
+def test_vended_credentials_unsupported_provider_is_reported(
+    superuser_conn,
+    iceberg_extension,
+    installcheck,
+    shape,
+    provider,
+    location,
+    vended_config,
+):
+    """
+    A catalog vending for a provider pg_lake cannot use has to say so.
+
+    Nothing fails at extraction: no credential comes back and the table
+    falls back to whatever secret pgduck_server was already configured
+    with, which is scoped and expires on its own terms rather than the
+    catalog's.  Silence would leave that substitution invisible, so the
+    table would either fail much later at scan time or read with access
+    the catalog never granted.
+
+    Both response shapes are covered, since a catalog using the newer
+    "storage-credentials" array never reaches the legacy config map.
+    """
+    if installcheck:
+        return
+
+    httpd, thread = _serve_provider_case(shape, location, vended_config)
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        assert summary is None, f"expected no usable credential, got {summary!r}"
+
+        warnings = [
+            n
+            for n in superuser_conn.notices
+            if "ignoring vended credentials" in n and provider in n
+        ]
+        reported = "\n".join(superuser_conn.notices)
+        # Exactly one: the two response shapes are tried in sequence, and
+        # reporting the same table twice would be its own kind of noise.
+        assert (
+            len(warnings) == 1
+        ), f"expected one warning naming {provider}:\n{reported}"
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread)
+
+
+def test_vended_credentials_unsupported_provider_reported_alongside_s3(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    Partial coverage is still reported.
+
+    A usable S3 credential for one prefix does not make an unusable
+    credential for another harmless: that part of the table is the part
+    that falls back to a substitute secret, and it is the case most
+    likely to look like it works.
+    """
+    if installcheck:
+        return
+
+    provider, location, vended_config = _UNSUPPORTED_PROVIDERS[0].values
+    httpd, thread = _serve_provider_case(
+        "storage-credentials",
+        location,
+        vended_config,
+        s3_credential={
+            "s3.access-key-id": "MIXED_KEY",
+            "s3.secret-access-key": "MIXED_SECRET",
+        },
+    )
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        # The S3 half is still extracted and scoped to its own prefix.
+        access_key, scope = summary.split("|")[:2]
+        assert access_key == "MIXED_KEY"
+        assert scope == f"{location}/data/"
+
+        assert any(
+            "ignoring vended credentials" in n and provider in n
+            for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread)
+
+
+def test_vended_credentials_s3_is_not_reported_as_unsupported(
+    superuser_conn, iceberg_extension, installcheck, configure_mock_catalog
+):
+    """
+    The warning must not fire for the credentials pg_lake does support,
+    or it would train users to ignore it.
+    """
+    if installcheck:
+        return
+
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "test_ns", "test_table")
+
+        assert summary.startswith("VENDED_ACCESS_KEY_123|")
+        assert not any(
+            "ignoring vended credentials" in n for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
