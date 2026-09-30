@@ -818,13 +818,13 @@ LoadRestCatalogMetadataLocation(RestCatalogOptions * opts, const char *restCatal
 
 
 /*
- * NormalizeS3Prefix returns a copy of prefix guaranteed to end with a
+ * NormalizeScopePrefix returns a copy of prefix guaranteed to end with a
  * trailing slash.  DuckDB selects a secret by longest-matching SCOPE
  * prefix, so without the trailing slash a scope of ".../t" would also
  * match a sibling table ".../t2".
  */
 static char *
-NormalizeS3Prefix(const char *prefix)
+NormalizeScopePrefix(const char *prefix)
 {
 	size_t		len = strlen(prefix);
 
@@ -1014,7 +1014,7 @@ TableRootFromLoadTableResponse(Jsonb *response)
 		JsonbGetOptionalString(response, 2, "metadata", "location");
 
 	if (tableLocation != NULL && tableLocation[0] != '\0')
-		return NormalizeS3Prefix(tableLocation);
+		return NormalizeScopePrefix(tableLocation);
 
 	char	   *metadataFile =
 		JsonbGetOptionalString(response, 1, "metadata-location");
@@ -1046,7 +1046,7 @@ ResolveVendedScope(const char *scopePrefix, char *tableRoot)
 	if (scopePrefix == NULL || scopePrefix[0] == '\0')
 		return tableRoot;
 
-	char	   *normScope = NormalizeS3Prefix(scopePrefix);
+	char	   *normScope = NormalizeScopePrefix(scopePrefix);
 
 	if (tableRoot == NULL ||
 		strncmp(normScope, tableRoot, strlen(tableRoot)) == 0)

@@ -214,12 +214,11 @@ LookupInheritedS3Settings(PGDuckConnection * conn, const char *s3Prefix)
 
 
 /*
- * AppendS3ConnectionSetting adds ", <keyword> '<value>'" to sql,
- * escaping the value for safe interpolation.
+ * AppendSecretSetting adds ", <keyword> '<value>'" to sql, escaping the
+ * value for safe interpolation.
  */
 static void
-AppendS3ConnectionSetting(StringInfo sql, const char *keyword,
-						  const char *value)
+AppendSecretSetting(StringInfo sql, const char *keyword, const char *value)
 {
 	char	   *escaped = EscapeSingleQuotes(value);
 
@@ -229,7 +228,7 @@ AppendS3ConnectionSetting(StringInfo sql, const char *keyword,
 
 
 /*
- * BuildCreateSecretSQL constructs the DuckDB SQL statement for
+ * BuildCreateS3SecretSQL constructs the DuckDB SQL statement for
  * creating or replacing a vended S3 secret.
  *
  * All values are treated as untrusted input and single-quote-escaped to
@@ -243,11 +242,11 @@ AppendS3ConnectionSetting(StringInfo sql, const char *keyword,
  * as unset.
  */
 static char *
-BuildCreateSecretSQL(const char *secretName,
-					 const VendedS3Secret * secret,
-					 const char *endpoint,
-					 const char *urlStyle,
-					 const char *useSsl)
+BuildCreateS3SecretSQL(const char *secretName,
+					   const VendedSecret * secret,
+					   const char *endpoint,
+					   const char *urlStyle,
+					   const char *useSsl)
 {
 	StringInfoData sql;
 
@@ -264,16 +263,16 @@ BuildCreateSecretSQL(const char *secretName,
 					 secretName, escapedKeyId, escapedSecret);
 
 	if (secret->sessionToken != NULL)
-		AppendS3ConnectionSetting(&sql, "SESSION_TOKEN", secret->sessionToken);
+		AppendSecretSetting(&sql, "SESSION_TOKEN", secret->sessionToken);
 
 	if (secret->region != NULL)
-		AppendS3ConnectionSetting(&sql, "REGION", secret->region);
+		AppendSecretSetting(&sql, "REGION", secret->region);
 
 	if (endpoint != NULL)
-		AppendS3ConnectionSetting(&sql, "ENDPOINT", endpoint);
+		AppendSecretSetting(&sql, "ENDPOINT", endpoint);
 
 	if (urlStyle != NULL)
-		AppendS3ConnectionSetting(&sql, "URL_STYLE", urlStyle);
+		AppendSecretSetting(&sql, "URL_STYLE", urlStyle);
 
 	if (useSsl != NULL)
 	{
@@ -290,7 +289,7 @@ BuildCreateSecretSQL(const char *secretName,
 	}
 
 	if (secret->scope != NULL)
-		AppendS3ConnectionSetting(&sql, "SCOPE", secret->scope);
+		AppendSecretSetting(&sql, "SCOPE", secret->scope);
 
 	appendStringInfoChar(&sql, ')');
 
@@ -302,8 +301,8 @@ BuildCreateSecretSQL(const char *secretName,
 
 
 /*
- * PushNamedVendedSecret resolves the S3 connection settings and creates
- * the vended secret under the given name.
+ * PushNamedS3Secret resolves the S3 connection settings and creates the
+ * vended secret under the given name.
  *
  * The catalog is the authority on where its own storage lives, so its
  * values are taken as given.  Each setting is resolved on its own,
@@ -319,9 +318,9 @@ BuildCreateSecretSQL(const char *secretName,
  * left to fill in.
  */
 static void
-PushNamedVendedSecret(PGDuckConnection * conn,
-					  const char *secretName,
-					  const VendedS3Secret * secret)
+PushNamedS3Secret(PGDuckConnection * conn,
+				  const char *secretName,
+				  const VendedSecret * secret)
 {
 	const char *endpoint = secret->endpoint;
 	const char *urlStyle = secret->urlStyle;
@@ -340,8 +339,8 @@ PushNamedVendedSecret(PGDuckConnection * conn,
 			useSsl = inherited.useSsl;
 	}
 
-	char	   *sql = BuildCreateSecretSQL(secretName, secret,
-										   endpoint, urlStyle, useSsl);
+	char	   *sql = BuildCreateS3SecretSQL(secretName, secret,
+											 endpoint, urlStyle, useSsl);
 
 	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, sql);
 
@@ -367,14 +366,14 @@ PushNamedVendedSecret(PGDuckConnection * conn,
  */
 void
 PushVendedSecretToPGDuck(PGDuckConnection * conn,
-						 const VendedS3Secret * secret)
+						 const VendedSecret * secret)
 {
 	char	   *secretName = GenerateVendedSecretName(secret->serverOid,
 													  secret->secretId);
 
 	elog(DEBUG2, "pushing vended secret \"%s\" to pgduck_server", secretName);
 
-	PushNamedVendedSecret(conn, secretName, secret);
+	PushNamedS3Secret(conn, secretName, secret);
 
 	pfree(secretName);
 }
