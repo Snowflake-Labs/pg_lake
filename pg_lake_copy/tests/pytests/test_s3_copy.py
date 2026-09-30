@@ -133,6 +133,7 @@ def test_s3_copy_from_parquet_invalid(pg_conn, s3):
     assert (
         error.startswith("ERROR:  HTTP Error: HTTP GET error")
         or "Unable to connect to URL" in error
+        or "Could not resolve hostname" in error
     )
 
     pg_conn.rollback()
