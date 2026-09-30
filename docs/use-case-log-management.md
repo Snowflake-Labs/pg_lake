@@ -1,4 +1,10 @@
-## Use case: Log management
+---
+title: Log management
+parent: Use cases
+nav_order: 1
+---
+
+# Use case: Log management
 
 A sample `pg_lake` use case is storing logs from a variety of applications in Iceberg and analyzing them using PostgreSQL queries.
 

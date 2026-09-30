@@ -1,3 +1,8 @@
+---
+title: File formats reference
+nav_order: 4
+---
+
 # File formats reference
 
 `pg_lake` supports querying, importing, and exporting in a variety of formats. The following commands can use all supported data lake formats:

@@ -1,3 +1,9 @@
+---
+title: Import and export
+parent: User guide
+nav_order: 3
+---
+
 # Data lake import and export
 
 Once your credentials are set so your cloud storage can be accessed by `pg_lake`, 

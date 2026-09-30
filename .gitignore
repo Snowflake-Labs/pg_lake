@@ -43,3 +43,10 @@ pg_lake_table/logs/
 .volume/
 Dockerfile.alpine
 duckdb_pglake/.cache/
+
+# Local docs site builds
+docs/_site/
+docs/.jekyll-cache/
+docs/.sass-cache/
+docs/Gemfile
+docs/Gemfile.lock

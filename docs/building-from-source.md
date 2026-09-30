@@ -1,6 +1,12 @@
+---
+title: Building from source
+parent: Get started
+nav_order: 1
+---
+
 # Building from source
 
-This guide covers installing pg_lake from source. For Docker-based setup, see [docker/LOCAL_DEV.md](../docker/LOCAL_DEV.md).
+This guide covers installing pg_lake from source. For Docker-based setup, see [docker/LOCAL_DEV.md](https://github.com/Snowflake-Labs/pg_lake/blob/main/docker/LOCAL_DEV.md).
 
 ## Add pg_lake to an Existing PostgreSQL Installation
 

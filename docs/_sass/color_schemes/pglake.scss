@@ -1,0 +1,15 @@
+// Light scheme: the theme's light defaults with a lake-blue accent in place
+// of purple.
+$pglake-blue: #0a6ebd;
+$pglake-blue-dk: #084f8a;
+$pglake-teal: #1597a3;
+
+$body-heading-color: #172b3d;
+$body-text-color: #3b4a58;
+$link-color: $pglake-blue;
+$nav-child-link-color: #3b4a58;
+$sidebar-color: #f4f8fb;
+$code-background-color: #f7f9fc;
+$btn-primary-color: $pglake-blue;
+$border-color: #e1e8ef;
+$feedback-color: darken($sidebar-color, 3%);

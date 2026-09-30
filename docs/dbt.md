@@ -1,3 +1,9 @@
+---
+title: dbt
+parent: User guide
+nav_order: 5
+---
+
 # dbt
 
 `pg_lake` integrates with Data Build Tool (dbt) to update, insert, or transform data. Installing both the `dbt-core` (version 1.9.2+) and the database adapter `dbt-postgres`(version 1.9.0+) are required.
@@ -6,7 +12,7 @@
 
 dbt runs externally over a Postgres connection. Superuser access might be needed depending on the number of changes expected.
 
-```yamldat
+```yaml
 my_dbt_project:
   outputs:
     dev:
@@ -25,13 +31,13 @@ my_dbt_project:
 
 While configuring dbt, you will need to create an environment variable to point dbt at S3, like this:
 
-```sql
+```bash
 export ICEBERG_LOCATION_PREFIX=<S3 location>
 ```
 
-If you’re using the built-in Iceberg appliance for pg_lakee, your S3 bucket location can be accessed from psql with a show command, like this:
+If you’re using the built-in Iceberg appliance for pg_lake, your S3 bucket location can be accessed from psql with a show command, like this:
 
-```sql
+```bash
 psql <connection-string> -c 'show pg_lake_iceberg.default_location_prefix'
 ```
 
@@ -43,14 +49,18 @@ The model configuration controls how the transformation process behaves.
 - `unique_key='created_at'`: This specifies the unique identifier for each record, used to detect new records.
 - `pre_hook` and `post_hook`: These hooks are executed before and after the model runs. In this case, the `pre_hook` sets the default access method to `iceberg` and configures the location prefix for storing Iceberg tables in S3. The `post_hook` resets these settings after the model has completed.
 
-```jsx
+<!-- The raw tags stop the docs site from evaluating the dbt Jinja. {% raw %} -->
+```jinja
 {{ config(
     materialized='incremental',
     unique_key='created_at',
     pre_hook="SET default_table_access_method TO 'iceberg'; SET pg_lake_iceberg.default_location_prefix = '{{ env_var('ICEBERG_LOCATION_PREFIX', '') }}';",
+    post_hook="RESET default_table_access_method; RESET pg_lake_iceberg.default_location_prefix;"
+) }}
 ```
+<!-- {% endraw %} -->
 
-## DBT for Postgres and and pg_lake
+## DBT for Postgres and pg_lake
 
 With dbt you can run the full range of features in the `dbt-postgres` adaptor for loading data and performing SQL operations in Postgres.
 

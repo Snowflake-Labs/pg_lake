@@ -1,11 +1,19 @@
+---
+title: Geospatial
+parent: User guide
+nav_order: 4
+---
+
 # Geospatial features for pg_lake
 
 ## Add spatial for pg_lake
 To add the `PostGIS` extension and other geospatial features for pg_lake, run the following:
 
+```sql
 CREATE EXTENSION pg_lake_spatial CASCADE;
+```
 
-# Geospatial features
+## Geospatial features
 
 `pg_lake` adds advanced geospatial features on top of PostGIS. The
 most powerful feature is to instantly import almost any geospatial data set with

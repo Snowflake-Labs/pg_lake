@@ -1,6 +1,12 @@
+---
+title: Query data lake files
+parent: User guide
+nav_order: 2
+---
+
 # Query data lake files 
 You can query files in object storage or at public URLs directly by creating
-a lake analytics table. See [data lake formats](./../docs/file-formats-reference.md) for a list of supported file types.
+a lake analytics table. See [data lake formats](file-formats-reference.md) for a list of supported file types.
 
 Lake analytics tables are foreign tables with `server pg_lake`
 pointing to external files in your data lake in a variety of supported formats.
@@ -104,4 +110,4 @@ When computations are pushed down, they are processed directly within the
 vectorized query engine. However, if certain computations cannot be handled by
 the vectorized engine, they are executed normally in PostgreSQL instead. See the
 Iceberg tables page for more information about
-[query pushdown](./../docs/iceberg-tables.md#query-pushdown-with-iceberg-tables).
+[query pushdown](iceberg-tables.md#query-pushdown-with-iceberg-tables).

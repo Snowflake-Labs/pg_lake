@@ -1,3 +1,9 @@
+---
+title: Iceberg tables
+parent: User guide
+nav_order: 1
+---
+
 # Iceberg tables
 
 Iceberg tables are transactional, columnar tables stored in object storage, optimized for fast analytics. 
@@ -19,7 +25,7 @@ using iceberg;
 insert into measurements values ('Istanbul', 18.5);
 ```
 
-You can also create an Iceberg table in your own S3 bucket, as long as it is in the same region as your Postgres server running. **Note that you must have set your [credentials](../README.md#connecting-pg_lake-to-s3-or-compatible)** to be able to access your private bucket.
+You can also create an Iceberg table in your own S3 bucket, as long as it is in the same region as your Postgres server running. **Note that you must have set your [credentials](get-started.md#connect-to-object-storage)** to be able to access your private bucket.
 
 ```sql
 -- create a table in your own S3 bucket (must be in same region)
@@ -73,7 +79,7 @@ Iceberg tables support the following options when creating the table:
 | max_snapshot_age     | Maximum age (in seconds) of snapshots to retain. When set to `0`, old snapshots are automatically expired during writes. Overrides the `pg_lake_iceberg.max_snapshot_age` GUC for this table. |
 | out_of_range_values  | How to handle values that fall outside the Iceberg-representable range. Valid values: `error` (default), `clamp`. See [Out-of-range value handling](#out-of-range-value-handling). |
 
-Additionally, when creating the Iceberg table from a file, the following options are supported along with the format-specific options listed in the [data lake formats](../docs/file-formats-reference) section:
+Additionally, when creating the Iceberg table from a file, the following options are supported along with the format-specific options listed in the [data lake formats](file-formats-reference.md) section:
 
 | Option          | Description                                                                 |
 | --------------- | --------------------------------------------------------------------------- |
