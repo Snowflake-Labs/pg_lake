@@ -304,7 +304,7 @@ MaybeStartCatalogExportWorker(void)
 	{
 		SPI_connect();
 		SPI_execute("SELECT 1 FROM extension_base.workers "
-					"WHERE worker_name = 'catalog export worker'",
+					"WHERE worker_name = 'pg_lake catalog export worker'",
 					true, 1);
 		alreadyRegistered = SPI_processed > 0;
 		SPI_finish();
@@ -332,7 +332,7 @@ MaybeStartCatalogExportWorker(void)
 		}
 		else
 		{
-			RegisterBaseWorker("catalog export worker",
+			RegisterBaseWorker("pg_lake catalog export worker",
 							   funcOid,
 							   ExtensionId(PgLakeIceberg));
 			catalogExportWorkerStarted = true;

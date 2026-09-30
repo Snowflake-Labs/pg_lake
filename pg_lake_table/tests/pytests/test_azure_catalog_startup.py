@@ -63,7 +63,7 @@ def test_azure_catalog_startup_migrates_append_blob(
             database_conn.rollback()
             rows = run_query(
                 "SELECT extension_base.get_worker_pid(worker_id) "
-                "FROM extension_base.workers WHERE worker_name = 'catalog export worker'",
+                "FROM extension_base.workers WHERE worker_name = 'pg_lake catalog export worker'",
                 database_conn,
             )
             return rows[0][0] if rows else 0
