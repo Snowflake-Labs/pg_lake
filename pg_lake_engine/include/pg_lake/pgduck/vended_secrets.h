@@ -22,7 +22,7 @@
 #include "pg_lake/pgduck/client.h"
 
 /*
- * VendedS3Secret describes one scoped S3 secret to (re)create in
+ * VendedSecret describes one scoped S3 secret to (re)create in
  * pgduck_server.  The credential fields are supplied by the caller
  * (ultimately from the REST catalog loadTable response).
  *
@@ -34,7 +34,7 @@
  * connection.  Catalog-provided values always win over the inherited
  * fallback.
  */
-typedef struct VendedS3Secret
+typedef struct VendedSecret
 {
 	Oid			serverOid;		/* iceberg_catalog server OID */
 	const char *secretId;		/* identity the secret's name is derived from;
@@ -47,7 +47,7 @@ typedef struct VendedS3Secret
 	const char *endpoint;		/* NULL -> inherit from existing secret */
 	const char *urlStyle;		/* "path"/"vhost"; NULL -> inherit */
 	const char *useSsl;			/* "true"/"false"; NULL -> inherit */
-}			VendedS3Secret;
+}			VendedSecret;
 
 /*
  * PushVendedSecretToPGDuck creates or replaces a DuckDB scoped secret
@@ -69,7 +69,7 @@ typedef struct VendedS3Secret
  * manager automatically selects it for matching URLs.
  */
 extern PGDLLEXPORT void PushVendedSecretToPGDuck(PGDuckConnection * conn,
-												 const VendedS3Secret * secret);
+												 const VendedSecret * secret);
 
 /*
  * DropVendedSecretFromPGDuck removes a previously-created vended secret
