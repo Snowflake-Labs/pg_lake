@@ -59,6 +59,15 @@ def test_azure_catalog_startup_migrates_append_blob(
             )
             return rows[0][0] if rows else 0
 
+        def catalog_export_worker_pid():
+            database_conn.rollback()
+            rows = run_query(
+                "SELECT extension_base.get_worker_pid(worker_id) "
+                "FROM extension_base.workers WHERE worker_name = 'catalog export worker'",
+                database_conn,
+            )
+            return rows[0][0] if rows else 0
+
         if lease:
             deadline = time.monotonic() + 40
             while time.monotonic() < deadline:
@@ -75,11 +84,18 @@ def test_azure_catalog_startup_migrates_append_blob(
             assert previous_pid
             lease.release()
             lease = None
+            # Terminate both workers so the catalog export worker restarts
+            # and retries the Azure legacy blob cleanup with the lease gone.
             run_command(f"SELECT pg_terminate_backend({previous_pid})", superuser_conn)
+            export_pid = catalog_export_worker_pid()
+            if export_pid:
+                run_command(
+                    f"SELECT pg_terminate_backend({export_pid})", superuser_conn
+                )
 
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
-            if worker_pid():
+            if catalog_export_worker_pid() or worker_pid():
                 try:
                     if (
                         not enabled

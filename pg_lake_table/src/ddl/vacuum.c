@@ -58,6 +58,7 @@
 #include "pg_extension_base/spi_helpers.h"
 #include "nodes/makefuncs.h"
 #include "nodes/pg_list.h"
+#include "parser/parse_func.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
@@ -79,13 +80,6 @@ int			MaxCompactionsPerVacuum = 100;
 /*
  * Managed by a GUC, not exposed to the user, see note in
  * VacuumRemoveInProgressFiles.
- *
- * It also bounds how long the removal stages can run before the autovacuum loop
- * comes back around to the object store catalog export, which is serialized
- * behind them (see pg_lake_iceberg_vacuum). Removals are batched, so a budget
- * this size is a few requests worth of work when the object store is healthy;
- * when a batch fails it is retried a path at a time, and then the budget is what
- * keeps the retries from holding up the export for hours.
  */
 int			MaxFileRemovalsPerVacuum = 10000;
 
@@ -101,6 +95,7 @@ static bool VacuumStoppedWithFilesQueued = false;
 
 
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_vacuum);
+PG_FUNCTION_INFO_V1(pg_lake_catalog_export_worker);
 
 
 static void VacuumRegisterMissingFieldsForAllTables(MemoryContext outOfTransactionMemoryContext);
@@ -134,6 +129,8 @@ static void VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 * tables on the server. This function powers auto-vacuum for iceberg tables via
 * base worker registered.
 */
+static void MaybeStartCatalogExportWorker(void);
+
 Datum
 pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 {
@@ -168,28 +165,20 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	}
 	END_TRANSACTION_NO_THROW(WARNING);
 
-	/* set up invalidation callbacks */
-	InitObjectStoreCatalog();
-
-	/*
-	 * 3.4 wrote Azure object store catalogs as append blobs, which the
-	 * current block-blob writer cannot overwrite. Drop one here so the first
-	 * export recreates it.
-	 */
-	START_TRANSACTION();
-	{
-		RemoveLegacyAzureObjectStoreCatalog();
-	}
-	END_TRANSACTION_NO_THROW(WARNING);
-
 	TimestampTz lastVacuumTime = GetCurrentTimestamp();
-	TimestampTz lastCatalogExportTime = GetCurrentTimestamp();
 
 	while (true)
 	{
 		TimestampTz currentTime = GetCurrentTimestamp();
 
 		ApplyAutovacuumLockTimeout();
+
+		/*
+		 * Start the dedicated catalog export worker as soon as
+		 * object-store-catalog tables appear.  The function is a no-op once
+		 * the worker has been registered.
+		 */
+		MaybeStartCatalogExportWorker();
 
 		if (IcebergAutovacuumEnabled &&
 			TimestampDifferenceExceeds(lastVacuumTime, currentTime,
@@ -231,24 +220,125 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 			END_TRANSACTION_NO_THROW(WARNING);
 		}
 
-		if (EnableObjectStoreCatalog &&
-			TimestampDifferenceExceeds(lastCatalogExportTime, currentTime, 1000))
-		{
-			/* initiate push at regular cadence */
-			lastCatalogExportTime = GetCurrentTimestamp();
-
-			START_TRANSACTION();
-			{
-				ExportIcebergCatalogIfNeeded();
-			}
-			END_TRANSACTION_NO_THROW(WARNING);
-		}
-
 		MemoryContextReset(outOfTransactionMemoryContext);
 
 		LightSleep(1000);
 	}
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * pg_lake_catalog_export_worker is a dedicated background worker that
+ * continuously exports the object store catalog to object storage,
+ * independent of the autovacuum worker's cycle.
+ *
+ * This worker is not registered at extension install time.  Instead, the
+ * autovacuum worker registers it dynamically via MaybeStartCatalogExportWorker
+ * when it discovers that the database has object-store-catalog tables, so
+ * databases without such tables never pay the cost of a second worker.
+ *
+ * Once running, it owns the entire catalog-export lifecycle: relcache
+ * invalidation tracking (InitObjectStoreCatalog), Azure legacy blob cleanup
+ * (RemoveLegacyAzureObjectStoreCatalog), and the tight export loop.  The
+ * autovacuum worker does none of these.
+ */
+Datum
+pg_lake_catalog_export_worker(PG_FUNCTION_ARGS)
+{
+	if (!EnableObjectStoreCatalog)
+	{
+		ereport(LOG,
+				(errmsg("catalog export worker: object store catalog is "
+						"disabled, exiting")));
+		PG_RETURN_INT32(60000);
+	}
+
+	pgstat_report_appname("pg_lake catalog export");
+	set_ps_display(psprintf("(pg_lake catalog export for database %d)",
+							MyDatabaseId));
+
+	InitObjectStoreCatalog();
+
+	START_TRANSACTION();
+	{
+		RemoveLegacyAzureObjectStoreCatalog();
+	}
+	END_TRANSACTION_NO_THROW(WARNING);
+
+	while (true)
+	{
+		START_TRANSACTION();
+		{
+			ExportIcebergCatalogIfNeeded();
+		}
+		END_TRANSACTION_NO_THROW(WARNING);
+
+		LightSleep(1000);
+	}
+
+	PG_RETURN_INT32(0);
+}
+
+
+/*
+ * MaybeStartCatalogExportWorker dynamically registers the catalog export
+ * worker when the object-store catalog is enabled.
+ *
+ * Called on every autovacuum loop iteration.  A static flag makes the
+ * function a no-op once the worker has been registered.  On autovacuum
+ * restart (crash, postmaster cycle), the flag is lost but the worker may
+ * already be registered; we check the workers table first to avoid a
+ * duplicate-key error.
+ */
+static void
+MaybeStartCatalogExportWorker(void)
+{
+	static bool catalogExportWorkerStarted = false;
+	bool		alreadyRegistered = false;
+
+	if (catalogExportWorkerStarted || !EnableObjectStoreCatalog)
+		return;
+
+	START_TRANSACTION();
+	{
+		SPI_connect();
+		SPI_execute("SELECT 1 FROM extension_base.workers "
+					"WHERE worker_name = 'catalog export worker'",
+					true, 1);
+		alreadyRegistered = SPI_processed > 0;
+		SPI_finish();
+	}
+	END_TRANSACTION_NO_THROW(WARNING);
+
+	if (alreadyRegistered)
+	{
+		catalogExportWorkerStarted = true;
+		return;
+	}
+
+	START_TRANSACTION();
+	{
+		Oid			argTypes[] = {INTERNALOID};
+		List	   *funcName = list_make2(makeString(PG_LAKE_ICEBERG_SCHEMA),
+										  makeString("catalog_export"));
+		Oid			funcOid = LookupFuncName(funcName, 1, argTypes, true);
+
+		if (!OidIsValid(funcOid))
+		{
+			ereport(WARNING,
+					(errmsg("catalog export worker: function "
+							"lake_iceberg.catalog_export not found")));
+		}
+		else
+		{
+			RegisterBaseWorker("catalog export worker",
+							   funcOid,
+							   ExtensionId(PgLakeIceberg));
+			catalogExportWorkerStarted = true;
+		}
+	}
+	END_TRANSACTION_NO_THROW(WARNING);
 }
 
 
