@@ -70,6 +70,7 @@ static HttpResult CurlReturnError(CURL *curl, struct curl_slist *headerList,
 static const char *HttpRequestMethodToString(HttpMethod method);
 static char *StrCaseStr(char *haystack, const char *needle);
 static bool IsKeyStartBoundary(char precedingChar);
+static bool IsKeyQualifierChar(char c);
 static char *RedactValueInPlace(char *valueStart);
 static void RedactUrlUserinfoInPlace(char *text);
 
@@ -718,6 +719,9 @@ HttpRequestMethodToString(HttpMethod method)
  * Anchoring on the bare name rather than on '"<name>"' is deliberate: the
  * OAuth token request body is application/x-www-form-urlencoded, so a
  * JSON-only matcher let the client_secret through in cleartext.
+ *
+ * A key also matches with a dotted qualifier appended, which is how Iceberg
+ * names per-account credentials such as adls.sas-token.<account-host>.
  */
 static const char *const sensitiveKeys[] = {
 	"access_token",
@@ -731,6 +735,17 @@ static const char *const sensitiveKeys[] = {
 	"s3.access-key-id",
 	"s3.secret-access-key",
 	"s3.session-token",
+	"s3.sse.key",
+	"adls.sas-token",
+	"adls.connection-string",
+	"adls.account-key",
+	"adls.client-secret",
+	"adls.credential",
+	"adls.token",
+	"adls.auth.shared-key.account.key",
+	"gcs.oauth2.token",
+	"gcs.encryption-key",
+	"gcs.decryption-key",
 	"storage-credentials",
 	NULL
 };
@@ -768,6 +783,17 @@ IsKeyStartBoundary(char precedingChar)
 		precedingChar == '{' || precedingChar == ',' ||
 		precedingChar == '&' || precedingChar == '?' ||
 		precedingChar == ';' || isspace((unsigned char) precedingChar);
+}
+
+
+/*
+ * IsKeyQualifierChar returns true if c can appear in the qualifier Iceberg
+ * appends to a per-account key: a storage account name or DNS host.
+ */
+static bool
+IsKeyQualifierChar(char c)
+{
+	return isalnum((unsigned char) c) || c == '.' || c == '-' || c == '_';
 }
 
 
@@ -927,6 +953,12 @@ RedactSensitiveText(const char *input)
 			}
 
 			char	   *separator = afterKey;
+
+			if (*separator == '.')
+			{
+				while (IsKeyQualifierChar(*separator))
+					separator++;
+			}
 
 			if (*separator == '"')
 				separator++;	/* closing quote of a JSON key */
