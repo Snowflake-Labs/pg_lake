@@ -325,7 +325,9 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 
 	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
-	DataFileSchema *schema = GetDataFileSchemaForExternalIcebergTable(currentMetadataPath);
+	DataFileSchema *schema =
+		GetDataFileSchemaForExternalIcebergTable(currentMetadataPath,
+												 LowercasesColumnNames(relationId));
 
 	Relation	rel = RelationIdGetRelation(relationId);
 	TupleDesc	tupDesc = RelationGetDescr(rel);
@@ -413,7 +415,8 @@ GetDataFileSchemaForTableInternal(Oid relationId)
 
 		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
-		return GetDataFileSchemaForExternalIcebergTable(path);
+		return GetDataFileSchemaForExternalIcebergTable(path,
+														LowercasesColumnNames(relationId));
 	}
 }
 
@@ -430,12 +433,16 @@ GetDataFileSchemaForTable(Oid relationId)
 
 /*
  * GetDataFileSchemaForExternalIcebergTable gets a table schema field based
- * on the current Iceberg metadata.
+ * on the current Iceberg metadata, with names lowercased if requested.
  */
 DataFileSchema *
-GetDataFileSchemaForExternalIcebergTable(char *metadataPath)
+GetDataFileSchemaForExternalIcebergTable(char *metadataPath, bool lowercaseNames)
 {
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+
+	if (lowercaseNames)
+		LowercaseIcebergTableMetadataNames(metadata);
+
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
 
 	DataFileSchema *schema = palloc0(sizeof(DataFileSchema));

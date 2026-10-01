@@ -575,6 +575,7 @@ InitPgLakeIcebergOptions(void)
 		{"catalog_name", ForeignTableRelationId},
 		{"catalog_table_name", ForeignTableRelationId},
 		{"catalog_namespace", ForeignTableRelationId},
+		{LOWERCASE_COLUMN_NAMES_OPTION, ForeignTableRelationId},
 
 		/*
 		 * out-of-range value handling during writes: 'error' (default) or
@@ -673,6 +674,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	/* if not provided, assume postgres catalog */
 	IcebergCatalogType icebergCatalogType = POSTGRES_CATALOG;
 	bool		readOnlyExternalCatalogTable = false;
+	bool		lowercaseColumnNames = false;
 	char	   *catalogName = NULL;
 	char	   *catalogTableName = NULL;
 	char	   *catalogNamespace = NULL;
@@ -812,6 +814,12 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			/* only accept boolean */
 			readOnlyExternalCatalogTable = defGetBoolean(def);
 		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, LOWERCASE_COLUMN_NAMES_OPTION) == 0)
+		{
+			/* only accept boolean */
+			lowercaseColumnNames = defGetBoolean(def);
+		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "catalog_table_name") == 0)
 		{
 			catalogTableName = defGetString(def);
@@ -930,6 +938,17 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"read_only\" option is only valid for catalog=\"rest\" or catalog=\"object_store\"")));
+
+	/*
+	 * The names of a table pg_lake writes are its Postgres column names, so
+	 * there is nothing to fold.
+	 */
+	if (catalog == ForeignTableRelationId && lowercaseColumnNames &&
+		!(icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" option is only valid for read-only rest and object_store catalog tables",
+						LOWERCASE_COLUMN_NAMES_OPTION)));
 
 	if (catalog == ForeignTableRelationId)
 	{

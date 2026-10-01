@@ -961,11 +961,16 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			 * credentials: the relation does not exist yet, and credentials
 			 * are resolved per relation, so nothing can push a secret for it.
 			 */
-			List	   *dataFileColumns =
+			IcebergTableMetadata *metadata =
 				catalogTableMetadata != NULL ?
-				DescribeColumnsFromIcebergMetadata(ParseIcebergTableMetadata(catalogTableMetadata),
-												   false) :
-				DescribeColumnsFromIcebergMetadataURI(metadataLocation, false);
+				ParseIcebergTableMetadata(catalogTableMetadata) :
+				ReadIcebergTableMetadata(metadataLocation);
+
+			if (HasLowercaseColumnNamesOption(createStmt->options))
+				LowercaseIcebergTableMetadataNames(metadata);
+
+			List	   *dataFileColumns =
+				DescribeColumnsFromIcebergMetadata(metadata, false);
 
 			createStmt->base.tableElts = dataFileColumns;
 			MaybeConvertUnsupportedNumericColumnsToDouble(createStmt->base.tableElts);

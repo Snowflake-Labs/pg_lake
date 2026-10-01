@@ -247,6 +247,7 @@ SELECT region, sum(amount) FROM orders GROUP BY region;
 | `catalog_name` | Catalog (warehouse) that holds the table. Defaults to the server's `catalog_name`, then to the prefix the catalog advertises, then to the database name. |
 | `catalog_namespace` | Namespace of the table. Defaults to the PostgreSQL schema name. |
 | `catalog_table_name` | Name of the table in the catalog. Defaults to the PostgreSQL table name. |
+| `lowercase_column_names` | Fold column and struct field names to lowercase. Valid for read-only REST and `object_store` catalog tables; defaults to `false`. |
 
 An attached table always reads the catalog's current version, so queries see new commits from
 other engines without any changes in PostgreSQL. Dropping it only removes it from PostgreSQL.
@@ -274,6 +275,26 @@ Attached tables cannot be written to. Writing would mean taking over the table's
 field IDs and file inventory from whatever produced them, which pg_lake does not do: it writes
 only to tables it created. To move existing data under pg_lake, create a new table and copy
 into it.
+
+#### Lowercase column names from external engines
+
+Some engines write Iceberg column names in uppercase. PostgreSQL folds unquoted identifiers to
+lowercase, so a column named `"ID"` normally has to be quoted. Set
+`lowercase_column_names = true` to expose it as `id`; nested struct field names are folded too.
+The option changes column and struct field names only; catalog, namespace and table names must
+still match the catalog. For example, the catalog identifiers below remain uppercase:
+
+```sql
+CREATE TABLE sales () USING iceberg
+WITH (catalog = 'polaris', read_only = true,
+      catalog_name = 'sales', catalog_namespace = 'PUBLIC',
+      catalog_table_name = 'SALES', lowercase_column_names = true);
+
+SELECT id, (address).city FROM sales;
+```
+
+The option cannot be changed after the table is created. Creation or query fails if two names
+in the same table or struct differ only in case.
 
 ### Create tables in an external catalog
 
@@ -329,12 +350,13 @@ is intended for managed integrations that exchange tables through object storage
 ## External Iceberg tables from metadata files
 
 You can query any Iceberg table, whoever wrote it, by creating a `pg_lake` foreign table that
-points at one of its metadata files:
+points at one of its metadata files. If the file has uppercase column names, set
+`lowercase_column_names` to fold column and nested struct field names to lowercase:
 
 ```sql
 CREATE FOREIGN TABLE external_iceberg ()
 SERVER pg_lake
-OPTIONS (path 's3://mybucket/table/metadata/v14.metadata.json');
+OPTIONS (path 's3://mybucket/table/metadata/v14.metadata.json', lowercase_column_names 'true');
 ```
 
 The table is a fixed snapshot: later changes by the writer are not visible until you point it
@@ -346,7 +368,9 @@ OPTIONS (SET path 's3://mybucket/table/metadata/v15.metadata.json');
 ```
 
 When the table is registered in a REST catalog, attaching it with `read_only = true` (above)
-avoids this manual step.
+avoids this manual step. The same `lowercase_column_names` option is accepted by `CREATE TABLE`
+with `load_from` or `definition_from`, and by `COPY ... FROM` an Iceberg metadata file. See the
+[file formats reference](file-formats-reference.md#external-iceberg-format) for those forms.
 
 ## Snowflake
 
@@ -362,5 +386,11 @@ For tables that Snowflake reads, create them with `compatibility_mode = 'snowfla
 `pg_lake_iceberg.default_compatibility_mode`). This stores `uuid` values nested inside arrays
 and composite types as strings, which Snowflake requires, while keeping the column type
 `uuid` in PostgreSQL.
+
+Conversely, when pg_lake reads tables written by Snowflake, column and nested field names may
+be uppercase. Set `lowercase_column_names = true` when attaching the table through a read-only
+catalog or a metadata file; catalog identifiers themselves are unchanged. See
+[lowercase column names from external engines](#lowercase-column-names-from-external-engines)
+and [external metadata files](#external-iceberg-tables-from-metadata-files).
 
 The [sync use case](use-case-iceberg-sync.md#snowflake) walks through both setups.

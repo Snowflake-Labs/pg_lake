@@ -40,6 +40,7 @@ accepts the same options.
 | `catalog_name`<span class="pglake-meta">Default the catalog server's `catalog_name`, or the database name; can be changed for read-only tables</span> | Catalog name of a read-only table. |
 | `catalog_namespace`<span class="pglake-meta">Default schema name; can be changed for read-only tables</span> | Namespace of a read-only table. |
 | `catalog_table_name`<span class="pglake-meta">Default table name; can be changed for read-only tables</span> | Table name of a read-only table. |
+| `lowercase_column_names`<span class="pglake-meta">Default `false` for attached tables; fixed at creation</span> | Fold column and nested struct field names. Also accepted when importing Iceberg metadata files. Names that differ only by case in the same table or struct are rejected. |
 | `autovacuum_enabled`<span class="pglake-meta">Default `true`; can be changed</span> | Whether the autovacuum worker processes the table. |
 | `autovacuum_compact_data_files`<span class="pglake-meta">Default `true`; can be changed</span> | Whether autovacuum compacts the table's data files. |
 | `max_snapshot_age`<span class="pglake-meta">Default `pg_lake_iceberg.max_snapshot_age`; can be changed</span> | Snapshot retention in seconds. `0` expires old snapshots on every write. |
@@ -79,6 +80,7 @@ Format-specific options:
 | `maximum_object_size` | json | Largest JSON object to accept, in bytes. |
 | `layer` | gdal | Layer within a multi-layer file, such as a sheet name. |
 | `zip_path` | gdal | File within a `.zip` archive, such as `'roads.shp'`. |
+| `lowercase_column_names` | iceberg metadata | Fold column and nested struct field names to lowercase when reading an Iceberg metadata file. Names that differ only by case in the same table or struct are rejected. |
 | `log_format` | log | Log template. Currently `s3` for S3 access logs. |
 
 The [file formats reference](file-formats-reference.md) describes each format.
@@ -92,6 +94,7 @@ options above:
 |:--|:--|
 | `definition_from` | URL of a file to infer the columns from. The column list must be empty. |
 | `load_from` | URL of a file to infer the columns from (if the column list is empty) and load into the new table. |
+| `lowercase_column_names` | `true` folds column and nested struct field names when the file is an Iceberg metadata file. Names that differ only by case in the same table or struct are rejected. |
 | `format` | Format of the file. Inferred from the extension if omitted. |
 | `compression` | Compression of the file. Inferred from the extension if omitted. |
 
@@ -109,6 +112,7 @@ addition to PostgreSQL's own:
 | `format` | `parquet`, `csv`, `json`, or `gdal` (`FROM` only). Inferred from the URL's extension if omitted. |
 | `compression` | For `TO`: `snappy` (Parquet default), `gzip`, `zstd` or `none`. For `FROM`: inferred if omitted. |
 | `header`, `delimiter`, `quote`, `escape`, `null` | As in PostgreSQL's CSV format. |
+| `lowercase_column_names` | `FROM` with `format 'iceberg'` and a metadata file: fold column and nested struct field names to lowercase. Names that differ only by case in the same table or struct are rejected. |
 
 ```sql
 COPY (SELECT * FROM orders WHERE order_date >= '2026-01-01')

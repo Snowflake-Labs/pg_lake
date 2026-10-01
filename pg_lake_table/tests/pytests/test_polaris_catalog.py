@@ -989,6 +989,109 @@ def test_rest_catalog_uppercase_columns(
     rest_catalog.drop_namespace(namespace)
 
 
+def test_rest_catalog_lowercase_column_names(
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """lowercase_column_names folds uppercase column and struct field names."""
+
+    if installcheck:
+        return
+
+    namespace = "test_lowercase_column_names"
+    rest_catalog = create_iceberg_rest_catalog(namespace)
+
+    # the way Snowflake names case-insensitive columns and struct fields
+    address_type = StructType(
+        NestedField(4, "CITY", StringType(), required=False),
+        NestedField(5, "ZIP", LongType(), required=False),
+    )
+    schema = Schema(
+        NestedField(1, "ID", LongType(), required=False),
+        NestedField(2, "Name", StringType(), required=False),
+        NestedField(3, "HOME", address_type, required=False),
+        NestedField(
+            6,
+            "PREVIOUS",
+            ListType(
+                element_id=7,
+                element_type=StructType(
+                    NestedField(8, "CITY", StringType(), required=False),
+                    NestedField(9, "ZIP", LongType(), required=False),
+                ),
+                element_required=False,
+            ),
+            required=False,
+        ),
+    )
+
+    table_name = "uppercase_table"
+    iceberg_table = rest_catalog.create_table(
+        identifier=f"{namespace}.{table_name}",
+        schema=schema,
+    )
+
+    iceberg_table.append(
+        pyarrow.Table.from_pylist(
+            [
+                {
+                    "ID": row_id,
+                    "Name": f"name_{row_id}",
+                    "HOME": {"CITY": f"city_{row_id}", "ZIP": row_id},
+                    "PREVIOUS": [{"CITY": f"old_{row_id}", "ZIP": -row_id}],
+                }
+                for row_id in range(1, 4)
+            ],
+            schema=iceberg_table.schema().as_arrow(),
+        )
+    )
+
+    run_command(f"""CREATE SCHEMA "{namespace}" """, pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE "{namespace}".lowered ()
+        USING iceberg
+        WITH (catalog='rest', read_only=True, catalog_table_name='{table_name}',
+              lowercase_column_names=True)
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    columns = run_query(
+        f"""
+        SELECT attname FROM pg_attribute
+        WHERE attrelid = '"{namespace}".lowered'::regclass AND attnum > 0
+        ORDER BY attnum
+        """,
+        pg_conn,
+    )
+    assert [row[0] for row in columns] == ["id", "name", "home", "previous"]
+
+    result = run_query(
+        f"""
+        SELECT id, name, (home).city, (home).zip, (previous[1]).city
+        FROM "{namespace}".lowered
+        WHERE (home).zip >= 2
+        ORDER BY id
+        """,
+        pg_conn,
+    )
+    assert result == [
+        [2, "name_2", "city_2", 2, "old_2"],
+        [3, "name_3", "city_3", 3, "old_3"],
+    ]
+
+    run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
+    pg_conn.commit()
+    rest_catalog.drop_table(f"{namespace}.{table_name}")
+    rest_catalog.drop_namespace(namespace)
+
+
 def test_rest_catalog_required_columns_autodetect(
     pg_conn,
     s3,

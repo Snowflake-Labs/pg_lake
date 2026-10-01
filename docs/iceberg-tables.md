@@ -116,6 +116,7 @@ has the complete list.
 | `autovacuum_enabled` | Whether the pg_lake autovacuum worker maintains this table. Default `true`. |
 | `max_snapshot_age` | Snapshot retention in seconds, overriding `pg_lake_iceberg.max_snapshot_age`. |
 | `out_of_range_values` | `error` (default) or `clamp` for values Iceberg cannot represent. See [data types](data-types.md#out-of-range-values). |
+| `lowercase_column_names` | For read-only tables in an external catalog, fold column and struct field names to lowercase. Default `false`. See [catalogs](iceberg-catalogs.md#query-tables-from-an-external-catalog). |
 | `compatibility_mode` | `auto` (default) or `snowflake`, to shape storage for engines with narrower type support. |
 
 ### Supported PostgreSQL features

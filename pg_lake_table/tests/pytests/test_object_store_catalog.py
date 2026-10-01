@@ -2120,3 +2120,169 @@ def test_enable_object_store_catalog_requires_restart(superuser_conn, extension)
     )
     assert "cannot be changed without restarting the server" in str(error)
     superuser_conn.rollback()
+
+
+# Snowflake stores case-insensitive names in uppercase, so a table it wrote
+# needs quoted identifiers in Postgres unless lowercase_column_names is set
+def test_read_only_lowercase_column_names(
+    pg_conn, s3, extension, with_default_location, adjust_object_store_settings
+):
+    run_command(
+        """
+        CREATE SCHEMA object_store_sc1;
+        CREATE TYPE object_store_sc1.address AS ("CITY" text, "ZIP" int);
+        CREATE TABLE object_store_sc1.tbl_1(
+            "ID" int,
+            "Name" text,
+            "HOME" object_store_sc1.address,
+            "PREVIOUS" object_store_sc1.address[]
+        ) USING iceberg WITH (catalog='object_store');
+        INSERT INTO object_store_sc1.tbl_1
+        SELECT i, 'name_' || i,
+               ROW('city_' || i, i)::object_store_sc1.address,
+               ARRAY[ROW('old_' || i, -i)::object_store_sc1.address]
+        FROM generate_series(1,10) i;
+
+        CREATE TABLE object_store_sc1.tbl_2("ID" int, "Name" text)
+        USING iceberg WITH (catalog='object_store');
+        INSERT INTO object_store_sc1.tbl_2 SELECT i, 'name_' || i FROM generate_series(1,10) i;
+
+        CREATE TABLE object_store_sc1.tbl_3("ID" int, id int)
+        USING iceberg WITH (catalog='object_store');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    for table_name in ["tbl_1", "tbl_2", "tbl_3"]:
+        wait_until_object_store_writable_table_pushed(
+            pg_conn, "object_store_sc1", table_name
+        )
+
+    run_command(
+        """
+        CREATE SCHEMA object_store_sc2;
+        CREATE TABLE object_store_sc2.lowered () USING iceberg
+        WITH (catalog='object_store', read_only=True, catalog_namespace='object_store_sc1',
+              catalog_table_name='tbl_1', lowercase_column_names=True);
+        CREATE TABLE object_store_sc2.unchanged () USING iceberg
+        WITH (catalog='object_store', read_only=True, catalog_namespace='object_store_sc1',
+              catalog_table_name='tbl_1');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    column_names_query = """
+        SELECT attname FROM pg_attribute
+        WHERE attrelid = '{}'::regclass AND attnum > 0 AND NOT attisdropped
+        ORDER BY attnum
+    """
+    columns = run_query(column_names_query.format("object_store_sc2.lowered"), pg_conn)
+    assert [row[0] for row in columns] == ["id", "name", "home", "previous"]
+
+    columns = run_query(
+        column_names_query.format("object_store_sc2.unchanged"), pg_conn
+    )
+    assert [row[0] for row in columns] == ["ID", "Name", "HOME", "PREVIOUS"]
+
+    # the composite type inferred for the struct has lowercase attributes too
+    struct_fields = run_query(
+        """
+        SELECT field.attname
+        FROM pg_attribute column_attr
+        JOIN pg_type struct_type ON struct_type.oid = column_attr.atttypid
+        JOIN pg_attribute field ON field.attrelid = struct_type.typrelid
+        WHERE column_attr.attrelid = 'object_store_sc2.lowered'::regclass
+          AND column_attr.attname = 'home' AND field.attnum > 0
+        ORDER BY field.attnum
+        """,
+        pg_conn,
+    )
+    assert [row[0] for row in struct_fields] == ["city", "zip"]
+
+    # struct fields are reachable by lowercase name in projections and filters
+    lowered = run_query(
+        """
+        SELECT id, name, (home).city, (home).zip, (previous[1]).city, (previous[1]).zip
+        FROM object_store_sc2.lowered WHERE (home).zip > 5 ORDER BY id
+        """,
+        pg_conn,
+    )
+    source = run_query(
+        """
+        SELECT "ID", "Name", ("HOME")."CITY", ("HOME")."ZIP",
+               ("PREVIOUS"[1])."CITY", ("PREVIOUS"[1])."ZIP"
+        FROM object_store_sc1.tbl_1 WHERE ("HOME")."ZIP" > 5 ORDER BY "ID"
+        """,
+        pg_conn,
+    )
+    assert len(lowered) == 5
+    assert lowered == source
+
+    unchanged = run_query(
+        """
+        SELECT "ID", "Name", ("HOME")."CITY", ("HOME")."ZIP",
+               ("PREVIOUS"[1])."CITY", ("PREVIOUS"[1])."ZIP"
+        FROM object_store_sc2.unchanged WHERE ("HOME")."ZIP" > 5 ORDER BY "ID"
+        """,
+        pg_conn,
+    )
+    assert unchanged == source
+
+    # explicitly listed columns are matched against the lowercased names
+    run_command(
+        """
+        CREATE TABLE object_store_sc2.explicit (id int, name text) USING iceberg
+        WITH (catalog='object_store', read_only=True, catalog_namespace='object_store_sc1',
+              catalog_table_name='tbl_2', lowercase_column_names=True);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, name FROM object_store_sc2.explicit WHERE id = 3", pg_conn
+    )
+    assert result == [[3, "name_3"]]
+
+    # names that differ only in case cannot both be lowercased
+    error = run_command(
+        """
+        CREATE TABLE object_store_sc2.colliding () USING iceberg
+        WITH (catalog='object_store', read_only=True, catalog_namespace='object_store_sc1',
+              catalog_table_name='tbl_3', lowercase_column_names=True);
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert 'Iceberg field "id" collides with another field' in str(error)
+    pg_conn.rollback()
+
+    # pg_lake writes the names of its own tables, so there is nothing to fold
+    error = run_command(
+        """
+        CREATE TABLE object_store_sc2.writable (a int) USING iceberg
+        WITH (catalog='object_store', lowercase_column_names=True);
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert (
+        '"lowercase_column_names" option is only valid for read-only rest and object_store catalog tables'
+        in str(error)
+    )
+    pg_conn.rollback()
+
+    # the column names were fixed at creation, so the option cannot change
+    for table_name, action in [("lowered", "SET"), ("unchanged", "ADD")]:
+        error = run_command(
+            f"ALTER FOREIGN TABLE object_store_sc2.{table_name} "
+            f"OPTIONS ({action} lowercase_column_names 'false')",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "The following table options can be changed" in str(error)
+        pg_conn.rollback()
+
+    run_command("DROP SCHEMA object_store_sc1, object_store_sc2 CASCADE", pg_conn)
+    pg_conn.commit()

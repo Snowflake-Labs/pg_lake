@@ -638,7 +638,7 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	if (sourceFormat == DATA_FORMAT_ICEBERG)
 	{
 		/* read up-to date iceberg schema */
-		schema = GetDataFileSchemaForExternalIcebergTable(sourcePath);
+		schema = GetDataFileSchemaForExternalIcebergTable(sourcePath, false);
 	}
 
 	char	   *readQuery =
