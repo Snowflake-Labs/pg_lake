@@ -79,6 +79,17 @@ extern PGDLLEXPORT char *TupleDescToProjectionList(TupleDesc tupleDesc,
 												   bool addCast,
 												   DataFileSchema * storageSchema);
 
+/*
+ * Returns a DuckDB expression converting every INTERVAL and TIMETZ leaf in
+ * `expression` from its Iceberg storage representation to the surface type
+ * PostgreSQL expects, or NULL when none is needed.  Recurses through arrays,
+ * composites, maps and domains.  Applied automatically by
+ * TupleDescToProjectionList; declared here for callers that build their own
+ * query over Iceberg-format data.
+ */
+extern PGDLLEXPORT char *BuildIcebergReadConversion(const char *expression,
+													Oid typeOid, int32 typmod);
+
 extern PGDLLEXPORT char *TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc,
 													 CopyDataFormat sourceFormat,
 													 bool preferVarchar,

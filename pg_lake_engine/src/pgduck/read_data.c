@@ -78,8 +78,6 @@ static char *BuildColumnProjection(char *expression,
 static bool TypeNeedsIcebergReadConversion(Oid typeOid);
 static void AppendIcebergReadConversion(StringInfo buf, const char *expression,
 										Oid typeOid, int32 typmod, int depth);
-static char *BuildIcebergReadConversion(const char *expression, Oid typeOid,
-										int32 typmod);
 static char *BuildStorageToSurfaceProjection(const char *columnName,
 											 Oid columnTypeId, int32 columnTypeMod,
 											 DuckDBTypeInfo duckdbType,
@@ -1301,8 +1299,11 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
  * BuildIcebergReadConversion returns a DuckDB expression that converts all
  * native-type leaves in expression from their Iceberg representation to their
  * PostgreSQL/DuckDB surface type, or NULL when no conversion is required.
+ *
+ * Declared in read_data.h so a caller building its own query over
+ * Iceberg-format data can apply the same conversion the read path applies.
  */
-static char *
+char *
 BuildIcebergReadConversion(const char *expression, Oid typeOid, int32 typmod)
 {
 	StringInfoData conversion;
