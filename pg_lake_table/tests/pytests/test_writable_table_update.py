@@ -405,6 +405,60 @@ def test_disallowed_select_for_update(create_writable_tables, pg_conn):
     pg_conn.rollback()
 
 
+def test_update_join_repeated_rows_serializable(
+    pg_conn, s3, extension, with_default_location
+):
+    """
+    A join that matches a target row twice makes update tracking find the row
+    ID already present. At SERIALIZABLE, PostgreSQL then re-reads that row
+    with the EState snapshot, which must be set.
+    """
+    location = f"s3://{TEST_BUCKET}/test_update_join_repeated_rows_serializable/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_update_serializable;
+        CREATE FOREIGN TABLE test_update_serializable.target (id int, val int)
+        SERVER pg_lake OPTIONS (location '{location}', writable 'true', format 'parquet');
+        INSERT INTO test_update_serializable.target VALUES (1, 0), (2, 0), (3, 0);
+
+        CREATE TABLE test_update_serializable.target_iceberg USING iceberg
+        AS SELECT * FROM test_update_serializable.target;
+
+        CREATE TABLE test_update_serializable.source (id int, val int);
+        INSERT INTO test_update_serializable.source VALUES (1, 10), (1, 10), (2, 20), (2, 20);
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    for table_name in ["target", "target_iceberg"]:
+        run_command("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE", pg_conn)
+
+        result = run_query(
+            f"""
+            UPDATE test_update_serializable.{table_name} t
+            SET val = s.val
+            FROM test_update_serializable.source s
+            WHERE t.id = s.id
+            RETURNING t.id, t.val
+        """,
+            pg_conn,
+        )
+        assert sorted(tuple(row) for row in result) == [(1, 10), (2, 20)]
+
+        result = run_query(
+            f"SELECT id, val FROM test_update_serializable.{table_name} ORDER BY id",
+            pg_conn,
+        )
+        assert [tuple(row) for row in result] == [(1, 10), (2, 20), (3, 0)]
+
+        pg_conn.commit()
+
+    run_command("DROP SCHEMA test_update_serializable CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_merge_on_read(pg_conn, extension):
     location = f"s3://{TEST_BUCKET}/test_merge_on_read/"
 
