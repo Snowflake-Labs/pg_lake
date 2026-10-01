@@ -572,6 +572,24 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 
 
 /*
+ * ClearDeletionQueue removes every row from the deletion queue without deleting
+ * the files they name.
+ */
+void
+ClearDeletionQueue(void)
+{
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_execute("DELETE FROM " DELETION_QUEUE_TABLE, readOnly, 0);
+
+	SPI_END();
+}
+
+
+/*
 * InsertPrefixDeletionRecord adds a prefix into the deletion queue for
 * later removal. When the prefix is removed, all files under the prefix
 * will be removed.
