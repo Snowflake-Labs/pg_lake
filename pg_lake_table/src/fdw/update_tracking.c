@@ -262,6 +262,12 @@ IsFirstUpdateOfTuple(RelationUpdateTrackingState * state, ItemPointer rowLocatio
 	/* make sure we see previously written tuples */
 	PushActiveSnapshot(GetTransactionSnapshot());
 
+	/*
+	 * At SERIALIZABLE, ExecCheckIndexConstraints re-reads a conflicting row
+	 * with es_snapshot, so it must be set while the snapshot is active.
+	 */
+	state->estate->es_snapshot = GetActiveSnapshot();
+
 	/* set the row ID in the TupleTableSlot */
 	TupleTableSlot *rowLocationSlot = state->rowLocationSlot;
 
@@ -287,6 +293,7 @@ IsFirstUpdateOfTuple(RelationUpdateTrackingState * state, ItemPointer rowLocatio
 		/* row ID is not yet in the table, insert it now */
 		ExecSimpleRelationInsert(state->updateRelInfo, state->estate, rowLocationSlot);
 
+	state->estate->es_snapshot = InvalidSnapshot;
 	PopActiveSnapshot();
 
 	/*
