@@ -657,3 +657,82 @@ def test_redaction_masks_a_composite_value_as_one_unit(
     # Fields after the array are still readable, and the line still parses.
     assert '"expires": 60' in redacted, redacted
     json.loads(redacted)
+
+
+def test_redaction_covers_azure_and_gcs_vended_credentials(
+    superuser_conn, extension, create_redact_helper_function
+):
+    """
+    Regression test for: vended Azure and GCS credentials traced in cleartext.
+
+    A catalog returns vended credentials in the loadTable response's top-level
+    config map as well as in storage-credentials, and only the S3 keys were
+    listed there.  Iceberg also names per-account ADLS credentials with the
+    account appended (adls.sas-token.<account-host>), which an exact key match
+    cannot see, so a SAS token survived in every spelling a catalog emits.
+    """
+    host = "acct.dfs.core.windows.net"
+    credentials = {
+        f"adls.sas-token.{host}": "SAS-KEYED-BY-HOST",
+        "adls.sas-token.acct": "SAS-KEYED-BY-ACCOUNT",
+        "adls.sas-token": "SAS-BARE",
+        "adls.connection-string": "AccountName=acct;AccountKey=CONNSTR-KEY",
+        "adls.account-key": "ACCOUNT-KEY",
+        "adls.client-secret": "CLIENT-SECRET",
+        "adls.credential": "ADLS-CREDENTIAL",
+        "adls.token": "ADLS-TOKEN",
+        "adls.auth.shared-key.account.key": "SHARED-KEY",
+        "gcs.oauth2.token": "GCS-TOKEN",
+    }
+    settings = {
+        "adls.account-name": "ACCOUNT-NAME-VALUE",
+        f"adls.sas-token-expires-at-ms.{host}": "1790000000000",
+        "gcs.oauth2.token-expires-at": "1790000000001",
+    }
+
+    cursor = superuser_conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT lake_iceberg.redact_sensitive_text(%s)",
+            (json.dumps({"config": {**credentials, **settings}}),),
+        )
+        redacted = cursor.fetchone()[0]
+    finally:
+        cursor.close()
+
+    for key, value in credentials.items():
+        assert value not in redacted, f"{key} survived redaction: {redacted}"
+    # Settings that are not credentials stay legible, including the expiries
+    # that share a prefix with the tokens they describe.
+    for value in settings.values():
+        assert value in redacted, redacted
+    json.loads(redacted)
+
+
+def test_redaction_covers_vended_encryption_keys(
+    superuser_conn, extension, create_redact_helper_function
+):
+    """
+    A catalog enforcing customer-supplied encryption vends the key in the same
+    loadTable config map as the storage credentials, so it is just as secret.
+    """
+    keys = {
+        "s3.sse.key": "SSE-C-KEY",
+        "gcs.encryption-key": "GCS-ENCRYPTION-KEY",
+        "gcs.decryption-key": "GCS-DECRYPTION-KEY",
+    }
+
+    cursor = superuser_conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT lake_iceberg.redact_sensitive_text(%s)",
+            (json.dumps({"config": {**keys, "s3.sse.type": "custom"}}),),
+        )
+        redacted = cursor.fetchone()[0]
+    finally:
+        cursor.close()
+
+    for key, value in keys.items():
+        assert value not in redacted, f"{key} survived redaction: {redacted}"
+    assert '"s3.sse.type": "custom"' in redacted, redacted
+    json.loads(redacted)
