@@ -95,7 +95,7 @@ def test_azure_catalog_startup_migrates_append_blob(
 
         deadline = time.monotonic() + 40
         while time.monotonic() < deadline:
-            if catalog_export_worker_pid() or worker_pid():
+            if catalog_export_worker_pid() or (not enabled and worker_pid()):
                 try:
                     if (
                         not enabled
@@ -131,6 +131,27 @@ def test_azure_catalog_startup_migrates_append_blob(
         else:
             time.sleep(2)
             assert blob.get_blob_properties().etag == original_etag
+            assert not catalog_export_worker_pid()
+
+            run_command(
+                "ALTER SYSTEM SET pg_lake_iceberg.enable_object_store_catalog = 'on'",
+                superuser_conn,
+            )
+            run_command("SELECT pg_reload_conf()", superuser_conn)
+            deadline = time.monotonic() + 90
+            while time.monotonic() < deadline:
+                try:
+                    if (
+                        catalog_export_worker_pid()
+                        and blob.get_blob_properties().blob_type == BlobType.BLOCKBLOB
+                    ):
+                        break
+                except ResourceNotFoundError:
+                    pass
+                time.sleep(0.2)
+            else:
+                pytest.fail("catalog export worker did not restart after enabling")
+            assert "catalog-snapshot-time" in json.loads(blob.download_blob().readall())
     finally:
         if database_conn:
             database_conn.close()

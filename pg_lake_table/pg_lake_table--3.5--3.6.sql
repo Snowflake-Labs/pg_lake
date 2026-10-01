@@ -28,20 +28,12 @@ END;
 $$ LANGUAGE plpgsql STABLE;
 
 
--- Dedicated catalog export worker, decoupled from the autovacuum cycle.
---
--- The autovacuum worker serializes catalog.json export behind its per-table
--- vacuum stages (compaction, deletion-queue drain, orphan cleanup), so a long
--- vacuum pass can delay the export for minutes.  This worker runs its own
--- tight loop that checks for invalidations every second and pushes a fresh
--- catalog.json whenever one is needed, regardless of what the vacuum worker
--- is doing.
---
--- The worker is NOT registered here.  The autovacuum worker registers it
--- dynamically when it discovers object-store-catalog tables, so databases
--- without such tables never pay for a second worker.
-
+-- Export the object store catalog independently of autovacuum. The worker
+-- restarts after a delay while export is disabled, so it only occupies a
+-- process slot when the catalog is enabled.
 CREATE FUNCTION lake_iceberg.catalog_export(internal)
 RETURNS internal
 AS 'MODULE_PATHNAME', 'pg_lake_catalog_export_worker'
 LANGUAGE C STRICT;
+
+SELECT extension_base.register_worker('pg_lake catalog export worker', 'lake_iceberg.catalog_export');

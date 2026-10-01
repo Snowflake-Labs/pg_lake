@@ -58,7 +58,6 @@
 #include "pg_extension_base/spi_helpers.h"
 #include "nodes/makefuncs.h"
 #include "nodes/pg_list.h"
-#include "parser/parse_func.h"
 #include "utils/acl.h"
 #include "utils/backend_status.h"
 #include "utils/builtins.h"
@@ -76,6 +75,7 @@ int			MaxCompactionsPerVacuum = 100;
 
 /* case insensitive */
 #define PG_LAKE_ICEBERG_VACUUM_FLAG "iceberg"
+#define CATALOG_EXPORT_DISABLED_RESTART_MS 60000
 
 /*
  * Managed by a GUC, not exposed to the user, see note in
@@ -128,9 +128,7 @@ static void VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 * pg_lake_iceberg_vacuum is a function that continuously vacuums all iceberg
 * tables on the server. This function powers auto-vacuum for iceberg tables via
 * base worker registered.
-*/
-static void MaybeStartCatalogExportWorker(void);
-
+ */
 Datum
 pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 {
@@ -172,13 +170,6 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 		TimestampTz currentTime = GetCurrentTimestamp();
 
 		ApplyAutovacuumLockTimeout();
-
-		/*
-		 * Start the dedicated catalog export worker as soon as
-		 * object-store-catalog tables appear.  The function is a no-op once
-		 * the worker has been registered.
-		 */
-		MaybeStartCatalogExportWorker();
 
 		if (IcebergAutovacuumEnabled &&
 			TimestampDifferenceExceeds(lastVacuumTime, currentTime,
@@ -229,30 +220,15 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 
 
 /*
- * pg_lake_catalog_export_worker is a dedicated background worker that
- * continuously exports the object store catalog to object storage,
- * independent of the autovacuum worker's cycle.
- *
- * This worker is not registered at extension install time.  Instead, the
- * autovacuum worker registers it dynamically via MaybeStartCatalogExportWorker
- * when it discovers that the database has object-store-catalog tables, so
- * databases without such tables never pay the cost of a second worker.
- *
- * Once running, it owns the entire catalog-export lifecycle: relcache
- * invalidation tracking (InitObjectStoreCatalog), Azure legacy blob cleanup
- * (RemoveLegacyAzureObjectStoreCatalog), and the tight export loop.  The
- * autovacuum worker does none of these.
+ * pg_lake_catalog_export_worker exports the object store catalog independently
+ * of the autovacuum worker. It is registered by the 3.6 upgrade script, but
+ * returns a restart delay instead of occupying a worker slot while disabled.
  */
 Datum
 pg_lake_catalog_export_worker(PG_FUNCTION_ARGS)
 {
 	if (!EnableObjectStoreCatalog)
-	{
-		ereport(LOG,
-				(errmsg("catalog export worker: object store catalog is "
-						"disabled, exiting")));
-		PG_RETURN_INT32(60000);
-	}
+		PG_RETURN_INT32(CATALOG_EXPORT_DISABLED_RESTART_MS);
 
 	pgstat_report_appname("pg_lake catalog export");
 	set_ps_display(psprintf("(pg_lake catalog export for database %d)",
@@ -268,6 +244,9 @@ pg_lake_catalog_export_worker(PG_FUNCTION_ARGS)
 
 	while (true)
 	{
+		if (!EnableObjectStoreCatalog)
+			PG_RETURN_INT32(CATALOG_EXPORT_DISABLED_RESTART_MS);
+
 		START_TRANSACTION();
 		{
 			ExportIcebergCatalogIfNeeded();
@@ -282,68 +261,7 @@ pg_lake_catalog_export_worker(PG_FUNCTION_ARGS)
 
 
 /*
- * MaybeStartCatalogExportWorker dynamically registers the catalog export
- * worker when the object-store catalog is enabled.
- *
- * Called on every autovacuum loop iteration.  A static flag makes the
- * function a no-op once the worker has been registered.  On autovacuum
- * restart (crash, postmaster cycle), the flag is lost but the worker may
- * already be registered; we check the workers table first to avoid a
- * duplicate-key error.
- */
-static void
-MaybeStartCatalogExportWorker(void)
-{
-	static bool catalogExportWorkerStarted = false;
-	bool		alreadyRegistered = false;
-
-	if (catalogExportWorkerStarted || !EnableObjectStoreCatalog)
-		return;
-
-	START_TRANSACTION();
-	{
-		SPI_connect();
-		SPI_execute("SELECT 1 FROM extension_base.workers "
-					"WHERE worker_name = 'pg_lake catalog export worker'",
-					true, 1);
-		alreadyRegistered = SPI_processed > 0;
-		SPI_finish();
-	}
-	END_TRANSACTION_NO_THROW(WARNING);
-
-	if (alreadyRegistered)
-	{
-		catalogExportWorkerStarted = true;
-		return;
-	}
-
-	START_TRANSACTION();
-	{
-		Oid			argTypes[] = {INTERNALOID};
-		List	   *funcName = list_make2(makeString(PG_LAKE_ICEBERG_SCHEMA),
-										  makeString("catalog_export"));
-		Oid			funcOid = LookupFuncName(funcName, 1, argTypes, true);
-
-		if (!OidIsValid(funcOid))
-		{
-			ereport(WARNING,
-					(errmsg("catalog export worker: function "
-							"lake_iceberg.catalog_export not found")));
-		}
-		else
-		{
-			RegisterBaseWorker("pg_lake catalog export worker",
-							   funcOid,
-							   ExtensionId(PgLakeIceberg));
-			catalogExportWorkerStarted = true;
-		}
-	}
-	END_TRANSACTION_NO_THROW(WARNING);
-}
-
-
-/*
-* ApplyAutovacuumLockTimeout bounds how long any lock wait in this worker can
+ * ApplyAutovacuumLockTimeout bounds how long any lock wait in this worker can
 * last, by setting lock_timeout from pg_lake_iceberg.autovacuum_lock_timeout.
 *
 * The advisory lock that CompactDataFiles and CompactMetadata take is held for
