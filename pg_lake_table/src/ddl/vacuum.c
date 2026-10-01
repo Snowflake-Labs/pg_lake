@@ -116,7 +116,8 @@ static List *GetPgLakePartitionIds(Oid relationId);
 static bool ProcessVacuumPgLakeIcebergFlag(VacuumStmt *vacuumStmt);
 static void VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose);
 static void VacuumCompactMetadata(Oid relationId, bool isVerbose);
-static void VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose);
+static bool VacuumRemoveDeletionQueueRecords(List *relationIdList, bool isFull,
+											 bool isVerbose);
 static void VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose);
 static void VacuumRegisterMissingFields(Oid relationId);
 static void PgLakeIcebergVacuumForRelation(Oid relationId, bool firstLoop);
@@ -125,6 +126,8 @@ static void VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbo
 									   bool isAutoVacuum);
 static void VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt);
 static void VacuumRemoveDroppedTableFiles(void);
+static void VacuumRemoveQueuedFilesForTables(List *relationIdList,
+											 MemoryContext outOfTransactionMemoryContext);
 static char *GetMetadataLocationPrefixForRelationId(Oid relationId);
 static void VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 
@@ -330,6 +333,10 @@ PgLakeIcebergVacuumForTables(MemoryContext outOfTransactionMemoryContext,
 		 */
 		CHECK_FOR_INTERRUPTS();
 	}
+
+	/* after the loop, so it also removes what the loop just queued */
+	VacuumRemoveQueuedFilesForTables(vacuumRelationIdList,
+									 outOfTransactionMemoryContext);
 }
 
 
@@ -356,6 +363,9 @@ PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
 	/* first, for the same reasons as in PgLakeIcebergVacuumForTables */
 	VacuumRemoveDroppedTableFiles();
 
+	VacuumRemoveQueuedFilesForTables(vacuumRelationIdList,
+									 outOfTransactionMemoryContext);
+
 	foreach_oid(relationId, vacuumRelationIdList)
 	{
 		if (!ActiveSnapshotSet())
@@ -379,7 +389,6 @@ PgLakeIcebergRemoveFilesForTables(MemoryContext outOfTransactionMemoryContext)
 			continue;
 		}
 
-		VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
 		VacuumRemoveInProgressFiles(relationId, isFull, isVerbose);
 
 		/*
@@ -801,7 +810,8 @@ GetPgLakePartitionIds(Oid relationId)
  * 1. Compact data files (only when isAutoVacuum is false, or when the
  *    autovacuum_compact_data_files table option is true; default true)
  * 2. Expire old snapshots & merge manifests
- * 3. Remove unreferenced files
+ * 3. Remove unreferenced files (autovacuum leaves the deletion queue to
+ *    VacuumRemoveQueuedFilesForTables)
  * 4. For pre-2.1 tables, register fields in field_id_mappings
  *
  * isAutoVacuum identifies whether the caller is the pg_lake autovacuum
@@ -821,7 +831,19 @@ VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
 		VacuumCompactDataFiles(relationId, isFull, isVerbose);
 
 	VacuumCompactMetadata(relationId, isVerbose);
-	VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
+
+	/* autovacuum removes the queued files of all its tables at once */
+	if (!isAutoVacuum)
+	{
+		/* PortalContext outlives the commits the drain makes */
+		MemoryContext oldContext = MemoryContextSwitchTo(PortalContext);
+		List	   *relationIdList = list_make1_oid(relationId);
+
+		MemoryContextSwitchTo(oldContext);
+
+		VacuumRemoveDeletionQueueRecords(relationIdList, isFull, isVerbose);
+	}
+
 	VacuumRemoveInProgressFiles(relationId, isFull, isVerbose);
 	VacuumRegisterMissingFields(relationId);
 }
@@ -1038,10 +1060,8 @@ VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt)
 	DefElem    *verboseOption = GetOption(vacuumStmt->options, "verbose");
 	bool		isVerbose = verboseOption != NULL ? defGetBoolean(verboseOption) : false;
 
-	Oid			relationId = InvalidOid;
-
-	VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
-	VacuumRemoveInProgressFiles(relationId, isFull, isVerbose);
+	VacuumRemoveDeletionQueueRecords(NIL, isFull, isVerbose);
+	VacuumRemoveInProgressFiles(InvalidOid, isFull, isVerbose);
 }
 
 
@@ -1061,11 +1081,67 @@ VacuumDroppedPgLakeIcebergTables(VacuumStmt *vacuumStmt)
 static void
 VacuumRemoveDroppedTableFiles(void)
 {
-	Oid			relationId = InvalidOid;
 	bool		isFull = false;
 	bool		isVerbose = false;
 
-	VacuumRemoveDeletionQueueRecords(relationId, isFull, isVerbose);
+	VacuumRemoveDeletionQueueRecords(NIL, isFull, isVerbose);
+}
+
+
+/*
+ * VacuumRemoveQueuedFilesForTables removes the queued files of the tables
+ * autovacuum covers. Draining them together lets one object-store request
+ * remove up to FILE_DELETION_BATCH_SIZE files of any of them, where a drain
+ * per table costs at least one request for every table with files queued.
+ *
+ * A failed removal cannot be traced back to a table, so after one each table
+ * is drained on its own, as before, and only the table that fails stops.
+ */
+static void
+VacuumRemoveQueuedFilesForTables(List *relationIdList,
+								 MemoryContext outOfTransactionMemoryContext)
+{
+	bool		isFull = false;
+	bool		isVerbose = false;
+	List	   *drainRelationIdList = NIL;
+
+	if (!ActiveSnapshotSet())
+		PushActiveSnapshot(GetTransactionSnapshot());
+
+	MemoryContext oldContext = MemoryContextSwitchTo(outOfTransactionMemoryContext);
+
+	foreach_oid(relationId, relationIdList)
+	{
+		/* a table dropped since is left to VacuumRemoveDroppedTableFiles */
+		if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(relationId)))
+			continue;
+
+		/* read-only tables do not own the files they read */
+		if (IsReadOnlyIcebergTable(relationId))
+			continue;
+
+		drainRelationIdList = lappend_oid(drainRelationIdList, relationId);
+	}
+
+	MemoryContextSwitchTo(oldContext);
+
+	if (drainRelationIdList == NIL)
+		return;
+
+	if (!VacuumRemoveDeletionQueueRecords(drainRelationIdList, isFull, isVerbose))
+		return;
+
+	foreach_oid(relationId, drainRelationIdList)
+	{
+		oldContext = MemoryContextSwitchTo(outOfTransactionMemoryContext);
+		List	   *tableRelationIdList = list_make1_oid(relationId);
+
+		MemoryContextSwitchTo(oldContext);
+
+		VacuumRemoveDeletionQueueRecords(tableRelationIdList, isFull, isVerbose);
+
+		CHECK_FOR_INTERRUPTS();
+	}
 }
 
 
@@ -1074,9 +1150,14 @@ VacuumRemoveDroppedTableFiles(void)
 * or until there are no more files to remove.
 *
 * When isFull is true, we remove all cleanup records.
+*
+* The queued files of all tables in relationIdList are removed together, and
+* NIL means the tables that were dropped. The list is read on every pass, so
+* it has to outlive the transactions this commits. Returns whether a pass
+* failed to remove a file or raised an error.
 */
-static void
-VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
+static bool
+VacuumRemoveDeletionQueueRecords(List *relationIdList, bool isFull, bool isVerbose)
 {
 	/*
 	 * Files this VACUUM removed, and what it has spent of its per-vacuum
@@ -1087,6 +1168,7 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 	 */
 	volatile int totalFilesRemoved = 0;
 	volatile int budgetSpent = 0;
+	volatile bool removalFailed = false;
 
 	volatile bool hasRemainingFiles = true;
 	MemoryContext savedContext = CurrentMemoryContext;
@@ -1118,7 +1200,7 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 			int			remainingBudget = MaxFileRemovalsPerVacuum - budgetSpent;
 
 			/* do cleanup */
-			deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull,
+			deletionQueueRecords = GetDeletionQueueRecords(relationIdList, isFull,
 														   remainingBudget);
 
 			int			filesRemoved = 0;
@@ -1142,6 +1224,10 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 			budgetSpent += (filesRemoved > 0) ? filesRemoved : (madeProgress ? 1 : 0);
 
 			hasRemainingFiles = madeProgress;
+
+			/* rows were claimed, so no progress means a removal failed */
+			if (deletionQueueRecords != NIL && !madeProgress)
+				removalFailed = true;
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -1167,6 +1253,7 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 
 			/* do not continue in case of failure */
 			hasRemainingFiles = false;
+			removalFailed = true;
 		}
 		PG_END_TRY();
 
@@ -1186,15 +1273,22 @@ VacuumRemoveDeletionQueueRecords(Oid relationId, bool isFull, bool isVerbose)
 
 	if (totalFilesRemoved > 0)
 	{
-		if (relationId != InvalidOid)
-			ereport(LOG,
-					(errmsg("pg_lake: expired %d files from iceberg table %s",
-							totalFilesRemoved, GetQualifiedRelationName(relationId))));
-		else
+		if (relationIdList == NIL)
 			ereport(LOG,
 					(errmsg("pg_lake: expired %d files from dropped iceberg tables",
 							totalFilesRemoved)));
+		else if (list_length(relationIdList) == 1)
+			ereport(LOG,
+					(errmsg("pg_lake: expired %d files from iceberg table %s",
+							totalFilesRemoved,
+							GetQualifiedRelationName(linitial_oid(relationIdList)))));
+		else
+			ereport(LOG,
+					(errmsg("pg_lake: expired %d files from iceberg tables",
+							totalFilesRemoved)));
 	}
+
+	return removalFailed;
 }
 
 /*

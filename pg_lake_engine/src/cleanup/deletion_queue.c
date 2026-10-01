@@ -94,7 +94,8 @@ flush_deletion_queue(PG_FUNCTION_ARGS)
 	/* remove all */
 	bool		isFull = true;
 	bool		isVerbose = false;
-	List	   *deletionQueueRecords = GetDeletionQueueRecords(relationId, isFull,
+	List	   *relationIdList = OidIsValid(relationId) ? list_make1_oid(relationId) : NIL;
+	List	   *deletionQueueRecords = GetDeletionQueueRecords(relationIdList, isFull,
 															   PER_LOOP_FILE_CLEANUP_LIMIT);
 
 	/* removes everything it can, so there is no budget to report back on */
@@ -455,6 +456,11 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
  * GetDeletionQueueRecords gets a list of paths that are eligible for
  * deletion, meaning delete_after condition is met on DELETION_QUEUE_TABLE.
  *
+ * It claims the rows of all tables in relationIdList together, so that the
+ * caller removes them in shared batches rather than with at least one
+ * request per table. With relationIdList NIL it claims the rows of tables
+ * that no longer exist.
+ *
  * Unless isFull is set, at most maxRecords rows are claimed, capped at
  * PER_LOOP_FILE_CLEANUP_LIMIT so that one pass cannot hold a transaction open
  * for an unbounded amount of work no matter what the caller asks for. Callers
@@ -474,7 +480,7 @@ IncrementDeletionQueueRetryCount(List *failedRemovalPaths)
  * asking to try everything now.
  */
 List *
-GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
+GetDeletionQueueRecords(List *relationIdList, bool isFull, int maxRecords)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 	List	   *result = NIL;
@@ -484,14 +490,14 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 	appendStringInfo(query,
 					 "WITH del AS (");
 
-	if (OidIsValid(relationId))
+	if (relationIdList != NIL)
 	{
 		appendStringInfo(query,
 						 "    SELECT ctid, path, orphaned_at, retry_count, is_prefix, resolve_metadata "
 						 "    FROM " DELETION_QUEUE_TABLE " "
 						 "    WHERE (orphaned_at IS NULL or pg_catalog.now() OPERATOR(pg_catalog.>=) (orphaned_at OPERATOR(pg_catalog.+) INTERVAL '%d seconds')) AND "
-						 "		  table_name OPERATOR(pg_catalog.=) %d AND retry_count OPERATOR(pg_catalog.<=) %d ",
-						 OrphanedFileRetentionPeriod, relationId, VacuumFileRemoveMaxRetries);
+						 "		  table_name::pg_catalog.oid OPERATOR(pg_catalog.=) ANY($1) AND retry_count OPERATOR(pg_catalog.<=) %d ",
+						 OrphanedFileRetentionPeriod, VacuumFileRemoveMaxRetries);
 
 		if (!isFull)
 			appendStringInfo(query,
@@ -540,12 +546,24 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 					 ") "
 					 "SELECT path, orphaned_at, retry_count, is_prefix, resolve_metadata FROM del");
 
+	/* $1 is only referenced by the claim for given tables */
+	Oid			argTypes[1] = {OIDARRAYOID};
+	Datum		argValues[1] = {0};
+	int			argCount = 0;
+
+	if (relationIdList != NIL)
+	{
+		argValues[0] = PointerGetDatum(OidListToArray(relationIdList));
+		argCount = 1;
+	}
+
 	/* switch to schema owner, we assume callers checked permissions */
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
-	SPI_execute(query->data, readOnly, 0);
+	SPI_execute_with_args(query->data, argCount, argTypes, argValues, NULL,
+						  readOnly, 0);
 
 	for (int rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
 	{

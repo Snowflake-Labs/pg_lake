@@ -491,3 +491,274 @@ def test_autovacuum_drains_a_backlog_without_napping(
                 "SELECT pg_reload_conf()",
             ]
         )
+
+
+def _create_tables(superuser_conn, tables):
+    for table in tables:
+        run_command(
+            f"CREATE TABLE {table} (id int) USING pg_lake_iceberg "
+            f"WITH (location = 's3://{TEST_BUCKET}/{TEST_PREFIX}/{table}/')",
+            superuser_conn,
+        )
+    superuser_conn.commit()
+
+
+def _drop_tables(superuser_conn, tables):
+    for table in tables:
+        run_command(f"DROP TABLE IF EXISTS {table}", superuser_conn)
+    superuser_conn.commit()
+
+
+def _queue_rows(superuser_conn, rows):
+    """Queue (path, table) rows in one transaction, so a vacuum pass sees all
+    of them or none of them.
+
+    Each row may also carry the orphaned_at, retry_count and last_attempt_at
+    expressions to queue it with, for rows that should not be eligible yet.
+    """
+    values = []
+
+    for row in rows:
+        path, table = row[0], row[1]
+        orphaned_at, retry_count, last_attempt_at = (
+            row[2:] if len(row) > 2 else ("NULL", "0", "NULL")
+        )
+        values.append(
+            f"('{path}', '{table}'::pg_catalog.regclass, {orphaned_at}, "
+            f"{retry_count}, {last_attempt_at}, false, false)"
+        )
+
+    run_command(
+        "INSERT INTO lake_engine.deletion_queue "
+        "(path, table_name, orphaned_at, retry_count, last_attempt_at, "
+        "is_prefix, resolve_metadata) VALUES " + ",".join(values),
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
+def _wait_until_gone(superuser_conn, prefix, deadline_seconds=60):
+    """Wait for the autovacuum worker to drain every row under prefix, and
+    return how many are left when it did not."""
+    remaining = None
+    deadline = time.monotonic() + deadline_seconds
+
+    while time.monotonic() < deadline:
+        remaining = len(_queued_rows(superuser_conn, prefix))
+        superuser_conn.commit()
+
+        if remaining == 0:
+            break
+
+        time.sleep(0.5)
+
+    return remaining
+
+
+class _DeleteRequests:
+    """Records the batch delete requests moto receives for keys under a
+    prefix. Moto runs in the test process, so wrapping its backend sees every
+    request pgduck_server sends."""
+
+    def __init__(self, monkeypatch, key_prefix):
+        from moto.s3.models import S3Backend
+
+        self.batches = []
+
+        original_delete_objects = S3Backend.delete_objects
+
+        def delete_objects(backend, bucket_name, objects, *args, **kwargs):
+            keys = [obj["Key"] for obj in objects if obj["Key"].startswith(key_prefix)]
+
+            if keys:
+                self.batches.append(keys)
+
+            return original_delete_objects(
+                backend, bucket_name, objects, *args, **kwargs
+            )
+
+        monkeypatch.setattr(S3Backend, "delete_objects", delete_objects)
+
+
+def test_autovacuum_batches_deletes_across_tables(
+    s3, superuser_conn, extension, installcheck, monkeypatch
+):
+    """Autovacuum removes the queued files of many tables in one request.
+
+    Draining one table at a time costs a request per table with files queued,
+    however few it has, so a database with many tables that each queue a few
+    files per cycle spends most of its drain on fixed per-request cost. The
+    tables here queue a handful of files each, so all of them fit one
+    FILE_DELETION_BATCH_SIZE (1000) batch.
+    """
+    if installcheck:
+        return
+
+    table_count = 8
+    files_per_table = 5
+    key_prefix = f"{TEST_PREFIX}/across"
+    prefix = f"s3://{TEST_BUCKET}/{key_prefix}"
+    tables = [f"test_deletion_queue_across_{i}" for i in range(table_count)]
+
+    rows = []
+
+    for table in tables:
+        for i in range(files_per_table):
+            path = f"{prefix}/{table}/f{i}.parquet"
+            bucket, key = parse_s3_path(path)
+            s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+            rows.append((path, table))
+
+    requests = _DeleteRequests(monkeypatch, key_prefix)
+
+    try:
+        _create_tables(superuser_conn, tables)
+        _queue_rows(superuser_conn, rows)
+
+        remaining = _wait_until_gone(superuser_conn, prefix)
+
+        assert remaining == 0, f"{remaining} of {len(rows)} rows still queued"
+        assert _existing_files(superuser_conn, prefix) == 0
+        superuser_conn.commit()
+
+        # every file went in the same request, so none was deleted on its own
+        removed = sorted(key for batch in requests.batches for key in batch)
+
+        assert removed == sorted(parse_s3_path(row[0])[1] for row in rows)
+        assert len(requests.batches) == 1, (
+            f"{len(requests.batches)} delete requests for {len(rows)} files "
+            f"across {table_count} tables, expected 1"
+        )
+    finally:
+        _drop_tables(superuser_conn, tables)
+
+
+def test_autovacuum_drain_keeps_eligibility_conditions(
+    s3, superuser_conn, extension, installcheck
+):
+    """Draining across tables still leaves alone the rows it should.
+
+    Rows still inside orphaned_file_retention_period, rows past
+    vacuum_file_remove_max_retries and rows that failed within
+    vacuum_file_remove_retry_interval stay queued, as do rows of a read-only
+    table. The one eligible row is there to show that a drain ran.
+    """
+    if installcheck:
+        return
+
+    table = "test_deletion_queue_conditions"
+    read_only_table = "test_deletion_queue_conditions_ro"
+    prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/conditions"
+
+    eligible = f"{prefix}/eligible.parquet"
+    kept = {
+        # the test server runs with no retention period, see below
+        f"{prefix}/retained.parquet": (table, "pg_catalog.now()", "0", "NULL"),
+        f"{prefix}/retired.parquet": (table, "NULL", "100000", "NULL"),
+        # the default retry interval is 10 minutes
+        f"{prefix}/backing_off.parquet": (table, "NULL", "1", "pg_catalog.now()"),
+        f"{prefix}/read_only.parquet": (read_only_table, "NULL", "0", "NULL"),
+    }
+
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_engine.orphaned_file_retention_period TO 3600",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+    try:
+        _create_tables(superuser_conn, [table, read_only_table])
+
+        run_command(
+            f"UPDATE lake_iceberg.tables_internal SET read_only = 't' "
+            f"WHERE table_name = '{read_only_table}'::regclass",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        _queue_rows(
+            superuser_conn,
+            [(eligible, table)] + [(path,) + spec for path, spec in kept.items()],
+        )
+
+        assert _wait_until_gone(superuser_conn, eligible) == 0
+
+        remaining = _queued_rows(superuser_conn, prefix)
+        superuser_conn.commit()
+
+        assert sorted(row[0] for row in remaining) == sorted(kept)
+
+        # nothing was attempted, so nothing was charged
+        retry_counts = {row[0]: row[1] for row in remaining}
+
+        assert retry_counts == {path: int(spec[2]) for path, spec in kept.items()}
+    finally:
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_engine.orphaned_file_retention_period",
+                "SELECT pg_reload_conf()",
+            ]
+        )
+        run_command(
+            f"UPDATE lake_iceberg.tables_internal SET read_only = 'f' "
+            f"WHERE table_name = '{read_only_table}'::regclass",
+            superuser_conn,
+        )
+        run_command(
+            f"DELETE FROM lake_engine.deletion_queue WHERE path LIKE '{prefix}%'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        _drop_tables(superuser_conn, [table, read_only_table])
+
+
+def test_autovacuum_failure_on_one_table_spares_the_others(
+    s3, superuser_conn, extension, installcheck
+):
+    """A path one table cannot remove does not hold up the other tables.
+
+    The walk stops at the first path it cannot remove, and that path shares a
+    batch with other tables' files. Those files are left unattempted rather than
+    charged, and after the failure every table is drained on its own, so they
+    are removed in the same cycle as they would be if every table drained alone.
+    """
+    if installcheck:
+        return
+
+    failing_table = "test_deletion_queue_failing"
+    healthy_table = "test_deletion_queue_healthy"
+    prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/failing"
+    bad_path = f"nosuchfs://{TEST_PREFIX}/failing/f.parquet"
+    good_paths = [f"{prefix}/f{i}.parquet" for i in range(4)]
+
+    for path in good_paths:
+        bucket, key = parse_s3_path(path)
+        s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+
+    try:
+        _create_tables(superuser_conn, [failing_table, healthy_table])
+
+        # the failing row is queued first, so it is the first path of the batch
+        _queue_rows(
+            superuser_conn,
+            [(bad_path, failing_table)]
+            + [(path, healthy_table) for path in good_paths],
+        )
+
+        assert _wait_until_gone(superuser_conn, prefix) == 0
+        assert _existing_files(superuser_conn, prefix) == 0
+        superuser_conn.commit()
+
+        failing_rows = _queued_rows(superuser_conn, bad_path)
+        superuser_conn.commit()
+
+        # retried on the retry interval (10 minutes by default), so charged once
+        assert [row[1] for row in failing_rows] == [1]
+    finally:
+        run_command(
+            f"DELETE FROM lake_engine.deletion_queue WHERE path = '{bad_path}'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        _drop_tables(superuser_conn, [failing_table, healthy_table])
