@@ -26,3 +26,14 @@ BEGIN
   );
 END;
 $$ LANGUAGE plpgsql STABLE;
+
+
+-- Export the object store catalog independently of autovacuum. The worker
+-- restarts after a delay while export is disabled, so it only occupies a
+-- process slot when the catalog is enabled.
+CREATE FUNCTION lake_iceberg.catalog_export(internal)
+RETURNS internal
+AS 'MODULE_PATHNAME', 'pg_lake_catalog_export_worker'
+LANGUAGE C STRICT;
+
+SELECT extension_base.register_worker('pg_lake catalog export worker', 'lake_iceberg.catalog_export');

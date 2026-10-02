@@ -75,17 +75,11 @@ int			MaxCompactionsPerVacuum = 100;
 
 /* case insensitive */
 #define PG_LAKE_ICEBERG_VACUUM_FLAG "iceberg"
+#define CATALOG_EXPORT_DISABLED_RESTART_MS 60000
 
 /*
  * Managed by a GUC, not exposed to the user, see note in
  * VacuumRemoveInProgressFiles.
- *
- * It also bounds how long the removal stages can run before the autovacuum loop
- * comes back around to the object store catalog export, which is serialized
- * behind them (see pg_lake_iceberg_vacuum). Removals are batched, so a budget
- * this size is a few requests worth of work when the object store is healthy;
- * when a batch fails it is retried a path at a time, and then the budget is what
- * keeps the retries from holding up the export for hours.
  */
 int			MaxFileRemovalsPerVacuum = 10000;
 
@@ -101,6 +95,7 @@ static bool VacuumStoppedWithFilesQueued = false;
 
 
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_vacuum);
+PG_FUNCTION_INFO_V1(pg_lake_catalog_export_worker);
 
 
 static void VacuumRegisterMissingFieldsForAllTables(MemoryContext outOfTransactionMemoryContext);
@@ -133,7 +128,7 @@ static void VacuumConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 * pg_lake_iceberg_vacuum is a function that continuously vacuums all iceberg
 * tables on the server. This function powers auto-vacuum for iceberg tables via
 * base worker registered.
-*/
+ */
 Datum
 pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 {
@@ -168,22 +163,7 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 	}
 	END_TRANSACTION_NO_THROW(WARNING);
 
-	/* set up invalidation callbacks */
-	InitObjectStoreCatalog();
-
-	/*
-	 * 3.4 wrote Azure object store catalogs as append blobs, which the
-	 * current block-blob writer cannot overwrite. Drop one here so the first
-	 * export recreates it.
-	 */
-	START_TRANSACTION();
-	{
-		RemoveLegacyAzureObjectStoreCatalog();
-	}
-	END_TRANSACTION_NO_THROW(WARNING);
-
 	TimestampTz lastVacuumTime = GetCurrentTimestamp();
-	TimestampTz lastCatalogExportTime = GetCurrentTimestamp();
 
 	while (true)
 	{
@@ -231,19 +211,6 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 			END_TRANSACTION_NO_THROW(WARNING);
 		}
 
-		if (EnableObjectStoreCatalog &&
-			TimestampDifferenceExceeds(lastCatalogExportTime, currentTime, 1000))
-		{
-			/* initiate push at regular cadence */
-			lastCatalogExportTime = GetCurrentTimestamp();
-
-			START_TRANSACTION();
-			{
-				ExportIcebergCatalogIfNeeded();
-			}
-			END_TRANSACTION_NO_THROW(WARNING);
-		}
-
 		MemoryContextReset(outOfTransactionMemoryContext);
 
 		LightSleep(1000);
@@ -253,7 +220,48 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 
 
 /*
-* ApplyAutovacuumLockTimeout bounds how long any lock wait in this worker can
+ * pg_lake_catalog_export_worker exports the object store catalog independently
+ * of the autovacuum worker. It is registered by the 3.6 upgrade script, but
+ * returns a restart delay instead of occupying a worker slot while disabled.
+ */
+Datum
+pg_lake_catalog_export_worker(PG_FUNCTION_ARGS)
+{
+	if (!EnableObjectStoreCatalog)
+		PG_RETURN_INT32(CATALOG_EXPORT_DISABLED_RESTART_MS);
+
+	pgstat_report_appname("pg_lake catalog export");
+	set_ps_display(psprintf("(pg_lake catalog export for database %d)",
+							MyDatabaseId));
+
+	InitObjectStoreCatalog();
+
+	START_TRANSACTION();
+	{
+		RemoveLegacyAzureObjectStoreCatalog();
+	}
+	END_TRANSACTION_NO_THROW(WARNING);
+
+	while (true)
+	{
+		if (!EnableObjectStoreCatalog)
+			PG_RETURN_INT32(CATALOG_EXPORT_DISABLED_RESTART_MS);
+
+		START_TRANSACTION();
+		{
+			ExportIcebergCatalogIfNeeded();
+		}
+		END_TRANSACTION_NO_THROW(WARNING);
+
+		LightSleep(1000);
+	}
+
+	PG_RETURN_INT32(0);
+}
+
+
+/*
+ * ApplyAutovacuumLockTimeout bounds how long any lock wait in this worker can
 * last, by setting lock_timeout from pg_lake_iceberg.autovacuum_lock_timeout.
 *
 * The advisory lock that CompactDataFiles and CompactMetadata take is held for
