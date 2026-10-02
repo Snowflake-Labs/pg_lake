@@ -1,0 +1,130 @@
+diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
+index f342821..83383c5 100644
+--- a/src/azure_blob_filesystem.cpp
++++ b/src/azure_blob_filesystem.cpp
+@@ -18,8 +18,11 @@
+ #include <azure/core/io/body_stream.hpp>
+ #include <azure/storage/blobs.hpp>
+ #include <azure/storage/blobs/blob_options.hpp>
++#include <azure/storage/blobs/blob_batch.hpp>
+ 
+ #include <cstdlib>
++#include <map>
++#include <vector>
+ 
+ namespace duckdb {
+ 
+@@ -416,6 +419,93 @@ bool AzureBlobStorageFileSystem::TryRemoveFile(const string &filename, optional_
+ 	return blob_client.DeleteIfExists().Value.Deleted;
+ }
+ 
++/*
++ * Azure Blob Storage limits a batch request to 256 subrequests.
++ */
++static constexpr idx_t AZURE_BATCH_DELETE_MAX_KEYS = 256;
++
++/*
++ * RemoveFiles deletes many blobs using the Azure Blob Batch API, sending up to
++ * AZURE_BATCH_DELETE_MAX_KEYS delete subrequests per SubmitBatch call instead
++ * of one HTTP request per blob. All paths must be azure:// or az:// URLs.
++ *
++ * Errors on individual blobs are checked via the DeferredResponse from
++ * each subrequest. BlobNotFound (404) is tolerated -- a blob that is already
++ * gone is not an error. Any other failure throws right away, leaving the
++ * remaining batches and containers unattempted, as the S3 path does: the
++ * pg_lake retries a failed request one path at a time.
++ */
++void AzureBlobStorageFileSystem::RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener) {
++	if (paths.empty()) {
++		return;
++	}
++
++	/*
++	 * Group paths by container, because SubmitBatch targets one container at a
++	 * time (BlobContainerBatch is scoped to its BlobContainerClient).
++	 */
++	std::map<string, vector<AzureParsedUrl>> paths_by_container;
++
++	for (const string &path : paths) {
++		auto parsed = ParseUrl(path);
++		paths_by_container[parsed.container].push_back(std::move(parsed));
++	}
++
++	for (auto &entry : paths_by_container) {
++		const string &container_name = entry.first;
++		vector<AzureParsedUrl> &container_paths = entry.second;
++
++		/*
++		 * Get a storage context from the first path in this container. All paths
++		 * in the same container share the same account and credentials.
++		 */
++		string first_path_url = (container_paths[0].prefix.empty() ? PATH_PREFIX : container_paths[0].prefix) +
++		                        container_name + "/" + container_paths[0].path;
++		auto storage_context = GetOrCreateStorageContext(opener, first_path_url,
++		                                                 container_paths[0]);
++		auto container_client =
++		    storage_context->As<AzureBlobContextState>().GetBlobContainerClient(container_name);
++
++		for (idx_t begin = 0; begin < container_paths.size();
++		     begin += AZURE_BATCH_DELETE_MAX_KEYS) {
++			idx_t end = std::min<idx_t>(begin + AZURE_BATCH_DELETE_MAX_KEYS,
++			                            container_paths.size());
++
++			auto batch = container_client.CreateBatch();
++			vector<Azure::Storage::DeferredResponse<Azure::Storage::Blobs::Models::DeleteBlobResult>>
++			    deferred_responses;
++			deferred_responses.reserve(end - begin);
++
++			for (idx_t i = begin; i < end; i++) {
++				deferred_responses.push_back(batch.DeleteBlob(container_paths[i].path));
++			}
++
++			try {
++				container_client.SubmitBatch(batch);
++			} catch (const Azure::Storage::StorageException &e) {
++				throw IOException(
++				    "AzureBlobStorageFileSystem batch delete in container '%s' "
++				    "failed with %s Reason Phrase: %s",
++				    container_name, e.ErrorCode, e.ReasonPhrase);
++			}
++
++			for (idx_t i = 0; i < deferred_responses.size(); i++) {
++				try {
++					deferred_responses[i].GetResponse();
++				} catch (const Azure::Storage::StorageException &e) {
++					if (e.StatusCode == Azure::Core::Http::HttpStatusCode::NotFound) {
++						continue;
++					}
++					throw IOException(
++					    "AzureBlobStorageFileSystem batch delete of '%s' "
++					    "failed with %s Reason Phrase: %s",
++					    container_paths[begin + i].path, e.ErrorCode, e.ReasonPhrase);
++				}
++			}
++		}
++	}
++}
++
+ void AzureBlobStorageFileSystem::ReadRange(AzureFileHandle &handle, idx_t file_offset, char *buffer_out,
+                                            idx_t buffer_out_len) {
+ 	auto &afh = handle.Cast<AzureBlobStorageFileHandle>();
+diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
+index 088a65f..4d17cc5 100644
+--- a/src/include/azure_blob_filesystem.hpp
++++ b/src/include/azure_blob_filesystem.hpp
+@@ -10,6 +10,7 @@
+ #include <azure/storage/blobs/blob_service_client.hpp>
+ #include <azure/storage/blobs/block_blob_client.hpp>
+ #include <string>
++#include <vector>
+ 
+ namespace duckdb {
+ 
+@@ -73,6 +74,7 @@ public:
+ 
+ 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener) override;
+ 	virtual bool TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener) override;
++  void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener);
+ 
+ public:
+ 	static const string SCHEME;

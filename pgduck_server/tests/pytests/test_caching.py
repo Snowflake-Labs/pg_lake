@@ -1656,6 +1656,40 @@ def test_pg_lake_remove_file_azure_missing_blob(azure, pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_pg_lake_remove_file_azure_batch_after_idle(azure, pgduck_conn):
+    """A batch delete sent over a pooled connection the server has closed
+    completes promptly.
+
+    Azurite drops idle connections after 5 seconds. The curl transport then
+    retries the request on a new connection, and without rewinding the body it
+    sent an empty batch and waited 60 seconds for an answer.
+    """
+    prefix = "test_remove_file_azure_batch_after_idle"
+    urls = [f"az://{TEST_BUCKET}/{prefix}/data_{index}.csv" for index in range(3)]
+
+    for url in urls:
+        run_command(f"COPY (SELECT 1) TO '{url}';", pgduck_conn)
+
+    time.sleep(7)
+
+    # a blob that is already gone is tolerated within a batch
+    values = ", ".join(
+        f"('{url}')" for url in urls + [f"az://{TEST_BUCKET}/{prefix}/missing.csv"]
+    )
+
+    start_time = time.monotonic()
+    run_command(
+        f"SELECT pg_lake_remove_file(file) FROM (VALUES {values}) AS batch(file);",
+        pgduck_conn,
+    )
+    elapsed = time.monotonic() - start_time
+
+    assert elapsed < 30
+    assert not any(azure.list_blobs(name_starts_with=prefix))
+
+    pgduck_conn.rollback()
+
+
 # Test that query arguments are included in the path
 def test_http_query_args(s3, pgduck_conn):
     key = "test_http_query_args/data.parquet"
