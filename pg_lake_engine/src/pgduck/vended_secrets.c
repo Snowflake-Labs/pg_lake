@@ -18,8 +18,8 @@
 /*
  * vended_secrets.c
  *
- * Manages DuckDB scoped secrets for vended S3 credentials from
- * Iceberg REST catalogs.  Secrets are pushed to pgduck_server via
+ * Manages DuckDB scoped secrets for vended credentials from Iceberg
+ * REST catalogs.  Secrets are pushed to pgduck_server via
  * CREATE OR REPLACE SECRET with a URL-scoped SCOPE, so DuckDB's
  * secret manager automatically selects the most specific match.
  */
@@ -250,6 +250,8 @@ BuildCreateS3SecretSQL(const char *secretName,
 {
 	StringInfoData sql;
 
+	Assert(secret->accessKeyId != NULL && secret->secretAccessKey != NULL);
+
 	initStringInfo(&sql);
 
 	char	   *escapedKeyId = EscapeSingleQuotes(secret->accessKeyId);
@@ -352,6 +354,97 @@ PushNamedS3Secret(PGDuckConnection * conn,
 
 
 /*
+ * AppendConnectionStringField adds "<field>=<value>" to an Azure
+ * connection string, skipping a NULL value.
+ *
+ * The value comes from the catalog, and the Azure SDK splits a
+ * connection string at ';', so a value containing one would add a field
+ * of its own -- a BlobEndpoint of its choosing, say, which would send
+ * the SAS token to that host.  Refuse it rather than escape it: the SDK
+ * has no escape for ';'.  The value itself stays out of the error, since
+ * it may be the token.
+ */
+static void
+AppendConnectionStringField(StringInfo connectionString, const char *field,
+							const char *value)
+{
+	if (value == NULL)
+		return;
+
+	if (strchr(value, ';') != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("vended Azure credential has a %s containing \";\"",
+						field)));
+
+	appendStringInfo(connectionString, "%s%s=%s",
+					 connectionString->len > 0 ? ";" : "", field, value);
+}
+
+
+/*
+ * BuildCreateAzureSecretSQL constructs the DuckDB SQL statement for
+ * creating or replacing a vended Azure secret.  DuckDB's Azure secret
+ * has no SAS parameter, but passes CONNECTION_STRING to the Azure SDK,
+ * which accepts SharedAccessSignature there.  AccountName is required
+ * whenever a URL names its account, since DuckDB checks the two agree.
+ */
+static char *
+BuildCreateAzureSecretSQL(const char *secretName, const VendedSecret * secret)
+{
+	StringInfoData connectionString;
+	StringInfoData sql;
+
+	Assert(secret->accountName != NULL && secret->sasToken != NULL);
+
+	initStringInfo(&connectionString);
+	AppendConnectionStringField(&connectionString, "AccountName",
+								secret->accountName);
+	AppendConnectionStringField(&connectionString, "BlobEndpoint",
+								secret->blobEndpoint);
+	AppendConnectionStringField(&connectionString, "DfsEndpoint",
+								secret->dfsEndpoint);
+	AppendConnectionStringField(&connectionString, "SharedAccessSignature",
+								secret->sasToken);
+
+	initStringInfo(&sql);
+	appendStringInfo(&sql, "CREATE OR REPLACE SECRET \"%s\" (TYPE AZURE",
+					 secretName);
+	AppendSecretSetting(&sql, "CONNECTION_STRING", connectionString.data);
+
+	if (secret->scope != NULL)
+		AppendSecretSetting(&sql, "SCOPE", secret->scope);
+
+	appendStringInfoChar(&sql, ')');
+
+	pfree(connectionString.data);
+
+	return sql.data;
+}
+
+
+/*
+ * PushNamedAzureSecret creates the vended Azure secret under the given
+ * name.  Unlike an S3 secret it inherits nothing from the secret already
+ * covering the scope, since DuckDB redacts an Azure secret's connection
+ * string.
+ */
+static void
+PushNamedAzureSecret(PGDuckConnection * conn,
+					 const char *secretName,
+					 const VendedSecret * secret)
+{
+	char	   *sql = BuildCreateAzureSecretSQL(secretName, secret);
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, sql);
+
+	CheckPGDuckResult(conn, result);
+	PQclear(result);
+
+	pfree(sql);
+}
+
+
+/*
  * The vended secret in pgduck_server is a temporary (in-memory) secret:
  * process-wide, shared across connections, and lost only when
  * pgduck_server restarts.  The storage-credential resolver tracks which
@@ -373,7 +466,10 @@ PushVendedSecretToPGDuck(PGDuckConnection * conn,
 
 	elog(DEBUG2, "pushing vended secret \"%s\" to pgduck_server", secretName);
 
-	PushNamedS3Secret(conn, secretName, secret);
+	if (secret->provider == VENDED_STORAGE_AZURE)
+		PushNamedAzureSecret(conn, secretName, secret);
+	else
+		PushNamedS3Secret(conn, secretName, secret);
 
 	pfree(secretName);
 }

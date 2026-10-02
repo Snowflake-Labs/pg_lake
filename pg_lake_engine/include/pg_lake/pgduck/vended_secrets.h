@@ -22,24 +22,42 @@
 #include "pg_lake/pgduck/client.h"
 
 /*
- * VendedSecret describes one scoped S3 secret to (re)create in
+ * The storage a vended credential is for.  S3 is zero so that a
+ * credential built without saying keeps meaning what it always has.
+ */
+typedef enum VendedStorageProvider
+{
+	VENDED_STORAGE_S3 = 0,
+	VENDED_STORAGE_AZURE
+}			VendedStorageProvider;
+
+/*
+ * VendedSecret describes one scoped secret to (re)create in
  * pgduck_server.  The credential fields are supplied by the caller
- * (ultimately from the REST catalog loadTable response).
+ * (ultimately from the REST catalog loadTable response), and only the
+ * ones belonging to provider are read.
  *
- * endpoint / urlStyle / useSsl carry the catalog-provided S3 connection
- * settings.  Each of them, left NULL, is filled in on its own from the
- * pre-existing (non-vended) S3 secret that covers the same bucket, so
- * vended secrets keep working against local S3 mocks (Moto/MinIO) and
- * custom endpoints even when the catalog states only part of the
- * connection.  Catalog-provided values always win over the inherited
- * fallback.
+ * For S3, endpoint / urlStyle / useSsl carry the catalog-provided
+ * connection settings.  Each of them, left NULL, is filled in on its own
+ * from the pre-existing (non-vended) S3 secret that covers the same
+ * bucket, so vended secrets keep working against local S3 mocks
+ * (Moto/MinIO) and custom endpoints even when the catalog states only
+ * part of the connection.  Catalog-provided values always win over the
+ * inherited fallback.
+ *
+ * For Azure, a SAS token for one storage account.  blobEndpoint /
+ * dfsEndpoint are used as the caller resolved them, and left NULL they
+ * default to the public cloud for accountName.
  */
 typedef struct VendedSecret
 {
+	VendedStorageProvider provider;
 	Oid			serverOid;		/* iceberg_catalog server OID */
 	const char *secretId;		/* identity the secret's name is derived from;
 								 * see GenerateVendedSecretName */
-	const char *scope;			/* normalized S3 scope (trailing '/') */
+	const char *scope;			/* normalized storage scope (trailing '/') */
+
+	/* S3 */
 	const char *accessKeyId;
 	const char *secretAccessKey;
 	const char *sessionToken;	/* NULL for non-STS credentials */
@@ -47,11 +65,17 @@ typedef struct VendedSecret
 	const char *endpoint;		/* NULL -> inherit from existing secret */
 	const char *urlStyle;		/* "path"/"vhost"; NULL -> inherit */
 	const char *useSsl;			/* "true"/"false"; NULL -> inherit */
+
+	/* Azure */
+	const char *accountName;
+	const char *sasToken;
+	const char *blobEndpoint;	/* NULL -> public cloud for accountName */
+	const char *dfsEndpoint;	/* NULL -> public cloud for accountName */
 }			VendedSecret;
 
 /*
  * PushVendedSecretToPGDuck creates or replaces a DuckDB scoped secret
- * for vended S3 credentials.  The call is mutating on purpose: it issues
+ * for vended credentials.  The call is mutating on purpose: it issues
  * CREATE OR REPLACE SECRET, so callers should treat this as a write, not
  * a getter.
  *
@@ -62,7 +86,7 @@ typedef struct VendedSecret
  * them instead of one each.
  *
  * The secret name is deterministic (see GenerateVendedSecretName).
- * Keeping the name independent of the S3 scope makes CREATE OR REPLACE
+ * Keeping the name independent of the scope makes CREATE OR REPLACE
  * idempotent as credentials rotate and lets the drop below reconstruct
  * the name without the credentials.  The secret's SCOPE is set to
  * secret->scope (what the credential is good for) so DuckDB's secret
