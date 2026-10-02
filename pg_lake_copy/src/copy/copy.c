@@ -638,7 +638,8 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	if (sourceFormat == DATA_FORMAT_ICEBERG)
 	{
 		/* read up-to date iceberg schema */
-		schema = GetDataFileSchemaForExternalIcebergTable(sourcePath);
+		schema = GetDataFileSchemaForExternalIcebergTable(sourcePath,
+														  HasLowercaseColumnNamesOption(copyStmt->options));
 	}
 
 	char	   *readQuery =
@@ -894,6 +895,13 @@ FindCopyFromWriteOptions(CopyDataFormat format, List *options)
 		{
 			/* custom option we use internally to allow JSON */
 			if (strcmp(option->defname, "maximum_object_size") == 0)
+				continue;
+		}
+
+		else if (format == DATA_FORMAT_ICEBERG)
+		{
+			/* applied to the source schema when reading */
+			if (strcmp(option->defname, LOWERCASE_COLUMN_NAMES_OPTION) == 0)
 				continue;
 		}
 

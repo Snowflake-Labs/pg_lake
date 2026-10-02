@@ -117,6 +117,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 	bool		foundLayer = false;
 
 	char	   *logFormat = NULL;
+	bool		lowercaseColumnNames = false;
 
 	CopyDataFormat copyDataFormat = DATA_FORMAT_INVALID;
 	CopyDataCompression copyDataCompression = DATA_COMPRESSION_INVALID;
@@ -335,6 +336,12 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 		{
 			foundFilename = true;
 		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, LOWERCASE_COLUMN_NAMES_OPTION) == 0)
+		{
+			/* only accept boolean */
+			lowercaseColumnNames = defGetBoolean(def);
+		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "maximum_object_size") == 0)
 		{
 			if (IsA(def->arg, Integer))
@@ -465,6 +472,13 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 							   "format")));
 	}
 
+	if (lowercaseColumnNames && copyDataFormat != DATA_FORMAT_ICEBERG)
+	{
+		ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("\"%s\" option is only supported for iceberg "
+							   "format", LOWERCASE_COLUMN_NAMES_OPTION)));
+	}
+
 	if (logFormat != NULL && copyDataFormat != DATA_FORMAT_LOG)
 	{
 		ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR),
@@ -526,6 +540,9 @@ InitPgLakeOptions(void)
 		/* log options */
 		{"log_format", ForeignTableRelationId},
 
+		/* iceberg options */
+		{LOWERCASE_COLUMN_NAMES_OPTION, ForeignTableRelationId},
+
 		{NULL, InvalidOid}
 	};
 
@@ -575,6 +592,7 @@ InitPgLakeIcebergOptions(void)
 		{"catalog_name", ForeignTableRelationId},
 		{"catalog_table_name", ForeignTableRelationId},
 		{"catalog_namespace", ForeignTableRelationId},
+		{LOWERCASE_COLUMN_NAMES_OPTION, ForeignTableRelationId},
 
 		/*
 		 * out-of-range value handling during writes: 'error' (default) or
@@ -673,6 +691,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	/* if not provided, assume postgres catalog */
 	IcebergCatalogType icebergCatalogType = POSTGRES_CATALOG;
 	bool		readOnlyExternalCatalogTable = false;
+	bool		lowercaseColumnNames = false;
 	char	   *catalogName = NULL;
 	char	   *catalogTableName = NULL;
 	char	   *catalogNamespace = NULL;
@@ -812,6 +831,12 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			/* only accept boolean */
 			readOnlyExternalCatalogTable = defGetBoolean(def);
 		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, LOWERCASE_COLUMN_NAMES_OPTION) == 0)
+		{
+			/* only accept boolean */
+			lowercaseColumnNames = defGetBoolean(def);
+		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "catalog_table_name") == 0)
 		{
 			catalogTableName = defGetString(def);
@@ -930,6 +955,17 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"read_only\" option is only valid for catalog=\"rest\" or catalog=\"object_store\"")));
+
+	/*
+	 * The names of a table pg_lake writes are its Postgres column names, so
+	 * there is nothing to fold.
+	 */
+	if (catalog == ForeignTableRelationId && lowercaseColumnNames &&
+		!(icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" option is only valid for read-only rest and object_store catalog tables",
+						LOWERCASE_COLUMN_NAMES_OPTION)));
 
 	if (catalog == ForeignTableRelationId)
 	{

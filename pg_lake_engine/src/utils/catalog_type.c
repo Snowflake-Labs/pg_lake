@@ -108,6 +108,36 @@ HasReadOnlyOption(List *options)
 
 
 /*
+ * HasLowercaseColumnNamesOption returns true if the options enable
+ * lowercase_column_names.
+ */
+bool
+HasLowercaseColumnNamesOption(List *options)
+{
+	return GetBoolOption(options, LOWERCASE_COLUMN_NAMES_OPTION, false);
+}
+
+
+/*
+ * LowercasesColumnNames returns true if the relation is a read-only catalog
+ * table or a metadata-path table whose external column and struct field names
+ * are folded to lowercase.
+ */
+bool
+LowercasesColumnNames(Oid relationId)
+{
+	if (!IsPgLakeIcebergForeignTableById(relationId) &&
+		!IsPgLakeForeignTableById(relationId))
+		return false;
+
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+
+	return HasLowercaseColumnNamesOption(foreignTable->options);
+}
+
+
+
+/*
  * IsCatalogOwnedByExtension returns true if the catalog name is one of
  * the reserved built-in names: 'rest', 'object_store', or 'postgres'.
  * Comparison is case-insensitive.

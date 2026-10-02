@@ -286,6 +286,10 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 
 		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(path);
 
+		/* fold names before the schema check, which looks them up as attnames */
+		if (LowercasesColumnNames(relationId))
+			LowercaseIcebergTableMetadataNames(metadata);
+
 		/*
 		 * We cannot afford to have a different schema between the Postgres
 		 * catalogs and the iceberg catalog.

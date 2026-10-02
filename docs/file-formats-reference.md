@@ -168,6 +168,19 @@ Note that changes to the external Iceberg table will **not** be reflected in t
 ALTER FOREIGN TABLE external_iceberg OPTIONS (SET path 's3://mybucket/table/v15.metadata.json');
 ```
 
+If the table was written by Snowflake, its case-insensitive names are stored in uppercase and have to be quoted in PostgreSQL. The `lowercase_column_names` option folds the column names and the field names of nested structs to lowercase. It is accepted on the foreign table, with `load_from` or `definition_from`, and on `COPY ... FROM` an Iceberg metadata file:
+
+```sql
+create foreign table external_iceberg()
+server pg_lake
+options (path 's3://mybucket/table/v14.metadata.json', lowercase_column_names 'true');
+
+create table imported () using iceberg
+with (load_from = 's3://mybucket/table/v14.metadata.json', lowercase_column_names = true);
+```
+
+The option cannot be changed after the table is created, and two names in the same table or struct that differ only in case are rejected.
+
 ## Hugging Face
 
 [**Hugging Face**](https://huggingface.co/) is a widely used platform for sharing machine learning models and training data. You can query files directly using a **`hf://`** prefix instead of **`s3`**. Hugging Face file URLs will look something 

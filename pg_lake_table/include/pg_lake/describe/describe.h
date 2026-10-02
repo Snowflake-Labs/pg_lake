@@ -24,7 +24,6 @@
 extern PGDLLEXPORT List *DescribeColumnsForURL(char *url, CopyDataFormat format,
 											   CopyDataCompression compression,
 											   List *copyOptions);
-extern PGDLLEXPORT List *DescribeColumnsFromIcebergMetadataURI(char *uri, bool emitFilename);
 extern PGDLLEXPORT List *DescribeColumnsFromIcebergMetadata(IcebergTableMetadata * metadata,
 															bool emitFilename);
 char	   *MakeSimpleColumnName(char *columnName, CopyDataFormat format);

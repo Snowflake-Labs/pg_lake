@@ -1071,7 +1071,9 @@ AssertInternalAndExternalTableSchemaMatch(Oid relationId, DataFileSchema * inter
 {
 
 	char	   *metadataPath = GetIcebergMetadataLocation(relationId, false);
-	DataFileSchema *externalSchema = GetDataFileSchemaForExternalIcebergTable(metadataPath);
+	DataFileSchema *externalSchema =
+		GetDataFileSchemaForExternalIcebergTable(metadataPath,
+												 LowercasesColumnNames(relationId));
 
 	if (internalSchema->nfields != externalSchema->nfields)
 	{
