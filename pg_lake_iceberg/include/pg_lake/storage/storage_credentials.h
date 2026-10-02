@@ -48,7 +48,7 @@
  *     still believes them present, so scans can fail with HTTP 403 until
  *     the next reconcile that has other work -- bounded by the credential
  *     TTL (<=1h for STS).  Closing this needs either a pgduck boot-id
- *     handshake (free on connect) or treating an S3 403 as a signal to
+ *     handshake (free on connect) or treating a storage 403 as a signal to
  *     re-push.
  *
  *  2. Same-scope, multi-principal selection.  DuckDB selects a secret by
@@ -65,6 +65,7 @@
 
 #include "datatype/timestamp.h"
 #include "nodes/pg_list.h"
+#include "pg_lake/pgduck/vended_secrets.h"
 
 /*
  * One credential and the storage prefix it authorizes.  A REST
@@ -80,13 +81,19 @@
  * IcebergProvideStorageCredentials returns freshly-allocated copies (not
  * pointers into the credential cache), because the caller may run
  * syscache lookups between resolving and using these values.
+ *
+ * Only the fields of provider are set; see VendedSecret for what each
+ * provider's fields mean.
  */
 typedef struct StorageCredential
 {
+	VendedStorageProvider provider;
 	Oid			serverOid;		/* iceberg_catalog server OID */
 	char	   *secretId;		/* identity, e.g.
 								 * "<umOid>/<catalog>/<ns>/<table>/<scope>" */
-	char	   *scopePrefix;	/* normalized S3 scope, trailing '/' */
+	char	   *scopePrefix;	/* normalized storage scope, trailing '/' */
+
+	/* S3 */
 	char	   *accessKeyId;
 	char	   *secretAccessKey;
 	char	   *sessionToken;	/* NULL for non-STS credentials */
@@ -94,6 +101,13 @@ typedef struct StorageCredential
 	char	   *endpoint;		/* catalog s3.endpoint; NULL -> inherit */
 	char	   *urlStyle;		/* "path"/"vhost"; NULL -> inherit */
 	char	   *useSsl;			/* "true"/"false"; NULL -> inherit */
+
+	/* Azure */
+	char	   *accountName;
+	char	   *sasToken;
+	char	   *blobEndpoint;	/* NULL -> public cloud for accountName */
+	char	   *dfsEndpoint;	/* NULL -> public cloud for accountName */
+
 	TimestampTz expiresAt;		/* 0 when the catalog gave no expiry */
 }			StorageCredential;
 

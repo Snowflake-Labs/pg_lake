@@ -2,8 +2,7 @@
 Tests for vended credentials support in REST catalog integration.
 
 A mock HTTP server simulates an Iceberg REST catalog that returns
-vended S3 credentials in the loadTable response's "config" map.  The
-tests verify that:
+vended credentials in the loadTable response.  The tests verify that:
 
 1. The X-Iceberg-Access-Delegation header is sent on loadTable requests
    when vended credentials are enabled.
@@ -12,8 +11,10 @@ tests verify that:
 3. The credential cache works correctly (no redundant REST calls).
 4. Disabling vended credentials suppresses the header and secret creation.
 5. ALTER/DROP SERVER invalidates the vended credential cache.
-6. Credentials vended for a provider other than S3 are reported rather
-   than passed over in silence.
+6. Azure SAS tokens are extracted in every spelling catalogs state them
+   by, with endpoints held to pg_lake.allowed_azure_host_suffixes.
+7. Credentials pg_lake cannot use are reported rather than passed over
+   in silence, while settings are not.
 """
 
 import json
@@ -23,6 +24,8 @@ import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from utils_pytest import *
+
+from datetime import datetime, timezone
 
 
 # ---------------------------------------------------------------------------
@@ -875,39 +878,56 @@ _VENDED_CREDS_FN = """
     """
 
 
-def _serve(handler_class):
-    """Start a mock catalog on a free port and point the GUCs at it."""
+def _serve(handler_class, conn=None):
+    """
+    Start a mock catalog on a free port and point the GUCs at it.
+
+    ``conn``, when given, is the connection about to use the catalog.  The
+    SIGHUP that ALTER SYSTEM's reload sends reaches it at an unpredictable
+    command boundary, so it also gets the settings with SET, which takes
+    effect at once.
+    """
     port = _find_free_port()
     httpd = HTTPServer(("127.0.0.1", port), handler_class)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
 
+    settings = {
+        "pg_lake_iceberg.rest_catalog_host": f"http://127.0.0.1:{port}/api/catalog",
+        "pg_lake_iceberg.rest_catalog_client_id": "test_id",
+        "pg_lake_iceberg.rest_catalog_client_secret": "test_secret",
+        # Vended credentials are opt-in (disabled by default); these tests
+        # exercise the vending path, so enable it explicitly.
+        "pg_lake_iceberg.rest_catalog_enable_vended_credentials": "true",
+    }
     run_command_outside_tx(
-        [
-            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{port}/api/catalog'",
-            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id'",
-            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret'",
-            # Vended credentials are opt-in (disabled by default); these tests
-            # exercise the vending path, so enable it explicitly.
-            "ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_enable_vended_credentials TO 'true'",
-            "SELECT pg_reload_conf()",
-        ]
+        [f"ALTER SYSTEM SET {name} TO '{value}'" for name, value in settings.items()]
+        + ["SELECT pg_reload_conf()"]
     )
+    if conn is not None:
+        for name, value in settings.items():
+            run_command(f"SET {name} TO '{value}'", conn)
+        conn.commit()
     return httpd, thread
 
 
-def _stop(httpd, thread):
+def _stop(httpd, thread, conn=None):
     httpd.shutdown()
     thread.join(timeout=5)
+    names = [
+        "pg_lake_iceberg.rest_catalog_host",
+        "pg_lake_iceberg.rest_catalog_client_id",
+        "pg_lake_iceberg.rest_catalog_client_secret",
+        "pg_lake_iceberg.rest_catalog_enable_vended_credentials",
+    ]
     run_command_outside_tx(
-        [
-            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_host",
-            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_id",
-            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_client_secret",
-            "ALTER SYSTEM RESET pg_lake_iceberg.rest_catalog_enable_vended_credentials",
-            "SELECT pg_reload_conf()",
-        ]
+        [f"ALTER SYSTEM RESET {name}" for name in names] + ["SELECT pg_reload_conf()"]
     )
+    if conn is not None:
+        conn.rollback()
+        for name in names:
+            run_command(f"RESET {name}", conn)
+        conn.commit()
 
 
 def _oauth_or_none(handler):
@@ -936,6 +956,19 @@ def _reply(handler, payload):
 
 
 def _run_vended_creds(superuser_conn, catalog, ns, table):
+    """
+    Load a table named after ``table`` and return its credential summary.
+
+    Each call loads a table of its own: a backend reports a table's
+    unusable credentials only once, so a reused name would hold back a
+    warning one test expects, or make one that another rules out vacuous.
+    """
+    return _load_vended_creds(
+        superuser_conn, catalog, ns, f"{table}_{uuid.uuid4().hex[:8]}"
+    )
+
+
+def _load_vended_creds(superuser_conn, catalog, ns, table):
     run_command(_VENDED_CREDS_FN, superuser_conn)
     superuser_conn.commit()
     result = run_query(
@@ -1694,19 +1727,30 @@ def test_vended_credentials_scope_below_table_root_preserved(
 
 
 # ---------------------------------------------------------------------------
-# Providers other than S3
+# Credentials pg_lake cannot use
 # ---------------------------------------------------------------------------
 
 _ADLS_HOST = "acct.dfs.core.windows.net"
+_ADLS_LOCATION = f"abfss://container@{_ADLS_HOST}/ns/tbl"
 
-# An ADLS credential names the storage account in the key itself, so
-# these cannot be looked up by a fixed key the way the S3 ones are.
+# An ADLS SAS token is usable, but only an account key is vended here.
 _ADLS_CASE = (
     "Azure Data Lake Storage",
     f"abfss://container@{_ADLS_HOST}/ns/tbl",
     {
-        f"adls.sas-token.{_ADLS_HOST}": "sv=2021-08-06&sig=not-a-signature",
-        f"adls.sas-token-expires-at-ms.{_ADLS_HOST}": "9999999999000",
+        "adls.account-name": "acct",
+        "adls.account-key": "not-an-account-key",
+    },
+)
+
+# A SAS token is only this table's credential when it is for the storage
+# account the table is on.
+_ADLS_OTHER_ACCOUNT_CASE = (
+    "Azure Data Lake Storage",
+    f"abfss://container@{_ADLS_HOST}/ns/tbl",
+    {
+        "adls.sas-token.other.dfs.core.windows.net": "sv=2021-08-06&sig=other",
+        "adls.sas-token-expires-at-ms.other.dfs.core.windows.net": "9999999999000",
     },
 )
 
@@ -1720,12 +1764,13 @@ _GCS_CASE = (
 )
 
 _UNSUPPORTED_PROVIDERS = [
-    pytest.param(*_ADLS_CASE, id="adls"),
+    pytest.param(*_ADLS_CASE, id="adls-account-key"),
+    pytest.param(*_ADLS_OTHER_ACCOUNT_CASE, id="adls-other-account"),
     pytest.param(*_GCS_CASE, id="gcs"),
 ]
 
 
-def _serve_provider_case(shape, location, vended_config, s3_credential=None):
+def _serve_provider_case(shape, location, vended_config, conn, s3_credential=None):
     """
     Mock catalog for a table at ``location`` vending ``vended_config``,
     either as a "storage-credentials" element or as the legacy top-level
@@ -1772,10 +1817,11 @@ def _serve_provider_case(shape, location, vended_config, s3_credential=None):
         def log_message(self, fmt, *args):
             pass
 
-    return _serve(_Handler)
+    return _serve(_Handler, conn)
 
 
 def _drop_vended_creds_fn(superuser_conn):
+    superuser_conn.rollback()
     run_command(
         "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
         superuser_conn,
@@ -1810,7 +1856,7 @@ def test_vended_credentials_unsupported_provider_is_reported(
     if installcheck:
         return
 
-    httpd, thread = _serve_provider_case(shape, location, vended_config)
+    httpd, thread = _serve_provider_case(shape, location, vended_config, superuser_conn)
     try:
         superuser_conn.notices.clear()
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
@@ -1831,7 +1877,46 @@ def test_vended_credentials_unsupported_provider_is_reported(
 
     finally:
         _drop_vended_creds_fn(superuser_conn)
-        _stop(httpd, thread)
+        _stop(httpd, thread, superuser_conn)
+
+
+def test_vended_credentials_unusable_reported_once_per_table(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    A backend warns about a table's unusable credentials once.
+
+    A read-only table is loaded from the catalog more than once per
+    statement, and a warning on every load would bury the one that
+    matters.  Another table still gets its own.
+    """
+    if installcheck:
+        return
+
+    _, location, vended_config = _GCS_CASE
+    httpd, thread = _serve_provider_case(
+        "storage-credentials", location, vended_config, superuser_conn
+    )
+    table = f"tbl_{uuid.uuid4().hex[:8]}"
+    try:
+
+        def warnings_loading(name):
+            superuser_conn.notices.clear()
+            summary = _load_vended_creds(superuser_conn, "postgres", "ns", name)
+            assert summary is None, f"expected no usable credential, got {summary!r}"
+            return [
+                n
+                for n in superuser_conn.notices
+                if n.startswith("WARNING") and "ignoring vended credentials" in n
+            ]
+
+        assert len(warnings_loading(table)) == 1
+        assert warnings_loading(table) == [], "the same table was reported again"
+        assert len(warnings_loading(f"{table}_other")) == 1, "another table was not"
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)
 
 
 def test_vended_credentials_unsupported_provider_reported_alongside_s3(
@@ -1848,11 +1933,12 @@ def test_vended_credentials_unsupported_provider_reported_alongside_s3(
     if installcheck:
         return
 
-    provider, location, vended_config = _ADLS_CASE
+    location = "s3://mixed-bucket/ns/tbl"
     httpd, thread = _serve_provider_case(
         "storage-credentials",
         location,
-        vended_config,
+        {"s3.session-token": "A_TOKEN_WITHOUT_ITS_KEYS"},
+        superuser_conn,
         s3_credential={
             "s3.access-key-id": "MIXED_KEY",
             "s3.secret-access-key": "MIXED_SECRET",
@@ -1862,45 +1948,185 @@ def test_vended_credentials_unsupported_provider_reported_alongside_s3(
         superuser_conn.notices.clear()
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        # The S3 half is still extracted and scoped to its own prefix.
+        # The usable half is still extracted and scoped to its own prefix.
         access_key, scope = summary.split("|")[:2]
         assert access_key == "MIXED_KEY"
         assert scope == f"{location}/data/"
 
         assert any(
-            "ignoring vended credentials" in n and provider in n
+            "ignoring vended credentials for S3" in n for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)
+
+
+@pytest.mark.parametrize("shape", ["storage-credentials", "config"])
+@pytest.mark.parametrize(
+    "location,settings",
+    [
+        pytest.param(
+            "s3://settings-bucket/ns/tbl",
+            {
+                "s3.endpoint": "https://s3.example.com",
+                "s3.path-style-access": "true",
+                "s3.region": "us-west-2",
+                "s3.sse.type": "kms",
+                "s3.sse.key": "arn:aws:kms:us-west-2:123456789012:key/example",
+                "client.region": "us-west-2",
+            },
+            id="s3",
+        ),
+        pytest.param(
+            _ADLS_LOCATION,
+            {
+                "adls.account-name": "acct",
+                "adls.account-host": _ADLS_HOST,
+                f"adls.connection-string.{_ADLS_HOST}": f"https://{_ADLS_HOST}",
+                "adls.token-credential-provider": "com.example.TokenProvider",
+                "client.region": "westeurope",
+            },
+            id="azure",
+        ),
+        pytest.param(
+            "gs://gcs-bucket/ns/tbl",
+            {
+                "gcs.project-id": "some-project",
+                "gcs.service.host": "storage.googleapis.com",
+                "gcs.encryption-key": "not-a-credential",
+                "gcs.decryption-key": "not-a-credential",
+                "adls.account-host": _ADLS_HOST,
+                "adls.account-name": "acct",
+            },
+            id="gcs",
+        ),
+    ],
+)
+def test_vended_credentials_provider_settings_are_not_a_credential(
+    superuser_conn, iceberg_extension, installcheck, shape, location, settings
+):
+    """
+    Settings are not reported as a credential nobody could use.
+
+    A catalog states settings like these whether or not it vends anything,
+    so only a key an HTTP trace masks counts as a credential, and even
+    then not an endpoint, adls.connection-string.<host>, or an encryption
+    key, such as the KMS key id s3.sse.key holds with s3.sse.type kms.  The
+    class of a token provider says how to get a credential but is not one.
+    """
+    if installcheck:
+        return
+
+    httpd, thread = _serve_provider_case(shape, location, settings, superuser_conn)
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        assert summary is None, f"expected no credential, got {summary!r}"
+        assert not any(
+            "ignoring vended credentials" in n for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)
+
+
+@pytest.mark.parametrize(
+    "shape,location,vended_config,provider",
+    [
+        pytest.param(
+            "storage-credentials",
+            "s3://other-storage-bucket/ns/tbl",
+            {f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X"},
+            "S3",
+            id="entry-for-other-storage",
+        ),
+        pytest.param(
+            "storage-credentials",
+            _ADLS_LOCATION,
+            {"adls.auth.shared-key.account.key": "not-an-account-key"},
+            "Azure Data Lake Storage",
+            id="azure-shared-key",
+        ),
+        pytest.param(
+            "storage-credentials",
+            _ADLS_LOCATION,
+            {"adls.token": "not-a-token"},
+            "Azure Data Lake Storage",
+            id="azure-bearer-token",
+        ),
+        pytest.param(
+            "config",
+            _ADLS_LOCATION,
+            {"adls.connection-string": "AccountName=acct;AccountKey=not-a-key"},
+            "Azure Data Lake Storage",
+            id="azure-connection-string",
+        ),
+        pytest.param(
+            "config",
+            "s3://incomplete-bucket/ns/tbl",
+            {"s3.access-key-id": "KEY_WITHOUT_SECRET"},
+            "S3",
+            id="s3-incomplete",
+        ),
+    ],
+)
+def test_vended_credentials_credential_pg_lake_cannot_use_is_reported(
+    superuser_conn,
+    iceberg_extension,
+    installcheck,
+    shape,
+    location,
+    vended_config,
+    provider,
+):
+    """
+    A credential pg_lake cannot use is reported as one for the table's own
+    storage, the one its location names.  That includes a perfectly good
+    credential for some other storage, since a SAS token on an S3 table is
+    still no S3 credential, and an incomplete one.  A real connection
+    string, unlike the endpoint Iceberg states under a qualified key,
+    carries an account key.
+    """
+    if installcheck:
+        return
+
+    httpd, thread = _serve_provider_case(shape, location, vended_config, superuser_conn)
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        assert summary is None, f"expected no usable credential, got {summary!r}"
+        assert any(
+            f"ignoring vended credentials for {provider}" in n
             for n in superuser_conn.notices
         ), "\n".join(superuser_conn.notices)
 
     finally:
         _drop_vended_creds_fn(superuser_conn)
-        _stop(httpd, thread)
+        _stop(httpd, thread, superuser_conn)
 
 
-@pytest.mark.parametrize("shape", ["storage-credentials", "config"])
-def test_vended_credentials_provider_settings_are_not_a_credential(
-    superuser_conn, iceberg_extension, installcheck, shape
+def test_vended_credentials_legacy_config_outside_namespace_is_not_reported(
+    superuser_conn, iceberg_extension, installcheck
 ):
     """
-    Provider settings that are not credentials must not be reported.
-
-    A table's config map states things like "gcs.project-id" and
-    "adls.account-host" whether or not anything was vended, so matching
-    a bare "gcs."/"adls." prefix would announce a substitution the
-    catalog never made.  Only a key carrying a credential counts.
+    The legacy config map also carries credentials of the catalog's own,
+    such as a token scoped to the table, so a credential outside the
+    storage's namespace there is not taken for a storage one.  Only a
+    storage-credentials entry, which exists to vend for storage, counts
+    every credential.
     """
     if installcheck:
         return
 
     httpd, thread = _serve_provider_case(
-        shape,
-        "gs://gcs-bucket/ns/tbl",
-        {
-            "gcs.project-id": "some-project",
-            "gcs.service.host": "storage.googleapis.com",
-            "adls.account-host": _ADLS_HOST,
-            "adls.account-name": "acct",
-        },
+        "config",
+        "s3://settings-bucket/ns/tbl",
+        {"token": "a-table-scoped-catalog-token"},
+        superuser_conn,
     )
     try:
         superuser_conn.notices.clear()
@@ -1913,7 +2139,7 @@ def test_vended_credentials_provider_settings_are_not_a_credential(
 
     finally:
         _drop_vended_creds_fn(superuser_conn)
-        _stop(httpd, thread)
+        _stop(httpd, thread, superuser_conn)
 
 
 def test_vended_credentials_s3_is_not_reported_as_unsupported(
@@ -1937,3 +2163,493 @@ def test_vended_credentials_s3_is_not_reported_as_unsupported(
 
     finally:
         _drop_vended_creds_fn(superuser_conn)
+
+
+# ---------------------------------------------------------------------------
+# Azure SAS tokens
+#
+# The shim summarizes an Azure credential as
+#     "azure|<account>|<scope>|<sas-token>|<expiry in unix seconds|noexpiry>|
+#      <blob-endpoint>|<dfs-endpoint>"
+# ---------------------------------------------------------------------------
+
+
+def _polaris_adls_config(host, account, sas):
+    """The SAS token under every key Polaris states it by."""
+    return {
+        f"adls.sas-token.{host}": sas,
+        f"adls.sas-token-expires-at-ms.{host}": "9999999999000",
+        f"adls.sas-token.{account}": sas,
+        "adls.sas-token": sas,
+        "adls.account-name": account,
+    }
+
+
+def _azure_credential(superuser_conn, shape, location, vended_config):
+    """Load the table from a mock catalog; return its one Azure credential."""
+    httpd, thread = _serve_provider_case(shape, location, vended_config, superuser_conn)
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+        assert not any(
+            "ignoring vended credentials" in n for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+        if summary is None:
+            return None
+        assert ";" not in summary, f"expected one credential, got {summary!r}"
+        fields = summary.split("|")
+        assert fields[0] == "azure", summary
+        keys = ["account", "scope", "sas", "expiry", "blob", "dfs"]
+        return dict(zip(keys, fields[1:]))
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)
+
+
+@pytest.mark.parametrize("shape", ["storage-credentials", "config"])
+def test_vended_credentials_azure_sas_token(
+    superuser_conn, iceberg_extension, installcheck, shape
+):
+    """
+    A catalog vending for an ADLS table states the one SAS token under
+    several keys, one per client generation.  They collapse onto a single
+    credential for the account the table's location names, scoped to the
+    table, with the expiry the catalog stated and endpoints derived from
+    that same host.
+    """
+    if installcheck:
+        return
+
+    cred = _azure_credential(
+        superuser_conn,
+        shape,
+        _ADLS_LOCATION,
+        _polaris_adls_config(_ADLS_HOST, "acct", "sv=2025-01-05&sig=VENDED"),
+    )
+
+    assert cred == {
+        "account": "acct",
+        "scope": f"{_ADLS_LOCATION}/",
+        "sas": "sv=2025-01-05&sig=VENDED",
+        "expiry": "9999999999",
+        "blob": "https://acct.blob.core.windows.net",
+        "dfs": "https://acct.dfs.core.windows.net",
+    }
+
+
+def _unix_seconds(*utc_fields):
+    return str(int(datetime(*utc_fields, tzinfo=timezone.utc).timestamp()))
+
+
+@pytest.mark.parametrize(
+    "vended_config,expected_expiry",
+    [
+        pytest.param(
+            {
+                f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&se=2030-01-02T03%3A04%3A05Z&sig=X"
+            },
+            _unix_seconds(2030, 1, 2, 3, 4, 5),
+            id="date-and-time",
+        ),
+        pytest.param(
+            {f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&se=2030-01-02&sig=X"},
+            _unix_seconds(2030, 1, 2),
+            id="date",
+        ),
+        pytest.param(
+            {
+                f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&se=2030-01-02&sig=X",
+                f"adls.sas-token-expires-at-ms.{_ADLS_HOST}": _unix_seconds(2029, 6, 1)
+                + "000",
+            },
+            _unix_seconds(2029, 6, 1),
+            id="the-catalog-says-first",
+        ),
+        pytest.param(
+            {f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&se=infinity&sig=X"},
+            "noexpiry",
+            id="not-a-date",
+        ),
+        pytest.param(
+            {f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&ske=2030-01-02&sig=X"},
+            "noexpiry",
+            id="no-se",
+        ),
+    ],
+)
+def test_vended_credentials_azure_expiry_falls_back_to_the_token(
+    superuser_conn, iceberg_extension, installcheck, vended_config, expected_expiry
+):
+    """
+    A SAS token states its own expiry in "se", which is used when the
+    catalog states none, so a token shorter-lived than the default TTL is
+    not kept past it.  It is UTC and percent-encoded, as a date or a date
+    and time; any other field, such as the key's own expiry "ske", is not
+    it.
+    """
+    if installcheck:
+        return
+
+    cred = _azure_credential(
+        superuser_conn, "storage-credentials", _ADLS_LOCATION, vended_config
+    )
+
+    assert cred["expiry"] == expected_expiry
+
+
+@pytest.mark.parametrize(
+    "vended_config,expected_sas",
+    [
+        pytest.param(
+            {
+                f"adls.sas-token.{_ADLS_HOST}": "BY-HOST",
+                "adls.sas-token.acct": "BY-ACCOUNT",
+                "adls.sas-token": "BARE",
+            },
+            "BY-HOST",
+            id="host-first",
+        ),
+        pytest.param(
+            {"adls.sas-token.acct": "BY-ACCOUNT", "adls.sas-token": "BARE"},
+            "BY-ACCOUNT",
+            id="then-account",
+        ),
+        pytest.param(
+            {"adls.sas-token": "BARE", "adls.account-name": "acct"},
+            "BARE",
+            id="then-bare",
+        ),
+        pytest.param(
+            {f"adls.sas-token.{_ADLS_HOST}": "?sv=2025-01-05&sig=Q"},
+            "sv=2025-01-05&sig=Q",
+            id="written-as-a-query-string",
+        ),
+        pytest.param(
+            {"adls.sas-token": "BARE"},
+            "BARE",
+            id="bare-without-account-name",
+        ),
+    ],
+)
+def test_vended_credentials_azure_token_precedence(
+    superuser_conn, iceberg_extension, installcheck, vended_config, expected_sas
+):
+    """
+    Newer spellings are preferred, and a bare token is taken as this
+    account's unless adls.account-name says it is some other account's.
+    """
+    if installcheck:
+        return
+
+    cred = _azure_credential(
+        superuser_conn, "storage-credentials", _ADLS_LOCATION, vended_config
+    )
+
+    assert cred["account"] == "acct"
+    assert cred["sas"] == expected_sas
+
+
+def test_vended_credentials_azure_bare_token_for_another_account(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """A bare token stated for another account is not this table's."""
+    if installcheck:
+        return
+
+    httpd, thread = _serve_provider_case(
+        "storage-credentials",
+        _ADLS_LOCATION,
+        {"adls.sas-token": "OTHER", "adls.account-name": "other"},
+        superuser_conn,
+    )
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        assert summary is None, summary
+        assert any(
+            "ignoring vended credentials" in n and "Azure Data Lake Storage" in n
+            for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)
+
+
+@pytest.mark.parametrize(
+    "location,host,extra,expected_blob,expected_dfs",
+    [
+        pytest.param(
+            "abfss://c@acct.dfs.core.usgovcloudapi.net/ns/tbl",
+            "acct.dfs.core.usgovcloudapi.net",
+            {},
+            "https://acct.blob.core.usgovcloudapi.net",
+            "https://acct.dfs.core.usgovcloudapi.net",
+            id="sovereign-cloud",
+        ),
+        pytest.param(
+            "az://acct.blob.core.windows.net/c/ns/tbl",
+            "acct.blob.core.windows.net",
+            {},
+            "https://acct.blob.core.windows.net",
+            "https://acct.dfs.core.windows.net",
+            id="blob-url",
+        ),
+        pytest.param(
+            _ADLS_LOCATION,
+            _ADLS_HOST,
+            {
+                f"adls.connection-string.{_ADLS_HOST}": (
+                    "https://acct.privatelink.dfs.core.windows.net/"
+                )
+            },
+            "https://acct.privatelink.dfs.core.windows.net",
+            "https://acct.privatelink.dfs.core.windows.net",
+            id="catalog-endpoint",
+        ),
+        pytest.param(
+            _ADLS_LOCATION,
+            _ADLS_HOST,
+            {"adls.connection-string.acct": "AccountName=acct;AccountKey=secret"},
+            "https://acct.blob.core.windows.net",
+            "https://acct.dfs.core.windows.net",
+            id="connection-string-is-not-an-endpoint",
+        ),
+    ],
+)
+def test_vended_credentials_azure_endpoints(
+    superuser_conn,
+    iceberg_extension,
+    installcheck,
+    location,
+    host,
+    extra,
+    expected_blob,
+    expected_dfs,
+):
+    """
+    The endpoints come from the table's own host, so a sovereign cloud is
+    not sent to the public one.  A catalog can state an endpoint of its own
+    under adls.connection-string.<host>, which in Iceberg's ADLS FileIO is
+    an endpoint URL; a value that is a connection string instead is not
+    taken for one.
+    """
+    if installcheck:
+        return
+
+    cred = _azure_credential(
+        superuser_conn,
+        "storage-credentials",
+        location,
+        {f"adls.sas-token.{host}": "sv=2025-01-05&sig=X", **extra},
+    )
+
+    assert (cred["blob"], cred["dfs"]) == (expected_blob, expected_dfs)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        pytest.param("http://169.254.169.254/metadata", id="internal-host"),
+        pytest.param("http://127.0.0.1:10000/acct", id="loopback"),
+        pytest.param("https://evil@acct.blob.core.windows.net", id="userinfo"),
+        pytest.param(
+            "https://169.254.169.254\\.blob.core.windows.net/", id="backslash"
+        ),
+        pytest.param(
+            "https://169.254.169.254%2f.blob.core.windows.net/", id="escaped-slash"
+        ),
+    ],
+)
+def test_vended_credentials_azure_endpoint_is_held_to_the_host_allowlist(
+    superuser_conn, iceberg_extension, installcheck, endpoint
+):
+    """
+    Regression test for: a catalog-stated endpoint could send pgduck_server's
+    requests to any host.
+
+    A role that can create a catalog server can make the catalog say
+    anything, and the endpoint it states replaces the host the table's own
+    URLs name -- the one pg_lake.allowed_azure_host_suffixes already vetted.
+    So the stated endpoint is held to that list too, and the host has to be
+    plain: userinfo, a backslash or an escape could otherwise pass the
+    suffix match here and be read as a different host by the Azure SDK.  A
+    refused endpoint is reported and the table's own host is used instead.
+    """
+    if installcheck:
+        return
+
+    cred = _azure_credential(
+        superuser_conn,
+        "storage-credentials",
+        _ADLS_LOCATION,
+        {
+            f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
+            f"adls.connection-string.{_ADLS_HOST}": endpoint,
+        },
+    )
+
+    assert (cred["blob"], cred["dfs"]) == (
+        "https://acct.blob.core.windows.net",
+        "https://acct.dfs.core.windows.net",
+    )
+    assert any(
+        "ignoring the endpoint the catalog vended" in n for n in superuser_conn.notices
+    ), "\n".join(superuser_conn.notices)
+
+
+def test_vended_credentials_azure_refused_endpoint_reported_once(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    A refused endpoint is reported once per backend, like an unusable
+    credential, rather than on every load of the table.  Another endpoint
+    still gets its own report.
+    """
+    if installcheck:
+        return
+
+    endpoint = f"http://169.254.169.254/{uuid.uuid4().hex[:8]}"
+
+    def reported(stated):
+        _azure_credential(
+            superuser_conn,
+            "storage-credentials",
+            _ADLS_LOCATION,
+            {
+                f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
+                f"adls.connection-string.{_ADLS_HOST}": stated,
+            },
+        )
+        return any(
+            n.startswith("WARNING") and "ignoring the endpoint the catalog vended" in n
+            for n in superuser_conn.notices
+        )
+
+    assert reported(endpoint)
+    assert not reported(endpoint), "the same endpoint was reported again"
+    assert reported(f"{endpoint}/other"), "another endpoint was not reported"
+
+
+def test_vended_credentials_azure_endpoint_allowed_by_the_host_allowlist(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    An administrator who adds a host to pg_lake.allowed_azure_host_suffixes
+    lets a catalog-stated endpoint reach it, which is how an emulator or a
+    private endpoint outside the default suffixes is used.  The list matches
+    on a label boundary, so ".0.0.1" admits 127.0.0.1.
+    """
+    if installcheck:
+        return
+
+    run_command(
+        "SET pg_lake.allowed_azure_host_suffixes TO '.dfs.core.windows.net,.0.0.1'",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    try:
+        cred = _azure_credential(
+            superuser_conn,
+            "storage-credentials",
+            _ADLS_LOCATION,
+            {
+                f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
+                f"adls.connection-string.{_ADLS_HOST}": "http://127.0.0.1:10000/acct/",
+            },
+        )
+        assert (cred["blob"], cred["dfs"]) == (
+            "http://127.0.0.1:10000/acct",
+            "http://127.0.0.1:10000/acct",
+        )
+    finally:
+        run_command("RESET pg_lake.allowed_azure_host_suffixes", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_vended_credentials_azure_location_host_is_held_to_the_host_allowlist(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    The endpoints derived from the table's location are held to the same
+    list as a stated one, since the location comes from the catalog too.
+    One that is outside it is left unset, so the Azure SDK reaches the
+    account at its public endpoint instead.
+    """
+    if installcheck:
+        return
+
+    host = "acct.dfs.internal.example"
+    cred = _azure_credential(
+        superuser_conn,
+        "storage-credentials",
+        f"abfss://container@{host}/ns/tbl",
+        {f"adls.sas-token.{host}": "sv=2025-01-05&sig=X"},
+    )
+
+    assert cred["account"] == "acct"
+    assert (cred["blob"], cred["dfs"]) == ("", "")
+
+
+@pytest.mark.parametrize(
+    "account",
+    [
+        pytest.param("metadata#x", id="fragment"),
+        pytest.param("ab", id="too-short"),
+        pytest.param("a" * 25, id="too-long"),
+    ],
+)
+def test_vended_credentials_azure_account_name_must_be_valid(
+    superuser_conn, iceberg_extension, installcheck, account
+):
+    """
+    The Azure SDK builds https://<account>.blob.core.windows.net itself
+    when no endpoint is set, so an account name that is not one Azure
+    accepts could change the host that URL names -- "metadata#x" names
+    "metadata".  Such a credential is not used, and is reported.
+    """
+    if installcheck:
+        return
+
+    httpd, thread = _serve_provider_case(
+        "config",
+        "az://container/ns/tbl",
+        {"adls.sas-token": "sv=2025-01-05&sig=X", "adls.account-name": account},
+        superuser_conn,
+    )
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        assert summary is None, f"expected no credential, got {summary!r}"
+        assert any(
+            "ignoring vended credentials for Azure Data Lake Storage" in n
+            for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)
+
+
+def test_vended_credentials_azure_short_url_takes_the_stated_account(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    az://<container>/<path> names no account, so the one the catalog
+    states is used, and the endpoints are left for the Azure SDK to derive
+    from it.
+    """
+    if installcheck:
+        return
+
+    cred = _azure_credential(
+        superuser_conn,
+        "config",
+        "az://container/ns/tbl",
+        {"adls.sas-token.acct": "sv=2025-01-05&sig=X", "adls.account-name": "acct"},
+    )
+
+    assert cred["account"] == "acct"
+    assert cred["scope"] == "az://container/ns/tbl/"
+    assert (cred["blob"], cred["dfs"]) == ("", "")

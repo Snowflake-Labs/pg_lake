@@ -979,3 +979,35 @@ RedactSensitiveText(const char *input)
 
 	return redacted;
 }
+
+
+/*
+ * IsSensitiveKey returns whether key, a key of a JSON object, is one whose
+ * value RedactSensitiveText masks: a sensitiveKeys entry, optionally with
+ * the dotted qualifier of a per-account key.
+ */
+bool
+IsSensitiveKey(const char *key)
+{
+	for (int keyIndex = 0; sensitiveKeys[keyIndex] != NULL; keyIndex++)
+	{
+		const char *sensitiveKey = sensitiveKeys[keyIndex];
+		size_t		keyLength = strlen(sensitiveKey);
+
+		if (pg_strncasecmp(key, sensitiveKey, keyLength) != 0)
+			continue;
+
+		const char *afterKey = key + keyLength;
+
+		if (*afterKey == '.')
+		{
+			while (IsKeyQualifierChar(*afterKey))
+				afterKey++;
+		}
+
+		if (*afterKey == '\0')
+			return true;
+	}
+
+	return false;
+}

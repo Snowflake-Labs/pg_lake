@@ -402,11 +402,12 @@ _PG_init(void)
 							   NULL, NULL, NULL);
 
 	DefineCustomBoolVariable("pg_lake_iceberg.rest_catalog_enable_vended_credentials",
-							 gettext_noop("Request vended (STS) credentials from the Iceberg REST catalog."),
+							 gettext_noop("Request vended credentials from the Iceberg REST catalog."),
 							 gettext_noop("When enabled, the X-Iceberg-Access-Delegation header is sent and the "
-										  "catalog-vended, table-scoped S3 credentials are pushed to pgduck_server. "
-										  "Opt-in: leave disabled for S3-compatible storage that does not support "
-										  "AWS STS, or when a static S3 secret already grants access."),
+										  "catalog-vended, table-scoped S3 credentials or Azure SAS tokens are "
+										  "pushed to pgduck_server. Opt-in: leave disabled for S3-compatible "
+										  "storage that does not support AWS STS, or when a static secret "
+										  "already grants access."),
 							 &RestCatalogEnableVendedCredentials,
 							 false,
 							 PGC_SUSET,

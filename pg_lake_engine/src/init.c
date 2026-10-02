@@ -242,7 +242,8 @@ _PG_init(void)
 							   gettext_noop("Azure URLs carry the storage endpoint in the host, so "
 											"an unrestricted host is an SSRF vector.  An empty list "
 											"rejects every URL that names a host; the endpoint from "
-											"the Azure secret is always allowed."),
+											"an Azure secret an administrator created is always "
+											"allowed, while one a catalog vends is held to this list."),
 							   &PgLakeAllowedAzureHostSuffixes,
 							   DEFAULT_ALLOWED_AZURE_HOST_SUFFIXES,
 							   PGC_SUSET,

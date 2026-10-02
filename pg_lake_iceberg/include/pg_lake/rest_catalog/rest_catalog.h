@@ -26,6 +26,7 @@
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/iceberg/api/snapshot.h"
+#include "pg_lake/pgduck/vended_secrets.h"
 
 #define REST_CATALOG_AUTH_TYPE_OAUTH2 (0)
 #define REST_CATALOG_AUTH_TYPE_HORIZON (1)
@@ -44,11 +45,15 @@ extern bool RestCatalogEnableVendedCredentials;
  * Temporary storage credentials received from an Iceberg REST catalog
  * via the X-Iceberg-Access-Delegation: vended-credentials mechanism.
  *
- * These credentials are scoped to a specific S3 prefix (typically a
- * table's data directory) and have a limited lifetime.
+ * These credentials are scoped to a specific storage prefix (typically a
+ * table's data directory) and have a limited lifetime.  Only the fields
+ * of provider are set.
  */
 typedef struct VendedCredentials
 {
+	VendedStorageProvider provider;
+
+	/* S3 */
 	char	   *accessKeyId;	/* s3.access-key-id */
 	char	   *secretAccessKey;	/* s3.secret-access-key */
 	char	   *sessionToken;	/* s3.session-token (may be NULL for non-STS
@@ -59,7 +64,14 @@ typedef struct VendedCredentials
 								 * (may be NULL) */
 	char	   *useSsl;			/* "true"/"false" from the s3.endpoint scheme
 								 * (may be NULL) */
-	char	   *scope;			/* S3 prefix these creds are scoped to (the
+
+	/* Azure */
+	char	   *accountName;	/* storage account the SAS token is for */
+	char	   *sasToken;		/* adls.sas-token.<host|account> */
+	char	   *blobEndpoint;	/* may be NULL: public cloud for accountName */
+	char	   *dfsEndpoint;	/* may be NULL: public cloud for accountName */
+
+	char	   *scope;			/* prefix these creds are scoped to (the
 								 * table's storage location; may be NULL) */
 	Oid			serverOid;		/* the iceberg_catalog server these came from */
 	TimestampTz fetchedAt;		/* when credentials were obtained */
@@ -377,8 +389,7 @@ typedef struct JsonbArrayElement
 
 Jsonb	   *JsonbGetObject(Jsonb *jb, const char *key);
 
-bool		JsonbObjectHasKeyPrefix(Jsonb *jb, const char *mapKey,
-									const char *keyPrefix);
+List	   *JsonbObjectKeys(Jsonb *jb, const char *mapKey);
 
 List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 										const char *objectKey,

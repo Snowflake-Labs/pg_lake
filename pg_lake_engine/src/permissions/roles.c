@@ -340,6 +340,56 @@ CheckAzureURLHost(const char *url)
 
 
 /*
+ * IsAllowedAzureEndpoint returns whether an http(s) endpoint URL names a
+ * host pg_lake.allowed_azure_host_suffixes admits, holding an endpoint that
+ * did not come from a URL -- one a catalog vends, say -- to the rule a
+ * user-supplied Azure URL is held to.
+ *
+ * The host has to be a plain DNS name or IPv4 literal, optionally followed
+ * by a port.  Anything else is refused rather than parsed, because the
+ * Azure SDK parses the URL itself: userinfo, a backslash or an escape would
+ * let a host that passes the suffix match here send the request elsewhere.
+ */
+bool
+IsAllowedAzureEndpoint(const char *endpoint)
+{
+	const char *authority = NULL;
+
+	if (endpoint == NULL)
+		return false;
+
+	if (pg_strncasecmp(endpoint, HTTPS_URL_PREFIX, strlen(HTTPS_URL_PREFIX)) == 0)
+		authority = endpoint + strlen(HTTPS_URL_PREFIX);
+	else if (pg_strncasecmp(endpoint, HTTP_URL_PREFIX, strlen(HTTP_URL_PREFIX)) == 0)
+		authority = endpoint + strlen(HTTP_URL_PREFIX);
+	else
+		return false;
+
+	size_t		hostLen = 0;
+
+	while (isalnum((unsigned char) authority[hostLen]) ||
+		   authority[hostLen] == '.' || authority[hostLen] == '-')
+		hostLen++;
+
+	const char *rest = authority + hostLen;
+
+	if (*rest == ':')
+	{
+		rest++;
+		if (!isdigit((unsigned char) *rest))
+			return false;
+		while (isdigit((unsigned char) *rest))
+			rest++;
+	}
+
+	if (hostLen == 0 || (*rest != '\0' && *rest != '/'))
+		return false;
+
+	return IsAllowedAzureHost(authority, hostLen);
+}
+
+
+/*
  * AzureURLPrefix returns the Azure scheme prefix url starts with, or NULL if
  * url is not an Azure URL.  Only the schemes IsSupportedURL() accepts are
  * listed; abfs:// (plaintext) is rejected before this runs.

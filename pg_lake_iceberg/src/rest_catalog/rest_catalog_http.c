@@ -476,27 +476,22 @@ JsonbGetObject(Jsonb *jb, const char *key)
 
 
 /*
- * JsonbObjectHasKeyPrefix reports whether an object holds any key that
- * begins with keyPrefix.  When mapKey is NULL the object is jb itself;
- * otherwise it is the object stored under jb->mapKey.
- *
- * This answers which storage provider an Iceberg config map describes
- * in the cases where there is no fixed key to look for: an ADLS
- * credential names the storage account in the key itself, as in
- * "adls.sas-token.<account>.dfs.core.windows.net".
+ * JsonbObjectKeys returns an object's own keys as palloc'd strings.  When
+ * mapKey is NULL the object is jb itself; otherwise it is the object
+ * stored under jb->mapKey.  Returns NIL when there is no such object.
  */
-bool
-JsonbObjectHasKeyPrefix(Jsonb *jb, const char *mapKey, const char *keyPrefix)
+List *
+JsonbObjectKeys(Jsonb *jb, const char *mapKey)
 {
-	if (jb == NULL || keyPrefix == NULL || keyPrefix[0] == '\0')
-		return false;
+	if (jb == NULL)
+		return NIL;
 
 	Jsonb	   *object = mapKey == NULL ? jb : JsonbGetObject(jb, mapKey);
 
 	if (object == NULL || !JsonContainerIsObject(&object->root))
-		return false;
+		return NIL;
 
-	int			prefixLen = strlen(keyPrefix);
+	List	   *keys = NIL;
 	JsonbIterator *it = JsonbIteratorInit(&object->root);
 	JsonbValue	value;
 	JsonbIteratorToken token;
@@ -504,15 +499,12 @@ JsonbObjectHasKeyPrefix(Jsonb *jb, const char *mapKey, const char *keyPrefix)
 	/* skipNested confines this to the object's own keys */
 	while ((token = JsonbIteratorNext(&it, &value, true)) != WJB_DONE)
 	{
-		if (token != WJB_KEY || value.type != jbvString)
-			continue;
-
-		if (value.val.string.len >= prefixLen &&
-			strncmp(value.val.string.val, keyPrefix, prefixLen) == 0)
-			return true;
+		if (token == WJB_KEY && value.type == jbvString)
+			keys = lappend(keys, pnstrdup(value.val.string.val,
+										  value.val.string.len));
 	}
 
-	return false;
+	return keys;
 }
 
 

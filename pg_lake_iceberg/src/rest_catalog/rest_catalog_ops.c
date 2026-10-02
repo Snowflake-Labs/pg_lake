@@ -44,15 +44,19 @@
 #include "common/hashfn.h"
 #include "foreign/foreign.h"
 #include "lib/stringinfo.h"
+#include "nodes/miscnodes.h"
 #include "utils/builtins.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/timestamp.h"
 
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/permissions/roles.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/storage/storage_credentials.h"
 #include "pg_lake/util/catalog_type.h"
@@ -99,6 +103,14 @@ static HTAB *VendedCredsCache = NULL;
 static MemoryContext VendedCredsCacheCtx = NULL;
 
 /*
+ * The problems with what catalogs vend that this backend has warned
+ * about, each named by a key its FirstVendedReport caller built.  Kept
+ * in the cache's context, so ALTER or DROP SERVER, which may be what
+ * fixes one, lets it be reported afresh.
+ */
+static List *ReportedVendedProblems = NIL;
+
+/*
  * Conservative TTL for vended credentials when the REST catalog does
  * not provide an explicit expiry.  AWS STS temporary credentials
  * typically last 1 hour; we default to 55 minutes to refresh early.
@@ -106,7 +118,11 @@ static MemoryContext VendedCredsCacheCtx = NULL;
 #define VENDED_CREDS_DEFAULT_TTL_SECS 3300
 
 static List *ExtractVendedCredentials(Jsonb *response,
-									  RestCatalogOptions * opts);
+									  RestCatalogOptions * opts,
+									  const char *restCatalogName,
+									  const char *namespaceName,
+									  const char *relationName);
+static bool FirstVendedReport(const char *reportKey);
 static void InitVendedCredsCacheIfNeeded(void);
 static void FreeCachedVendedCredentials(VendedCredentials * creds);
 static void FreeCachedVendedCredentialsList(List *credentials);
@@ -193,7 +209,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 
 	/*
 	 * If the stage-create response includes vended credentials, cache them
-	 * for subsequent writes to this table's S3 prefix.
+	 * for subsequent writes to this table's storage prefix.
 	 */
 	if (opts->enableVendedCredentials && httpResult.body != NULL &&
 		*httpResult.body != '\0')
@@ -201,7 +217,8 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 		Datum		bodyDatum = DirectFunctionCall1(jsonb_in,
 													CStringGetDatum(httpResult.body));
 		List	   *credentials =
-			ExtractVendedCredentials(DatumGetJsonbP(bodyDatum), opts);
+			ExtractVendedCredentials(DatumGetJsonbP(bodyDatum), opts,
+									 catalogName, namespaceName, relationName);
 
 		StoreVendedCredentialsInCache(credentials, opts->userMappingOid,
 									  catalogName, namespaceName,
@@ -558,6 +575,14 @@ FreeCachedVendedCredentials(VendedCredentials * creds)
 		pfree(creds->urlStyle);
 	if (creds->useSsl != NULL)
 		pfree(creds->useSsl);
+	if (creds->accountName != NULL)
+		pfree(creds->accountName);
+	if (creds->sasToken != NULL)
+		pfree(creds->sasToken);
+	if (creds->blobEndpoint != NULL)
+		pfree(creds->blobEndpoint);
+	if (creds->dfsEndpoint != NULL)
+		pfree(creds->dfsEndpoint);
 	if (creds->scope != NULL)
 		pfree(creds->scope);
 
@@ -688,8 +713,11 @@ StoreVendedCredentialsInCache(List *credentials,
 		VendedCredentials *creds = lfirst(credsCell);
 		VendedCredentials *cached = palloc0(sizeof(VendedCredentials));
 
-		cached->accessKeyId = pstrdup(creds->accessKeyId);
-		cached->secretAccessKey = pstrdup(creds->secretAccessKey);
+		cached->provider = creds->provider;
+		cached->accessKeyId = creds->accessKeyId ?
+			pstrdup(creds->accessKeyId) : NULL;
+		cached->secretAccessKey = creds->secretAccessKey ?
+			pstrdup(creds->secretAccessKey) : NULL;
 		cached->sessionToken = creds->sessionToken ?
 			pstrdup(creds->sessionToken) : NULL;
 		cached->region = creds->region ?
@@ -700,6 +728,14 @@ StoreVendedCredentialsInCache(List *credentials,
 			pstrdup(creds->urlStyle) : NULL;
 		cached->useSsl = creds->useSsl ?
 			pstrdup(creds->useSsl) : NULL;
+		cached->accountName = creds->accountName ?
+			pstrdup(creds->accountName) : NULL;
+		cached->sasToken = creds->sasToken ?
+			pstrdup(creds->sasToken) : NULL;
+		cached->blobEndpoint = creds->blobEndpoint ?
+			pstrdup(creds->blobEndpoint) : NULL;
+		cached->dfsEndpoint = creds->dfsEndpoint ?
+			pstrdup(creds->dfsEndpoint) : NULL;
 		cached->scope = creds->scope ?
 			pstrdup(creds->scope) : NULL;
 		cached->serverOid = creds->serverOid;
@@ -786,7 +822,10 @@ LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 
 	if (opts->enableVendedCredentials)
 	{
-		result.vendedCredentials = ExtractVendedCredentials(body, opts);
+		result.vendedCredentials = ExtractVendedCredentials(body, opts,
+															restCatalogName,
+															namespaceName,
+															relationName);
 
 		StoreVendedCredentialsInCache(result.vendedCredentials,
 									  opts->userMappingOid,
@@ -892,18 +931,41 @@ GetVendedConfigString(Jsonb *body, const char *mapKey, const char *leafKey)
 
 
 /*
- * ParseVendedCredsFromConfig builds a VendedCredentials from an Iceberg
- * config map (see GetVendedConfigString for the mapKey convention).
+ * ParseVendedExpiresAtMs converts an Iceberg "*-expires-at-ms" value
+ * (unix epoch millis) to a timestamp, or returns 0 when there is none to
+ * convert, so short-lived credentials are not cached past their real
+ * lifetime.
+ */
+static TimestampTz
+ParseVendedExpiresAtMs(const char *expiresMsStr)
+{
+	if (expiresMsStr == NULL)
+		return 0;
+
+	char	   *endptr = NULL;
+	long long	expiresMs = strtoll(expiresMsStr, &endptr, 10);
+
+	if (endptr == expiresMsStr || *endptr != '\0' || expiresMs <= 0)
+		return 0;
+
+	return (TimestampTz) IcebergTimestampMsToPostgresTimestamp((Timestamp) expiresMs);
+}
+
+
+/*
+ * ParseVendedS3CredsFromConfig builds an S3 VendedCredentials from an
+ * Iceberg config map (see GetVendedConfigString for the mapKey
+ * convention).
  *
  * Returns NULL unless at least the access key and secret are present.
  * The scope field is left unset here; the caller assigns it from the
- * storage-credential prefix or the table location.  The expiry is
- * parsed from "s3.session-token-expires-at-ms" (unix epoch millis) when
- * the catalog provides it, so short-lived STS credentials are not
- * cached past their real lifetime.
+ * storage-credential prefix or the table location, which an S3
+ * credential does not depend on.  The expiry is parsed from
+ * "s3.session-token-expires-at-ms" when the catalog provides it.
  */
 static VendedCredentials *
-ParseVendedCredsFromConfig(Jsonb *body, const char *mapKey, Oid serverOid)
+ParseVendedS3CredsFromConfig(Jsonb *body, const char *mapKey,
+							 const char *scope, Oid serverOid)
 {
 	char	   *accessKeyId = GetVendedConfigString(body, mapKey, "s3.access-key-id");
 	char	   *secretAccessKey = GetVendedConfigString(body, mapKey, "s3.secret-access-key");
@@ -983,20 +1045,567 @@ ParseVendedCredsFromConfig(Jsonb *body, const char *mapKey, Oid serverOid)
 			creds->urlStyle = pstrdup(usePathStyle ? "path" : "vhost");
 	}
 
-	char	   *expiresMsStr = GetVendedConfigString(body, mapKey,
-													 "s3.session-token-expires-at-ms");
-
-	if (expiresMsStr != NULL)
-	{
-		char	   *endptr = NULL;
-		long long	expiresMs = strtoll(expiresMsStr, &endptr, 10);
-
-		if (endptr != expiresMsStr && *endptr == '\0' && expiresMs > 0)
-			creds->expiresAt =
-				(TimestampTz) IcebergTimestampMsToPostgresTimestamp((Timestamp) expiresMs);
-	}
+	creds->expiresAt =
+		ParseVendedExpiresAtMs(GetVendedConfigString(body, mapKey,
+													 "s3.session-token-expires-at-ms"));
 
 	return creds;
+}
+
+
+/*
+ * AzureAccountHostFromLocation returns the storage host a fully
+ * qualified Azure URL names -- abfss://<container>@<host>/..., or
+ * <host>/<container>/... after az://, azure:// or abfss:// -- and NULL
+ * for any other URL.  That includes az://<container>/..., which names no
+ * account at all and leaves it to the credential.
+ */
+static char *
+AzureAccountHostFromLocation(const char *location)
+{
+	static const char *const azurePrefixes[] = {
+		AZURE_DLS_URL_PREFIX,
+		AZURE_BLOB_URL_PREFIX,
+		AZURE_URL_PREFIX,
+	};
+	const char *authority = NULL;
+
+	if (location == NULL)
+		return NULL;
+
+	for (int i = 0; i < lengthof(azurePrefixes); i++)
+	{
+		size_t		prefixLen = strlen(azurePrefixes[i]);
+
+		if (pg_strncasecmp(location, azurePrefixes[i], prefixLen) == 0)
+		{
+			authority = location + prefixLen;
+			break;
+		}
+	}
+
+	if (authority == NULL)
+		return NULL;
+
+	size_t		authorityLen = strcspn(authority, "/");
+	const char *atSign = memchr(authority, '@', authorityLen);
+	const char *host = atSign != NULL ? atSign + 1 : authority;
+	size_t		hostLen = authorityLen - (host - authority);
+
+	if (memchr(host, '.', hostLen) == NULL)
+		return NULL;
+
+	return pnstrdup(host, hostLen);
+}
+
+
+/*
+ * IsAzureStorageAccountName returns whether name is one Azure accepts for
+ * a storage account: 3 to 24 letters and digits.  The Azure SDK builds
+ * https://<account>.blob.core.windows.net itself when no endpoint is set,
+ * so anything else -- a '#' or '?', say -- would change which host that
+ * URL names.
+ */
+static bool
+IsAzureStorageAccountName(const char *name)
+{
+	if (name == NULL)
+		return false;
+
+	size_t		nameLen = strlen(name);
+
+	if (nameLen < 3 || nameLen > 24)
+		return false;
+
+	for (size_t i = 0; i < nameLen; i++)
+	{
+		if (!isalnum((unsigned char) name[i]))
+			return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * AzureEndpointsFromHost derives the blob and DFS endpoints of the
+ * storage account a host such as <account>.dfs.<suffix> names.  The
+ * suffix comes from the host rather than being assumed, which is what
+ * keeps a sovereign cloud (core.usgovcloudapi.net, say) from being
+ * addressed as the public one.  A host that names neither service is
+ * used as is for both.
+ */
+static void
+AzureEndpointsFromHost(const char *host, char **blobEndpoint,
+					   char **dfsEndpoint)
+{
+	static const char *const services[] = {".dfs.", ".blob."};
+	int			accountLen = strcspn(host, ".");
+
+	for (int i = 0; i < lengthof(services); i++)
+	{
+		size_t		serviceLen = strlen(services[i]);
+
+		if (pg_strncasecmp(host + accountLen, services[i], serviceLen) == 0)
+		{
+			const char *suffix = host + accountLen + serviceLen;
+
+			*blobEndpoint = psprintf("https://%.*s.blob.%s", accountLen, host,
+									 suffix);
+			*dfsEndpoint = psprintf("https://%.*s.dfs.%s", accountLen, host,
+									suffix);
+			return;
+		}
+	}
+
+	*blobEndpoint = psprintf("https://%s", host);
+	*dfsEndpoint = pstrdup(*blobEndpoint);
+}
+
+
+/*
+ * AzureEndpointOverride returns the endpoint a config map states for a
+ * storage account under adls.connection-string.<host> or
+ * .<account>.  In Iceberg's ADLS FileIO that key holds an endpoint URL
+ * rather than a connection string, and is how an emulator or a private
+ * endpoint is reached.  Anything but an http(s) URL is ignored, and so
+ * is the bare adls.connection-string, which PyIceberg uses for a real
+ * connection string.
+ *
+ * A role that can create a catalog server can make the catalog say
+ * anything, and the Azure SDK sends every request to the endpoint the
+ * secret carries, whatever host the URL names.  So the endpoint is held
+ * to pg_lake.allowed_azure_host_suffixes, the list a user-supplied Azure
+ * URL is held to, and one outside it is ignored rather than handed over:
+ * it would otherwise send pgduck_server's requests to any host.
+ */
+static char *
+AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
+					  const char *accountName, Oid serverOid)
+{
+	char	   *endpoint = NULL;
+
+	if (host != NULL)
+		endpoint = GetVendedConfigString(body, mapKey,
+										 psprintf("adls.connection-string.%s",
+												  host));
+
+	if (endpoint == NULL)
+		endpoint = GetVendedConfigString(body, mapKey,
+										 psprintf("adls.connection-string.%s",
+												  accountName));
+
+	if (endpoint == NULL ||
+		(pg_strncasecmp(endpoint, HTTPS_URL_PREFIX, strlen(HTTPS_URL_PREFIX)) != 0 &&
+		 pg_strncasecmp(endpoint, HTTP_URL_PREFIX, strlen(HTTP_URL_PREFIX)) != 0))
+		return NULL;
+
+	int			endpointLen = strlen(endpoint);
+
+	while (endpointLen > 0 && endpoint[endpointLen - 1] == '/')
+		endpoint[--endpointLen] = '\0';
+
+	if (!IsAllowedAzureEndpoint(endpoint))
+	{
+		char	   *reportKey = psprintf("endpoint/%u/%s/%s", serverOid,
+										 accountName, endpoint);
+
+		ereport(FirstVendedReport(reportKey) ? WARNING : DEBUG2,
+				(errmsg("ignoring the endpoint the catalog vended for Azure "
+						"storage account \"%s\"", accountName),
+				 errdetail("\"%s\" does not name a host under "
+						   "pg_lake.allowed_azure_host_suffixes.",
+						   RedactSensitiveText(endpoint)),
+				 errhint("Add the endpoint's host to "
+						 "pg_lake.allowed_azure_host_suffixes to reach it.")));
+		return NULL;
+	}
+
+	return endpoint;
+}
+
+
+/*
+ * SasTokenExpiry returns the expiry a SAS token states for itself in its
+ * signed-expiry ("se") field, or 0 when it states none that parses.  Azure
+ * writes it in UTC, as a date or a date and time, percent-encoded like the
+ * rest of the token.
+ */
+static TimestampTz
+SasTokenExpiry(const char *sasToken)
+{
+	const char *field = sasToken;
+
+	while (field != NULL && strncmp(field, "se=", 3) != 0)
+	{
+		field = strchr(field, '&');
+		if (field != NULL)
+			field++;
+	}
+
+	if (field == NULL)
+		return 0;
+
+	const char *encoded = field + 3;
+	size_t		encodedLen = strcspn(encoded, "&");
+	StringInfoData value;
+
+	initStringInfo(&value);
+
+	for (size_t i = 0; i < encodedLen; i++)
+	{
+		char		c = encoded[i];
+
+		if (c == '%' && i + 2 < encodedLen &&
+			isxdigit((unsigned char) encoded[i + 1]) &&
+			isxdigit((unsigned char) encoded[i + 2]))
+		{
+			char		hex[3] = {encoded[i + 1], encoded[i + 2], '\0'};
+
+			c = (char) strtol(hex, NULL, 16);
+			i += 2;
+		}
+
+		/* timestamptz_in also takes words such as "infinity" */
+		if (c == '\0' || (!isdigit((unsigned char) c) && strchr("-:.TZ", c) == NULL))
+			return 0;
+
+		appendStringInfoChar(&value, c);
+	}
+
+	if (strchr(value.data, 'T') == NULL)
+		appendStringInfoString(&value, "T00:00:00");
+
+	if (value.data[value.len - 1] != 'Z')
+		appendStringInfoChar(&value, 'Z');
+
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	Datum		expiry;
+
+	if (!DirectInputFunctionCallSafe(timestamptz_in, value.data, InvalidOid, -1,
+									 (Node *) &escontext, &expiry))
+		return 0;
+
+	return DatumGetTimestampTz(expiry);
+}
+
+
+/*
+ * ParseVendedAzureCredsFromConfig builds an Azure VendedCredentials from
+ * the SAS token an Iceberg config map carries for the storage account
+ * scope is on, or returns NULL when it carries none for that account.
+ *
+ * Catalogs state one token under several keys so every client finds its
+ * own spelling: adls.sas-token.<host> (Iceberg 1.8 and later),
+ * adls.sas-token.<account> (Iceberg 1.7), and a bare adls.sas-token
+ * paired with adls.account-name (PyIceberg).  They are tried in that
+ * order.  The account is the one scope's host names, or, when scope
+ * names none, adls.account-name; a bare token stated for some other
+ * account is not this table's credential.  It expires when the catalog
+ * says, or else when the token itself says.
+ */
+static VendedCredentials *
+ParseVendedAzureCredsFromConfig(Jsonb *body, const char *mapKey,
+								const char *scope, Oid serverOid)
+{
+	char	   *host = AzureAccountHostFromLocation(scope);
+	char	   *statedAccount = GetVendedConfigString(body, mapKey,
+													  "adls.account-name");
+	char	   *accountName = host != NULL ?
+		pnstrdup(host, strcspn(host, ".")) : statedAccount;
+
+	if (!IsAzureStorageAccountName(accountName))
+		return NULL;
+
+	char	   *sasToken = NULL;
+
+	if (host != NULL)
+		sasToken = GetVendedConfigString(body, mapKey,
+										 psprintf("adls.sas-token.%s", host));
+
+	if (sasToken == NULL)
+		sasToken = GetVendedConfigString(body, mapKey,
+										 psprintf("adls.sas-token.%s",
+												  accountName));
+
+	if (sasToken == NULL &&
+		(statedAccount == NULL || strcmp(statedAccount, accountName) == 0))
+		sasToken = GetVendedConfigString(body, mapKey, "adls.sas-token");
+
+	/* a SAS token is often written as the query string it came from */
+	if (sasToken != NULL && sasToken[0] == '?')
+		sasToken = sasToken[1] != '\0' ? pstrdup(sasToken + 1) : NULL;
+
+	if (sasToken == NULL)
+		return NULL;
+
+	VendedCredentials *creds = palloc0(sizeof(VendedCredentials));
+
+	creds->provider = VENDED_STORAGE_AZURE;
+	creds->accountName = accountName;
+	creds->sasToken = sasToken;
+	creds->serverOid = serverOid;
+	creds->fetchedAt = GetCurrentTimestamp();
+
+	char	   *endpoint = AzureEndpointOverride(body, mapKey, host, accountName,
+												 serverOid);
+
+	if (endpoint != NULL)
+	{
+		creds->blobEndpoint = endpoint;
+		creds->dfsEndpoint = pstrdup(endpoint);
+	}
+	else if (host != NULL)
+	{
+		AzureEndpointsFromHost(host, &creds->blobEndpoint, &creds->dfsEndpoint);
+
+		/*
+		 * The host comes from the catalog's location for the table, which
+		 * nothing has vetted, so what it yields is held to the same list.
+		 * Left unset, the Azure SDK reaches the account at its public
+		 * endpoint.
+		 */
+		if (!IsAllowedAzureEndpoint(creds->blobEndpoint) ||
+			!IsAllowedAzureEndpoint(creds->dfsEndpoint))
+		{
+			creds->blobEndpoint = NULL;
+			creds->dfsEndpoint = NULL;
+		}
+	}
+
+	char	   *expiresMsStr = NULL;
+
+	if (host != NULL)
+		expiresMsStr = GetVendedConfigString(body, mapKey,
+											 psprintf("adls.sas-token-expires-at-ms.%s",
+													  host));
+
+	if (expiresMsStr == NULL)
+		expiresMsStr = GetVendedConfigString(body, mapKey,
+											 psprintf("adls.sas-token-expires-at-ms.%s",
+													  accountName));
+
+	creds->expiresAt = ParseVendedExpiresAtMs(expiresMsStr);
+
+	if (creds->expiresAt == 0)
+		creds->expiresAt = SasTokenExpiry(sasToken);
+
+	return creds;
+}
+
+
+/*
+ * A kind of storage a credential can be vended for.  parse turns its
+ * config map into a credential, NULL when pg_lake cannot use credentials
+ * for that storage at all.  settingKeys are the keys an HTTP trace masks
+ * that are nonetheless settings rather than a credential, such as an
+ * endpoint or an encryption key; an entry ending in '.' is a prefix.
+ * requirement says what a usable credential needs, for the report on one
+ * that is not.
+ */
+typedef struct VendedStorage
+{
+	const char *name;
+	const char *keyNamespace;
+	const char *const *settingKeys;
+	VendedCredentials *(*parse) (Jsonb *body, const char *mapKey,
+								 const char *scope, Oid serverOid);
+	const char *requirement;
+}			VendedStorage;
+
+static const char *const S3SettingKeys[] = {
+	"s3.sse.key", NULL
+};
+
+static const char *const AzureSettingKeys[] = {
+	"adls.connection-string.", NULL
+};
+
+static const char *const GcsSettingKeys[] = {
+	"gcs.encryption-key", "gcs.decryption-key", NULL
+};
+
+static const char *const NoSettingKeys[] = {NULL};
+
+static const VendedStorage S3Storage = {
+	"S3", "s3.", S3SettingKeys, ParseVendedS3CredsFromConfig,
+	"pg_lake needs an S3 access key and secret."
+};
+
+static const VendedStorage AzureStorage = {
+	"Azure Data Lake Storage", "adls.", AzureSettingKeys,
+	ParseVendedAzureCredsFromConfig,
+	"pg_lake needs a SAS token for the storage account the table is on."
+};
+
+static const VendedStorage GcsStorage = {
+	"Google Cloud Storage", "gcs.", GcsSettingKeys, NULL,
+	"pg_lake cannot use vended credentials for Google Cloud Storage."
+};
+
+static const VendedStorage UnknownStorage = {
+	"an unrecognized kind of storage", NULL, NoSettingKeys, NULL,
+	"pg_lake can use vended credentials for S3 and Azure storage only."
+};
+
+static const VendedStorage *const KnownVendedStorage[] = {
+	&S3Storage, &AzureStorage, &GcsStorage
+};
+
+static const struct
+{
+	const char *urlPrefix;
+	const		VendedStorage *storage;
+}			VendedStorageSchemes[] = {
+	{S3_URL_PREFIX, &S3Storage},
+	{AZURE_DLS_URL_PREFIX, &AzureStorage},
+	{AZURE_BLOB_URL_PREFIX, &AzureStorage},
+	{AZURE_URL_PREFIX, &AzureStorage},
+	{GCS_URL_PREFIX, &GcsStorage},
+	{GCS_ALT_URL_PREFIX, &GcsStorage},
+};
+
+
+/*
+ * VendedStorageForLocation returns the storage a location's scheme
+ * names, or NULL when there is no location or it names none pg_lake
+ * knows.
+ */
+static const VendedStorage *
+VendedStorageForLocation(const char *location)
+{
+	if (location == NULL)
+		return NULL;
+
+	for (int i = 0; i < lengthof(VendedStorageSchemes); i++)
+	{
+		const char *urlPrefix = VendedStorageSchemes[i].urlPrefix;
+
+		if (pg_strncasecmp(location, urlPrefix, strlen(urlPrefix)) == 0)
+			return VendedStorageSchemes[i].storage;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * ParseVendedCredsFromConfig builds a VendedCredentials from an Iceberg
+ * config map vended for scope.  The storage it is for is the one scope's
+ * scheme names, which is what picks the parser, so a credential for any
+ * other storage is never taken for this one's.  Only when scope names no
+ * storage pg_lake knows is every parser tried.
+ *
+ * Returns NULL when the map yields no credential pg_lake can use, with
+ * *storage set to the storage it was vended for, or NULL when that is
+ * unknown.
+ */
+static VendedCredentials *
+ParseVendedCredsFromConfig(Jsonb *body, const char *mapKey,
+						   const char *scope, Oid serverOid,
+						   const VendedStorage * *storage)
+{
+	*storage = VendedStorageForLocation(scope);
+
+	if (*storage != NULL)
+		return (*storage)->parse != NULL ?
+			(*storage)->parse(body, mapKey, scope, serverOid) : NULL;
+
+	for (int i = 0; i < lengthof(KnownVendedStorage); i++)
+	{
+		const		VendedStorage *candidate = KnownVendedStorage[i];
+
+		if (candidate->parse == NULL)
+			continue;
+
+		VendedCredentials *creds = candidate->parse(body, mapKey, scope,
+													serverOid);
+
+		if (creds != NULL)
+		{
+			*storage = candidate;
+			return creds;
+		}
+	}
+
+	return NULL;
+}
+
+
+/*
+ * IsVendedSettingKey returns whether key is one of the storage's
+ * settingKeys.
+ */
+static bool
+IsVendedSettingKey(const VendedStorage * storage, const char *key)
+{
+	for (const char *const *setting = storage->settingKeys; *setting; setting++)
+	{
+		size_t		settingLen = strlen(*setting);
+
+		if ((*setting)[settingLen - 1] == '.' ?
+			strncmp(key, *setting, settingLen) == 0 :
+			strcmp(key, *setting) == 0)
+			return true;
+	}
+
+	return false;
+}
+
+
+/*
+ * UnusableVendedCredential returns the storage to report a credential
+ * for, when a config map that yielded none pg_lake can use vended one
+ * anyway, and NULL when it vended nothing.
+ *
+ * A key is a credential when an HTTP trace masks its value
+ * (IsSensitiveKey).  That list has to name every credential a catalog
+ * vends, or the trace would leak it, whereas a config map states any
+ * number of settings -- "gcs.project-id", "s3.sse.type" -- whether or not
+ * anything was vended.  One of the storage's settingKeys is passed over
+ * even so.  Every credential in a storage-credentials entry
+ * (isEntry) counts, but the legacy config map also carries the catalog's
+ * own, such as a table-scoped "token", so there only keys in the
+ * storage's namespace do.  With the storage unknown, a key's namespace
+ * says which it is for.
+ */
+static const VendedStorage *
+UnusableVendedCredential(Jsonb *body, const char *mapKey,
+						 const VendedStorage * storage, bool isEntry)
+{
+	List	   *keys = JsonbObjectKeys(body, mapKey);
+	ListCell   *keyCell = NULL;
+
+	foreach(keyCell, keys)
+	{
+		const char *key = lfirst(keyCell);
+		const		VendedStorage *keyStorage = storage;
+
+		if (!IsSensitiveKey(key))
+			continue;
+
+		for (int i = 0; keyStorage == NULL && i < lengthof(KnownVendedStorage); i++)
+		{
+			const char *keyNamespace = KnownVendedStorage[i]->keyNamespace;
+
+			if (strncmp(key, keyNamespace, strlen(keyNamespace)) == 0)
+				keyStorage = KnownVendedStorage[i];
+		}
+
+		bool		inNamespace = keyStorage != NULL &&
+			strncmp(key, keyStorage->keyNamespace,
+					strlen(keyStorage->keyNamespace)) == 0;
+
+		if (!isEntry && !inNamespace)
+			continue;
+
+		if (keyStorage != NULL && IsVendedSettingKey(keyStorage, key))
+			continue;
+
+		return keyStorage != NULL ? keyStorage : &UnknownStorage;
+	}
+
+	return NULL;
 }
 
 
@@ -1024,7 +1633,8 @@ TableRootFromLoadTableResponse(Jsonb *response)
 
 
 /*
- * ResolveVendedScope decides what S3 prefix a vended credential covers.
+ * ResolveVendedScope decides what storage prefix a vended credential
+ * covers.
  *
  * The storage-credential's own prefix is the catalog's declared scope,
  * and is preferred: it covers external tables whose data lives outside
@@ -1057,58 +1667,9 @@ ResolveVendedScope(const char *scopePrefix, char *tableRoot)
 
 
 /*
- * The vended credential keys pg_lake has no support for, and the
- * provider to report each by.
- *
- * Only keys that carry a credential belong here.  A table's config map
- * states provider settings that are not credentials at all --
- * "gcs.project-id", "adls.account-host" -- and matching those would
- * announce a substitution the catalog never made.
- *
- * Matching is by prefix because ADLS names the storage account in the
- * key itself, as in "adls.sas-token.<account>.dfs.core.windows.net".
- */
-static const struct
-{
-	const char *keyPrefix;
-	const char *providerName;
-}			UnsupportedVendedCredentialKeys[] = {
-	{"adls.sas-token", "Azure Data Lake Storage"},
-	{"adls.connection-string", "Azure Data Lake Storage"},
-	{"adls.account-key", "Azure Data Lake Storage"},
-	{"adls.client-secret", "Azure Data Lake Storage"},
-	{"adls.credential", "Azure Data Lake Storage"},
-	{"adls.token", "Azure Data Lake Storage"},
-	{"gcs.oauth2.token", "Google Cloud Storage"},
-};
-
-
-/*
- * UnsupportedVendedProvider names the provider a config map vends a
- * credential for when it is one pg_lake cannot use, and returns NULL
- * when the map carries no such credential.  Only meaningful once the S3
- * keys are known to be absent.  See GetVendedConfigString for the
- * mapKey convention.
- */
-static const char *
-UnsupportedVendedProvider(Jsonb *body, const char *mapKey)
-{
-	for (int i = 0; i < lengthof(UnsupportedVendedCredentialKeys); i++)
-	{
-		const char *keyPrefix = UnsupportedVendedCredentialKeys[i].keyPrefix;
-
-		if (JsonbObjectHasKeyPrefix(body, mapKey, keyPrefix))
-			return UnsupportedVendedCredentialKeys[i].providerName;
-	}
-
-	return NULL;
-}
-
-
-/*
- * ExtractVendedCredentials parses S3 vended credentials from a REST
- * catalog loadTable response body, returning one VendedCredentials per
- * scope the catalog vended for.
+ * ExtractVendedCredentials parses vended credentials -- S3 keys or an
+ * Azure SAS token -- from a REST catalog loadTable response body,
+ * returning one VendedCredentials per scope the catalog vended for.
  *
  * Two response shapes are supported: the newer "storage-credentials"
  * array, each element carrying its own "prefix" and "config", and the
@@ -1121,24 +1682,29 @@ UnsupportedVendedProvider(Jsonb *body, const char *mapKey)
  * are skipped: DuckDB selects one secret per path, so a second one at
  * the same scope could only shadow the first.
  *
- * A credential for any other provider is reported with a WARNING.
- * Passing over it quietly is the worst outcome available: the table
- * does not fail here but falls back to whatever secret pgduck_server
- * was configured with, which is scoped and expires on its own terms
- * rather than the catalog's, so the table either fails much later at
- * scan time or reads with access the catalog never granted.
+ * A credential the catalog vended that pg_lake cannot use is reported
+ * with a WARNING; see UnusableVendedCredential for how one is told apart
+ * from a setting.  Passing over it quietly is the worst outcome
+ * available: the table does not fail here but falls back to whatever
+ * secret pgduck_server was configured with, which is scoped and expires
+ * on its own terms rather than the catalog's, so the table either fails
+ * much later at scan time or reads with access the catalog never
+ * granted.  A backend warns about a table once; see FirstVendedReport.
  *
  * Returns NIL when the response carries no usable credential.
  */
 static List *
-ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
+ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts,
+						 const char *restCatalogName,
+						 const char *namespaceName,
+						 const char *relationName)
 {
 	if (response == NULL)
 		return NIL;
 
 	char	   *tableRoot = TableRootFromLoadTableResponse(response);
 	List	   *credentials = NIL;
-	const char *unsupportedProvider = NULL;
+	const		VendedStorage *unusable = NULL;
 	List	   *elements =
 		JsonbGetArrayElementObjects(response, "storage-credentials",
 									"config", "prefix");
@@ -1160,21 +1726,24 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
 	foreach(elementCell, elements)
 	{
 		JsonbArrayElement *element = lfirst(elementCell);
+		char	   *scope = ResolveVendedScope(element->stringValue, tableRoot);
+		const		VendedStorage *storage = NULL;
 		VendedCredentials *creds =
-			ParseVendedCredsFromConfig(element->object, NULL, opts->serverOid);
+			ParseVendedCredsFromConfig(element->object, NULL, scope,
+									   opts->serverOid, &storage);
 
 		if (creds == NULL)
 		{
-			if (unsupportedProvider == NULL)
-				unsupportedProvider = UnsupportedVendedProvider(element->object,
-																NULL);
+			if (unusable == NULL)
+				unusable = UnusableVendedCredential(element->object, NULL,
+													storage, true);
 			continue;
 		}
 
-		if (creds->region == NULL)
+		if (creds->provider == VENDED_STORAGE_S3 && creds->region == NULL)
 			creds->region = tableRegion;
 
-		creds->scope = ResolveVendedScope(element->stringValue, tableRoot);
+		creds->scope = scope;
 
 		ListCell   *takenCell = NULL;
 		bool		scopeTaken = false;
@@ -1198,35 +1767,75 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts)
 	if (credentials == NIL)
 	{
 		/* Fall back to the legacy top-level "config" map. */
+		char	   *legacyScope = ResolveVendedScope(NULL, tableRoot);
+		const		VendedStorage *storage = NULL;
 		VendedCredentials *legacyCreds =
-			ParseVendedCredsFromConfig(response, "config", opts->serverOid);
+			ParseVendedCredsFromConfig(response, "config", legacyScope,
+									   opts->serverOid, &storage);
 
 		if (legacyCreds != NULL)
 		{
-			legacyCreds->scope = ResolveVendedScope(NULL, tableRoot);
+			legacyCreds->scope = legacyScope;
 			credentials = list_make1(legacyCreds);
 		}
-		else if (unsupportedProvider == NULL)
-			unsupportedProvider = UnsupportedVendedProvider(response, "config");
+		else if (unusable == NULL)
+			unusable = UnusableVendedCredential(response, "config", storage,
+												false);
 	}
 
-	if (unsupportedProvider != NULL)
-		ereport(WARNING,
+	if (unusable != NULL)
+	{
+		char	   *identity = BuildVendedCredentialsIdentity(restCatalogName,
+															  namespaceName,
+															  relationName);
+		char	   *reportKey = psprintf("unusable/%u/%u/%s", opts->serverOid,
+										 opts->userMappingOid, identity);
+
+		ereport(FirstVendedReport(reportKey) ? WARNING : DEBUG2,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("ignoring vended credentials for %s",
-						unsupportedProvider),
-				 errdetail("Vended credentials are only supported for S3.  "
-						   "This table falls back to the credentials "
+				 errmsg("ignoring vended credentials for %s", unusable->name),
+				 errdetail("%s  This table falls back to the credentials "
 						   "pgduck_server is already configured with, whose "
 						   "scope and lifetime may differ from the ones the "
-						   "catalog vended."),
+						   "catalog vended.", unusable->requirement),
 				 errhint("Configure a secret in pgduck_server for this "
 						 "table's storage location.")));
+	}
 	else if (credentials == NIL)
 		elog(DEBUG2, "REST catalog loadTable response did not contain "
-			 "vended S3 credentials");
+			 "usable vended credentials");
 
 	return credentials;
+}
+
+
+/*
+ * FirstVendedReport returns whether this backend is yet to warn about the
+ * problem reportKey names, and records that it now has.  A read-only table
+ * is loaded from the catalog more than once per statement, so a problem
+ * with what is vended for it would otherwise be reported on every load;
+ * the caller reports the repeats at DEBUG2.
+ */
+static bool
+FirstVendedReport(const char *reportKey)
+{
+	ListCell   *reportedCell = NULL;
+
+	foreach(reportedCell, ReportedVendedProblems)
+	{
+		if (strcmp(lfirst(reportedCell), reportKey) == 0)
+			return false;
+	}
+
+	InitVendedCredsCacheIfNeeded();
+
+	MemoryContext oldContext = MemoryContextSwitchTo(VendedCredsCacheCtx);
+
+	ReportedVendedProblems = lappend(ReportedVendedProblems,
+									 pstrdup(reportKey));
+	MemoryContextSwitchTo(oldContext);
+
+	return true;
 }
 
 
@@ -1271,6 +1880,7 @@ InvalidateVendedCredentialsCache(void)
 
 	MemoryContextReset(VendedCredsCacheCtx);
 	VendedCredsCache = NULL;
+	ReportedVendedProblems = NIL;
 }
 
 
@@ -1338,7 +1948,7 @@ LookupVendedCredentialsInCache(Oid serverOid,
 /*
  * IcebergProvideStorageCredentials is the pg_lake_iceberg implementation
  * of the engine's storage-credential provider hook (installed at
- * _PG_init).  Given a relation, it resolves the vended S3 credentials
+ * _PG_init).  Given a relation, it resolves the vended credentials
  * for its REST-catalog Iceberg table and returns them as a
  * List<StorageCredential *> the engine resolver can push to
  * pgduck_server.
@@ -1440,6 +2050,7 @@ IcebergProvideStorageCredentials(Oid relationId)
 		 * memory.
 		 */
 		sc = palloc0(sizeof(StorageCredential));
+		sc->provider = creds->provider;
 		sc->serverOid = opts->serverOid;
 
 		/*
@@ -1459,6 +2070,10 @@ IcebergProvideStorageCredentials(Oid relationId)
 		sc->endpoint = creds->endpoint ? pstrdup(creds->endpoint) : NULL;
 		sc->urlStyle = creds->urlStyle ? pstrdup(creds->urlStyle) : NULL;
 		sc->useSsl = creds->useSsl ? pstrdup(creds->useSsl) : NULL;
+		sc->accountName = creds->accountName ? pstrdup(creds->accountName) : NULL;
+		sc->sasToken = creds->sasToken ? pstrdup(creds->sasToken) : NULL;
+		sc->blobEndpoint = creds->blobEndpoint ? pstrdup(creds->blobEndpoint) : NULL;
+		sc->dfsEndpoint = creds->dfsEndpoint ? pstrdup(creds->dfsEndpoint) : NULL;
 
 		/*
 		 * A catalog that states no expiry still needs one here.  The resolver

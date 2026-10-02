@@ -328,6 +328,7 @@ MakeVendedSecret(const StorageCredential * sc)
 {
 	VendedSecret secret = {0};
 
+	secret.provider = sc->provider;
 	secret.serverOid = sc->serverOid;
 	secret.secretId = sc->secretId;
 	secret.scope = sc->scopePrefix;
@@ -338,6 +339,10 @@ MakeVendedSecret(const StorageCredential * sc)
 	secret.endpoint = sc->endpoint;
 	secret.urlStyle = sc->urlStyle;
 	secret.useSsl = sc->useSsl;
+	secret.accountName = sc->accountName;
+	secret.sasToken = sc->sasToken;
+	secret.blobEndpoint = sc->blobEndpoint;
+	secret.dfsEndpoint = sc->dfsEndpoint;
 
 	return secret;
 }

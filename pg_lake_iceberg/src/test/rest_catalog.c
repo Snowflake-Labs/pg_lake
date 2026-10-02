@@ -105,6 +105,11 @@ get_rest_metadata_location(PG_FUNCTION_ARGS)
  *     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>|
  *      <region>|<endpoint>|<url-style>|<use-ssl>"
  *
+ * or, for an Azure SAS token:
+ *
+ *     "azure|<account>|<scope>|<sas-token>|<expiry in unix seconds|noexpiry>|
+ *      <blob-endpoint>|<dfs-endpoint>"
+ *
  * A catalog may vend more than one credential, in which case the
  * summaries are joined with ';' in the order the catalog returned them.
  *
@@ -136,6 +141,26 @@ get_rest_vended_credentials(PG_FUNCTION_ARGS)
 	foreach(credsCell, result.vendedCredentials)
 	{
 		VendedCredentials *creds = lfirst(credsCell);
+
+		if (creds->provider == VENDED_STORAGE_AZURE)
+		{
+			char	   *expiry = creds->expiresAt > 0 ?
+				psprintf(INT64_FORMAT,
+						 (int64) (creds->expiresAt / USECS_PER_SEC +
+								  (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) *
+								  SECS_PER_DAY)) :
+				"noexpiry";
+
+			appendStringInfo(&buf, "%sazure|%s|%s|%s|%s|%s|%s",
+							 buf.len > 0 ? ";" : "",
+							 creds->accountName,
+							 creds->scope ? creds->scope : "",
+							 creds->sasToken,
+							 expiry,
+							 creds->blobEndpoint ? creds->blobEndpoint : "",
+							 creds->dfsEndpoint ? creds->dfsEndpoint : "");
+			continue;
+		}
 
 		appendStringInfo(&buf, "%s%s|%s|%s|%s|%s|%s|%s|%s",
 						 buf.len > 0 ? ";" : "",
