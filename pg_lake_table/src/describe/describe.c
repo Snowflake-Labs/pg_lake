@@ -36,6 +36,7 @@
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/sniff_csv.h"
 #include "pg_lake/pgduck/type.h"
+#include "pg_lake/util/catalog_type.h"
 #include "lib/stringinfo.h"
 #include "nodes/makefuncs.h"
 #include "nodes/parsenodes.h"
@@ -72,8 +73,12 @@ DescribeColumnsForURL(char *url,
 	if (format == DATA_FORMAT_ICEBERG)
 	{
 		bool		emitFilename = GetBoolOption(copyOptions, "filename", false);
+		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(url);
 
-		return DescribeColumnsFromIcebergMetadataURI(url, emitFilename);
+		if (HasLowercaseColumnNamesOption(copyOptions))
+			LowercaseIcebergTableMetadataNames(metadata);
+
+		return DescribeColumnsFromIcebergMetadata(metadata, emitFilename);
 	}
 
 	/*
@@ -159,18 +164,6 @@ DescribeColumnsForURL(char *url,
 
 	return columns;
 }
-
-/*
- * DescribeColumnsFromIcebergMetadataURI retrieves the columns for a given
- * Iceberg metadata URI.
- */
-List *
-DescribeColumnsFromIcebergMetadataURI(char *uri, bool emitFilename)
-{
-	return DescribeColumnsFromIcebergMetadata(ReadIcebergTableMetadata(uri),
-											  emitFilename);
-}
-
 
 /*
  * DescribeColumnsFromIcebergMetadata retrieves the columns described by

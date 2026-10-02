@@ -174,6 +174,25 @@ Note that changes to the external Iceberg table will **not** be reflected in the
 ALTER FOREIGN TABLE external_iceberg OPTIONS (SET path 's3://mybucket/table/v15.metadata.json');
 ```
 
+When querying or importing an Iceberg metadata file written with uppercase names, use
+`lowercase_column_names` to fold column and nested struct field names to lowercase. It is
+accepted on metadata-path foreign tables, `CREATE TABLE` with `load_from` or `definition_from`,
+and `COPY ... FROM`:
+
+```sql
+CREATE FOREIGN TABLE external_iceberg () SERVER pg_lake
+OPTIONS (path 's3://mybucket/table/v14.metadata.json', lowercase_column_names 'true');
+
+CREATE TABLE imported () USING iceberg
+WITH (load_from = 's3://mybucket/table/v14.metadata.json', lowercase_column_names = true);
+
+COPY imported FROM 's3://mybucket/table/v14.metadata.json'
+WITH (format 'iceberg', lowercase_column_names true);
+```
+
+The option cannot be changed after a foreign table is created. Names that differ only in case
+within the same table or struct are rejected.
+
 ## Postgres tables
 
 You can create regular (”heap”) tables in PostgreSQL as usual.

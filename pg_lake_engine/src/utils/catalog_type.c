@@ -119,13 +119,15 @@ HasLowercaseColumnNamesOption(List *options)
 
 
 /*
- * LowercasesColumnNames returns true if the relation is an Iceberg table
- * whose external column and struct field names are folded to lowercase.
+ * LowercasesColumnNames returns true if the relation is a read-only catalog
+ * table or a metadata-path table whose external column and struct field names
+ * are folded to lowercase.
  */
 bool
 LowercasesColumnNames(Oid relationId)
 {
-	if (!IsPgLakeIcebergForeignTableById(relationId))
+	if (!IsPgLakeIcebergForeignTableById(relationId) &&
+		!IsPgLakeForeignTableById(relationId))
 		return false;
 
 	ForeignTable *foreignTable = GetForeignTable(relationId);

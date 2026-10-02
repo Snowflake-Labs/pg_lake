@@ -46,9 +46,10 @@
 #define PG_LAKE_REST_CATALOG_SERVER_NAME         "pg_lake_rest_catalog"
 
 /*
- * Table option of a read-only external catalog table: fold the Iceberg
- * column and struct field names to lowercase, as Postgres does for unquoted
- * identifiers, so names stored uppercase (as Snowflake does) need no quotes.
+ * Option of a read-only external catalog table, a metadata-path table, or an
+ * import from a metadata file: fold the Iceberg column and struct field names
+ * to lowercase, as Postgres does for unquoted identifiers, so names stored
+ * uppercase (as Snowflake does) need no quotes.
  */
 #define LOWERCASE_COLUMN_NAMES_OPTION "lowercase_column_names"
 

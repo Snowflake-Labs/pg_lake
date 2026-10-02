@@ -2201,13 +2201,11 @@ def test_read_only_lowercase_column_names(
     assert [row[0] for row in struct_fields] == ["city", "zip"]
 
     # struct fields are reachable by lowercase name in projections and filters
-    lowered = run_query(
-        """
+    lowered_rows = """
         SELECT id, name, (home).city, (home).zip, (previous[1]).city, (previous[1]).zip
         FROM object_store_sc2.lowered WHERE (home).zip > 5 ORDER BY id
-        """,
-        pg_conn,
-    )
+    """
+    lowered = run_query(lowered_rows, pg_conn)
     source = run_query(
         """
         SELECT "ID", "Name", ("HOME")."CITY", ("HOME")."ZIP",
@@ -2228,6 +2226,23 @@ def test_read_only_lowercase_column_names(
         pg_conn,
     )
     assert unchanged == source
+
+    # pushdown writes bind the target's field ids to the lowercased names
+    run_command(
+        """
+        CREATE TABLE object_store_sc2.target (LIKE object_store_sc2.lowered)
+        USING iceberg WITH (catalog='object_store');
+        """,
+        pg_conn,
+    )
+    insert_select = """
+        INSERT INTO object_store_sc2.target
+        SELECT * FROM object_store_sc2.lowered WHERE (home).zip > 5
+    """
+    assert_query_pushdownable(insert_select, pg_conn)
+    run_command(insert_select, pg_conn)
+    pg_conn.commit()
+    assert run_query(lowered_rows.replace("lowered", "target"), pg_conn) == source
 
     # explicitly listed columns are matched against the lowercased names
     run_command(

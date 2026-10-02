@@ -117,6 +117,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 	bool		foundLayer = false;
 
 	char	   *logFormat = NULL;
+	bool		lowercaseColumnNames = false;
 
 	CopyDataFormat copyDataFormat = DATA_FORMAT_INVALID;
 	CopyDataCompression copyDataCompression = DATA_COMPRESSION_INVALID;
@@ -335,6 +336,12 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 		{
 			foundFilename = true;
 		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, LOWERCASE_COLUMN_NAMES_OPTION) == 0)
+		{
+			/* only accept boolean */
+			lowercaseColumnNames = defGetBoolean(def);
+		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "maximum_object_size") == 0)
 		{
 			if (IsA(def->arg, Integer))
@@ -465,6 +472,13 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 							   "format")));
 	}
 
+	if (lowercaseColumnNames && copyDataFormat != DATA_FORMAT_ICEBERG)
+	{
+		ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("\"%s\" option is only supported for iceberg "
+							   "format", LOWERCASE_COLUMN_NAMES_OPTION)));
+	}
+
 	if (logFormat != NULL && copyDataFormat != DATA_FORMAT_LOG)
 	{
 		ereport(ERROR, (errcode(ERRCODE_SYNTAX_ERROR),
@@ -525,6 +539,9 @@ InitPgLakeOptions(void)
 
 		/* log options */
 		{"log_format", ForeignTableRelationId},
+
+		/* iceberg options */
+		{LOWERCASE_COLUMN_NAMES_OPTION, ForeignTableRelationId},
 
 		{NULL, InvalidOid}
 	};

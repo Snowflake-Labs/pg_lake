@@ -402,6 +402,14 @@ ExtractDataImportOptions(CopyDataFormat format, List *options)
 				continue;
 			}
 		}
+		else if (format == DATA_FORMAT_ICEBERG)
+		{
+			if (strcmp(option->defname, LOWERCASE_COLUMN_NAMES_OPTION) == 0)
+			{
+				copyOptions = lappend(copyOptions, option);
+				continue;
+			}
+		}
 	}
 
 	return copyOptions;
