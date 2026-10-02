@@ -21,6 +21,7 @@
 #include "fmgr.h"
 
 #include "catalog/namespace.h"
+#include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -130,11 +131,18 @@ RunAttachedCommand(char *command, char *databaseName)
 /*
 * pg_lake_finish_postgres_recovery_in_db updates all internal iceberg tables
 * to read-only in the database where the function is called.
+*
+* It also empties the deletion queue. Every row in it was queued before the
+* restore, so it names a file in storage that the instance this one was
+* restored from still owns and cleans up itself. Leaving the rows would let
+* VACUUM delete those files from here, for instance once a read-only table is
+* dropped and its rows fall to the dropped-table drain.
 */
 Datum
 pg_lake_finish_postgres_recovery_in_db(PG_FUNCTION_ARGS)
 {
 	UpdateAllInternalIcebergTablesToReadOnly();
+	ClearDeletionQueue();
 
 	PG_RETURN_VOID();
 }
