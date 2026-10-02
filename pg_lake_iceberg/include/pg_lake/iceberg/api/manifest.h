@@ -33,6 +33,22 @@
  */
 typedef bool (*ManifestPredicateFn) (IcebergManifest * manifest);
 
+/*
+ * IcebergManifestWriteContext holds the table state that the Iceberg spec
+ * requires in the Avro key-value metadata of every manifest file.
+ */
+typedef struct IcebergManifestWriteContext
+{
+	int			formatVersion;
+
+	/* the table's current schema, as JSON, and its id */
+	int32_t		schemaId;
+	const char *schemaJson;
+
+	/* partition specs that a manifest may be written for */
+	List	   *partitionSpecs;
+}			IcebergManifestWriteContext;
+
 /* predicates */
 extern PGDLLEXPORT bool IsManifestOfFileContentAdd(IcebergManifest * manifest);
 extern PGDLLEXPORT bool IsManifestOfFileContentDeletes(IcebergManifest * manifest);
@@ -42,7 +58,10 @@ extern PGDLLEXPORT List *FetchManifestsFromSnapshot(IcebergSnapshot * snapshot, 
 
 /* write api */
 extern PGDLLEXPORT char *GenerateRemoteManifestPath(const char *location, const char *snapshotUUID, int manifestIndex, char *queryArguments);
-extern PGDLLEXPORT int64_t UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI);
+extern PGDLLEXPORT int64_t UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI,
+													  IcebergManifestWriteContext * writeContext,
+													  int32_t partitionSpecId,
+													  IcebergManifestContentType contentType);
 extern PGDLLEXPORT IcebergManifest * CreateNewIcebergManifest(IcebergSnapshot * snapshot,
 															  int32_t partitionSpecId,
 															  List *allTransforms,

@@ -1,5 +1,6 @@
 """Iceberg-specific test utilities, path helpers, and fixtures."""
 
+import io
 import json
 import os
 import re
@@ -7,6 +8,7 @@ import tempfile
 import time
 from pathlib import Path
 
+import fastavro
 import pytest
 from pyiceberg.catalog.sql import SqlCatalog
 
@@ -32,6 +34,7 @@ from .json import write_json_to_file
 # ---------------------------------------------------------------------------
 # Iceberg file sorting / normalisation helpers
 # ---------------------------------------------------------------------------
+
 
 # for test consistency
 def file_sort_key(file_entry):
@@ -73,6 +76,7 @@ def normalize_dictrow(row):
 # Iceberg sample-data paths
 # ---------------------------------------------------------------------------
 
+
 def iceberg_metadata_json_folder_path():
     return str(Path(__file__).parent.parent / "sample" / "iceberg" / "metadata_json")
 
@@ -88,6 +92,7 @@ def iceberg_metadata_manifest_folder_path():
 # ---------------------------------------------------------------------------
 # Iceberg catalog helpers
 # ---------------------------------------------------------------------------
+
 
 def create_iceberg_test_catalog(pg_conn):
     catalog_user = "iceberg_test_catalog"
@@ -119,6 +124,7 @@ def create_iceberg_test_catalog(pg_conn):
 # ---------------------------------------------------------------------------
 # Iceberg S3 file inspection / consistency checks
 # ---------------------------------------------------------------------------
+
 
 def assert_iceberg_s3_file_consistency(
     pg_conn,
@@ -252,6 +258,58 @@ def s3_prefix_contains_any_file(pg_conn, prefix):
     return exists
 
 
+def assert_manifests_have_table_metadata(s3, table_metadata):
+    """Check the key-value metadata the Iceberg spec requires in each manifest
+    of the current snapshot against the table metadata (the parsed
+    metadata.json). Returns the checked manifest list records."""
+    schemas = {schema["schema-id"]: schema for schema in table_metadata["schemas"]}
+    specs = {spec["spec-id"]: spec for spec in table_metadata["partition-specs"]}
+    current = next(
+        snapshot
+        for snapshot in table_metadata["snapshots"]
+        if snapshot["snapshot-id"] == table_metadata["current-snapshot-id"]
+    )
+
+    manifest_list = read_s3_operations(s3, current["manifest-list"], is_text=False)
+    manifests = list(fastavro.reader(io.BytesIO(manifest_list)))
+    assert manifests, "current snapshot has no manifests"
+
+    for manifest in manifests:
+        body = read_s3_operations(s3, manifest["manifest_path"], is_text=False)
+        header = fastavro.reader(io.BytesIO(body)).metadata
+        path = manifest["manifest_path"]
+
+        assert header["format-version"] == str(table_metadata["format-version"]), path
+        assert header["content"] == ("data" if manifest["content"] == 0 else "deletes")
+
+        # the manifest list and the manifest agree on the spec, and it is the
+        # table's spec of that id
+        spec_id = manifest["partition_spec_id"]
+        assert header["partition-spec-id"] == str(spec_id), path
+        spec_fields = [
+            (field["source-id"], field["field-id"], field["name"], field["transform"])
+            for field in json.loads(header["partition-spec"])
+        ]
+        assert spec_fields == [
+            (field["source-id"], field["field-id"], field["name"], field["transform"])
+            for field in specs[spec_id]["fields"]
+        ], path
+
+        # schema-id names a table schema with the same fields as "schema"
+        schema = json.loads(header["schema"])
+        schema_id = int(header["schema-id"])
+        assert schema["schema-id"] == schema_id, path
+        assert [(field["id"], field["name"]) for field in schema["fields"]] == [
+            (field["id"], field["name"]) for field in schemas[schema_id]["fields"]
+        ], path
+
+        # a manifest written for this snapshot uses the current schema
+        if manifest["added_snapshot_id"] == current["snapshot-id"]:
+            assert schema_id == table_metadata["current-schema-id"], path
+
+    return manifests
+
+
 def table_partition_specs(pg_conn, table_name):
     metadata_location = run_query(
         f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{table_name}'",
@@ -267,6 +325,7 @@ def table_partition_specs(pg_conn, table_name):
 # ---------------------------------------------------------------------------
 # Iceberg metadata regeneration helpers
 # ---------------------------------------------------------------------------
+
 
 def regenerate_metadata_json(superuser_conn, metadata_location, s3):
 
@@ -811,11 +870,18 @@ def assert_iceberg_schemas_equal(left_json, right_json, label=""):
     matching field definitions.  Field IDs and schema-ids are ignored
     because they may be assigned differently by each engine.
     """
+
     def _norm_fields(fields):
         return [
-            (f["name"],
-             re.sub(r"\s+", "", f["type"]) if isinstance(f["type"], str) else f["type"],
-             f.get("required", False))
+            (
+                f["name"],
+                (
+                    re.sub(r"\s+", "", f["type"])
+                    if isinstance(f["type"], str)
+                    else f["type"]
+                ),
+                f.get("required", False),
+            )
             for f in fields
         ]
 

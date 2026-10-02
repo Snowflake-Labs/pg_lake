@@ -32,6 +32,9 @@ typedef struct ExtraMetadata
 {
 	const char *schema_json;
 	size_t		schema_json_length;
+
+	/* List of AvroMetadataEntry, written after "avro.schema" */
+	List	   *entries;
 }			ExtraMetadata;
 
 static AvroWriter * AvroWriterCreate(const char *filePath, avro_schema_t schema, avro_value_t * meta);
@@ -39,7 +42,7 @@ static bool AvroFileWriterClose(AvroWriter * writer);
 static void AvroFileWriterCloseCallback(void *arg);
 static void AvroPrepareSetNullable(avro_value_t * record, char *fieldName, avro_value_t * innerValue, bool isSet);
 static void WriteExtraMetadataToAvro(avro_value_t * record, ExtraMetadata * metadata);
-static avro_value_t * CreateAvroExtraMetadata(const char *schemaJson);
+static avro_value_t * CreateAvroExtraMetadata(const char *schemaJson, List *metadataEntries);
 static avro_schema_t GetSchemaFromJson(const char *schemaJson);
 
 
@@ -59,10 +62,22 @@ int			DefaultAvroWriterBlockSize = DEFAULT_AVRO_WRITER_BLOCK_SIZE;
 AvroWriter *
 AvroWriterCreateWithJsonSchema(const char *filePath, const char *schemaJson)
 {
+	return AvroWriterCreateWithJsonSchemaAndMetadata(filePath, schemaJson, NIL);
+}
+
+
+/*
+ * AvroWriterCreateWithJsonSchemaAndMetadata is AvroWriterCreateWithJsonSchema
+ * plus a List of AvroMetadataEntry for the file header's key-value metadata.
+ */
+AvroWriter *
+AvroWriterCreateWithJsonSchemaAndMetadata(const char *filePath, const char *schemaJson,
+										  List *metadataEntries)
+{
 	avro_schema_t schema = GetSchemaFromJson(schemaJson);
 
-	/* "avro.schema" */
-	avro_value_t *meta = CreateAvroExtraMetadata(schemaJson);
+	/* "avro.schema" and the extra entries */
+	avro_value_t *meta = CreateAvroExtraMetadata(schemaJson, metadataEntries);
 
 	return AvroWriterCreate(filePath, schema, meta);
 }
@@ -206,6 +221,10 @@ WriteExtraMetadataToAvro(avro_value_t * record, ExtraMetadata * metadata)
 										  { \
 										    \"type\": \"int\", \
 										    \"name\": \"length\" \
+										  }, \
+										  { \
+										    \"type\": {\"type\": \"map\", \"values\": \"string\"}, \
+										    \"name\": \"properties\" \
 										  } \
 									    ] \
 									 }";
@@ -222,17 +241,39 @@ WriteExtraMetadataToAvro(avro_value_t * record, ExtraMetadata * metadata)
 
 	AvroSetStringField(record, "avroschema", metadata->schema_json);
 	AvroSetInt32Field(record, "length", metadata->schema_json_length);
+
+	avro_value_t propertiesMap;
+
+	if (avro_value_get_by_name(record, "properties", &propertiesMap, NULL) != 0)
+	{
+		ereport(ERROR, (errmsg("properties not found in schema")));
+	}
+
+	ListCell   *entryCell = NULL;
+
+	foreach(entryCell, metadata->entries)
+	{
+		AvroMetadataEntry *entry = lfirst(entryCell);
+		avro_value_t entryValue;
+
+		if (avro_value_add(&propertiesMap, entry->key, &entryValue, NULL, NULL) != 0 ||
+			avro_value_set_string(&entryValue, entry->value) != 0)
+		{
+			ereport(ERROR, (errmsg("could not set avro metadata entry %s", entry->key)));
+		}
+	}
 }
 
 
 /*
  * CreateAvroExtraMetadata creates an Avro record for extra metadata.
- * It currently only contains the JSON "avro.schema", which is used by the
- * Avro writer to properly specify field-id and default for fields.
- * If not set, the writer is not able to write field ids and defaults.
+ * It contains the JSON "avro.schema", which is used by the Avro writer to
+ * properly specify field-id and default for fields (if not set, the writer
+ * is not able to write field ids and defaults), and the extra key-value
+ * entries for the file header.
  */
 static avro_value_t *
-CreateAvroExtraMetadata(const char *schemaJson)
+CreateAvroExtraMetadata(const char *schemaJson, List *metadataEntries)
 {
 	size_t		schemaJsonLength = strlen(schemaJson);
 
@@ -240,6 +281,7 @@ CreateAvroExtraMetadata(const char *schemaJson)
 
 	metadata.schema_json = schemaJson;
 	metadata.schema_json_length = schemaJsonLength;
+	metadata.entries = metadataEntries;
 
 	avro_value_t *meta = palloc0(sizeof(avro_value_t));
 

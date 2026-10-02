@@ -21,7 +21,7 @@ index ffbb68dc5..5bb2ee699 100644
  avro_file_reader_get_writer_schema(avro_file_reader_t reader);
  
 diff --git a/lang/c/src/datafile.c b/lang/c/src/datafile.c
-index c9d4dfeb6..4a1fdb25f 100644
+index c9d4dfeb6..dcb6f50cc 100644
 --- a/lang/c/src/datafile.c
 +++ b/lang/c/src/datafile.c
 @@ -73,7 +73,7 @@ static int write_sync(avro_file_writer_t w)
@@ -33,23 +33,35 @@ index c9d4dfeb6..4a1fdb25f 100644
  {
  	int rval;
  	uint8_t version = 1;
-@@ -82,6 +82,15 @@ static int write_header(avro_file_writer_t w)
+@@ -82,27 +82,65 @@ static int write_header(avro_file_writer_t w)
  	const avro_encoding_t *enc = &avro_binary_encoding;
  	int64_t schema_len;
  
 +	const char *json_schema = NULL;
 +	size_t json_schema_len = 0;
++  avro_value_t properties = {0};
++  size_t properties_count = 0;
 +	if (extra_meta != NULL)
 +	{
 +		avro_value_t meta_schema = {0};
 +		check(rval, avro_value_get_by_name(extra_meta, "avroschema", &meta_schema, NULL));
 +		check(rval, avro_value_get_string(&meta_schema, &json_schema, &json_schema_len));
++
++    /* optional map of extra string entries for the file metadata */
++    if (avro_value_get_by_name(extra_meta, "properties", &properties, NULL) == 0)
++      check(rval, avro_value_get_size(&properties, &properties_count));
 +	}
 +
  	/* Generate random sync */
  	generate_sync(w);
  
-@@ -94,15 +103,24 @@ static int write_header(avro_file_writer_t w)
+ 	check(rval, avro_write(w->writer, "Obj", 3));
+ 	check(rval, avro_write(w->writer, &version, 1));
+ 
+-	check(rval, enc->write_long(w->writer, 2));
++	check(rval, enc->write_long(w->writer, 2 + properties_count));
+ 	check(rval, enc->write_string(w->writer, "avro.codec"));
+ 	check(rval, enc->write_bytes(w->writer, w->codec->name, strlen(w->codec->name)));
  	check(rval, enc->write_string(w->writer, "avro.schema"));
  	schema_writer =
  	    avro_writer_memory(&w->schema_buf[0], sizeof(w->schema_buf));
@@ -72,10 +84,24 @@ index c9d4dfeb6..4a1fdb25f 100644
  	check(rval,
  	      enc->write_bytes(w->writer, w->schema_buf, schema_len));
 +
++	for (size_t i = 0; i < properties_count; i++) {
++		avro_value_t value;
++		const char *key = NULL;
++		const char *str = NULL;
++		size_t str_len = 0;
++
++		check(rval, avro_value_get_by_index(&properties, i, &value, &key));
++		check(rval, avro_value_get_string(&value, &str, &str_len));
++
++		/* str_len counts the NUL terminator, which is not part of the value */
++		check(rval, enc->write_string(w->writer, key));
++		check(rval, enc->write_bytes(w->writer, str, str_len - 1));
++	}
++
  	check(rval, enc->write_long(w->writer, 0));
  	return write_sync(w);
  }
-@@ -140,7 +158,7 @@ file_writer_init_fp(FILE *fp, const char *path, int should_close, const char *mo
+@@ -140,7 +178,7 @@ file_writer_init_fp(FILE *fp, const char *path, int should_close, const char *mo
  #endif
  
  static int
@@ -84,7 +110,7 @@ index c9d4dfeb6..4a1fdb25f 100644
  {
  	int rval;
  
-@@ -169,7 +187,7 @@ file_writer_create(FILE *fp, const char *path, int should_close, avro_schema_t s
+@@ -169,7 +207,7 @@ file_writer_create(FILE *fp, const char *path, int should_close, avro_schema_t s
  	}
  
  	w->writers_schema = avro_schema_incref(schema);
@@ -93,7 +119,7 @@ index c9d4dfeb6..4a1fdb25f 100644
  }
  
  int
-@@ -196,6 +214,15 @@ int avro_file_writer_create_with_codec(const char *path,
+@@ -196,6 +234,15 @@ int avro_file_writer_create_with_codec(const char *path,
  int avro_file_writer_create_with_codec_fp(FILE *fp, const char *path, int should_close,
  			avro_schema_t schema, avro_file_writer_t * writer,
  			const char *codec, size_t block_size)
@@ -109,7 +135,7 @@ index c9d4dfeb6..4a1fdb25f 100644
  {
  	avro_file_writer_t w;
  	int rval;
-@@ -226,7 +253,7 @@ int avro_file_writer_create_with_codec_fp(FILE *fp, const char *path, int should
+@@ -226,7 +273,7 @@ int avro_file_writer_create_with_codec_fp(FILE *fp, const char *path, int should
  		avro_freet(struct avro_file_writer_t_, w);
  		return rval;
  	}
@@ -118,7 +144,7 @@ index c9d4dfeb6..4a1fdb25f 100644
  	if (rval) {
  		avro_codec_reset(w->codec);
  		avro_freet(struct avro_codec_t_, w->codec);
-@@ -452,6 +479,36 @@ static int file_read_block_count(avro_file_reader_t r)
+@@ -452,6 +499,36 @@ static int file_read_block_count(avro_file_reader_t r)
  	check_prefix(rval, enc->read_long(r->reader, &len),
  		     "Cannot read file block size: ");
  
@@ -155,7 +181,7 @@ index c9d4dfeb6..4a1fdb25f 100644
  	if (r->current_blockdata && len > r->current_blocklen) {
  		r->current_blockdata = (char *) avro_realloc(r->current_blockdata, r->current_blocklen, len);
  		r->current_blocklen = len;
-@@ -466,6 +523,27 @@ static int file_read_block_count(avro_file_reader_t r)
+@@ -466,6 +543,27 @@ static int file_read_block_count(avro_file_reader_t r)
  
  		check_prefix(rval, avro_codec_decode(r->codec, r->current_blockdata, len),
  			     "Cannot decode file block: ");
@@ -183,7 +209,7 @@ index c9d4dfeb6..4a1fdb25f 100644
  	}
  
  	avro_reader_memory_set_source(r->block_reader, (const char *) r->codec->block_data, r->codec->used_size);
-@@ -541,6 +619,93 @@ int avro_file_reader_fp(FILE *fp, const char *path, int should_close,
+@@ -541,6 +639,93 @@ int avro_file_reader_fp(FILE *fp, const char *path, int should_close,
  	return 0;
  }
  

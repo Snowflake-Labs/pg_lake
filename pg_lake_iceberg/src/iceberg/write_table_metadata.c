@@ -224,30 +224,7 @@ AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size
 
 	for (size_t i = 0; i < schemas_length; i++)
 	{
-		appendStringInfoString(command, "{");
-
-		/* append type */
-		appendJsonString(command, "type", schemas[i].type);
-		appendStringInfoString(command, ", ");
-
-		/* Append schema_id */
-		appendJsonInt32(command, "schema-id", schemas[i].schema_id);
-
-		if (schemas[i].identifier_field_ids_length > 0)
-		{
-			appendStringInfoString(command, ", ");
-			appendStringInfoString(command, "\"identifier-field-ids\":");
-			AppendIntArray(command, schemas[i].identifier_field_ids,
-						   schemas[i].identifier_field_ids_length);
-		}
-
-		/* Append fields */
-		appendStringInfoString(command, ", ");
-
-		appendStringInfoString(command, "\"fields\":");
-		AppendIcebergStructFields(command, schemas[i].fields, schemas[i].fields_length);
-
-		appendStringInfoString(command, "}");
+		AppendIcebergTableSchema(command, &schemas[i]);
 
 		if (i < schemas_length - 1)
 		{
@@ -256,6 +233,40 @@ AppendIcebergTableSchemas(StringInfo command, IcebergTableSchema * schemas, size
 	}
 
 	appendStringInfoString(command, "]");
+}
+
+
+/*
+ * AppendIcebergTableSchema appends a single schema, including its schema-id,
+ * as a JSON object. Manifests also carry it as their "schema" metadata.
+ */
+void
+AppendIcebergTableSchema(StringInfo command, IcebergTableSchema * schema)
+{
+	appendStringInfoString(command, "{");
+
+	/* append type */
+	appendJsonString(command, "type", schema->type);
+	appendStringInfoString(command, ", ");
+
+	/* Append schema_id */
+	appendJsonInt32(command, "schema-id", schema->schema_id);
+
+	if (schema->identifier_field_ids_length > 0)
+	{
+		appendStringInfoString(command, ", ");
+		appendStringInfoString(command, "\"identifier-field-ids\":");
+		AppendIntArray(command, schema->identifier_field_ids,
+					   schema->identifier_field_ids_length);
+	}
+
+	/* Append fields */
+	appendStringInfoString(command, ", ");
+
+	appendStringInfoString(command, "\"fields\":");
+	AppendIcebergStructFields(command, schema->fields, schema->fields_length);
+
+	appendStringInfoString(command, "}");
 }
 
 

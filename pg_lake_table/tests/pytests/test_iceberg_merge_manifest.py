@@ -1,3 +1,5 @@
+import math
+
 import pytest
 from utils_pytest import *
 
@@ -328,7 +330,7 @@ def test_manifest_merge_target_size(
     # let one manifest be unmerged after the next INSERT
     total_manifest_size_in_kb = get_current_manifests_size_in_kb(pg_conn)
     run_command(
-        f"SET pg_lake_iceberg.target_manifest_size_kb = {total_manifest_size_in_kb}",
+        f"SET pg_lake_iceberg.target_manifest_size_kb = {math.ceil(total_manifest_size_in_kb)}",
         pg_conn,
     )
 
@@ -406,7 +408,7 @@ def test_manifest_merge_by_lowered_target_size(
 
     # lower the target size to trigger manifest merge on the next INSERT
     run_command(
-        f"SET pg_lake_iceberg.target_manifest_size_kb = {2 * single_manifest_size_in_kb}",
+        f"SET pg_lake_iceberg.target_manifest_size_kb = {math.ceil(2 * single_manifest_size_in_kb)}",
         pg_conn,
     )
 
@@ -442,7 +444,7 @@ def test_manifest_merge_with_multiple_groups_due_to_disabled_merge_on_write(
     # at most, a group will have 2 manifests
     total_manifest_size_in_kb = get_current_manifests_size_in_kb(pg_conn)
     run_command(
-        f"SET pg_lake_iceberg.target_manifest_size_kb = {total_manifest_size_in_kb}",
+        f"SET pg_lake_iceberg.target_manifest_size_kb = {math.ceil(total_manifest_size_in_kb)}",
         pg_conn,
     )
 
@@ -496,7 +498,7 @@ def test_manifest_merge_with_multiple_groups_due_to_small_target_size(
     # at most, a group will have 2 manifests, this will unblock other manifest groups merge
     total_manifest_size_in_kb = get_current_manifests_size_in_kb(pg_conn)
     run_command(
-        f"SET pg_lake_iceberg.target_manifest_size_kb = {total_manifest_size_in_kb}",
+        f"SET pg_lake_iceberg.target_manifest_size_kb = {math.ceil(total_manifest_size_in_kb)}",
         pg_conn,
     )
 
@@ -1488,6 +1490,8 @@ def get_current_manifests(pg_conn):
     return manifests
 
 
+# target_manifest_size_kb is an integer, so callers sizing it to fit a set of
+# manifests round this up
 def get_current_manifests_size_in_kb(pg_conn):
     metadata_location = run_query(
         f"SELECT metadata_location FROM lake_iceberg.tables WHERE table_name = '{TEST_TABLE_NAME}'",

@@ -19,6 +19,7 @@
 
 #include "postgres.h"
 
+#include "pg_lake/iceberg/api/manifest.h"
 #include "pg_lake/iceberg/api/snapshot.h"
 #include "pg_lake/iceberg/manifest_spec.h"
 
@@ -41,6 +42,7 @@ extern int	ManifestMinCountToMerge;
 
 extern PGDLLEXPORT List *MergeDataManifests(IcebergSnapshot * currentSnapshot,
 											List *allTransforms,
+											IcebergManifestWriteContext * writeContext,
 											List *dataManifests,
 											const char *metadataLocation,
 											const char *snapshotUUID,
@@ -48,6 +50,7 @@ extern PGDLLEXPORT List *MergeDataManifests(IcebergSnapshot * currentSnapshot,
 											int *manifestIndex);
 extern PGDLLEXPORT bool RemoveDeletedManifestEntries(IcebergSnapshot * currentSnapshot,
 													 List *allTransforms,
+													 IcebergManifestWriteContext * writeContext,
 													 List **manifests,
 													 IcebergManifestContentType contentType,
 													 const char *metadataLocation,

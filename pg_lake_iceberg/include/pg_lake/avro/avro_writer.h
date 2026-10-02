@@ -18,6 +18,7 @@
 #pragma once
 
 #include "avro.h"
+#include "nodes/pg_list.h"
 #include "utils/palloc.h"
 
 #define DEFAULT_AVRO_WRITER_BLOCK_SIZE 64
@@ -26,6 +27,13 @@
 extern int	DefaultAvroWriterBlockSize;
 
 typedef void (*AvroSerializeFunction) (void *entry, avro_value_t * record);
+
+/* a string entry for the file header's key-value metadata */
+typedef struct AvroMetadataEntry
+{
+	const char *key;
+	const char *value;
+}			AvroMetadataEntry;
 
 typedef struct AvroWriter
 {
@@ -51,6 +59,9 @@ typedef struct AvroWriter
 
 AvroWriter *AvroWriterCreateWithJsonSchema(const char *filePath,
 										   const char *schemaJson);
+AvroWriter *AvroWriterCreateWithJsonSchemaAndMetadata(const char *filePath,
+													  const char *schemaJson,
+													  List *metadataEntries);
 void		AvroWriterWriteRecord(AvroWriter * writer, AvroSerializeFunction serializeFn, void *entry);
 void		AvroWriterClose(AvroWriter * writer);
 

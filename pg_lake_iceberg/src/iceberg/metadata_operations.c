@@ -125,22 +125,27 @@ static void ProcessIcebergMetadataOperations(Oid relationId, List *metadataOpera
 static IcebergManifestEntry * CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation * operation,
 																			  int64_t newSnapshotId,
 																			  int64_t sequenceNumber);
+static IcebergManifestWriteContext * CreateManifestWriteContext(Oid relationId,
+																IcebergTableMetadata * metadata,
+																IcebergSnapshotBuilder * builder,
+																bool writableRestCatalogTable);
 static IcebergSnapshot * FinalizeNewSnapshot(IcebergSnapshotBuilder * builder,
 											 Oid relationId,
 											 const char *metadataLocation,
 											 int32_t currentSchemaId,
 											 List *allTransforms,
+											 IcebergManifestWriteContext * writeContext,
 											 bool isVerbose);
 static List *CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManifestEntries,
 												 IcebergSnapshot * newSnapshot, const char *metadataLocation,
 												 const char *snapshotUUID, int *manifestIndex,
-												 int partitionSpecId, List *partitionTransforms,
+												 int partitionSpecId, List *partitionTransforms, IcebergManifestWriteContext * writeContext,
 												 IcebergManifestContentType contentType);
 static bool RewriteManifestForRemoval(IcebergManifest * manifest,
 									  List *removedEntries, bool removeAllEntries,
 									  int64_t snapshotId, IcebergSnapshot * newSnapshot,
 									  const char *metadataLocation, const char *snapshotUUID,
-									  int *manifestIndex, List *allTransforms,
+									  int *manifestIndex, List *allTransforms, IcebergManifestWriteContext * writeContext,
 									  List **finalDataManifestList,
 									  List **finalDeleteManifestList);
 static IcebergSnapshot * CopyIcebergSnapshot(IcebergSnapshot * src);
@@ -307,11 +312,15 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	/* whether to create a new version of the Iceberg table */
 	bool		createNewSnapshot = false;
 
+	IcebergManifestWriteContext *manifestWriteContext =
+		CreateManifestWriteContext(relationId, metadata, builder, writableRestCatalogTable);
+
 	IcebergSnapshot *newSnapshot = FinalizeNewSnapshot(builder,
 													   relationId,
 													   metadata->location,
 													   metadata->current_schema_id,
 													   allTransforms,
+													   manifestWriteContext,
 													   isVerbose);
 
 	if (newSnapshot != NULL)
@@ -841,6 +850,67 @@ ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
 
 
 /*
+ * CreateManifestWriteContext returns the table state for the key-value
+ * metadata of the manifests written for the new snapshot.
+ *
+ * Writable REST catalog tables only send this transaction's schema and spec
+ * changes to the catalog, so those come from the builder. A new schema gets
+ * the id the catalog will assign it, one past the highest existing id.
+ */
+static IcebergManifestWriteContext *
+CreateManifestWriteContext(Oid relationId, IcebergTableMetadata * metadata,
+						   IcebergSnapshotBuilder * builder,
+						   bool writableRestCatalogTable)
+{
+	IcebergManifestWriteContext *writeContext = palloc0(sizeof(IcebergManifestWriteContext));
+	IcebergTableSchema *schema = NULL;
+
+	writeContext->formatVersion = metadata->format_version;
+	writeContext->partitionSpecs = GetAllIcebergPartitionSpecsFromTableMetadata(metadata);
+
+	if (!writableRestCatalogTable)
+	{
+		schema = GetIcebergTableSchemaByIdFromTableMetadata(metadata,
+															metadata->current_schema_id);
+	}
+	else
+	{
+		if (builder->schema != NULL)
+		{
+			int			lastColumnId = 0;
+
+			schema = RebuildIcebergSchemaFromDataFileSchema(relationId, builder->schema,
+															&lastColumnId);
+			schema->schema_id = 0;
+
+			for (size_t schemaIndex = 0; schemaIndex < metadata->schemas_length; schemaIndex++)
+				schema->schema_id = Max(schema->schema_id,
+										metadata->schemas[schemaIndex].schema_id + 1);
+		}
+		else
+		{
+			int32_t		schemaId = builder->regenerateSchema ?
+				builder->schemaId : metadata->current_schema_id;
+
+			schema = GetIcebergTableSchemaByIdFromTableMetadata(metadata, schemaId);
+		}
+
+		writeContext->partitionSpecs = list_concat(writeContext->partitionSpecs,
+												   builder->partitionSpecs);
+	}
+
+	StringInfo	schemaJson = makeStringInfo();
+
+	AppendIcebergTableSchema(schemaJson, schema);
+
+	writeContext->schemaId = schema->schema_id;
+	writeContext->schemaJson = schemaJson->data;
+
+	return writeContext;
+}
+
+
+/*
 * FinalizeNewSnapshot creates a new snapshot from an IcebergSnapshotBuilder.
 *
 * It creates new manifest files for the new data files and positional
@@ -849,7 +919,7 @@ ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
 */
 static IcebergSnapshot *
 FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char *metadataLocation,
-					int32_t currentSchemaId, List *allTransforms, bool isVerbose)
+					int32_t currentSchemaId, List *allTransforms, IcebergManifestWriteContext * writeContext, bool isVerbose)
 {
 	IcebergSnapshot *currentSnapshot = builder->baseSnapshot;
 	IcebergSnapshot *newSnapshot = builder->newSnapshot;
@@ -890,11 +960,11 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 		 * RemoveDeletedManifestEntries goes through old snapshot's manifests
 		 * and removes any entries that are marked as deleted.
 		 */
-		bool		anyDataManifestModified = RemoveDeletedManifestEntries(currentSnapshot, allTransforms, &finalDataManifestList,
+		bool		anyDataManifestModified = RemoveDeletedManifestEntries(currentSnapshot, allTransforms, writeContext, &finalDataManifestList,
 																		   ICEBERG_MANIFEST_FILE_CONTENT_DATA, metadataLocation,
 																		   snapshotUUID, isVerbose, &manifestIndex);
 
-		bool		anyDeleteManifestModified = RemoveDeletedManifestEntries(currentSnapshot, allTransforms, &finalDeleteManifestList,
+		bool		anyDeleteManifestModified = RemoveDeletedManifestEntries(currentSnapshot, allTransforms, writeContext, &finalDeleteManifestList,
 																			 ICEBERG_MANIFEST_FILE_CONTENT_DELETES, metadataLocation,
 																			 snapshotUUID, isVerbose, &manifestIndex);
 
@@ -923,7 +993,9 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 										   snapshotUUID,
 										   manifestIndex++, "");
 
-			int64_t		manifestSize = UploadIcebergManifestToURI(manifestEntries, remoteManifestPath);
+			int64_t		manifestSize = UploadIcebergManifestToURI(manifestEntries, remoteManifestPath,
+																  writeContext, partitionSpecId,
+																  ICEBERG_MANIFEST_FILE_CONTENT_DATA);
 
 			IcebergManifest *newDataManifest =
 				CreateNewIcebergManifest(newSnapshot, partitionSpecId, allTransforms,
@@ -958,7 +1030,9 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 										   snapshotUUID,
 										   manifestIndex++, "");
 
-			int64_t		manifestSize = UploadIcebergManifestToURI(manifestEntries, remoteManifestPath);
+			int64_t		manifestSize = UploadIcebergManifestToURI(manifestEntries, remoteManifestPath,
+																  writeContext, partitionSpecId,
+																  ICEBERG_MANIFEST_FILE_CONTENT_DELETES);
 
 			IcebergManifest *newDeleteManifest =
 				CreateNewIcebergManifest(newSnapshot, partitionSpecId, allTransforms, manifestSize,
@@ -992,7 +1066,7 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 			if (RewriteManifestForRemoval(manifest, removedEntries, removeAllEntries,
 										  snapshotId, newSnapshot,
 										  metadataLocation, snapshotUUID,
-										  &manifestIndex, allTransforms,
+										  &manifestIndex, allTransforms, writeContext,
 										  &finalDataManifestList,
 										  &finalDeleteManifestList))
 			{
@@ -1010,7 +1084,7 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 		 */
 		int			beforeMergeCount = list_length(finalDataManifestList);
 
-		finalDataManifestList = MergeDataManifests(newSnapshot, allTransforms, finalDataManifestList,
+		finalDataManifestList = MergeDataManifests(newSnapshot, allTransforms, writeContext, finalDataManifestList,
 												   metadataLocation, snapshotUUID, isVerbose, &manifestIndex);
 
 		int			afterMergeCount = list_length(finalDataManifestList);
@@ -1067,11 +1141,12 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 static List *
 CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManifestEntries, IcebergSnapshot * newSnapshot,
 									const char *metadataLocation, const char *snapshotUUID, int *manifestIndex,
-									int partitionSpecId, List *partitionTransforms, IcebergManifestContentType contentType)
+									int partitionSpecId, List *partitionTransforms, IcebergManifestWriteContext * writeContext, IcebergManifestContentType contentType)
 {
 	char	   *deleteManifestPath = GenerateRemoteManifestPath(metadataLocation,
 																snapshotUUID, (*manifestIndex)++, "");
-	int64_t		manifestSize = UploadIcebergManifestToURI(deletedManifestEntries, deleteManifestPath);
+	int64_t		manifestSize = UploadIcebergManifestToURI(deletedManifestEntries, deleteManifestPath,
+														  writeContext, partitionSpecId, contentType);
 
 	IcebergManifest *deleteManifest =
 		CreateNewIcebergManifest(newSnapshot, partitionSpecId, partitionTransforms, manifestSize,
@@ -1096,7 +1171,8 @@ CreateNewManifestsForDeletedEntries(List *allManifestEntries, List *deletedManif
 	 */
 	char	   *remainingManifestPath = GenerateRemoteManifestPath(metadataLocation,
 																   snapshotUUID, (*manifestIndex)++, "");
-	int64_t		remainingManifestSize = UploadIcebergManifestToURI(remainingManifestEntries, remainingManifestPath);
+	int64_t		remainingManifestSize = UploadIcebergManifestToURI(remainingManifestEntries, remainingManifestPath,
+																   writeContext, partitionSpecId, contentType);
 
 	SetExistingStatusForOldSnapshotAddedEntries(remainingManifestEntries, newSnapshot->snapshot_id);
 
@@ -1142,7 +1218,7 @@ RewriteManifestForRemoval(IcebergManifest * manifest,
 						  List *removedEntries, bool removeAllEntries,
 						  int64_t snapshotId, IcebergSnapshot * newSnapshot,
 						  const char *metadataLocation, const char *snapshotUUID,
-						  int *manifestIndex, List *allTransforms,
+						  int *manifestIndex, List *allTransforms, IcebergManifestWriteContext * writeContext,
 						  List **finalDataManifestList,
 						  List **finalDeleteManifestList)
 {
@@ -1173,7 +1249,7 @@ RewriteManifestForRemoval(IcebergManifest * manifest,
 			CreateNewManifestsForDeletedEntries(manifestEntries, deletedManifestEntries,
 												newSnapshot, metadataLocation, snapshotUUID,
 												manifestIndex, manifest->partition_spec_id,
-												allTransforms, content);
+												allTransforms, writeContext, content);
 
 		if (content == ICEBERG_MANIFEST_FILE_CONTENT_DATA)
 		{

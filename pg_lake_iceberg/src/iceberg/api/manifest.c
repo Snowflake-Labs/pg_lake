@@ -21,6 +21,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_lake/avro/avro_writer.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/iceberg_field.h"
@@ -33,6 +34,10 @@
 
 #include "utils/lsyscache.h"
 
+static List *GetManifestKeyValueMetadata(IcebergManifestWriteContext * writeContext,
+										 int32_t partitionSpecId,
+										 IcebergManifestContentType contentType);
+static AvroMetadataEntry * MakeAvroMetadataEntry(const char *key, const char *value);
 static void SetManifestFileAndRowCounts(IcebergManifest * manifest, List *manifestEntries);
 static void SetManifestPartitionSummary(IcebergManifest * manifest, List *manifestEntries, List *transforms);
 static FieldSummary * GetPartitionFieldSummaryFromDataFiles(List *dataFiles, int32_t partitionFieldIndex,
@@ -92,14 +97,21 @@ FetchManifestsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manif
 
 /*
  * UploadIcebergManifestToURI writes the manifest to a file and uploads it to given uri.
- * It returns the size of the manifest file.
+ * The manifest holds files of the given content type written with the given
+ * partition spec. It returns the size of the manifest file.
  */
 int64_t
-UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI)
+UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI,
+						   IcebergManifestWriteContext * writeContext,
+						   int32_t partitionSpecId,
+						   IcebergManifestContentType contentType)
 {
 	char	   *localManifestPath = GenerateTempFileNameForUpload(PG_LAKE_ICEBERG);
 
-	WriteIcebergManifest(localManifestPath, manifestEntries);
+	List	   *metadataEntries =
+		GetManifestKeyValueMetadata(writeContext, partitionSpecId, contentType);
+
+	WriteIcebergManifest(localManifestPath, manifestEntries, metadataEntries);
 
 	/*
 	 * Manifest files will get auto-deleted on commit unless
@@ -114,6 +126,68 @@ UploadIcebergManifestToURI(List *manifestEntries, char *manifestURI)
 	int64		manifestSize = GetLocalFileSize(localManifestPath);
 
 	return manifestSize;
+}
+
+
+/*
+ * GetManifestKeyValueMetadata returns the Avro key-value metadata that the
+ * Iceberg spec requires in a manifest file, as a List of AvroMetadataEntry.
+ */
+static List *
+GetManifestKeyValueMetadata(IcebergManifestWriteContext * writeContext,
+							int32_t partitionSpecId,
+							IcebergManifestContentType contentType)
+{
+	IcebergPartitionSpec *partitionSpec = NULL;
+	ListCell   *specCell = NULL;
+
+	foreach(specCell, writeContext->partitionSpecs)
+	{
+		IcebergPartitionSpec *spec = lfirst(specCell);
+
+		if (spec->spec_id == partitionSpecId)
+		{
+			partitionSpec = spec;
+			break;
+		}
+	}
+
+	if (partitionSpec == NULL)
+		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+						errmsg("partition spec %d not found for manifest",
+							   partitionSpecId)));
+
+	/* only the fields array, not the whole spec object */
+	StringInfo	partitionSpecFields = makeStringInfo();
+
+	AppendIcebergPartitionSpecFields(partitionSpecFields, partitionSpec->fields,
+									 partitionSpec->fields_length);
+
+	const char *content =
+		contentType == ICEBERG_MANIFEST_FILE_CONTENT_DATA ? "data" : "deletes";
+
+	List	   *entries = NIL;
+
+	entries = lappend(entries, MakeAvroMetadataEntry("schema", writeContext->schemaJson));
+	entries = lappend(entries, MakeAvroMetadataEntry("schema-id", psprintf("%d", writeContext->schemaId)));
+	entries = lappend(entries, MakeAvroMetadataEntry("partition-spec", partitionSpecFields->data));
+	entries = lappend(entries, MakeAvroMetadataEntry("partition-spec-id", psprintf("%d", partitionSpecId)));
+	entries = lappend(entries, MakeAvroMetadataEntry("format-version", psprintf("%d", writeContext->formatVersion)));
+	entries = lappend(entries, MakeAvroMetadataEntry("content", content));
+
+	return entries;
+}
+
+
+static AvroMetadataEntry *
+MakeAvroMetadataEntry(const char *key, const char *value)
+{
+	AvroMetadataEntry *entry = palloc0(sizeof(AvroMetadataEntry));
+
+	entry->key = key;
+	entry->value = value;
+
+	return entry;
 }
 
 

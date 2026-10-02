@@ -4706,6 +4706,61 @@ def ensure_table_dropped(encoded_namespace, encoded_table_name, pg_conn):
         pg_conn.rollback()
 
 
+def test_writable_rest_manifest_metadata(
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+    create_http_helper_functions,
+):
+    """Manifests carry the key-value metadata the Iceberg spec requires, with
+    the schema and spec ids the catalog assigned, also when the table is
+    created, or its schema or spec changed, in the transaction that writes."""
+    if installcheck:
+        return
+
+    namespace = "test_writable_rest_manifest_metadata"
+    table = f"{namespace}.tbl"
+
+    run_command(f"CREATE SCHEMA {namespace}", pg_conn)
+    run_command(
+        f"CREATE TABLE {table} (id int, value text) USING iceberg "
+        f"WITH (catalog='rest', partition_by='bucket(4, id)')",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {table} SELECT i, 'v' || i FROM generate_series(1, 100) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    run_command(f"ALTER TABLE {table} ADD COLUMN extra int", pg_conn)
+    run_command(f"INSERT INTO {table} VALUES (101, 'v101', 1)", pg_conn)
+    pg_conn.commit()
+
+    run_command(f"ALTER TABLE {table} OPTIONS (SET partition_by 'id')", pg_conn)
+    run_command(f"INSERT INTO {table} VALUES (102, 'v102', 2)", pg_conn)
+    pg_conn.commit()
+
+    # a small delete becomes a position delete file
+    run_command("SET pg_lake_table.copy_on_write_threshold TO 100", pg_conn)
+    run_command(f"DELETE FROM {table} WHERE id = 5", pg_conn)
+    run_command("RESET pg_lake_table.copy_on_write_threshold", pg_conn)
+    pg_conn.commit()
+
+    metadata = get_rest_table_metadata(namespace, "tbl", pg_conn)["metadata"]
+    manifests = assert_manifests_have_table_metadata(s3, metadata)
+
+    assert len(metadata["schemas"]) == 2
+    assert len({manifest["partition_spec_id"] for manifest in manifests}) == 2
+    assert {manifest["content"] for manifest in manifests} == {0, 1}
+
+    run_command(f"DROP SCHEMA {namespace} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def get_rest_table_metadata(encoded_namespace, encoded_table_name, pg_conn):
 
     url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/{server_params.PG_DATABASE}/namespaces/{encoded_namespace}/tables/{encoded_table_name}"

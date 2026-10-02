@@ -67,11 +67,11 @@ static HTAB *GroupManifestsByPartitionSpecId(List *manifests);
 static ManifestGroup * FindBestFitManifestGroupForManifest(List *manifestGroups, IcebergManifest * manifest, int64_t targetSize);
 static List *CreateManifestGroupsWithTargetSize(List *manifests, int64_t targetSize);
 static bool RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapshot * currentSnapshot,
-												 List *allTransforms, IcebergManifestContentType contentType,
+												 List *allTransforms, IcebergManifestWriteContext * writeContext, IcebergManifestContentType contentType,
 												 const char *metadataLocation, const char *snapshotUUID, int *manifestIndex);
 static bool IsMergeableManifestGroup(ManifestGroup * manifestGroup, IcebergManifest * latestManifest);
 static IcebergManifest * MergeManifestGroup(ManifestGroup * mergeableManifestGroup, IcebergSnapshot * currentSnapshot,
-											List *allTransforms, int mergedManifestIndex, const char *metadataLocation,
+											List *allTransforms, IcebergManifestWriteContext * writeContext, int mergedManifestIndex, const char *metadataLocation,
 											const char *snapshotUUID);
 
 #ifdef USE_ASSERT_CHECKING
@@ -117,7 +117,7 @@ int			ManifestMinCountToMerge = DEFAULT_MANIFEST_MIN_COUNT_TO_MERGE;
  */
 List *
 MergeDataManifests(IcebergSnapshot * currentSnapshot,
-				   List *allTransforms,
+				   List *allTransforms, IcebergManifestWriteContext * writeContext,
 				   List *dataManifests,
 				   const char *metadataLocation,
 				   const char *snapshotUUID,
@@ -167,7 +167,7 @@ MergeDataManifests(IcebergSnapshot * currentSnapshot,
 
 			if (IsMergeableManifestGroup(manifestGroup, latestManifest))
 			{
-				IcebergManifest *mergedManifest = MergeManifestGroup(manifestGroup, currentSnapshot, allTransforms,
+				IcebergManifest *mergedManifest = MergeManifestGroup(manifestGroup, currentSnapshot, allTransforms, writeContext,
 																	 *manifestIndex, metadataLocation,
 																	 snapshotUUID);
 
@@ -201,7 +201,7 @@ MergeDataManifests(IcebergSnapshot * currentSnapshot,
  */
 bool
 RemoveDeletedManifestEntries(IcebergSnapshot * currentSnapshot,
-							 List *allTransforms,
+							 List *allTransforms, IcebergManifestWriteContext * writeContext,
 							 List **manifests,
 							 IcebergManifestContentType contentType,
 							 const char *metadataLocation,
@@ -237,7 +237,7 @@ RemoveDeletedManifestEntries(IcebergSnapshot * currentSnapshot,
 		}
 
 		bool		modified = RemoveDeletedManifestEntriesInternal(&manifest, currentSnapshot,
-																	allTransforms, contentType,
+																	allTransforms, writeContext, contentType,
 																	metadataLocation, snapshotUUID,
 																	manifestIndex);
 
@@ -462,7 +462,7 @@ IsMergeableManifestGroup(ManifestGroup * manifestGroup, IcebergManifest * latest
  */
 static IcebergManifest *
 MergeManifestGroup(ManifestGroup * mergeableManifestGroup, IcebergSnapshot * currentSnapshot,
-				   List *allTransforms, int mergedManifestIndex, const char *metadataLocation,
+				   List *allTransforms, IcebergManifestWriteContext * writeContext, int mergedManifestIndex, const char *metadataLocation,
 				   const char *snapshotUUID)
 {
 	List	   *mergeableManifestEntries = NIL;
@@ -494,7 +494,9 @@ MergeManifestGroup(ManifestGroup * mergeableManifestGroup, IcebergSnapshot * cur
 																snapshotUUID,
 																mergedManifestIndex, "");
 
-	int64_t		manifestSize = UploadIcebergManifestToURI(mergeableManifestEntries, remoteManifestPath);
+	int64_t		manifestSize = UploadIcebergManifestToURI(mergeableManifestEntries, remoteManifestPath,
+														  writeContext, mergeableManifestGroup->partitionSpecId,
+														  ICEBERG_MANIFEST_FILE_CONTENT_DATA);
 
 	IcebergManifest *mergedManifest =
 		CreateNewIcebergManifest(currentSnapshot, mergeableManifestGroup->partitionSpecId,
@@ -512,7 +514,7 @@ MergeManifestGroup(ManifestGroup * mergeableManifestGroup, IcebergSnapshot * cur
  */
 static bool
 RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapshot * currentSnapshot,
-									 List *allTransforms, IcebergManifestContentType contentType,
+									 List *allTransforms, IcebergManifestWriteContext * writeContext, IcebergManifestContentType contentType,
 									 const char *metadataLocation, const char *snapshotUUID, int *manifestIndex)
 {
 	/*
@@ -578,7 +580,9 @@ RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapsho
 									   snapshotUUID,
 									   (*manifestIndex)++, "");
 
-		int64_t		manifestSize = UploadIcebergManifestToURI(newManifestEntries, remoteManifestPath);
+		int64_t		manifestSize = UploadIcebergManifestToURI(newManifestEntries, remoteManifestPath,
+															  writeContext, (*manifest)->partition_spec_id,
+															  contentType);
 
 		IcebergManifest *newManifest =
 			CreateNewIcebergManifest(currentSnapshot, (*manifest)->partition_spec_id, allTransforms,

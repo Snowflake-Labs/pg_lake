@@ -74,7 +74,8 @@ reserialize_iceberg_manifest(PG_FUNCTION_ARGS)
 
 	List	   *manifestEntries = ReadManifestEntries(manifestReadPath);
 
-	WriteIcebergManifest(manifestWritePath, manifestEntries);
+	/* only the entries are compared, so no table key-value metadata */
+	WriteIcebergManifest(manifestWritePath, manifestEntries, NIL);
 
 	PG_RETURN_VOID();
 }

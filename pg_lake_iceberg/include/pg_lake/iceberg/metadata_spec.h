@@ -291,5 +291,6 @@ typedef struct IcebergTableMetadata
 extern PGDLLEXPORT IcebergTableMetadata * ReadIcebergTableMetadata(const char *tableMetadataPath);
 extern PGDLLEXPORT IcebergTableMetadata * ParseIcebergTableMetadata(Jsonb *tableMetadataJson);
 extern PGDLLEXPORT char *WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata);
+extern PGDLLEXPORT void AppendIcebergTableSchema(StringInfo command, IcebergTableSchema * schema);
 extern PGDLLEXPORT void AppendIcebergTableSchemaForRestCatalog(StringInfo command, IcebergTableSchema * schemas, size_t schemas_length);
 extern PGDLLEXPORT void AppendIcebergPartitionSpecFields(StringInfo command, IcebergPartitionSpecField * fields, size_t fields_length);

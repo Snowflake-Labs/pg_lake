@@ -40,15 +40,18 @@ static const char *AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Pa
 
 
 /*
- * WriteIcebergManifest writes given manifest entries to the given manifest file.
+ * WriteIcebergManifest writes given manifest entries to the given manifest file,
+ * with metadataEntries (AvroMetadataEntry) in the file's key-value metadata.
  */
 void
-WriteIcebergManifest(const char *manifestPath, List *manifestEntries)
+WriteIcebergManifest(const char *manifestPath, List *manifestEntries,
+					 List *metadataEntries)
 {
 	const char *manifestSchema = GetIcebergManifestJsonSchema(manifestEntries);
 
 	AvroWriter *manifestWriter =
-		AvroWriterCreateWithJsonSchema(manifestPath, manifestSchema);
+		AvroWriterCreateWithJsonSchemaAndMetadata(manifestPath, manifestSchema,
+												  metadataEntries);
 
 	ListCell   *manifestEntryCell = NULL;
 
