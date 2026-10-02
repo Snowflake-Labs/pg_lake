@@ -1,8 +1,104 @@
+import time
+
 import pytest
 from utils_pytest import *
 from helpers.spark import *
 
 from test_writable_iceberg_common import *
+
+
+def _iceberg_vacuum_worker_pid(superuser_conn):
+    """PID of this database's live pg_lake autovacuum worker, or None.
+
+    Read from pg_stat_activity rather than from extension_base.get_worker_pid,
+    so the answer is a process that is connected right now: a worker slot can
+    still name one that has already exited, and terminating a pid the system
+    has since handed to something else would be worse than doing nothing. The
+    worker reports this application_name itself, and there is one per database,
+    hence the datname filter.
+    """
+    superuser_conn.rollback()
+    rows = run_query(
+        "SELECT pid FROM pg_stat_activity "
+        "WHERE application_name = 'pg_lake autovacuum' "
+        "AND datname = current_database()",
+        superuser_conn,
+    )
+    return rows[0][0] if rows else None
+
+
+def _backend_is_alive(superuser_conn, pid):
+    """Whether a backend with this pid is still connected."""
+    superuser_conn.rollback()
+    rows = run_query(
+        f"SELECT count(*) FROM pg_stat_activity WHERE pid = {pid}", superuser_conn
+    )
+    return bool(rows[0][0])
+
+
+@pytest.fixture(scope="module")
+def iceberg_autovacuum_off(superuser_conn):
+    """Keep the pg_lake autovacuum worker out of a dropped table's leftovers.
+
+    The tests below that drop an iceberg table and then read what the COMMIT
+    left in object storage are racing this worker. They create their tables
+    WITH (autovacuum_enabled='False') to keep it away from their files, and
+    that option stops applying the moment the table is gone: the worker's
+    dropped-table pass claims every deletion-queue row whose table is no
+    longer in pg_class, and there is no table left to read an option from.
+
+    Both test clusters run the worker with
+    pg_lake_iceberg.autovacuum_naptime=5 and
+    pg_lake_engine.orphaned_file_retention_period=0 -- deliberately, to stress
+    file removal -- so the files a dropped table leaves behind are eligible
+    immediately and survive at most five seconds. The assertions usually win
+    that race and occasionally do not, which reads as two identical listings
+    of the same prefix disagreeing a few milliseconds apart.
+
+    The setting alone is not a barrier: a pass that had already started when
+    the reload landed runs to its end, and it is a pass -- not the setting --
+    that claims the rows. So the worker that predates the reload is terminated
+    as well, and what is waited for is its exit rather than its replacement's
+    arrival. A database with no worker runs no pass, and whenever the next one
+    does start it reads autovacuum=off from postgresql.auto.conf, which ALTER
+    SYSTEM wrote before the reload.
+
+    Module-scoped for the same reason: pg_extension_base delays a restart by an
+    exponential backoff -- 5s doubling to a 60s cap, with the failure counter
+    reset only once a worker has stayed up for 60s -- so terminating the worker
+    once per test leaves the database without one for longer each time.
+    """
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_iceberg.autovacuum TO off",
+            "SELECT pg_catalog.pg_reload_conf()",
+        ]
+    )
+
+    previous_pid = _iceberg_vacuum_worker_pid(superuser_conn)
+    if previous_pid:
+        run_command(
+            f"SELECT pg_catalog.pg_terminate_backend({previous_pid})", superuser_conn
+        )
+        superuser_conn.commit()
+
+        deadline = time.monotonic() + 60
+        while _backend_is_alive(superuser_conn, previous_pid):
+            if time.monotonic() > deadline:
+                pytest.fail(
+                    f"the iceberg vacuum worker (pid {previous_pid}) did not exit"
+                )
+            time.sleep(0.2)
+
+    try:
+        yield
+    finally:
+        run_command_outside_tx(
+            [
+                "ALTER SYSTEM RESET pg_lake_iceberg.autovacuum",
+                "SELECT pg_catalog.pg_reload_conf()",
+            ]
+        )
 
 
 def test_in_tx_with_partition_by(
@@ -446,6 +542,7 @@ def test_in_tx_with_drop_success(
     installcheck,
     s3,
     pg_conn,
+    iceberg_autovacuum_off,
     duckdb_conn,
     spark_session,
     extension,
@@ -518,6 +615,7 @@ def test_in_tx_with_drop_fail(
     installcheck,
     s3,
     pg_conn,
+    iceberg_autovacuum_off,
     duckdb_conn,
     spark_session,
     extension,
@@ -591,6 +689,7 @@ def test_in_subtx_fail_with_drop(
     installcheck,
     s3,
     pg_conn,
+    iceberg_autovacuum_off,
     duckdb_conn,
     spark_session,
     extension,
@@ -671,6 +770,7 @@ def test_in_subtx_success_with_drop(
     installcheck,
     s3,
     pg_conn,
+    iceberg_autovacuum_off,
     duckdb_conn,
     spark_session,
     extension,
