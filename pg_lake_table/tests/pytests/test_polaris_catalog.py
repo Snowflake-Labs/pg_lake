@@ -14,6 +14,7 @@ from pyiceberg.types import (
     FixedType,
     NestedField,
     ListType,
+    MapType,
     StructType,
 )
 import pyarrow
@@ -1009,6 +1010,15 @@ def test_rest_catalog_lowercase_column_names(
     address_type = StructType(
         NestedField(4, "CITY", StringType(), required=False),
         NestedField(5, "ZIP", LongType(), required=False),
+        NestedField(
+            10,
+            "GEO",
+            StructType(
+                NestedField(11, "LAT", DoubleType(), required=False),
+                NestedField(12, "LON", DoubleType(), required=False),
+            ),
+            required=False,
+        ),
     )
     schema = Schema(
         NestedField(1, "ID", LongType(), required=False),
@@ -1027,6 +1037,21 @@ def test_rest_catalog_lowercase_column_names(
             ),
             required=False,
         ),
+        NestedField(
+            13,
+            "SPOTS",
+            MapType(
+                key_id=14,
+                key_type=StringType(),
+                value_id=15,
+                value_type=StructType(
+                    NestedField(16, "LAT", DoubleType(), required=False),
+                    NestedField(17, "LON", DoubleType(), required=False),
+                ),
+                value_required=False,
+            ),
+            required=False,
+        ),
     )
 
     table_name = "uppercase_table"
@@ -1041,8 +1066,18 @@ def test_rest_catalog_lowercase_column_names(
                 {
                     "ID": row_id,
                     "Name": f"name_{row_id}",
-                    "HOME": {"CITY": f"city_{row_id}", "ZIP": row_id},
+                    "HOME": {
+                        "CITY": f"city_{row_id}",
+                        "ZIP": row_id,
+                        "GEO": {"LAT": float(row_id), "LON": -float(row_id)},
+                    },
                     "PREVIOUS": [{"CITY": f"old_{row_id}", "ZIP": -row_id}],
+                    "SPOTS": [
+                        (
+                            f"spot_{row_id}",
+                            {"LAT": row_id * 10.0, "LON": row_id * -10.0},
+                        )
+                    ],
                 }
                 for row_id in range(1, 4)
             ],
@@ -1070,20 +1105,30 @@ def test_rest_catalog_lowercase_column_names(
         """,
         pg_conn,
     )
-    assert [row[0] for row in columns] == ["id", "name", "home", "previous"]
+    assert [row[0] for row in columns] == [
+        "id",
+        "name",
+        "home",
+        "previous",
+        "spots",
+    ]
 
+    # nested structs and map values written by another engine are folded too
     result = run_query(
         f"""
-        SELECT id, name, (home).city, (home).zip, (previous[1]).city
+        SELECT id, name, (home).city, (home).zip, (previous[1]).city,
+               ((home).geo).lat, ((home).geo).lon,
+               (map_type.extract(spots, 'spot_' || id)).lat,
+               (map_type.extract(spots, 'spot_' || id)).lon
         FROM "{namespace}".lowered
-        WHERE (home).zip >= 2
+        WHERE (home).zip >= 2 AND ((home).geo).lon < -1
         ORDER BY id
         """,
         pg_conn,
     )
     assert result == [
-        [2, "name_2", "city_2", 2, "old_2"],
-        [3, "name_3", "city_3", 3, "old_3"],
+        [2, "name_2", "city_2", 2, "old_2", 2.0, -2.0, 20.0, -20.0],
+        [3, "name_3", "city_3", 3, "old_3", 3.0, -3.0, 30.0, -30.0],
     ]
 
     run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
