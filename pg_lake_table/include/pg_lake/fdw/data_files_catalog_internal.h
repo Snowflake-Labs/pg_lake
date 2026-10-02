@@ -30,11 +30,18 @@
 #include "nodes/pg_list.h"
 
 /*
- * Per-tx temp table populated by the bulk path with the ids of newly-added
- * data files that PgLakeAddDataFileHook opted in. Read by the old per-row
- * catalog code in data_files_catalog.c, written by data_files_catalog_batch.c.
+ * Per-tx temp table populated unconditionally by the bulk add path with the
+ * id of every data or position-delete file the current top-level
+ * transaction added. Read by GetTableDataFilesHashFromCatalog's
+ * newFilesOnly predicate (data_files_catalog.c) and by the append-only
+ * commit path (track_iceberg_metadata_changes.c); written by
+ * data_files_catalog_batch.c.
+ *
+ * This is a session temp table, so it lives in pg_temp regardless of what
+ * name it is given; the name below is plain, not schema-qualified like
+ * DATA_FILES_TABLE_QUALIFIED.
  */
-#define TX_DATA_FILES_QUALIFIED_TABLE_NAME PG_LAKE_TABLE_SCHEMA "tx_data_file_ids"
+#define TX_DATA_FILES_TABLE_NAME "pg_lake_tx_data_file_ids"
 
 /* True when adjacent ops of this type can be collapsed into one bulk SQL. */
 bool		BatchableType(TableMetadataOperationType type);
