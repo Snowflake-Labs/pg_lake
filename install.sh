@@ -206,7 +206,7 @@ detect_os() {
         . /etc/os-release
         if [[ "$ID" == "debian" ]] || [[ "$ID" == "ubuntu" ]] || [[ "$ID_LIKE" == *"debian"* ]]; then
             OS="debian"
-        elif [[ "$ID" == "rhel" ]] || [[ "$ID" == "almalinux" ]] || [[ "$ID" == "rocky" ]] || [[ "$ID_LIKE" == *"rhel"* ]]; then
+        elif [[ "$ID" == "rhel" ]] || [[ "$ID" == "fedora" ]] || [[ "$ID" == "almalinux" ]] || [[ "$ID" == "rocky" ]] || [[ "$ID_LIKE" == *"rhel"* ]]; then
             OS="rhel"
         else
             print_error "Unsupported Linux distribution: $ID"
@@ -274,8 +274,11 @@ install_system_deps() {
             ;;
         rhel)
             sudo dnf -y update
-            sudo dnf -y install epel-release
-            sudo dnf config-manager --enable crb 2>/dev/null || sudo dnf config-manager --set-enabled crb 2>/dev/null || true
+            # Fedora ships these packages in its own repositories; EPEL and CRB only exist on RHEL clones
+            if [[ "$ID" != "fedora" ]]; then
+                sudo dnf -y install epel-release
+                sudo dnf config-manager --enable crb 2>/dev/null || sudo dnf config-manager --set-enabled crb 2>/dev/null || true
+            fi
             sudo dnf -y install \
                 cmake \
                 ninja-build \

@@ -178,3 +178,17 @@
     height: auto;
   }
 }
+
+// Reference tables list parameter and option names in the first column; keep
+// them on one line so a name like pg_lake_iceberg.default_location_prefix does
+// not break at every period. Tables that still do not fit scroll horizontally.
+.main-content td:first-child > code {
+  white-space: nowrap;
+}
+
+.pglake-meta {
+  display: block;
+  margin-top: $sp-1;
+  font-size: 0.8rem;
+  color: $grey-dk-000;
+}

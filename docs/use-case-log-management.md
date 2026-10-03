@@ -1,27 +1,36 @@
 ---
 title: Log management
 parent: Use cases
-nav_order: 1
+nav_order: 2
 ---
 
-# Use case: Log management
+# Log management
+{: .no_toc }
 
-A sample `pg_lake` use case is storing logs from a variety of applications in Iceberg and analyzing them using PostgreSQL queries.
+A common `pg_lake` use case is storing logs from a variety of applications in Iceberg and analyzing them using PostgreSQL queries.
+
+1. TOC
+{:toc}
 
 Many tools can archive log files into S3. The log files are usually in a text format, such as newline-delimited JSON or tab-separated values. You can set up lake tables to query these files directly, but parsing and processing a large number of log files may take a long time. Hence, it is preferable to append the log data to an Iceberg table, which is compressed and optimized for fast queries.
 
-We developed the [pg_incremental](https://github.com/crunchydata/pg_incremental) extension to incrementally process files (or rows in a table). It periodically runs a SQL command with a parameter that is set to the next file or array of files to process. Since the bookkeeping of the processed files is done in the same transaction as the command, files are always processed exactly once. Using this technique, we can automatically append all existing and new log files that appear in object storage to an Iceberg table in an efficient, reliable manner.
+The [pg_incremental](https://github.com/crunchydata/pg_incremental) extension incrementally processes files (or rows in a table). It periodically runs a SQL command with a parameter that is set to the next file or array of files to process. Since the bookkeeping of the processed files is done in the same transaction as the command, files are always processed exactly once. Using this technique, we can automatically append all existing and new log files that appear in object storage to an Iceberg table in an efficient, reliable manner.
 
 ## Converting logs to Iceberg incrementally
 
 It is possible to directly load log files into an Iceberg table using `COPY`. However, it can be convenient to still create a lake analytics table for the log files. By leaving the column list in the `create  foreign table` statement empty, the columns will be automatically detected from the existing log files. The `filename 'true'` option additionally adds a `_filename` column that will contain the source file name.
 
-Build pg_incremental:
+pg_incremental runs on [pg_cron](https://github.com/citusdata/pg_cron), which must be in `shared_preload_libraries`. Build and create both extensions:
 
 ```bash
 git clone https://github.com/CrunchyData/pg_incremental.git
 cd pg_incremental
 make install
+```
+
+```sql
+CREATE EXTENSION pg_cron;
+CREATE EXTENSION pg_incremental CASCADE;
 ```
 
 ```sql
@@ -37,7 +46,7 @@ create table logs_iceberg (like logs_csv)
 using iceberg;
 ```
 
-Finally, we set up a pg\_incremental job with simple insert..select command that filters by the `_filename` column. Only the files that match the filter will be scanned by the query engine, which makes incremental processing relatively efficient. By default, the existing files will be processed immediately. 
+Finally, we set up a pg_incremental job with a simple `INSERT ... SELECT` command that filters by the `_filename` column. Only the files that match the filter are scanned by the query engine, which makes incremental processing efficient. Existing files are processed immediately, and new files every 15 minutes by default (change it with the `schedule` argument).
 
 ```sql
 -- Set up a pg_incremental job to process existing and new files
@@ -76,7 +85,7 @@ using iceberg;
 
 -- Set up a pg_incremental job to extract relevant fields from logs
 select incremental.create_file_list_pipeline('process-logs', 
-   file_pattern := 's3://mybucket/logs/*.json.gz', 
+   file_pattern := 's3://mybucket/logs/*.json', 
    batched := true, 
    command := $$
        insert into
@@ -84,8 +93,8 @@ select incremental.create_file_list_pipeline('process-logs',
        select
          to_timestamp("timestamp"),
          (payload->>'machine-id')::uuid,
-         payload->>'response-time',
-         payload->>'error-code',
+         (payload->>'response-time')::double precision,
+         (payload->>'error-code')::int,
          payload->>'message'
        from
          logs_json
@@ -115,3 +124,6 @@ order by 1 asc;
 ```
 
 It is useful to select specific columns (avoid `select *`), since the query engine will only read necessary columns from the underlying Parquet files. Adding relevant filters (e.g. on time range) further improves performance, since the query engine can skip files and row groups within the files based on filters.
+
+To also make the logs available in Snowflake, read the Iceberg table through a catalog
+integration, as described in [syncing tables to Iceberg](use-case-iceberg-sync.md#snowflake).

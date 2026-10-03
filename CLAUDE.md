@@ -183,10 +183,12 @@ pg_lake_benchmark (optional, for benchmarking)
 - `pytest.ini`: Root pytest configuration
 
 ### Documentation
+The user documentation in `docs/` is published with GitHub Pages; `docs/README.md` lists every page.
 - `docs/building-from-source.md`: Detailed build instructions
-- `docs/iceberg-tables.md`: Iceberg table usage
+- `docs/iceberg-*.md`: Iceberg table usage, partitioning, catalogs and maintenance
 - `docs/query-data-lake-files.md`: Foreign table usage
 - `docs/data-lake-import-export.md`: COPY command usage
+- `docs/settings-reference.md`, `docs/sql-reference.md`, `docs/table-options.md`: Reference pages to update when adding GUCs, functions or table options
 
 ## Maintaining Installation Documentation
 

@@ -2,6 +2,8 @@
 
 `pg_lake` integrates Iceberg and data lake files into Postgres. With the `pg_lake` extensions, you can use Postgres as a stand-alone lakehouse system that supports transactions and fast queries on Iceberg tables, and can directly work with raw data files in object stores like S3.
 
+**Documentation: [snowflake-labs.github.io/pg_lake](https://snowflake-labs.github.io/pg_lake/)**, with a getting started guide, the user guide, use cases and reference pages.
+
 At a high level, `pg_lake` lets you:
 
 - **Create and modify [Iceberg](https://iceberg.apache.org/)** tables directly from PostgreSQL, with full transactional guarantees and query them from other engines
@@ -12,6 +14,34 @@ At a high level, `pg_lake` lets you:
 - **Combine heap, Iceberg, and external Parquet/CSV/JSON** files in the same SQL queries and modifications — all with full transactional guarantees and no SQL limitations  
 - **Infer table columns and types** from external data sources such as Iceberg, Parquet, JSON, and CSV files
 - **Leverage DuckDB’s query engine** underneath for fast execution without leaving Postgres  
+
+For example:
+
+```sql
+-- create an Iceberg table
+CREATE TABLE measurements (
+  sensor_id int,
+  recorded_at timestamptz,
+  value double precision
+) USING iceberg;
+
+INSERT INTO measurements VALUES (1, now(), 21.5);
+
+-- or, create one from a file, here a public file with 3 million taxi trips
+CREATE TABLE trips () USING iceberg
+  WITH (load_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet');
+
+-- query and modify it like any other table
+SELECT extract(hour FROM tpep_pickup_datetime) AS hour, round(avg(tip_amount)::numeric, 2) AS avg_tip
+FROM trips GROUP BY 1 ORDER BY avg_tip DESC LIMIT 3;
+
+DELETE FROM trips WHERE total_amount < 0;
+
+-- query files in place, and export query results
+CREATE FOREIGN TABLE clicks () SERVER pg_lake OPTIONS (path 's3://mybucket/clicks/*.parquet');
+
+COPY (SELECT page, count(*) FROM clicks GROUP BY page) TO 's3://mybucket/reports/clicks.csv';
+```
 
 ## Setting up `pg_lake`
 
@@ -113,11 +143,9 @@ You can also set the credentials on `pgduck_server` for [local development with 
 You can create Iceberg tables by adding `USING iceberg` to your `CREATE TABLE` statements.
 
 ```sql
-CREATE TABLE iceberg_test USING iceberg 
-      AS SELECT 
-            i as key, 'val_'|| i  as val
-         FROM 
-            generate_series(0,99)i;
+CREATE TABLE iceberg_test USING iceberg
+AS SELECT i AS key, 'val_' || i AS val
+   FROM generate_series(0, 99) i;
 ```
 
 Then, query it:
@@ -229,7 +257,7 @@ In June 2025, [Crunchy Data was acquired by Snowflake](https://www.crunchydata.c
 
 ## Documentation
 
-Full project documentation can be found in the [docs](./docs) directory.
+The full documentation is at [snowflake-labs.github.io/pg_lake](https://snowflake-labs.github.io/pg_lake/). Its sources are in the [docs](./docs) directory.
 
 
 ## License

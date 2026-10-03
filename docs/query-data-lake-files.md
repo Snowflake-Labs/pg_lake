@@ -4,110 +4,155 @@ parent: User guide
 nav_order: 2
 ---
 
-# Query data lake files 
-You can query files in object storage or at public URLs directly by creating
-a lake analytics table. See [data lake formats](file-formats-reference.md) for a list of supported file types.
+# Query data lake files
+{: .no_toc }
 
-Lake analytics tables are foreign tables with `server pg_lake`
-pointing to external files in your data lake in a variety of supported formats.
+You can query files in object storage or at public URLs directly, without loading them first,
+by creating a foreign table on the `pg_lake` server. pg_lake reads Parquet, CSV, JSON, GDAL
+formats, external Iceberg and Delta tables and more; see the
+[file formats reference](file-formats-reference.md).
 
-For instance, you can create a table from a directory of Parquet files in S3 and
-immediately start querying them:
+1. TOC
+{:toc}
 
-```sql
--- Load a GeoParquet file without specifying columns
--- Geometry columns are automatically recognized
--- Struct/map types are auto-generated
-create foreign table ov_buildings ()
-server pg_lake
-options (path 's3://overturemaps-us-west-2/release/2024-08-20.0/theme=buildings/type=*/*.parquet');
+## Create a table for files
 
-postgres=> \d ov_buildings
-                                                          Foreign table "public.ov_buildings"
-┌────────────────────────┬─────────────────────────────────────────────────────────────────────────────┬───────────┬──────────┬─────────┬─────────────┐
-│         Column         │                                    Type                                     │ Collation │ Nullable │ Default │ FDW options │
-├────────────────────────┼─────────────────────────────────────────────────────────────────────────────┼───────────┼──────────┼─────────┼─────────────┤
-│ id                     │ text                                                                        │           │          │         │             │
-│ geometry               │ geometry                                                                    │           │          │         │             │
-│ bbox                   │ lake_struct.xmin_xmax_ymin_ymax_35464140                                 │           │          │         │             │
-...
-│ type                   │ text                                                                        │           │          │         │             │
-└────────────────────────┴─────────────────────────────────────────────────────────────────────────────┴───────────┴──────────┴─────────┴─────────────┘
-Server: pg_lake
-FDW options: (path 's3://overturemaps-us-west-2/release/2024-08-20.0/theme=buildings/type=*/*.parquet')
-```
-
-pg_lake tables support multiple formats, including
-Parquet, CSV, and newline-delimited JSON. Additionally, each format has more
-specialized options. 
-
-## Explore your object store files
-
-You can view the list of files in your supported cloud storage bucket directly
-from your database, using the `lake_file.list()` utility function. Just
-pass in the URL pattern for your bucket to see the results:
+With an empty column list, the columns are inferred from the files:
 
 ```sql
-SELECT path FROM lake_file.list('s3://pglakedemobucket/**/*.parquet');
+CREATE FOREIGN TABLE taxi_trips () SERVER pg_lake
+OPTIONS (path 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet');
+
+SELECT payment_type, count(*), round(avg(tip_amount)::numeric, 2) AS avg_tip
+FROM taxi_trips
+GROUP BY 1 ORDER BY 2 DESC;
 ```
 
+The format and compression are detected from the file extension, and for CSV files, the
+delimiter, quote character and header as well.
+
+You can also declare the columns yourself, for example to use different types. Declared columns
+are matched to the file's columns **by position**, not by name, so list them in the same order
+as in the file. You can leave out trailing columns, but not columns in the middle. To check
+what the file contains, and what pg_lake would infer, use `lake_file.preview`:
+
+```sql
+SELECT * FROM lake_file.preview('https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet');
+
+      column_name      |         column_type
+-----------------------+-----------------------------
+ vendorid              | integer
+ tpep_pickup_datetime  | timestamp without time zone
+ tpep_dropoff_datetime | timestamp without time zone
+ passenger_count       | bigint
+ ...
 ```
-                                    path  
------------------------------------------------------------------------------
- s3://pglakedemobucket/out.parquet
- s3://pglakedemobucket/table1/part1.parquet
- s3://pglakedemobucket/table1/part2.parquet
- s3://pglakedemobucket/table1/part3.parquet
- s3://pglakedemobucket/tmp/AI.parquet
- s3://pglakedemobucket/tmp/map.parquet
- s3://pglakedemobucket/tmp/map/dec98925-3ad9-4056-8bd6-9ec6bdb8082c.parquet
- s3://pglakedemobucket/tmp/out.parquet
-(8 rows)
+
+To use only some columns of a wide file, infer all columns and create a view on the ones you
+need.
+
+Nested Parquet structs become composite types, and arrays and maps become PostgreSQL arrays
+and [map types](https://github.com/Snowflake-Labs/pg_lake/blob/main/pg_map/README.md). Access a
+struct field with parentheses, as in `(names).primary`.
+
+## Explore your object store
+
+`lake_file.list` lists the files that match a pattern, with their size and modification time:
+
+```sql
+SELECT path, file_size FROM lake_file.list('s3://pglakedemobucket/**/*.parquet');
+
+                    path                    | file_size
+--------------------------------------------+-----------
+ s3://pglakedemobucket/out.parquet          |      1082
+ s3://pglakedemobucket/table1/part1.parquet |   8142233
+ s3://pglakedemobucket/table1/part2.parquet |   8140119
+ s3://pglakedemobucket/table1/part3.parquet |   8139402
 ```
+
 ## Wildcards
 
-You can use wildcards to find all `*.parquet` files anywhere in your
-S3 bucket, or use a more restrictive pattern to limit to a single directory:
+A `path` can match many files. `*` matches any characters within one directory level, and `**`
+matches any number of levels:
 
 ```sql
-SELECT path FROM lake_file.list('s3://pglakedemobucket/table1/*');
+-- all Parquet files directly under table1/
+CREATE FOREIGN TABLE table1 () SERVER pg_lake
+OPTIONS (path 's3://pglakedemobucket/table1/*.parquet');
+
+-- all compressed CSV files anywhere under logs/
+CREATE FOREIGN TABLE all_logs () SERVER pg_lake
+OPTIONS (path 's3://pglakedemobucket/logs/**/*.csv.gz');
 ```
 
-```
-                    path  
----------------------------------------------
- s3://pglakedemobucket/table1/part1.parquet
- s3://pglakedemobucket/table1/part2.parquet
- s3://pglakedemobucket/table1/part3.parquet
-(3 rows)
-```
+The set of files is determined when you run a query, so new files that match the pattern are
+included automatically.
 
-### Show filename in table
+### The source file of each row
 
-When working with wildcards and larger groups of files, you can include filename 'true' in the create options to add a column to the foreign table to include the filename. 
+With `filename 'true'`, the table gets an extra `_filename` column with the URL of the file
+each row came from. Filtering on it only reads the matching files, which makes it useful for
+[loading new files as they arrive](data-lake-import-export.md#load-new-files-as-they-arrive):
 
 ```sql
-create foreign table events_source ()
-server pg_lake 
-options (path 's3://pglaketest/events/*.csv', filename 'true');
+CREATE FOREIGN TABLE events_source () SERVER pg_lake
+OPTIONS (path 's3://pglakedemobucket/events/*.csv', filename 'true');
+
+SELECT _filename, count(*) FROM events_source GROUP BY 1;
 ```
 
-## Querying across regions
+If you list the columns yourself, add `_filename text` as the last column.
 
-pg_lake will automatically detect the region of the S3 bucket you are querying and configure itself accordingly to provide a seamless experience. Our automatic caching will download files you query to fast local drives to minimize network traffic across regions and maximize query performance. As a best practice, we still recommend that S3 buckets you access frequently and your `pg_lake` server are in the same region to get the fastest caching performance and avoid network charges altogether.
+### Hive-style partitions
 
-## Vectorized query execution
+Data sets are often organized in directories named after a column value, like
+`year=2026/month=09/`. pg_lake turns these directory names into columns:
 
-`pg_lake` extends PostgreSQL with a vectorized query engine
-designed to accelerate analytics tasks. Vectorized execution improves efficiency
-by processing data in batches, improving computational throughput. Performance
-is improved by pushing down query computation to this engine when possible.
-This is especially beneficial for tables of Parquet files.
+```sql
+-- files under s3://mybucket/hive/year=2025/ and s3://mybucket/hive/year=2026/
+CREATE FOREIGN TABLE hive_events () SERVER pg_lake
+OPTIONS (path 's3://mybucket/hive/**/*.parquet');
 
-### Query pushdown
+\d hive_events
+                Foreign table "public.hive_events"
+ Column |  Type   | Collation | Nullable | Default | FDW options
+--------+---------+-----------+----------+---------+-------------
+ id     | integer |           |          |         |
+ v      | text    |           |          |         |
+ year   | bigint  |           |          |         |
+```
 
-When computations are pushed down, they are processed directly within the
-vectorized query engine. However, if certain computations cannot be handled by
-the vectorized engine, they are executed normally in PostgreSQL instead. See the
-Iceberg tables page for more information about
-[query pushdown](iceberg-tables.md#query-pushdown-with-iceberg-tables).
+Filters on these columns skip the directories that do not match.
+
+## Writable tables
+
+A foreign table with `writable 'true'` accepts `INSERT`: each statement writes new files under
+`location`. This is a simple way to append data to a directory that other tools read:
+
+```sql
+CREATE FOREIGN TABLE exported_events (id bigint, event_time timestamptz, payload text)
+SERVER pg_lake
+OPTIONS (writable 'true', format 'parquet', location 's3://mybucket/exported_events/');
+
+INSERT INTO exported_events SELECT id, event_time, payload FROM events WHERE event_time >= current_date;
+```
+
+Writable tables support Parquet, CSV and JSON, and are append-only. For a table you want to
+update or delete from, or that other engines should see transactionally, use an
+[Iceberg table](iceberg-tables.md).
+
+## Querying across regions and providers
+
+pg_lake detects the region of S3 buckets automatically, so you can query buckets in any region
+and different storage providers in the same query, given [credentials](configuration.md#object-storage-credentials).
+The [file cache](performance.md#file-cache) keeps files you query on local disk, which reduces
+repeated transfers. For data you query often, a bucket in the same region as your server is
+still the fastest and cheapest option.
+
+## Performance
+
+Queries on data lake files run on DuckDB's vectorized engine, and filters on Parquet files use
+the row group statistics to skip data. Parquet is much faster to query than CSV or JSON; if you
+query the same text files repeatedly, [convert them to Parquet](data-lake-import-export.md#converting-csv-and-json-to-parquet)
+or load them into an Iceberg table. See [performance](performance.md) for how to check what is
+pushed down.

@@ -288,6 +288,9 @@ apt-get install -y \
 
 #### RHEL/AlmaLinux/Rocky Linux
 
+On Fedora, use the same packages but leave out the `epel-release` and `crb` steps: Fedora has
+these packages in its own repositories.
+
 ```bash
 dnf -y update && \
 dnf -y install epel-release && \
