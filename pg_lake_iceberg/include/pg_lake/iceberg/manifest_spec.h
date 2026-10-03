@@ -168,6 +168,13 @@ typedef struct IcebergManifest
  */
 typedef struct DataFile
 {
+	/*
+	 * Read-time context inherited from the enclosing manifest, not
+	 * serialized.
+	 */
+	int64_t		data_sequence_number;
+	int32_t		partition_spec_id;
+
 	IcebergDataFileContentType content;
 
 	const char *file_path;

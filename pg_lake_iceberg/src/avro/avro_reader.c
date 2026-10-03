@@ -567,6 +567,10 @@ AvroExtractNullableFieldFromRecordByIndex(avro_value_t * record, int index,
 	{
 		rc = avro_value_get_bytes(&fieldValue, (const void **) value, valueLength);
 	}
+	else if (fieldType == AVRO_FIXED)
+	{
+		rc = avro_value_get_fixed(&fieldValue, (const void **) value, valueLength);
+	}
 	else if (fieldType == AVRO_FLOAT)
 	{
 		*value = palloc0(sizeof(float));
@@ -610,6 +614,16 @@ AvroExtractNullableFieldFromRecordByIndex(avro_value_t * record, int index,
 				(errcode(ERRCODE_INTERNAL_ERROR),
 				 errmsg("Failed to extract nullable field value %s", avro_strerror())));
 	}
+	/* Avro owns these buffers and reuses them on the next record. */
+	if (fieldType == AVRO_STRING || fieldType == AVRO_BYTES || fieldType == AVRO_FIXED)
+	{
+		void	   *copy = palloc(Max(*valueLength, 1));
+
+		if (*valueLength > 0)
+			memcpy(copy, *value, *valueLength);
+		*value = copy;
+	}
+
 }
 
 /*

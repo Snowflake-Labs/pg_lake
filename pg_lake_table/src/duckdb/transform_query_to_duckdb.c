@@ -22,6 +22,7 @@
  *-------------------------------------------------------------------------
  */
 #include "postgres.h"
+#include "miscadmin.h"
 
 #include "fmgr.h"
 #include "funcapi.h"
@@ -50,6 +51,8 @@
 #include "pg_lake/duckdb/transform_query_to_duckdb.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
 #include "pg_lake/fdw/snapshot.h"
+#include "pg_lake/fdw/equality_delete.h"
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_extension_base/pg_compat.h"
@@ -63,6 +66,10 @@ static char *BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan,
 												  bool skipFullMatchFiles,
 												  TupleDesc projection);
 static void EnsureServerType(Oid relationId);
+static void AppendEqualityReadGroups(StringInfo command, List *groups,
+									 int start, int count, List *positionDeletePaths,
+									 TupleDesc dataDesc, TupleDesc projection,
+									 List *options, DataFileSchema * schema);
 
 
 /*
@@ -225,10 +232,32 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 		schema = GetDataFileSchemaForTable(relationId);
 	}
 
-	char	   *readCall =
-		ReadDataSourceQuery(dataFilePaths, positionDeletePaths,
-							format, compression, readTupleDesc, options,
-							schema, &stats, readFlags);
+	char	   *readCall;
+
+	if (tableScan->equalityDeleteReadGroups != NIL)
+	{
+		ValidateEqualityDeleteFiles(tableScan->equalityDeleteScans);
+
+		/*
+		 * A child projection can omit delete keys; read the full child
+		 * schema.
+		 */
+		Relation	dataRelation = RelationIdGetRelation(relationId);
+		TupleDesc	dataDesc = CreateTupleDescCopy(RelationGetDescr(dataRelation));
+
+		RelationClose(dataRelation);
+		StringInfo	query = makeStringInfo();
+
+		AppendEqualityReadGroups(query, tableScan->equalityDeleteReadGroups,
+								 0, list_length(tableScan->equalityDeleteReadGroups),
+								 positionDeletePaths, dataDesc, readTupleDesc, options, schema);
+		readCall = query->data;
+		FreeTupleDesc(dataDesc);
+	}
+	else
+		readCall = ReadDataSourceQuery(dataFilePaths, positionDeletePaths,
+									   format, compression, readTupleDesc, options,
+									   schema, &stats, readFlags);
 
 	StringInfoData command;
 
@@ -280,6 +309,76 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 	appendStringInfoString(&command, ")");
 
 	return command.data;
+}
+
+
+/*
+ * Balance the UNION tree so parser depth grows logarithmically with groups.
+ * Each data file appears once, and NOT EXISTS preserves the multiplicity of
+ * surviving rows even when delete keys themselves are duplicated.
+ */
+static void
+AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
+						 List *positionDeletePaths, TupleDesc dataDesc,
+						 TupleDesc projection, List *options, DataFileSchema * schema)
+{
+	check_stack_depth();
+	if (count > 1)
+	{
+		int			leftCount = count / 2;
+
+		appendStringInfoChar(command, '(');
+		AppendEqualityReadGroups(command, groups, start, leftCount,
+								 positionDeletePaths, dataDesc, projection, options, schema);
+		appendStringInfoString(command, ") UNION ALL (");
+		AppendEqualityReadGroups(command, groups, start + leftCount, count - leftCount,
+								 positionDeletePaths, dataDesc, projection, options, schema);
+		appendStringInfoChar(command, ')');
+		return;
+	}
+
+	PgLakeEqualityDeleteReadGroup *group = list_nth(groups, start);
+	ReadDataStats stats = {0, 0};
+	List	   *paths = GetFileScanPathList(group->fileScans, &stats.sourceRowCount, false);
+
+	/* Preserve Iceberg storage-to-surface conversions for non-key columns. */
+	char	   *dataQuery = ReadDataSourceQuery(paths, positionDeletePaths, DATA_FORMAT_ICEBERG,
+												DATA_COMPRESSION_INVALID, dataDesc, options,
+												schema, &stats, 0);
+
+	appendStringInfoString(command, "SELECT ");
+	bool		first = true;
+
+	for (int i = 0; i < projection->natts; i++)
+	{
+		Form_pg_attribute attribute = TupleDescAttr(projection, i);
+
+		if (attribute->attisdropped)
+			continue;
+		appendStringInfo(command, "%sd.%s", first ? "" : ", ",
+						 duckdb_quote_identifier(NameStr(attribute->attname)));
+		first = false;
+	}
+	appendStringInfo(command, " FROM (%s) AS d", dataQuery);
+	first = true;
+	foreach_ptr(PgLakeEqualityDeleteScan, deletion, group->deleteScans)
+	{
+		char	   *deleteQuery = ReadDataSourceQuery(deletion->paths, NIL, DATA_FORMAT_PARQUET,
+													  DATA_COMPRESSION_INVALID, NULL, NIL,
+													  deletion->schema, NO_STATISTICS, 0);
+
+		appendStringInfo(command, "%s NOT EXISTS (SELECT 1 FROM (%s) AS e WHERE ",
+						 first ? " WHERE" : " AND", deleteQuery);
+		for (size_t i = 0; i < deletion->schema->nfields; i++)
+		{
+			const char *name = duckdb_quote_identifier(deletion->schema->fields[i].name);
+
+			appendStringInfo(command, "%sd.%s IS NOT DISTINCT FROM e.%s",
+							 i == 0 ? "" : " AND ", name, name);
+		}
+		appendStringInfoChar(command, ')');
+		first = false;
+	}
 }
 
 

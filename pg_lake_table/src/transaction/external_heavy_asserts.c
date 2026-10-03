@@ -1019,7 +1019,11 @@ ErrorIfIcebergMetadataIsOutOfSync(Oid relationId, List *fileScans,
 	List	   *icebergMetadataFileScans = NIL;
 	List	   *icebergPositionDeleteFileScans = NIL;
 
-	CreateTableScanForIcebergMetadata(relationId, metadata, NIL, &icebergMetadataFileScans, &icebergPositionDeleteFileScans);
+	List	   *equalityDeleteScans = NIL;
+	List	   *equalityDeleteReadGroups = NIL;
+
+	CreateTableScanForIcebergMetadata(relationId, metadata, NIL, &icebergMetadataFileScans, &icebergPositionDeleteFileScans,
+									  &equalityDeleteScans, &equalityDeleteReadGroups);
 
 	ErrorIfScanListsAreNotEqual(icebergMetadataFileScans, fileScans, "fileScan");
 	ErrorIfScanListsAreNotEqual(icebergPositionDeleteFileScans, positionDeleteScans, "posDeleteScan");

@@ -32,6 +32,7 @@
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/snapshot.h"
+#include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/parsetree/options.h"
@@ -190,6 +191,8 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 {
 	List	   *fileScans = NIL;
 	List	   *positionDeleteScans = NIL;
+	List	   *equalityDeleteScans = NIL;
+	List	   *equalityDeleteReadGroups = NIL;
 
 	if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
 	{
@@ -297,7 +300,8 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 			catalogType == NONE_CATALOG)
 			ErrorIfSchemasDoNotMatch(relationId, metadata);
 
-		CreateTableScanForIcebergMetadata(relationId, metadata, baseRestrictInfoList, &fileScans, &positionDeleteScans);
+		CreateTableScanForIcebergMetadata(relationId, metadata, baseRestrictInfoList, &fileScans, &positionDeleteScans,
+										  &equalityDeleteScans, &equalityDeleteReadGroups);
 	}
 	else
 	{
@@ -377,6 +381,8 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 	tableScan->uniqueRelationIdentifier = uniqueRelationIdentifier;
 	tableScan->fileScans = fileScans;
 	tableScan->positionDeleteScans = positionDeleteScans;
+	tableScan->equalityDeleteScans = equalityDeleteScans;
+	tableScan->equalityDeleteReadGroups = equalityDeleteReadGroups;
 	tableScan->childScans = childScans;
 	tableScan->isUpdateDelete = isResultRelation;
 
@@ -626,7 +632,8 @@ GetPositionDeleteTableDataFileForDataFiles(Oid relationId, List *dataFileList,
 */
 void
 CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadata, List *baseRestrictInfoList,
-								  List **fileScans, List **positionDeleteScans)
+								  List **fileScans, List **positionDeleteScans,
+								  List **equalityDeleteScans, List **equalityDeleteReadGroups)
 {
 	List	   *dataFiles = NIL;
 	List	   *deleteFiles = NIL;
@@ -636,6 +643,8 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 	List	   *retainedFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);
 
 	ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, fileScans, positionDeleteScans);
+	*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles, deleteFiles,
+														   *fileScans, equalityDeleteScans);
 }
 
 
@@ -666,6 +675,9 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 	foreach(dataFileCell, deleteFiles)
 	{
 		DataFile   *dataFile = lfirst(dataFileCell);
+
+		if (dataFile->content != ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES || dataFiles == NIL)
+			continue;
 
 		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
 
@@ -748,7 +760,7 @@ SnapshotFilesScanned(PgLakeScanSnapshot * scanSnapshot, int *dataFileScans,
 		PgLakeTableScan *tableScan = (PgLakeTableScan *) lfirst(lc);
 
 		int			curDataFileScans = list_length(tableScan->fileScans);
-		int			curDeleteFileScans = list_length(tableScan->positionDeleteScans);
+		int			curDeleteFileScans = list_length(tableScan->positionDeleteScans) + list_length(tableScan->equalityDeleteScans);
 
 		*dataFileScans += curDataFileScans;
 		*deleteFileScans += curDeleteFileScans;

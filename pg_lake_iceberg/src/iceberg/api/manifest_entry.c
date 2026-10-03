@@ -42,7 +42,19 @@ IsManifestEntryStatusScannable(IcebergManifestEntry * manifestEntry)
 	 * snapshot. Deleted entries in data and delete manifests (those marked
 	 * with status "DELETED") are not used in a scan.
 	 */
-	return manifestEntry->status != ICEBERG_MANIFEST_ENTRY_STATUS_DELETED;
+	switch (manifestEntry->status)
+	{
+		case ICEBERG_MANIFEST_ENTRY_STATUS_ADDED:
+		case ICEBERG_MANIFEST_ENTRY_STATUS_EXISTING:
+			return true;
+		case ICEBERG_MANIFEST_ENTRY_STATUS_DELETED:
+			return false;
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("invalid Iceberg manifest entry status %d", manifestEntry->status)));
+	}
+	return false;
 }
 
 /*
