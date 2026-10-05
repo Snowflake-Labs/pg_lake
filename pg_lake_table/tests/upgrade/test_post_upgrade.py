@@ -84,3 +84,42 @@ def test_csv_table(superuser_conn, s3, extension):
     assert result[0] == ["hello-3"]
 
     superuser_conn.rollback()
+
+
+@pytest.mark.skipif(
+    os.getenv("TEST_PG_UPGRADE_FROM_BINDIR") == None,
+    reason="set TEST_PG_UPGRADE_FROM_BINDIR to the old PG version to run",
+)
+def test_azure_named_host(superuser_conn, extension):
+    # pg_upgrade fails outright if the restore rejects the host, so getting
+    # here is most of the test
+    result = run_query(
+        """
+        SELECT 'path=azure://someaccount.blob.core.windows.net/c/data.parquet'
+               = ANY (ftoptions)
+        FROM pg_foreign_table
+        WHERE ftrelid = 'pre_upgrade.azure_named_host'::regclass
+        """,
+        superuser_conn,
+    )
+    assert result == [[True]]
+
+    superuser_conn.rollback()
+
+
+@pytest.mark.skipif(
+    os.getenv("TEST_PG_UPGRADE_FROM_BINDIR") == None,
+    reason="set TEST_PG_UPGRADE_FROM_BINDIR to the old PG version to run",
+)
+def test_role_default_catalog(superuser_conn, extension):
+    result = run_query(
+        """
+        SELECT 'pg_lake_iceberg.default_catalog=pre_upgrade_rest' = ANY (setconfig)
+        FROM pg_db_role_setting
+        WHERE setrole = 'pre_upgrade_rest_user'::regrole
+        """,
+        superuser_conn,
+    )
+    assert result == [[True]]
+
+    superuser_conn.rollback()
