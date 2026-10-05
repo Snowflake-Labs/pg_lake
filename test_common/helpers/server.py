@@ -709,6 +709,19 @@ def run_pre_upgrade_script():
         SERVER pg_lake
         OPTIONS (path 's3://{TEST_BUCKET}/pre_upgrade/csv/data.csv');
 
+        -- The restore re-runs the FDW validator, which checks a host in an
+        -- Azure URL against pg_lake.allowed_azure_host_suffixes
+        CREATE FOREIGN TABLE pre_upgrade.azure_named_host (id int)
+        SERVER pg_lake
+        OPTIONS (path 'azure://someaccount.blob.core.windows.net/c/data.parquet', format 'parquet');
+
+        -- The restore replays the role setting with the globals, before the
+        -- server it names exists
+        CREATE SERVER pre_upgrade_rest TYPE 'rest' FOREIGN DATA WRAPPER iceberg_catalog
+        OPTIONS (rest_endpoint 'https://127.0.0.1:1/api/catalog');
+        CREATE ROLE pre_upgrade_rest_user;
+        ALTER ROLE pre_upgrade_rest_user SET pg_lake_iceberg.default_catalog = 'pre_upgrade_rest';
+
         -- Throw another extension into the mix
         CREATE EXTENSION postgres_fdw CASCADE;
     """
