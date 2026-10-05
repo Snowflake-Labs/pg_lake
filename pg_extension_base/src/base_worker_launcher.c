@@ -1559,6 +1559,12 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 
 	while (!TerminationRequested)
 	{
+		/*
+		 * Tests park a starter here to hold it in the main loop, where it
+		 * reads the registrations without the lock it took above.
+		 */
+		INJECTION_POINT_COMPAT("database-starter-in-main-loop");
+
 		/* read pg_extension_base.workers contents */
 		List	   *workerRegistrationList = GetBaseWorkerRegistrationList();
 
@@ -2420,6 +2426,27 @@ PgExtensionBaseWorkerMain(Datum arg)
 
 	StartTransactionCommand();
 
+	/*
+	 * Take the lock a registration change holds before reading our own
+	 * registration below.
+	 *
+	 * DeregisterBaseWorker deletes the row and SIGTERMs the worker inside its
+	 * transaction, so until that transaction ends the row is still there for
+	 * everyone else.  Its lock stops a database starter that has yet to reach
+	 * its main loop, but one already in that loop re-reads the registrations
+	 * without the lock and launches us from the deleted row.  Reading it
+	 * ourselves without waiting would then have us do the work the deregister
+	 * was meant to stop, holding locks on resources that transaction is about
+	 * to drop while waiting for rows it has written: a deadlock, not just
+	 * wasted work.
+	 *
+	 * The commit below releases the lock, which is all we need: a deregister
+	 * that starts after it finds the pid we published above and signals us.
+	 */
+	bool		waitForLock = true;
+
+	LockDatabaseStarter(databaseId, RowExclusiveLock, waitForLock);
+
 	char	   *databaseName = get_database_name(databaseId);
 
 	char	   *extensionName = get_extension_name(extensionId);
@@ -2427,9 +2454,10 @@ PgExtensionBaseWorkerMain(Datum arg)
 	if (extensionName == NULL || !IsWorkerRegistered(workerId))
 	{
 		/*
-		 * The extension was dropped just after the base worker started. The
-		 * worker registration is permanently gone, so we can remove it from
-		 * the hash.
+		 * The extension was dropped just after the base worker started, or
+		 * our registration was deleted by a deregister we waited for above.
+		 * The worker registration is permanently gone, so we can remove it
+		 * from the hash.
 		 */
 
 		RemoveBaseWorkerEntry(databaseId, workerId);
@@ -2831,6 +2859,12 @@ DeregisterBaseWorker_internal(int32 workerId)
 		/*
 		 * Block the database starter on start-up, such that it waits for us
 		 * to commit before reading from the database.
+		 *
+		 * That only covers a starter that has yet to reach its main loop; one
+		 * already in it reads the registrations without the lock and can
+		 * launch a replacement.  The base worker takes the lock too, before
+		 * checking whether it is still registered, which is what makes such a
+		 * replacement harmless.
 		 */
 		LockDatabaseStarter(MyDatabaseId, ShareLock, waitForLock);
 		DatabaseStarterNeedsRestart(MyDatabaseId);

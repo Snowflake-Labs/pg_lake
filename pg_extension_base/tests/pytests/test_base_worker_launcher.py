@@ -1038,3 +1038,129 @@ def test_database_starter_lock_is_outside_the_database_lock_space(superuser_conn
         "DROP EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
     )
     superuser_conn.commit()
+
+
+SCHEDULER_WORKER_NAME = "pg_extension_base_test_scheduler_main_worker"
+MAIN_LOOP_POINT = "database-starter-in-main-loop"
+
+
+def test_worker_launched_from_an_open_deregister_does_not_run(
+    superuser_conn, create_injection_extension
+):
+    """A worker launched from a registration row that an open deregister has
+    already deleted must not reach its entry point.
+
+    deregister_worker deletes the row and SIGTERMs the worker inside its
+    transaction, so from that kill until the transaction ends the row is still
+    there for every other session to read.  The lock it takes keeps a database
+    starter that has yet to reach its main loop from acting on the row, but a
+    starter already in that loop re-reads the registrations without the lock, so
+    it launches a replacement.  The replacement used to find the same row,
+    conclude it was registered, and go and do the work the deregister was meant
+    to stop -- on resources the deregistering transaction was about to drop,
+    taking locks across its path and then waiting for rows it had written, which
+    is a deadlock rather than merely wasted work.
+
+    The injection point holds a starter in the main loop so the window is a
+    given rather than something to race for.
+    """
+    if get_pg_version_num(superuser_conn) < 170000:
+        pytest.skip("Injection points not available (requires PostgreSQL 17+)")
+
+    superuser_conn.rollback()
+    superuser_conn.autocommit = True
+
+    other_conn = None
+    try:
+        run_command(
+            f"SELECT injection_points_attach('{MAIN_LOOP_POINT}', 'wait')",
+            superuser_conn,
+        )
+
+        start_offset = log_end_offset()
+
+        # The registration wakes a starter, which parks before it can act on it
+        run_command(
+            "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
+        )
+
+        assert wait_until_equal(
+            lambda: "database starter for database postgres started"
+            in "".join(read_new_log_lines(start_offset)),
+            True,
+        ), "no database starter reached the main loop"
+
+        worker_id = run_query(
+            f"SELECT worker_id FROM extension_base.workers WHERE worker_name = '{SCHEDULER_WORKER_NAME}'",
+            superuser_conn,
+        )[0]["worker_id"]
+
+        # Deregister from a second session and leave the transaction open, so
+        # the row is deleted but still visible to the parked starter
+        other_conn = psycopg2.connect(
+            f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER} "
+            f"password={server_params.PG_PASSWORD} port={server_params.PG_PORT} "
+            f"host={server_params.PG_HOST}"
+        )
+        run_command(
+            f"SELECT extension_base.deregister_worker('{SCHEDULER_WORKER_NAME}')",
+            other_conn,
+        )
+
+        launch_offset = log_end_offset()
+        run_command(
+            f"SELECT injection_points_wakeup('{MAIN_LOOP_POINT}')", superuser_conn
+        )
+        run_command(
+            f"SELECT injection_points_detach('{MAIN_LOOP_POINT}')", superuser_conn
+        )
+
+        assert wait_until_equal(
+            lambda: f"starting pg base extension worker {worker_id} in database"
+            in "".join(read_new_log_lines(launch_offset)),
+            True,
+        ), "the released starter never launched the deregistered worker"
+
+        # It is waiting for the open transaction.  Leave it room to get this
+        # wrong before concluding that it did not.
+        time.sleep(1.0)
+
+        ran = [
+            line
+            for line in read_new_log_lines(launch_offset)
+            if f"pg extension base worker {worker_id} in database" in line
+            and line.rstrip().endswith("started")
+        ]
+        assert not ran, f"the replacement ran while the deregister was open: {ran}"
+
+        # Committing releases it, and it now sees that it is gone
+        other_conn.commit()
+
+        assert wait_until_equal(
+            lambda: f"pg extension base worker {worker_id} in database postgres was dropped"
+            in "".join(read_new_log_lines(launch_offset)),
+            True,
+        ), "the replacement never noticed it had been deregistered"
+
+        assert (
+            wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 0)
+            == 0
+        )
+    finally:
+        if other_conn is not None:
+            other_conn.close()
+        run_command(
+            f"SELECT injection_points_wakeup('{MAIN_LOOP_POINT}')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            f"SELECT injection_points_detach('{MAIN_LOOP_POINT}')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            "DROP EXTENSION IF EXISTS pg_extension_base_test_scheduler CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.autocommit = False
