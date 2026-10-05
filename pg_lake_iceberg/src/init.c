@@ -89,6 +89,11 @@ static const struct config_enum_entry CompatibilityModeOptions[] = {
 void
 _PG_init(void)
 {
+	/*
+	 * Unlike pg_lake_engine, GUCs stay unregistered during pg_upgrade: the
+	 * restore replays ALTER ROLE/DATABASE SET before the iceberg_catalog
+	 * server that pg_lake_iceberg.default_catalog may name exists.
+	 */
 	if (IsBinaryUpgrade)
 	{
 		/*
