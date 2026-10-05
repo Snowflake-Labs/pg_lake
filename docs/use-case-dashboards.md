@@ -46,16 +46,17 @@ pg_cron is installed (`cron.database_name`, `postgres` by default).
 
 ## Load the raw data
 
-The trip records are published as one Parquet file per month. Create an Iceberg table from the
-first month, with the columns inferred from the file and partitioned by day, so that a
-dashboard's time range only reads the files for those days. Then add the next two months with
-`COPY`:
+The trip records are published as one Parquet file per month. Create an Iceberg table with
+`definition_from`, which infers the columns from a file without loading it, and partition it by
+day, so that a dashboard's time range only reads the files for those days. Then load three
+months with `COPY`:
 
 ```sql
 CREATE TABLE trips () USING iceberg
-  WITH (load_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet',
+  WITH (definition_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet',
         partition_by = 'day(tpep_pickup_datetime)');
 
+COPY trips FROM 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet';
 COPY trips FROM 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-02.parquet';
 COPY trips FROM 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-03.parquet';
 ```
