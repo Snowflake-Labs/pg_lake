@@ -38,10 +38,11 @@
  * data_files_catalog_batch.c.
  *
  * This is a session temp table, so it lives in pg_temp regardless of what
- * name it is given; the name below is plain, not schema-qualified like
- * DATA_FILES_TABLE_QUALIFIED.
+ * name it is given. We schema-qualify with pg_temp so the reference is
+ * unambiguous even under SPI_START_EXTENSION_OWNER's locked-down
+ * search_path.
  */
-#define TX_DATA_FILES_TABLE_NAME "pg_lake_tx_data_file_ids"
+#define TX_DATA_FILES_TABLE_NAME "pg_temp.pg_lake_tx_data_file_ids"
 
 /* True when adjacent ops of this type can be collapsed into one bulk SQL. */
 bool		BatchableType(TableMetadataOperationType type);
