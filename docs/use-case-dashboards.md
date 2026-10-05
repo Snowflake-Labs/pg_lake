@@ -46,53 +46,29 @@ pg_cron is installed (`cron.database_name`, `postgres` by default).
 
 ## Load the raw data
 
-Create an Iceberg table partitioned by day, so that a dashboard's time range only reads the
-files for those days:
+The trip records are published as one Parquet file per month. Create an Iceberg table from the
+first month, with the columns inferred from the file and partitioned by day, so that a
+dashboard's time range only reads the files for those days. Then add the next two months with
+`COPY`:
 
 ```sql
-CREATE TABLE trips (
-  pickup_time timestamp NOT NULL,
-  dropoff_time timestamp NOT NULL,
-  pickup_zone int,
-  dropoff_zone int,
-  passengers int,
-  distance double precision,
-  fare numeric(10,2),
-  tip numeric(10,2),
-  total numeric(10,2),
-  payment_type int
-) USING iceberg WITH (partition_by = 'day(pickup_time)');
+CREATE TABLE trips () USING iceberg
+  WITH (load_from = 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-01.parquet',
+        partition_by = 'day(tpep_pickup_datetime)');
+
+COPY trips FROM 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-02.parquet';
+COPY trips FROM 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_2024-03.parquet';
 ```
 
-The trip records are published as one Parquet file per month. Load three months, keeping only
-the trips that started in that month (the files contain a few rows with bad timestamps):
+Each file takes 15 to 20 seconds to load. The files contain a few trips with timestamps outside
+their month, some as old as 2002, which would show up as stray days on a dashboard. Remove them:
 
 ```sql
-DO $$
-DECLARE
-  month date;
-BEGIN
-  FOR month IN SELECT generate_series('2024-01-01'::date, '2024-03-01', interval '1 month') LOOP
-    EXECUTE format($sql$
-      CREATE FOREIGN TABLE taxi_file () SERVER pg_lake
-        OPTIONS (path 'https://d37ci6vzurychx.cloudfront.net/trip-data/yellow_tripdata_%s.parquet')
-    $sql$, to_char(month, 'YYYY-MM'));
-
-    EXECUTE format($sql$
-      INSERT INTO trips
-      SELECT tpep_pickup_datetime, tpep_dropoff_datetime, pulocationid, dolocationid,
-             passenger_count, trip_distance, fare_amount, tip_amount, total_amount, payment_type
-      FROM taxi_file
-      WHERE tpep_pickup_datetime >= %L AND tpep_pickup_datetime < %L
-    $sql$, month, month + interval '1 month');
-
-    DROP FOREIGN TABLE taxi_file;
-  END LOOP;
-END $$;
+DELETE FROM trips WHERE tpep_pickup_datetime < '2024-01-01' OR tpep_pickup_datetime >= '2024-04-01';
 ```
 
-This takes about a minute and produces 9,554,722 rows in 91 files, one per day, 180 MB in
-total. For data that keeps arriving as files, use a
+That leaves 9,554,757 trips in 95 files, mostly one per day, 193 MB in total. For data that
+keeps arriving as files, use a
 [file list pipeline](data-lake-import-export.md#load-new-files-as-they-arrive) instead; for rows
 written to PostgreSQL, see [syncing tables to Iceberg](use-case-iceberg-sync.md).
 
@@ -111,25 +87,25 @@ COPY zones FROM 'https://d37ci6vzurychx.cloudfront.net/misc/taxi_zone_lookup.csv
 A time series panel with trips and revenue per day:
 
 ```sql
-SELECT date_trunc('day', pickup_time) AS day, count(*) AS trips, sum(total) AS revenue
+SELECT date_trunc('day', tpep_pickup_datetime) AS day, count(*) AS trips, round(sum(total_amount)) AS revenue
 FROM trips
-WHERE pickup_time >= '2024-03-01' AND pickup_time < '2024-04-01'
+WHERE tpep_pickup_datetime >= '2024-03-01' AND tpep_pickup_datetime < '2024-04-01'
 GROUP BY 1 ORDER BY 1;
 
-         day         | trips  |  revenue
----------------------+--------+------------
- 2024-03-01 00:00:00 | 117638 | 3142038.32
- 2024-03-02 00:00:00 | 122463 | 3037189.16
- 2024-03-03 00:00:00 |  97000 | 2694353.59
+         day         | trips  | revenue
+---------------------+--------+---------
+ 2024-03-01 00:00:00 | 117640 | 3142126
+ 2024-03-02 00:00:00 | 122463 | 3037189
+ 2024-03-03 00:00:00 |  97000 | 2694354
  ...
 ```
 
 The busiest pickup zones, with their tip percentage:
 
 ```sql
-SELECT z.borough, z.zone, count(*) AS trips, round(100 * sum(t.tip) / sum(t.fare), 1) AS tip_pct
-FROM trips t JOIN zones z ON z.zone_id = t.pickup_zone
-WHERE t.pickup_time >= '2024-03-01' AND t.pickup_time < '2024-04-01'
+SELECT z.borough, z.zone, count(*) AS trips, round((100 * sum(t.tip_amount) / sum(t.fare_amount))::numeric, 1) AS tip_pct
+FROM trips t JOIN zones z ON z.zone_id = t.pulocationid
+WHERE t.tpep_pickup_datetime >= '2024-03-01' AND t.tpep_pickup_datetime < '2024-04-01'
 GROUP BY 1, 2 ORDER BY trips DESC LIMIT 5;
 
   borough  |         zone          | trips  | tip_pct
@@ -145,20 +121,20 @@ A heatmap of trips by day of the week and hour, over all three months, and the m
 duration:
 
 ```sql
-SELECT extract(isodow FROM pickup_time) AS dow, extract(hour FROM pickup_time) AS hour, count(*)
+SELECT extract(isodow FROM tpep_pickup_datetime) AS dow, extract(hour FROM tpep_pickup_datetime) AS hour, count(*)
 FROM trips GROUP BY 1, 2 ORDER BY 1, 2;
 
-SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM dropoff_time - pickup_time) / 60)
-FROM trips WHERE pickup_time >= '2024-03-01' AND pickup_time < '2024-04-01';
+SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY extract(epoch FROM tpep_dropoff_datetime - tpep_pickup_datetime) / 60)
+FROM trips WHERE tpep_pickup_datetime >= '2024-03-01' AND tpep_pickup_datetime < '2024-04-01';
 ```
 
-Each of these took between 40 and 120 milliseconds once the files were in pgduck_server's
+Each of these took between 40 and 110 milliseconds once the files were in pgduck_server's
 [file cache](performance.md#file-cache), measured on a 16-core machine. `EXPLAIN VERBOSE` shows
 that the whole query runs in DuckDB, and how many files it reads:
 
 ```sql
 EXPLAIN VERBOSE
-SELECT count(*) FROM trips WHERE pickup_time >= '2024-03-10' AND pickup_time < '2024-03-17';
+SELECT count(*) FROM trips WHERE tpep_pickup_datetime >= '2024-03-10' AND tpep_pickup_datetime < '2024-03-17';
 
  Custom Scan (Query Pushdown)
    Engine: DuckDB
@@ -168,9 +144,9 @@ SELECT count(*) FROM trips WHERE pickup_time >= '2024-03-10' AND pickup_time < '
 
 Two things keep these queries fast:
 
-- **Filter on the partition column.** A week of data reads 7 of the 91 files.
+- **Filter on the partition column.** A week of data reads 7 of the 95 files.
 - **Keep lookup tables in Iceberg.** The same zones query with `zones` as a heap table took
-  4.7 seconds instead of 0.12, because PostgreSQL joins the 3.6 million matching trips itself.
+  about 4 seconds instead of 0.06, because PostgreSQL joins the 3.6 million matching trips itself.
   If a lookup table is maintained as a regular table, refresh an Iceberg copy when it changes,
   for example with
   `BEGIN; DELETE FROM zones; INSERT INTO zones SELECT * FROM zones_source; COMMIT;`.
@@ -178,9 +154,9 @@ Two things keep these queries fast:
 ## Keep a rollup for busy panels
 
 All queries on Iceberg tables share pgduck_server. On the same machine, the daily query above
-ran at about 70 queries per second, whether 8 or 32 clients sent it, so with 32 clients each
-query took 450 milliseconds. A wall display, or a dashboard that dozens of people refresh every
-few seconds, is better served from a rollup.
+ran at about 75 to 80 queries per second, whether 8 or 32 clients sent it, so with 32 clients
+each query took about 400 milliseconds. A wall display, or a dashboard that dozens of people
+refresh every few seconds, is better served from a rollup.
 
 Create an hourly rollup per pickup zone as a heap table:
 
@@ -206,10 +182,10 @@ SELECT incremental.create_time_interval_pipeline(
   start_time := '2024-01-01',
   command := $$
     INSERT INTO trips_hourly
-    SELECT date_trunc('hour', pickup_time), coalesce(pickup_zone, 0), count(*),
-           coalesce(sum(fare), 0), coalesce(sum(tip), 0), coalesce(sum(total), 0)
+    SELECT date_trunc('hour', tpep_pickup_datetime), coalesce(pulocationid, 0), count(*),
+           coalesce(sum(fare_amount), 0), coalesce(sum(tip_amount), 0), coalesce(sum(total_amount), 0)
     FROM trips
-    WHERE pickup_time >= $1::timestamp AND pickup_time < $2::timestamp
+    WHERE tpep_pickup_datetime >= $1::timestamp AND tpep_pickup_datetime < $2::timestamp
     GROUP BY 1, 2
     ON CONFLICT (hour, pickup_zone) DO UPDATE SET
       trips = trips_hourly.trips + excluded.trips,
@@ -228,14 +204,14 @@ hand.
 Dashboard queries on the rollup return the same results:
 
 ```sql
-SELECT date_trunc('day', hour) AS day, sum(trips) AS trips, sum(revenue) AS revenue
+SELECT date_trunc('day', hour) AS day, sum(trips) AS trips, round(sum(revenue)) AS revenue
 FROM trips_hourly
 WHERE hour >= '2024-03-01' AND hour < '2024-04-01'
 GROUP BY 1 ORDER BY 1;
 ```
 
-They took about 25 milliseconds with one client, and stayed under 100 milliseconds at about 350
-queries per second with 32 clients. Use the rollup for the summary panels, and the Iceberg table
+They stayed under 100 milliseconds at about 340 queries per second with 32 clients, four times
+the throughput of the raw table. Use the rollup for the summary panels, and the Iceberg table
 for drill-downs and ad-hoc questions that the rollup cannot answer.
 
 ## Connect a dashboard tool
@@ -253,9 +229,9 @@ data source and the `$__timeFilter` macro, which turns the dashboard's time rang
 `BETWEEN` filter that DuckDB uses to skip files:
 
 ```sql
-SELECT date_trunc('hour', pickup_time) AS time, count(*) AS trips
+SELECT date_trunc('hour', tpep_pickup_datetime) AS time, count(*) AS trips
 FROM trips
-WHERE $__timeFilter(pickup_time)
+WHERE $__timeFilter(tpep_pickup_datetime)
 GROUP BY 1 ORDER BY 1;
 ```
 
