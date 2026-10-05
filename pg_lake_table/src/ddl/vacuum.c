@@ -75,7 +75,6 @@ int			MaxCompactionsPerVacuum = 100;
 
 /* case insensitive */
 #define PG_LAKE_ICEBERG_VACUUM_FLAG "iceberg"
-#define CATALOG_EXPORT_DISABLED_RESTART_MS 60000
 
 /*
  * Managed by a GUC, not exposed to the user, see note in
@@ -222,13 +221,16 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 /*
  * pg_lake_catalog_export_worker exports the object store catalog independently
  * of the autovacuum worker. It is registered by the 3.6 upgrade script, but
- * returns a restart delay instead of occupying a worker slot while disabled.
+ * exits without asking for a restart when the catalog is disabled.
+ * pg_lake_iceberg.enable_object_store_catalog is a postmaster setting, so a
+ * worker that finds it off cannot see it turn on later, and leaving the process
+ * slot free for good is better than waking up to re-read the setting.
  */
 Datum
 pg_lake_catalog_export_worker(PG_FUNCTION_ARGS)
 {
 	if (!EnableObjectStoreCatalog)
-		PG_RETURN_INT32(CATALOG_EXPORT_DISABLED_RESTART_MS);
+		PG_RETURN_INT32(0);
 
 	pgstat_report_appname("pg_lake catalog export");
 	set_ps_display(psprintf("(pg_lake catalog export for database %d)",
@@ -244,9 +246,6 @@ pg_lake_catalog_export_worker(PG_FUNCTION_ARGS)
 
 	while (true)
 	{
-		if (!EnableObjectStoreCatalog)
-			PG_RETURN_INT32(CATALOG_EXPORT_DISABLED_RESTART_MS);
-
 		START_TRANSACTION();
 		{
 			ExportIcebergCatalogIfNeeded();

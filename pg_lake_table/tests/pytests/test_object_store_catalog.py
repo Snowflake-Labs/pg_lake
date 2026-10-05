@@ -2100,3 +2100,23 @@ def test_table_lookups_use_the_caller_snapshot(pg_conn, extension, concurrent_dd
         "DROP SCHEMA IF EXISTS lookup_snapshot, lookup_snapshot_other CASCADE", pg_conn
     )
     pg_conn.commit()
+
+
+def test_enable_object_store_catalog_requires_restart(superuser_conn, extension):
+    # The catalog export worker exits for good when the setting is off, which
+    # only holds if the setting cannot be turned on again without a restart.
+    superuser_conn.rollback()
+    context = run_query(
+        "SELECT context FROM pg_settings "
+        "WHERE name = 'pg_lake_iceberg.enable_object_store_catalog'",
+        superuser_conn,
+    )[0][0]
+    assert context == "postmaster"
+
+    error = run_command(
+        "SET pg_lake_iceberg.enable_object_store_catalog = 'off'",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert "cannot be changed without restarting the server" in str(error)
+    superuser_conn.rollback()
