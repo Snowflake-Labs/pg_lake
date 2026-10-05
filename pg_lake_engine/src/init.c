@@ -76,9 +76,6 @@ char	   *PgLakeAllowedAzureHostSuffixes = NULL;
 void
 _PG_init(void)
 {
-	if (IsBinaryUpgrade)
-		return;
-
 	DefineCustomStringVariable(
 							   "pg_lake_engine.host",
 							   gettext_noop("Specifies the pg_lake engine host"),
@@ -250,6 +247,14 @@ _PG_init(void)
 							   GUC_LIST_INPUT,
 							   PgLakeAllowedAzureHostSuffixesCheckHook,
 							   NULL, NULL);
+
+	/*
+	 * GUCs are registered even during pg_upgrade: the restore runs our FDW
+	 * validators, which read pg_lake.allowed_azure_host_suffixes, and an
+	 * unregistered string GUC is NULL rather than its default.
+	 */
+	if (IsBinaryUpgrade)
+		return;
 
 	if (QueryEngineEnabled)
 	{
