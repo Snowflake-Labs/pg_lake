@@ -20,6 +20,8 @@
 #include "fmgr.h"
 
 #include "catalog/namespace.h"
+#include "pg_lake/cleanup/deletion_queue.h"
+#include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_lake/iceberg/catalog.h"
@@ -129,11 +131,26 @@ RunAttachedCommand(char *command, char *databaseName)
 /*
 * pg_lake_finish_postgres_recovery_in_db updates all internal iceberg tables
 * to read-only in the database where the function is called.
+*
+* It also empties the deletion queue and the in-progress file table. Every row
+* in either names a file in storage that the instance this one was restored
+* from still owns and cleans up itself, so VACUUM must not act on them here. A
+* deletion queue row becomes reachable once a read-only table is dropped and
+* its rows fall to the dropped-table drain. An in-progress row is reachable
+* right away: VACUUM (ICEBERG) sweeps that table with an empty location
+* prefix, which matches every row and never looks at read_only.
+*
+* An in-progress row is only held back from cleanup while its operation id is
+* locked, and those locks lived in the source instance's lock table. Here
+* every inherited row is lockable, so it looks like an aborted transaction's
+* leftover even when the source is about to commit the file it names.
 */
 Datum
 pg_lake_finish_postgres_recovery_in_db(PG_FUNCTION_ARGS)
 {
 	UpdateAllInternalIcebergTablesToReadOnly();
+	ClearDeletionQueue();
+	ClearInProgressFiles();
 
 	PG_RETURN_VOID();
 }

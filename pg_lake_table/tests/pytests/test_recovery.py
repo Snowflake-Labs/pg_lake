@@ -395,3 +395,111 @@ def test_recovery_ignores_forged_extension_membership(s3, extension, superuser_c
         )
         run_command(f"DROP ROLE IF EXISTS {attacker_role}", superuser_conn)
         superuser_conn.autocommit = False
+
+
+def test_recovery_clears_file_cleanup_queues(
+    s3, superuser_conn, extension, with_default_location
+):
+    """
+    Recovery forgets the queued and in-progress files without deleting them.
+
+    Both tables were written before the restore, so the files they name belong
+    to the instance this one was restored from. Left in place, VACUUM here
+    could delete them: a deletion queue row once its read-only table is
+    dropped, and an in-progress row as soon as someone runs VACUUM (ICEBERG),
+    because the operation id that held it back was locked on the source. This
+    queues a row of each kind and checks they are all gone afterwards while
+    the files are still in object storage.
+    """
+    table = "recovery_queue_marker"
+    prefix = f"s3://{TEST_BUCKET}/test_recovery_clears_file_cleanup_queues"
+    queued_paths = [f"{prefix}/live.parquet", f"{prefix}/dropped.parquet"]
+    in_progress_path = f"{prefix}/in_progress.parquet"
+    paths = queued_paths + [in_progress_path]
+
+    for path in paths:
+        bucket, key = parse_s3_path(path)
+        s3.put_object(Bucket=bucket, Key=key, Body=b"x")
+
+    already_read_only = [
+        row[0]
+        for row in run_query(
+            "SELECT table_name::text FROM lake_iceberg.tables_internal "
+            "WHERE read_only",
+            superuser_conn,
+        )
+    ]
+    superuser_conn.commit()
+
+    try:
+        run_command(f"CREATE TABLE {table} (x int) USING iceberg", superuser_conn)
+
+        # orphaned in the future, so autovacuum leaves them alone until recovery
+        run_command(
+            "INSERT INTO lake_engine.deletion_queue (path, table_name, orphaned_at) "
+            f"VALUES ('{queued_paths[0]}', '{table}'::regclass, now() + interval '1 day'), "
+            f"('{queued_paths[1]}', 0, now() + interval '1 day')",
+            superuser_conn,
+        )
+
+        # Nothing holds a lock on this operation id, which is what an inherited
+        # row looks like once the source instance's lock table is gone.
+        run_command(
+            "INSERT INTO lake_engine.in_progress_files "
+            "(path, operation_id, is_prefix) "
+            f"VALUES ('{in_progress_path}', 987654321, false)",
+            superuser_conn,
+        )
+
+        # commit first, see test_recovery_marks_internal_iceberg_tables_read_only
+        superuser_conn.commit()
+
+        run_command("CALL lake_table.finish_postgres_recovery()", superuser_conn)
+        superuser_conn.commit()
+
+        queued = run_query(
+            "SELECT path FROM lake_engine.deletion_queue "
+            f"WHERE path LIKE '{prefix}/%'",
+            superuser_conn,
+        )
+        assert queued == [], f"recovery left queued deletions behind: {queued!r}"
+
+        in_progress = run_query(
+            "SELECT path FROM lake_engine.in_progress_files "
+            f"WHERE path LIKE '{prefix}/%'",
+            superuser_conn,
+        )
+        assert (
+            in_progress == []
+        ), f"recovery left in-progress files behind: {in_progress!r}"
+
+        remaining = run_query(
+            f"SELECT count(*) FROM lake_file.list('{prefix}/*')", superuser_conn
+        )
+        assert remaining[0][0] == len(paths), "recovery deleted queued files"
+        superuser_conn.commit()
+    finally:
+        superuser_conn.rollback()
+        run_command(
+            f"DELETE FROM lake_engine.deletion_queue WHERE path LIKE '{prefix}/%'",
+            superuser_conn,
+        )
+        run_command(
+            f"DELETE FROM lake_engine.in_progress_files WHERE path LIKE '{prefix}/%'",
+            superuser_conn,
+        )
+        run_command(
+            "UPDATE lake_iceberg.tables_internal SET read_only = false",
+            superuser_conn,
+        )
+        run_command(f"DROP TABLE IF EXISTS {table}", superuser_conn)
+        if already_read_only:
+            restore = ", ".join(
+                "'" + name.replace("'", "''") + "'" for name in already_read_only
+            )
+            run_command(
+                "UPDATE lake_iceberg.tables_internal SET read_only = true "
+                f"WHERE table_name::text IN ({restore})",
+                superuser_conn,
+            )
+        superuser_conn.commit()

@@ -570,6 +570,28 @@ GetDeletionQueueRecords(Oid relationId, bool isFull, int maxRecords)
 
 
 /*
+ * ClearDeletionQueue removes every row from the deletion queue without deleting
+ * the files they name.
+ *
+ * DELETE rather than TRUNCATE, because TRUNCATE would take ACCESS EXCLUSIVE on
+ * a table a concurrent VACUUM drain writes, and a publication that does not
+ * publish truncate would not replicate it, leaving the rows on the subscriber.
+ */
+void
+ClearDeletionQueue(void)
+{
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_execute("DELETE FROM " DELETION_QUEUE_TABLE, readOnly, 0);
+
+	SPI_END();
+}
+
+
+/*
 * InsertPrefixDeletionRecord adds a prefix into the deletion queue for
 * later removal. When the prefix is removed, all files under the prefix
 * will be removed.
