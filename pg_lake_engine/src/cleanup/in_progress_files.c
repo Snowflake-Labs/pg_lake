@@ -450,6 +450,27 @@ DeleteInProgressFileRecords(List *paths)
 
 
 /*
+ * ClearInProgressFiles removes every row from the in-progress file table
+ * without deleting the files they name.
+ *
+ * DELETE rather than TRUNCATE for the same reasons as ClearDeletionQueue.
+ */
+void
+ClearInProgressFiles(void)
+{
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeEngine);
+
+	bool		readOnly = false;
+
+	SPI_execute("DELETE FROM " PG_LAKE_ENGINE_NSP "." IN_PROGRESS_FILES_TABLE,
+				readOnly, 0);
+
+	SPI_END();
+}
+
+
+/*
  * ReplaceInProgressPrefixPathWithFullPaths replaces an in-progress prefix path with the actual file paths.
  */
 void
