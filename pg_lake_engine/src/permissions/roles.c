@@ -462,15 +462,14 @@ IsAllowedAzureHost(const char *host, size_t hostLen)
 
 
 /*
- * AllowedAzureHostSuffixes returns the configured suffix list.  An empty
- * setting means "no Azure host may be named in a URL".  NULL means the GUC
- * was never registered, so the default applies.
+ * AllowedAzureHostSuffixes returns the configured suffix list, treating an
+ * empty setting as "no Azure host may be named in a URL".
  */
 static const char *
 AllowedAzureHostSuffixes(void)
 {
 	if (PgLakeAllowedAzureHostSuffixes == NULL)
-		return DEFAULT_ALLOWED_AZURE_HOST_SUFFIXES;
+		return "";
 
 	return PgLakeAllowedAzureHostSuffixes;
 }
