@@ -2427,21 +2427,9 @@ PgExtensionBaseWorkerMain(Datum arg)
 	StartTransactionCommand();
 
 	/*
-	 * Take the lock a registration change holds before reading our own
-	 * registration below.
-	 *
-	 * DeregisterBaseWorker deletes the row and SIGTERMs the worker inside its
-	 * transaction, so until that transaction ends the row is still there for
-	 * everyone else.  Its lock stops a database starter that has yet to reach
-	 * its main loop, but one already in that loop re-reads the registrations
-	 * without the lock and launches us from the deleted row.  Reading it
-	 * ourselves without waiting would then have us do the work the deregister
-	 * was meant to stop, holding locks on resources that transaction is about
-	 * to drop while waiting for rows it has written: a deadlock, not just
-	 * wasted work.
-	 *
-	 * The commit below releases the lock, which is all we need: a deregister
-	 * that starts after it finds the pid we published above and signals us.
+	 * A starter may launch us from a stale registration list. Wait for any
+	 * in-progress deregistration before checking our registration; a later
+	 * one sees our PID after this lock is released and signals us.
 	 */
 	bool		waitForLock = true;
 
