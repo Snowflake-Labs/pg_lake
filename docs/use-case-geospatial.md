@@ -1,7 +1,7 @@
 ---
 title: Geospatial analytics
 parent: Use cases
-nav_order: 4
+nav_order: 5
 ---
 
 # Geospatial analytics on public data

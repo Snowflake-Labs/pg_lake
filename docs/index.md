@@ -152,8 +152,12 @@ TO 's3://mybucket/reports/trips_per_day.csv' WITH (header true);
     <span class="pglake-card-text">Keep an Iceberg copy of operational tables up to date, and query it from Spark, DuckDB or Snowflake without ETL.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-archiving.html' | relative_url }}">
-    <span class="pglake-card-title">Archive old data</span>
+    <span class="pglake-card-title">Archive partitions to Iceberg</span>
     <span class="pglake-card-text">Keep recent rows in PostgreSQL and move old months to cheaper Iceberg storage.</span>
+  </a>
+  <a class="pglake-card" href="{{ '/use-case-dashboards.html' | relative_url }}">
+    <span class="pglake-card-title">Fast analytics dashboards</span>
+    <span class="pglake-card-text">Serve dashboards from Iceberg tables with sub-second aggregates over millions of rows, and keep rollups up to date for busy panels.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-geospatial.html' | relative_url }}">
     <span class="pglake-card-title">Geospatial analytics</span>

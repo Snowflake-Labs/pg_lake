@@ -191,8 +191,36 @@ CREATE TABLE users (userid bigint, username text, email text);
 This is useful for tools that do not know about Iceberg, such as `pg_dump` restores or
 [dbt](dbt.md). Assign it to a specific user with
 `ALTER USER ... SET default_table_access_method`, since temporary and unlogged tables fail
-under this setting unless you add `USING heap`. See
-[migrating tables to Iceberg](use-case-migrate.md) for an example.
+under this setting unless you add `USING heap`.
+
+### Copying tables from another PostgreSQL server
+
+To copy tables from another PostgreSQL server, such as Amazon RDS, Cloud SQL or your own
+servers, into Iceberg tables, restore a `pg_dump` as a user with Iceberg as the default:
+
+```sql
+CREATE ROLE migration LOGIN PASSWORD '...';
+GRANT lake_read_write TO migration;
+GRANT CREATE ON SCHEMA public TO migration;
+ALTER ROLE migration SET default_table_access_method TO 'iceberg';
+```
+
+```bash
+pg_dump --table=orders --section=pre-data --section=data \
+        --no-table-access-method --no-owner \
+        "postgres://user@source-host:5432/sourcedb" \
+  | psql "postgres://migration@pglake-host:5432/postgres"
+```
+
+`--section=pre-data --section=data` leaves out indexes, which Iceberg tables do not support, and
+`--no-table-access-method` stops `pg_dump` from switching the default back to `heap`. Use
+`--table` several times, or `--schema`, to copy several tables from one consistent snapshot.
+Identity columns cause two errors during the restore, since Iceberg tables do not support adding
+an identity; the data still loads and the column becomes a plain `NOT NULL` column.
+
+If the data contains values Iceberg cannot store, such as `infinity` timestamps or `NaN` in
+`numeric` columns, create the table first with `out_of_range_values = 'clamp'` (see
+[data types](data-types.md)) and restore with `pg_dump --data-only`.
 
 ## Inspecting an Iceberg table
 

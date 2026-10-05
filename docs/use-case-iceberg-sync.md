@@ -375,7 +375,8 @@ ORDER BY 1, 2;
 ## Going further
 
 - **Keep only recent data in PostgreSQL.** Once rows are in Iceberg, you can delete old rows from
-  the heap table, as in [archiving old data](use-case-archiving.md).
+  the heap table, as in [archiving partitions to Iceberg](use-case-archiving.md).
 - **Sync many tables.** Create one pipeline per table. Each pipeline is a pg_cron job.
 - **Transform on the way.** The pipeline command can be any SQL, so you can filter, join or
-  aggregate rows while copying them, for example to maintain an hourly rollup in Iceberg.
+  aggregate rows while copying them, for example to maintain an hourly rollup, as in
+  [fast analytics dashboards](use-case-dashboards.md#keep-a-rollup-for-busy-panels).

@@ -20,15 +20,15 @@ pg_lake installation with object storage.
     <span class="pglake-card-text">Turn log files in object storage into a compact Iceberg table, processing each new file exactly once.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-archiving.html' | relative_url }}">
-    <span class="pglake-card-title">Archive old data to Iceberg</span>
+    <span class="pglake-card-title">Archive partitions to Iceberg</span>
     <span class="pglake-card-text">Keep recent rows in heap partitions and move old months into a partitioned Iceberg table.</span>
+  </a>
+  <a class="pglake-card" href="{{ '/use-case-dashboards.html' | relative_url }}">
+    <span class="pglake-card-title">Fast analytics dashboards</span>
+    <span class="pglake-card-text">Serve dashboards from Iceberg tables with sub-second aggregates over millions of rows, and keep rollups up to date for busy panels.</span>
   </a>
   <a class="pglake-card" href="{{ '/use-case-geospatial.html' | relative_url }}">
     <span class="pglake-card-title">Geospatial analytics</span>
     <span class="pglake-card-text">Query public GeoParquet and Shapefiles in place, extract them into Iceberg and PostGIS tables, run spatial joins and map the results in QGIS.</span>
-  </a>
-  <a class="pglake-card" href="{{ '/use-case-migrate.html' | relative_url }}">
-    <span class="pglake-card-title">Migrate tables to Iceberg</span>
-    <span class="pglake-card-text">Copy tables from any PostgreSQL server into Iceberg with pg_dump and psql.</span>
   </a>
 </div>

@@ -124,4 +124,4 @@ modified in place, and pg_lake keeps files that are no longer referenced for
   them and copy data into new tables without affecting the original.
 
 A `pg_dump` contains the definitions of Iceberg tables, and their data when you dump the data
-section; see [migrating tables](use-case-migrate.md).
+section; see [copying tables from another server](iceberg-tables.md#copying-tables-from-another-postgresql-server).

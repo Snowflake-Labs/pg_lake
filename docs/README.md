@@ -21,9 +21,9 @@ The documentation is published at **https://snowflake-labs.github.io/pg_lake/**.
 **Use cases**
 - [Sync Postgres tables to Iceberg](./use-case-iceberg-sync.md)
 - [Log management](./use-case-log-management.md)
-- [Archive old data to Iceberg](./use-case-archiving.md)
+- [Archive partitions to Iceberg](./use-case-archiving.md)
+- [Fast analytics dashboards](./use-case-dashboards.md)
 - [Geospatial analytics](./use-case-geospatial.md)
-- [Migrate tables to Iceberg](./use-case-migrate.md)
 
 **Reference**
 - [SQL functions and views](./sql-reference.md)

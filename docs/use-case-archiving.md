@@ -1,10 +1,10 @@
 ---
-title: Archive old data to Iceberg
+title: Archive partitions to Iceberg
 parent: Use cases
 nav_order: 3
 ---
 
-# Archive old data to Iceberg
+# Archive partitions to Iceberg
 {: .no_toc }
 
 Many tables grow forever, but only recent rows are updated or looked up by key: orders, events,
