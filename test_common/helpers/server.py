@@ -709,11 +709,20 @@ def run_pre_upgrade_script():
         SERVER pg_lake
         OPTIONS (path 's3://{TEST_BUCKET}/pre_upgrade/csv/data.csv');
 
-        -- The restore re-runs the FDW validator, which checks a host in an
-        -- Azure URL against pg_lake.allowed_azure_host_suffixes
+        -- A saved database GUC must be restored before validating its tables
+        ALTER DATABASE postgres SET pg_lake.allowed_azure_host_suffixes =
+            '.blob.core.windows.net,.custom.azure.test';
+        SET pg_lake.allowed_azure_host_suffixes =
+            '.blob.core.windows.net,.custom.azure.test';
+
+        -- The restore re-runs the FDW validator against the saved allowlist
         CREATE FOREIGN TABLE pre_upgrade.azure_named_host (id int)
         SERVER pg_lake
         OPTIONS (path 'azure://someaccount.blob.core.windows.net/c/data.parquet', format 'parquet');
+
+        CREATE FOREIGN TABLE pre_upgrade.azure_custom_host (id int)
+        SERVER pg_lake
+        OPTIONS (path 'azure://someaccount.custom.azure.test/c/data.parquet', format 'parquet');
 
         -- The restore replays the role setting with the globals, before the
         -- server it names exists

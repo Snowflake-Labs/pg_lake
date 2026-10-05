@@ -76,6 +76,29 @@ char	   *PgLakeAllowedAzureHostSuffixes = NULL;
 void
 _PG_init(void)
 {
+	/*
+	 * The FDW validator runs during pg_upgrade restore, so register its GUC
+	 * before the binary-upgrade return.
+	 */
+	DefineCustomStringVariable(
+							   "pg_lake.allowed_azure_host_suffixes",
+							   gettext_noop("Comma-separated list of host suffixes a user-supplied "
+											"Azure URL may name a storage endpoint under"),
+							   gettext_noop("Azure URLs carry the storage endpoint in the host, so "
+											"an unrestricted host is an SSRF vector.  An empty list "
+											"rejects every URL that names a host; the endpoint from "
+											"an Azure secret an administrator created is always "
+											"allowed, while one a catalog vends is held to this list."),
+							   &PgLakeAllowedAzureHostSuffixes,
+							   DEFAULT_ALLOWED_AZURE_HOST_SUFFIXES,
+							   PGC_SUSET,
+							   GUC_LIST_INPUT,
+							   PgLakeAllowedAzureHostSuffixesCheckHook,
+							   NULL, NULL);
+
+	if (IsBinaryUpgrade)
+		return;
+
 	DefineCustomStringVariable(
 							   "pg_lake_engine.host",
 							   gettext_noop("Specifies the pg_lake engine host"),
@@ -231,29 +254,6 @@ _PG_init(void)
 							   0,
 							   PgLakeStageLocationCheckHook,
 							   NULL, NULL);
-
-	DefineCustomStringVariable(
-							   "pg_lake.allowed_azure_host_suffixes",
-							   gettext_noop("Comma-separated list of host suffixes a user-supplied "
-											"Azure URL may name a storage endpoint under"),
-							   gettext_noop("Azure URLs carry the storage endpoint in the host, so "
-											"an unrestricted host is an SSRF vector.  An empty list "
-											"rejects every URL that names a host; the endpoint from "
-											"the Azure secret is always allowed."),
-							   &PgLakeAllowedAzureHostSuffixes,
-							   DEFAULT_ALLOWED_AZURE_HOST_SUFFIXES,
-							   PGC_SUSET,
-							   GUC_LIST_INPUT,
-							   PgLakeAllowedAzureHostSuffixesCheckHook,
-							   NULL, NULL);
-
-	/*
-	 * GUCs are registered even during pg_upgrade: the restore runs our FDW
-	 * validators, which read pg_lake.allowed_azure_host_suffixes, and an
-	 * unregistered string GUC is NULL rather than its default.
-	 */
-	if (IsBinaryUpgrade)
-		return;
 
 	if (QueryEngineEnabled)
 	{
