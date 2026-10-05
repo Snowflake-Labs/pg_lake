@@ -30,22 +30,35 @@
 #include "nodes/pg_list.h"
 
 /*
- * Per-tx temp table populated unconditionally by the bulk add path with the
- * id of every data or position-delete file the current top-level
- * transaction added. Read by GetTableDataFilesHashFromCatalog's
- * newFilesOnly predicate (data_files_catalog.c) and by the append-only
- * commit path (track_iceberg_metadata_changes.c); written by
- * data_files_catalog_batch.c.
+ * Per-tx temp tables that track which files the current transaction added
+ * and removed. Both use ON COMMIT DELETE ROWS so the tracking is
+ * automatically scoped to a single top-level transaction.
  *
- * This is a session temp table, so it lives in pg_temp regardless of what
- * name it is given. We schema-qualify with pg_temp so the reference is
- * unambiguous even under SPI_START_EXTENSION_OWNER's locked-down
+ * TX_DATA_FILES_TABLE_NAME: populated unconditionally by the bulk add path
+ * with the (id, path) of every data or position-delete file the transaction
+ * added. Read by GetTableDataFilesHashFromCatalog's newFilesOnly predicate
+ * (data_files_catalog.c) and by the catalog-based commit path
+ * (track_iceberg_metadata_changes.c); written by data_files_catalog_batch.c.
+ *
+ * TX_REMOVED_FILE_PATHS_TABLE_NAME: populated by RemoveDataFileFromTable
+ * with the path of every file the transaction removed (including cascaded
+ * deletion-file removals). Read by the catalog-based commit path.
+ *
+ * Both are session temp tables that live in pg_temp. We schema-qualify so
+ * the reference is unambiguous under SPI_START_EXTENSION_OWNER's locked-down
  * search_path.
  */
 #define TX_DATA_FILES_TABLE_NAME "pg_temp.pg_lake_tx_data_file_ids"
+#define TX_REMOVED_FILE_PATHS_TABLE_NAME "pg_temp.pg_lake_tx_removed_file_paths"
 
 /* True when adjacent ops of this type can be collapsed into one bulk SQL. */
 bool		BatchableType(TableMetadataOperationType type);
 
 /* Apply a run of same-typed batchable ops to the files catalog. */
 void		ApplyDataFileBatch(Oid relationId, TableMetadataOperationType type, List *batch);
+
+/* Ensure the per-tx remove-tracking temp table exists. */
+void		CreateTxRemovedFilePathsTempTableIfNotExists(void);
+
+/* Ensure the per-tx add-tracking temp table exists. */
+void		CreateTxDataFileIdsTempTableIfNotExists(void);
