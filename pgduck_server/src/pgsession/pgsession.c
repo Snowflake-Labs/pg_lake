@@ -276,7 +276,10 @@ pgsession_handle_connection(void *input)
 					 * duckdb_query_result_send_column_metadata() in
 					 * process_execute_message().
 					 */
-					char		describeType = pq_getmsgbyte(&inputMessage);
+					int			describeType = pq_getmsgbyte(&inputMessage);
+
+					if (describeType == EOF)
+						goto finally;
 
 					(void) describeType;
 
