@@ -94,10 +94,32 @@ static char *ProcessProtocolMessages(AttachedWorker * worker, bool nowait,
 									 TupleDesc *resultDesc);
 static void ValidateWorkerTupleDesc(TupleDesc workerDesc, TupleDesc expectedDesc);
 static void ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue);
+static void TrackLiveAttachedWorker(BackgroundWorkerHandle *workerHandle);
+static void RemoveAttachedWorkerHandle(BackgroundWorkerHandle *workerHandle);
+static void StopLiveAttachedWorkersAtExit(int code, Datum arg);
 
 #if PG_VERSION_NUM < 170000
 static bool UserOidIsLoginRole(Oid userOid);
 #endif
+
+/*
+ * The attached workers this process has started and not ended yet.
+ *
+ * Every caller ends its worker from a PG_FINALLY, which covers an ERROR but
+ * not a FATAL: a FATAL goes straight to proc_exit without unwinding the
+ * PG_TRY, so the worker would be left running with nobody to read from it.
+ * That is not an exotic case -- terminating a background worker raises FATAL
+ * in it, which is how a base worker is stopped -- and the orphan keeps every
+ * lock its command had taken, so whatever the terminating caller does next
+ * can deadlock against a worker it believes is gone.
+ *
+ * before_shmem_exit callbacks do run on proc_exit, so this is the list
+ * StopLiveAttachedWorkersAtExit walks.  It holds handles rather than
+ * AttachedWorkers because the structs are the caller's, allocated in whatever
+ * context it was running in, and that context is gone by then.
+ */
+static List *LiveAttachedWorkerHandles = NIL;
+static bool LiveAttachedWorkerExitCallbackSet = false;
 
 
 /*
@@ -417,7 +439,17 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	worker.bgw_notify_pid = MyProcPid;
 
 	BackgroundWorkerHandle *workerHandle;
+
+	/*
+	 * In TopMemoryContext, because the handle outlives this call by as long
+	 * as the worker does: it is what StopLiveAttachedWorkersAtExit terminates
+	 * the worker through, and that runs after the context this was called in
+	 * has been reset.  EndAttachedWorker frees it.
+	 */
+	MemoryContext callerContext = MemoryContextSwitchTo(TopMemoryContext);
 	bool		registered = RegisterDynamicBackgroundWorker(&worker, &workerHandle);
+
+	MemoryContextSwitchTo(callerContext);
 
 	if (!registered)
 	{
@@ -427,6 +459,12 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 						errmsg("out of background worker slots"),
 						errhint("You might need to increase max_worker_processes.")));
 	}
+
+	/*
+	 * Before the first thing below that can throw, so that a worker which is
+	 * already registered is never untracked while it is alive.
+	 */
+	TrackLiveAttachedWorker(workerHandle);
 
 	/*
 	 * Associate the queues with the worker. Without a handle, shm_mq cannot
@@ -726,6 +764,10 @@ IsAttachedWorkerRunning(AttachedWorker * worker)
 {
 	pid_t		pid;
 
+	/* ended workers have had their handle freed, and are not running */
+	if (worker->workerHandle == NULL)
+		return false;
+
 	return GetBackgroundWorkerPid(worker->workerHandle, &pid) != BGWH_STOPPED;
 }
 
@@ -748,6 +790,104 @@ EndAttachedWorker(AttachedWorker * worker)
 
 	dsm_detach(worker->sharedMemorySegment);
 	worker->sharedMemorySegment = NULL;
+
+	/*
+	 * After the detach, not before: the queue handles were given this handle
+	 * (shm_mq_set_handle), so it has to outlive them.
+	 */
+	RemoveAttachedWorkerHandle(worker->workerHandle);
+	worker->workerHandle = NULL;
+}
+
+
+/*
+ * TrackLiveAttachedWorker records a started worker as one this process still
+ * has to reap, and makes sure proc_exit will reap it.
+ */
+static void
+TrackLiveAttachedWorker(BackgroundWorkerHandle *workerHandle)
+{
+	if (!LiveAttachedWorkerExitCallbackSet)
+	{
+		before_shmem_exit(StopLiveAttachedWorkersAtExit, (Datum) 0);
+		LiveAttachedWorkerExitCallbackSet = true;
+	}
+
+	/*
+	 * The switch is for the list, which the first lappend here allocates; the
+	 * handle it comes to hold is already in TopMemoryContext, put there by
+	 * StartAttachedWorkerInternal when it registered the worker.
+	 */
+	MemoryContext callerContext = MemoryContextSwitchTo(TopMemoryContext);
+
+	LiveAttachedWorkerHandles = lappend(LiveAttachedWorkerHandles, workerHandle);
+	MemoryContextSwitchTo(callerContext);
+}
+
+
+/*
+ * RemoveAttachedWorkerHandle drops a reaped worker from the list and frees its
+ * handle.  The worker is gone by the time this is called, so the handle has no
+ * reader left: IsAttachedWorkerRunning reports a worker without one as stopped.
+ */
+static void
+RemoveAttachedWorkerHandle(BackgroundWorkerHandle *workerHandle)
+{
+	pid_t		workerPid PG_USED_FOR_ASSERTS_ONLY = 0;
+
+	if (workerHandle == NULL)
+		return;
+
+	Assert(GetBackgroundWorkerPid(workerHandle, &workerPid) == BGWH_STOPPED);
+
+	/* no switch needed: list_delete_ptr only shrinks the list in place */
+	LiveAttachedWorkerHandles = list_delete_ptr(LiveAttachedWorkerHandles,
+												workerHandle);
+
+	pfree(workerHandle);
+}
+
+
+/*
+ * StopLiveAttachedWorkersAtExit terminates the attached workers this process
+ * never got to end itself, and waits for them.
+ *
+ * The wait is the point as much as the signal.  A caller that stopped this
+ * process is entitled to read "the process is gone" as "the work it was doing
+ * has stopped", and it only means that if the worker doing the work is gone
+ * too.
+ */
+static void
+StopLiveAttachedWorkersAtExit(int code, Datum arg)
+{
+	ListCell   *handleCell = NULL;
+
+	/*
+	 * No PG_TRY around this: neither call below throws.  proc_exit_prepare
+	 * raised InterruptHoldoffCount before running us, so the
+	 * CHECK_FOR_INTERRUPTS inside the wait cannot fire, and a postmaster that
+	 * dies while we wait is reported as a status rather than an error.
+	 */
+	foreach(handleCell, LiveAttachedWorkerHandles)
+	{
+		BackgroundWorkerHandle *workerHandle =
+			(BackgroundWorkerHandle *) lfirst(handleCell);
+		pid_t		workerPid = 0;
+
+		if (GetBackgroundWorkerPid(workerHandle, &workerPid) == BGWH_STOPPED)
+			continue;
+
+		TerminateBackgroundWorker(workerHandle);
+
+		/*
+		 * Without a postmaster there is nothing left to reap the rest of the
+		 * list with, and those workers are going down with it anyway.
+		 */
+		if (WaitForBackgroundWorkerShutdown(workerHandle) == BGWH_POSTMASTER_DIED)
+			break;
+	}
+
+	LiveAttachedWorkerHandles = NIL;
 }
 
 

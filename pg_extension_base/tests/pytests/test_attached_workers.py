@@ -267,6 +267,73 @@ def test_parent_cancellation(superuser_conn, pg_extension_base):
     superuser_conn.rollback()
 
 
+def test_parent_termination(superuser_conn, pg_extension_base):
+    # pg_terminate_backend where test_parent_cancellation uses
+    # pg_cancel_backend, because the two leave by different doors: a cancel
+    # unwinds the caller through the PG_FINALLY that ends the worker, a FATAL
+    # goes straight to proc_exit and skips it. The worker has to be reaped
+    # either way. Whoever killed the caller reads "the backend is gone" as
+    # "what it was running has stopped", and an orphaned worker holds every
+    # lock its command took -- which is a deadlock for the next thing that
+    # killer does, not just a stray process.
+    #
+    # Run on a connection of its own, since this one is module-scoped and the
+    # test kills the backend it runs the worker from.
+    victim_conn = open_pg_conn()
+
+    try:
+        error = run_command(
+            """SELECT 8766
+                   FROM extension_base.run_attached($$
+                       SELECT pg_advisory_lock(8766);
+                       SELECT pg_terminate_backend(pid), pg_sleep(300)
+                         FROM pg_stat_activity WHERE query LIKE 'SELECT 8766%'
+                   $$);
+            """,
+            victim_conn,
+            raise_error=False,
+        )
+        # Only that it failed, not how it was worded. The server reports
+        # "terminating connection due to administrator command", but the
+        # connection goes away in the same breath, so libpq can reach EOF
+        # first and report that instead; which of the two the client sees is
+        # not what this test is about.
+        assert error is not None, "terminating the caller did not fail its command"
+    finally:
+        victim_conn.close()
+
+    # The caller reports the FATAL to its client before running its exit
+    # callbacks, so the worker is allowed to outlive the error above -- but
+    # only by the time those callbacks take. The sleep is long enough that
+    # the worker noticing the dead queue on its own cannot be what ends it.
+    deadline = time.monotonic() + 60
+
+    while True:
+        workers = run_query(
+            """SELECT count(*) FROM pg_stat_activity
+                WHERE backend_type = 'pg_extension_base attached worker'""",
+            superuser_conn,
+        )[0]["count"]
+        superuser_conn.rollback()
+
+        if workers == 0 or time.monotonic() > deadline:
+            break
+
+        time.sleep(0.1)
+
+    assert workers == 0, "the terminated caller left its attached worker running"
+
+    # And the lock it was holding is gone with it, which is the part a caller
+    # that goes on to touch the same objects depends on.
+    locks = run_query(
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND objid = 8766",
+        superuser_conn,
+    )[0]["count"]
+    superuser_conn.rollback()
+
+    assert locks == 0
+
+
 def test_returning_simple(superuser_conn, pg_extension_base):
     result = run_query(
         "SELECT * FROM extension_base.run_attached_returning($$SELECT 1 as a, 2 as b$$) AS t(a int, b int)",
