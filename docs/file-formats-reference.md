@@ -191,7 +191,8 @@ WITH (format 'iceberg', lowercase_column_names true);
 ```
 
 The option cannot be changed after a foreign table is created. Names that differ only in case
-within the same table or struct are rejected.
+within the same table or struct are rejected, as are column names that fold to a system
+column name such as `xmin` or `ctid`. Only the current schema of the metadata file is folded.
 
 ## Postgres tables
 

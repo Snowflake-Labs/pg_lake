@@ -294,7 +294,8 @@ SELECT id, (address).city FROM sales;
 ```
 
 The option cannot be changed after the table is created. Creation or query fails if two names
-in the same table or struct differ only in case.
+in the same table or struct differ only in case, or if a column name folds to a system column
+name such as `xmin` or `ctid`.
 
 ### Create tables in an external catalog
 

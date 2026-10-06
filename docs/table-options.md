@@ -40,7 +40,7 @@ accepts the same options.
 | `catalog_name`<span class="pglake-meta">Default the catalog server's `catalog_name`, or the database name; can be changed for read-only tables</span> | Catalog name of a read-only table. |
 | `catalog_namespace`<span class="pglake-meta">Default schema name; can be changed for read-only tables</span> | Namespace of a read-only table. |
 | `catalog_table_name`<span class="pglake-meta">Default table name; can be changed for read-only tables</span> | Table name of a read-only table. |
-| `lowercase_column_names`<span class="pglake-meta">Default `false` for attached tables; fixed at creation</span> | Fold column and nested struct field names. Also accepted when importing Iceberg metadata files. Names that differ only by case in the same table or struct are rejected. |
+| `lowercase_column_names`<span class="pglake-meta">Default `false` for attached tables; fixed at creation</span> | Fold column and nested struct field names. Also accepted when importing Iceberg metadata files. Names that differ only by case in the same table or struct, and column names that fold to a system column, are rejected. |
 | `autovacuum_enabled`<span class="pglake-meta">Default `true`; can be changed</span> | Whether the autovacuum worker processes the table. |
 | `autovacuum_compact_data_files`<span class="pglake-meta">Default `true`; can be changed</span> | Whether autovacuum compacts the table's data files. |
 | `max_snapshot_age`<span class="pglake-meta">Default `pg_lake_iceberg.max_snapshot_age`; can be changed</span> | Snapshot retention in seconds. `0` expires old snapshots on every write. |
