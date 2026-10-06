@@ -28,6 +28,7 @@ extern PGDLLEXPORT IcebergTableSchema * GetCurrentIcebergTableSchema(IcebergTabl
 extern PGDLLEXPORT List *GetLeafFieldsFromIcebergMetadata(IcebergTableMetadata * metadata);
 extern PGDLLEXPORT List *GetLeafFieldsForIcebergSchema(IcebergTableSchema * schema);
 extern PGDLLEXPORT DataFileSchemaField * GetDataFileSchemaFieldById(DataFileSchema * schema, int fieldId);
+extern PGDLLEXPORT void LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata);
 
 /* write api */
 extern PGDLLEXPORT IcebergTableSchema * RebuildIcebergSchemaFromDataFileSchema(Oid foreignTableOid,

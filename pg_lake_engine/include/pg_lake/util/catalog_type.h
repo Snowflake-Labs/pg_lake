@@ -31,6 +31,7 @@
 #define POSTGRES_CATALOG_NAME "postgres"
 #define OBJECT_STORE_CATALOG_NAME "object_store"
 #define REST_CATALOG_NAME "rest"
+#define SNOWFLAKE_CATALOG_NAME "snowflake"
 
 /*
  * Built-in iceberg_catalog server names.  Pre-created by the extension
@@ -45,6 +46,14 @@
 #define PG_LAKE_OBJECT_STORE_CATALOG_SERVER_NAME "pg_lake_object_store_catalog"
 #define PG_LAKE_REST_CATALOG_SERVER_NAME         "pg_lake_rest_catalog"
 
+/*
+ * Option of a read-only external catalog table, a metadata-path table, or an
+ * import from a metadata file: fold the Iceberg column and struct field names
+ * to lowercase, as Postgres does for unquoted identifiers, so names stored
+ * uppercase (as Snowflake does) need no quotes.
+ */
+#define LOWERCASE_COLUMN_NAMES_OPTION "lowercase_column_names"
+
 typedef enum IcebergCatalogType
 {
 	NONE_CATALOG = 0,
@@ -53,9 +62,9 @@ typedef enum IcebergCatalogType
 	POSTGRES_CATALOG = 1,
 
 	/*
-	 * catalog='rest', read_only=True Always treat like external iceberg
-	 * table, read the metadata location from the external catalog and never
-	 * modify.
+	 * catalog='rest' (or its alias 'snowflake'), read_only=True Always treat
+	 * like external iceberg table, read the metadata location from the
+	 * external catalog and never modify.
 	 */
 	REST_CATALOG_READ_ONLY = 2,
 
@@ -82,6 +91,8 @@ extern PGDLLEXPORT IcebergCatalogType GetIcebergCatalogType(Oid relationId);
 extern PGDLLEXPORT bool HasRestCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasObjectStoreCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasReadOnlyOption(List *options);
+extern PGDLLEXPORT bool HasLowercaseColumnNamesOption(List *options);
+extern PGDLLEXPORT bool LowercasesColumnNames(Oid relationId);
 extern PGDLLEXPORT bool IsCatalogOwnedByExtension(const char *catalog);
 extern PGDLLEXPORT bool IsRestCatalog(const char *catalog);
 extern PGDLLEXPORT const char *ResolveCatalogServerName(const char *catalog);

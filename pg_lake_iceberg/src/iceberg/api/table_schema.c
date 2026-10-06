@@ -28,11 +28,16 @@
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/pgduck/serialize.h"
+#include "pg_lake/util/catalog_type.h"
+#include "catalog/heap.h"
+#include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 
 static IcebergTableSchema * GetIcebergTableSchemaById(IcebergTableMetadata * metadata, int schemaId);
 static List *GetLeafFieldsForField(Field * field, int fieldId, int *level);
+static void LowercaseStructElementNames(FieldStructElement * elements, size_t elementCount);
+static void LowercaseFieldNames(Field * field);
 
 /*
  * GetIcebergTableSchemaByIdFromTableMetadata gets the schema by id from given table metadata.
@@ -198,6 +203,106 @@ GetDataFileSchemaFieldById(DataFileSchema * schema, int fieldId)
 	}
 
 	return schemaField;
+}
+
+
+/*
+ * LowercaseIcebergTableMetadataNames folds the column and struct field names
+ * of the current schema to lowercase, in place. Field ids are left alone, so
+ * data is still bound by id. Older schemas are not read, so they are skipped.
+ */
+void
+LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata)
+{
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+
+	LowercaseStructElementNames(schema->fields, schema->fields_length);
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+	{
+		const char *columnName = schema->fields[fieldIdx].name;
+
+		if (columnName != NULL && SystemAttributeByName(columnName) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DUPLICATE_COLUMN),
+					 errmsg("Iceberg column \"%s\" conflicts with a system column "
+							"name when lowercased", columnName),
+					 errhint("Create the table without the %s option.",
+							 LOWERCASE_COLUMN_NAMES_OPTION)));
+	}
+}
+
+
+/*
+ * LowercaseStructElementNames folds the names of the given sibling fields and
+ * of everything nested below them. Two siblings that differ only in case
+ * would become one name, which neither Postgres nor DuckDB can represent.
+ */
+static void
+LowercaseStructElementNames(FieldStructElement * elements, size_t elementCount)
+{
+	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
+	{
+		FieldStructElement *element = &elements[elementIdx];
+
+		if (element->name != NULL)
+		{
+			const char *originalName = element->name;
+			char	   *foldedName = downcase_identifier(originalName, strlen(originalName),
+														 false, false);
+
+			for (size_t previousIdx = 0; previousIdx < elementIdx; previousIdx++)
+			{
+				const char *previousName = elements[previousIdx].name;
+
+				if (previousName != NULL && strcmp(previousName, foldedName) == 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_DUPLICATE_COLUMN),
+							 errmsg("Iceberg field \"%s\" collides with another field "
+									"when lowercased to \"%s\"",
+									originalName, foldedName),
+							 errhint("Create the table without the %s option.",
+									 LOWERCASE_COLUMN_NAMES_OPTION)));
+			}
+
+			element->name = foldedName;
+		}
+
+		LowercaseFieldNames(element->type);
+	}
+}
+
+
+/*
+ * LowercaseFieldNames folds the struct field names nested in the given type.
+ */
+static void
+LowercaseFieldNames(Field * field)
+{
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			break;
+
+		case FIELD_TYPE_LIST:
+			LowercaseFieldNames(field->field.list.element);
+			break;
+
+		case FIELD_TYPE_MAP:
+			LowercaseFieldNames(field->field.map.key);
+			LowercaseFieldNames(field->field.map.value);
+			break;
+
+		case FIELD_TYPE_STRUCT:
+			LowercaseStructElementNames(field->field.structType.fields,
+										field->field.structType.nfields);
+			break;
+
+		default:
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("unsupported field type %d", field->type)));
+	}
 }
 
 

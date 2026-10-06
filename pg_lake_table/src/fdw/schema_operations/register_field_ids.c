@@ -325,7 +325,9 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 
 	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
-	DataFileSchema *schema = GetDataFileSchemaForExternalIcebergTable(currentMetadataPath);
+	DataFileSchema *schema =
+		GetDataFileSchemaForExternalIcebergTable(currentMetadataPath,
+												 LowercasesColumnNames(relationId));
 
 	Relation	rel = RelationIdGetRelation(relationId);
 	TupleDesc	tupDesc = RelationGetDescr(rel);
@@ -342,10 +344,11 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		columnMapping->field = field;
 
 		columnMapping->attrNum = get_attnum(relationId, field->name);
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum == InvalidAttrNumber)
+		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum <= InvalidAttrNumber)
 		{
 			/*
-			 * If no such column exists, skip.
+			 * If no such user column exists, skip. System columns have
+			 * negative attnums.
 			 */
 			continue;
 		}
@@ -354,9 +357,23 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		columnMapping->attrNum = get_attnum(relationId, field->name);
 		Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
 
-		columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
-		columnMapping->attNotNull = attr->attnotnull;
-		columnMapping->attHasDef = attr->atthasdef;
+		/*
+		 * A managed (non-REST) Iceberg table can carry a field that has no
+		 * matching Postgres column (the REST read-only case already skipped
+		 * those above). Only look up the attribute when it exists: the
+		 * type/null/default fields stay zero (from palloc0) so
+		 * ErrorIfSchemasDoNotMatch() reports the mismatch, and we avoid
+		 * TupleDescAttr(InvalidAttrNumber - 1), which trips PG19's new bounds
+		 * Assert in TupleDescAttr().
+		 */
+		if (columnMapping->attrNum > InvalidAttrNumber)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
+
+			columnMapping->pgType = MakePGType(attr->atttypid, attr->atttypmod);
+			columnMapping->attNotNull = attr->attnotnull;
+			columnMapping->attHasDef = attr->atthasdef;
+		}
 
 		/*
 		 * The external metadata is the storage shape; the PostgreSQL
@@ -400,7 +417,8 @@ GetDataFileSchemaForTableInternal(Oid relationId)
 
 		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
-		return GetDataFileSchemaForExternalIcebergTable(path);
+		return GetDataFileSchemaForExternalIcebergTable(path,
+														LowercasesColumnNames(relationId));
 	}
 }
 
@@ -417,12 +435,16 @@ GetDataFileSchemaForTable(Oid relationId)
 
 /*
  * GetDataFileSchemaForExternalIcebergTable gets a table schema field based
- * on the current Iceberg metadata.
+ * on the current Iceberg metadata, with names lowercased if requested.
  */
 DataFileSchema *
-GetDataFileSchemaForExternalIcebergTable(char *metadataPath)
+GetDataFileSchemaForExternalIcebergTable(char *metadataPath, bool lowercaseNames)
 {
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+
+	if (lowercaseNames)
+		LowercaseIcebergTableMetadataNames(metadata);
+
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
 
 	DataFileSchema *schema = palloc0(sizeof(DataFileSchema));

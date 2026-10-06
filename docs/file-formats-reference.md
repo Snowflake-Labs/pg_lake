@@ -163,6 +163,26 @@ Note that changes to the external Iceberg table will **not** be reflected in t
 ALTER FOREIGN TABLE external_iceberg OPTIONS (SET path 's3://mybucket/table/v15.metadata.json');
 ```
 
+When querying or importing an Iceberg metadata file written with uppercase names, use
+`lowercase_column_names` to fold column and nested struct field names to lowercase. It is
+accepted on metadata-path foreign tables, `CREATE TABLE` with `load_from` or `definition_from`,
+and `COPY ... FROM`:
+
+```sql
+CREATE FOREIGN TABLE external_iceberg () SERVER pg_lake
+OPTIONS (path 's3://mybucket/table/v14.metadata.json', lowercase_column_names 'true');
+
+CREATE TABLE imported () USING iceberg
+WITH (load_from = 's3://mybucket/table/v14.metadata.json', lowercase_column_names = true);
+
+COPY imported FROM 's3://mybucket/table/v14.metadata.json'
+WITH (format 'iceberg', lowercase_column_names true);
+```
+
+The option cannot be changed after a foreign table is created. Names that differ only in case
+within the same table or struct are rejected, as are column names that fold to a system
+column name such as `xmin` or `ctid`. Only the current schema of the metadata file is folded.
+
 ## Hugging Face
 
 [**Hugging Face**](https://huggingface.co/) is a widely used platform for sharing machine learning models and training data. You can query files directly using a **`hf://`** prefix instead of **`s3`**. Hugging Face file URLs will look something 

@@ -108,14 +108,45 @@ HasReadOnlyOption(List *options)
 
 
 /*
+ * HasLowercaseColumnNamesOption returns true if the options enable
+ * lowercase_column_names.
+ */
+bool
+HasLowercaseColumnNamesOption(List *options)
+{
+	return GetBoolOption(options, LOWERCASE_COLUMN_NAMES_OPTION, false);
+}
+
+
+/*
+ * LowercasesColumnNames returns true if the relation is a read-only catalog
+ * table or a metadata-path table whose external column and struct field names
+ * are folded to lowercase.
+ */
+bool
+LowercasesColumnNames(Oid relationId)
+{
+	if (!IsPgLakeIcebergForeignTableById(relationId) &&
+		!IsPgLakeForeignTableById(relationId))
+		return false;
+
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+
+	return HasLowercaseColumnNamesOption(foreignTable->options);
+}
+
+
+
+/*
  * IsCatalogOwnedByExtension returns true if the catalog name is one of
- * the reserved built-in names: 'rest', 'object_store', or 'postgres'.
- * Comparison is case-insensitive.
+ * the reserved built-in names: 'rest', 'snowflake', 'object_store', or
+ * 'postgres'.  Comparison is case-insensitive.
  */
 bool
 IsCatalogOwnedByExtension(const char *catalog)
 {
 	return pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0 ||
 		pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0 ||
 		pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0;
 }
@@ -123,8 +154,8 @@ IsCatalogOwnedByExtension(const char *catalog)
 
 /*
  * IsRestCatalog returns true if the catalog name identifies a REST catalog.
- * This includes the built-in 'rest' literal and any user-created
- * iceberg_catalog server whose TYPE is 'rest'.
+ * This includes the built-in 'rest' literal, the 'snowflake' alias, and
+ * any user-created iceberg_catalog server whose TYPE is 'rest'.
  *
  * The internal built-in server names (e.g. "pg_lake_rest_catalog") are
  * deliberately rejected: they are implementation details and must not be
@@ -138,7 +169,8 @@ IsRestCatalog(const char *catalog)
 	if (catalog == NULL)
 		return false;
 
-	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
+	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
 		return true;
 
 	if (IsBuiltinCatalogServerName(catalog))
@@ -170,8 +202,9 @@ IsRestCatalog(const char *catalog)
  * ResolveCatalogServerName maps a user-facing catalog identifier to the
  * actual pg_foreign_server.srvname.
  *
- * For the three reserved short names ('postgres', 'object_store', 'rest')
- * the result is the corresponding pre-created built-in server name.
+ * For the four reserved short names ('postgres', 'object_store', 'rest',
+ * 'snowflake') the result is the corresponding pre-created built-in
+ * server name.  'snowflake' is an alias for 'rest'.
  * Any other input is returned unchanged (user-created server names match
  * their catalog= option value verbatim).
  *
@@ -184,7 +217,8 @@ ResolveCatalogServerName(const char *catalog)
 	if (catalog == NULL)
 		return NULL;
 
-	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
+	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
 		return PG_LAKE_REST_CATALOG_SERVER_NAME;
 	if (pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0)
 		return PG_LAKE_POSTGRES_CATALOG_SERVER_NAME;
