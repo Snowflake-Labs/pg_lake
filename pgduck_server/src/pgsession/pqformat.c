@@ -329,8 +329,12 @@ pq_getmsgbytes(StringInfo msg, int datalen)
 {
 	const char *result;
 
-	if (datalen < 0 || datalen > (msg->len - msg->cursor))
+	if (datalen < 0 || msg->cursor < 0 || msg->cursor > msg->len ||
+		datalen > (msg->len - msg->cursor))
+	{
 		PGDUCK_SERVER_ERROR("insufficient data left in message");
+		return NULL;
+	}
 
 	result = &msg->data[msg->cursor];
 	msg->cursor += datalen;
@@ -345,8 +349,11 @@ pq_getmsgbytes(StringInfo msg, int datalen)
 int
 pq_getmsgbyte(StringInfo msg)
 {
-	if (msg->cursor >= msg->len)
+	if (msg->cursor < 0 || msg->cursor >= msg->len)
+	{
 		PGDUCK_SERVER_ERROR("insufficient data left in message");
+		return EOF;
+	}
 
 	return (unsigned char) msg->data[msg->cursor++];
 }
