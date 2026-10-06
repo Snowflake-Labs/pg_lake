@@ -823,8 +823,8 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("invalid catalog option: %s", icebergCatalogName),
-             errdetail("Use \"rest\", \"snowflake\", \"object_store\", \"postgres\", "
-                   "or the name of an iceberg_catalog server.")));
+						 errdetail("Use \"rest\", \"snowflake\", \"object_store\", \"postgres\", "
+								   "or the name of an iceberg_catalog server.")));
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "read_only") == 0)
 		{

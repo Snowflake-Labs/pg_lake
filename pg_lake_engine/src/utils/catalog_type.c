@@ -145,10 +145,10 @@ LowercasesColumnNames(Oid relationId)
 bool
 IsCatalogOwnedByExtension(const char *catalog)
 {
-  return pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
-    pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0 ||
-    pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0 ||
-    pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0;
+	return pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0;
 }
 
 
@@ -169,9 +169,9 @@ IsRestCatalog(const char *catalog)
 	if (catalog == NULL)
 		return false;
 
-  if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
-    pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
-    return true;
+	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
+		return true;
 
 	if (IsBuiltinCatalogServerName(catalog))
 		return false;
@@ -217,10 +217,10 @@ ResolveCatalogServerName(const char *catalog)
 	if (catalog == NULL)
 		return NULL;
 
-  if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
-    pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
-    return PG_LAKE_REST_CATALOG_SERVER_NAME;
-  if (pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0)
+	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
+		pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
+		return PG_LAKE_REST_CATALOG_SERVER_NAME;
+	if (pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0)
 		return PG_LAKE_POSTGRES_CATALOG_SERVER_NAME;
 	if (pg_strcasecmp(catalog, OBJECT_STORE_CATALOG_NAME) == 0)
 		return PG_LAKE_OBJECT_STORE_CATALOG_SERVER_NAME;

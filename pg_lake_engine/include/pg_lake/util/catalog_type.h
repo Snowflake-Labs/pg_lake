@@ -62,9 +62,9 @@ typedef enum IcebergCatalogType
 	POSTGRES_CATALOG = 1,
 
 	/*
-	 * catalog='rest' (or its alias 'snowflake'), read_only=True Always treat like external iceberg
-	 * table, read the metadata location from the external catalog and never
-	 * modify.
+	 * catalog='rest' (or its alias 'snowflake'), read_only=True Always treat
+	 * like external iceberg table, read the metadata location from the
+	 * external catalog and never modify.
 	 */
 	REST_CATALOG_READ_ONLY = 2,
 

@@ -395,8 +395,7 @@ ErrorIfCreateForeignTableOnIcebergCatalog(CreateForeignTableStmt *createStmt)
  *
  * Both user-created iceberg_catalog servers and the three pre-created
  * built-in catalog servers get a dependency entry: the short reserved
-     * names ('rest', 'snowflake', 'postgres', 'object_store') are mapped
-     * to the
+ * names ('rest', 'snowflake', 'postgres', 'object_store') are mapped to the
  * corresponding built-in server (e.g. 'pg_lake_rest_catalog') via
  * ResolveCatalogServerName.
  */
@@ -741,8 +740,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * The pre-created built-in catalog servers (pg_lake_rest_catalog,
 		 * pg_lake_postgres_catalog, pg_lake_object_store_catalog) are
 		 * internal anchors and must not be addressable via the user-facing
-     * catalog= option.  Users say catalog='rest' / 'snowflake' /
-     * 'postgres' / 'object_store' and we map short -> long internally.
+		 * catalog= option.  Users say catalog='rest' / 'snowflake' /
+		 * 'postgres' / 'object_store' and we map short -> long internally.
 		 */
 		char	   *catalogVal = strVal(catalogOption->arg);
 
@@ -752,11 +751,11 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 					 errmsg("catalog name \"%s\" is reserved for an internal "
 							"pg_lake_iceberg catalog server",
 							catalogVal),
-           errhint("Use catalog='%s', '%s', '%s', or '%s' instead.",
-               REST_CATALOG_NAME,
-               SNOWFLAKE_CATALOG_NAME,
-               POSTGRES_CATALOG_NAME,
-               OBJECT_STORE_CATALOG_NAME)));
+					 errhint("Use catalog='%s', '%s', '%s', or '%s' instead.",
+							 REST_CATALOG_NAME,
+							 SNOWFLAKE_CATALOG_NAME,
+							 POSTGRES_CATALOG_NAME,
+							 OBJECT_STORE_CATALOG_NAME)));
 	}
 
 	/*
