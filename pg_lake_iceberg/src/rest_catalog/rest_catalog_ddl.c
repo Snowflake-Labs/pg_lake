@@ -312,9 +312,9 @@ static bool IsRedactableUserMappingSecret(const char *name);
  *
  * Two layers of protection for server DDL:
  *
- * 1. Short reserved names ('postgres', 'object_store', 'rest') -- these
- *    are the user-facing catalog= values.  We block CREATE SERVER and
- *    RENAME TO these names so users can't shadow the built-in catalogs.
+ * 1. Short reserved names ('postgres', 'object_store', 'rest', 'snowflake')
+ *    -- these are the user-facing catalog= values.  We block CREATE SERVER
+ *    and RENAME TO these names so users can't shadow the built-in catalogs.
  *
  * 2. Built-in long server names ('pg_lake_postgres_catalog', etc.) --
  *    these are the pre-created anchors.  Outside of CREATE/ALTER

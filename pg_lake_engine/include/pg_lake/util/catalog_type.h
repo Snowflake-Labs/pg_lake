@@ -31,6 +31,7 @@
 #define POSTGRES_CATALOG_NAME "postgres"
 #define OBJECT_STORE_CATALOG_NAME "object_store"
 #define REST_CATALOG_NAME "rest"
+#define SNOWFLAKE_CATALOG_NAME "snowflake"
 
 /*
  * Built-in iceberg_catalog server names.  Pre-created by the extension
@@ -61,7 +62,7 @@ typedef enum IcebergCatalogType
 	POSTGRES_CATALOG = 1,
 
 	/*
-	 * catalog='rest', read_only=True Always treat like external iceberg
+	 * catalog='rest' (or its alias 'snowflake'), read_only=True Always treat like external iceberg
 	 * table, read the metadata location from the external catalog and never
 	 * modify.
 	 */
