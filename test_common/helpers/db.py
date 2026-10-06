@@ -160,6 +160,27 @@ def run_command(query, conn, raise_error=True):
         cur.close()
 
 
+def run_command_retrying_deadlock(query, conn, timeout=60):
+    """Run ``query`` on ``conn``, retrying while it is chosen as a deadlock victim.
+
+    Use this for statements that can race a background worker, where the
+    deadlock is expected and retrying is safe. Each failed attempt rolls back
+    ``conn``, so ``query`` must be the only work in the transaction. Errors
+    other than DeadlockDetected, and a deadlock that outlasts ``timeout``
+    seconds, are raised to the caller.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            run_command(query, conn)
+            return
+        except psycopg2.errors.DeadlockDetected:
+            conn.rollback()
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.5)
+
+
 def run_command_outside_tx(query_list, raise_error=True):
     conn = open_pg_conn()
     conn.autocommit = True

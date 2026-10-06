@@ -18,6 +18,7 @@ from .cloud_storage import (
 from .db import (
     open_pg_conn,
     run_command,
+    run_command_retrying_deadlock,
     run_query,
 )
 from .server import (
@@ -199,42 +200,6 @@ def app_user(postgres):
     conn.commit()
 
 
-def _drop_extension_retrying_deadlock(superuser_conn, statement, timeout=60):
-    """Run an extension DROP, retrying for as long as a pg_lake worker deadlocks it.
-
-    DROP EXTENSION takes AccessExclusiveLock on the extension's own objects.
-    The pg_lake autovacuum worker writes to some of those objects while it
-    drains the deletion queue, and reaches them in the other order, so the two
-    can deadlock -- with the DROP as the victim Postgres picks:
-
-        Process 18784 waits for AccessExclusiveLock on relation 16521 of
-        database 16384; blocked by process 18790.
-        Process 18790 waits for RowExclusiveLock on relation 26599 of
-        database 16384; blocked by process 18784.
-        Process 18784: DROP EXTENSION pg_lake_table CASCADE;
-
-    18790 had logged "pg_lake: expired 223 files from dropped iceberg tables" a
-    second earlier, so it was a dropped-table pass. That cost an installcheck
-    shard its module teardown, which pytest reports as an error and the job as
-    a failure -- for a drop whose only purpose is to leave the database clean
-    for the next module.
-
-    A pass is bounded, so retrying is exactly what the deadlock error asks the
-    loser to do. Only DeadlockDetected is retried; every other error is the
-    caller's.
-    """
-    deadline = time.monotonic() + timeout
-    while True:
-        try:
-            run_command(statement, superuser_conn)
-            return
-        except psycopg2.errors.DeadlockDetected:
-            superuser_conn.rollback()
-            if time.monotonic() >= deadline:
-                raise
-            time.sleep(0.5)
-
-
 @pytest.fixture(scope="module")
 def extension(superuser_conn, pg_conn, app_user):
     # we do not want to expose 1.3 features to all users, but expose in the tests
@@ -266,8 +231,19 @@ def extension(superuser_conn, pg_conn, app_user):
 
     pg_conn.rollback()
     superuser_conn.rollback()
-    _drop_extension_retrying_deadlock(
-        superuser_conn, "DROP EXTENSION pg_lake_table CASCADE;"
+    # The pg_lake autovacuum worker writes to the extension's own tables while
+    # it drains the deletion queue, and takes those locks in the opposite
+    # order to DROP EXTENSION, so the DROP can lose a deadlock:
+    #
+    #   Process 18784 waits for AccessExclusiveLock on relation 16521 of
+    #   database 16384; blocked by process 18790.
+    #   Process 18790 waits for RowExclusiveLock on relation 26599 of
+    #   database 16384; blocked by process 18784.
+    #   Process 18784: DROP EXTENSION pg_lake_table CASCADE;
+    #
+    # A worker pass is bounded, so retrying is what the error asks for.
+    run_command_retrying_deadlock(
+        "DROP EXTENSION pg_lake_table CASCADE;", superuser_conn
     )
     superuser_conn.commit()
 
