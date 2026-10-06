@@ -195,6 +195,7 @@ extern void pq_copymsgbytes(StringInfo msg, char *buf, int datalen, bool *readFa
 extern int	pq_getmsgend(StringInfo msg);
 extern void pq_sendcountedtext(StringInfo buf, const char *str, int slen,
 							   bool countincludesself);
+
 /*
  * On failure, pq_getmsgbytes returns NULL and pq_getmsgbyte returns EOF.
  * Neither function advances msg->cursor on failure.
