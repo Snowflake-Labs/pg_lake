@@ -66,6 +66,11 @@
 
 static void CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 static bool RestCatalogExists(RestCatalogOptions * opts, const char *catalogName);
+static bool RestNamespaceExists(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
+static char *UppercaseIdentifierCandidate(const char *name);
+static bool TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
+										const char *namespaceName, const char *relationName,
+										bool missingOk, RestCatalogLoadTableResult * result);
 static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
 
 
@@ -471,17 +476,12 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 
 
 /*
-* ErrorIfRestNamespaceDoesNotExist checks if the namespace exists in the Rest Catalog.
-* If it does not exist, an error is raised. This is used to ensure that the
-* namespace exists when creating a table in the given namespace.
-*/
-void
-ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
+ * RestNamespaceExists checks whether the namespace exists in the given
+ * catalog of the REST catalog server.
+ */
+static bool
+RestNamespaceExists(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
 {
-	/*
-	 * First, we need to check if the namespace already exists in Rest Catalog
-	 * via a GET request.
-	 */
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 opts->baseUri, URLEncodePath(catalogName),
@@ -489,37 +489,111 @@ ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogN
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
 
-	/* namespace not found */
-	if (httpResult.status == 404)
+	if (httpResult.status == 200)
+		return true;
+	else if (httpResult.status == 404)
+		return false;
+
+	ReportHTTPError(httpResult, ERROR);
+	return false;
+}
+
+
+/*
+ * UppercaseIdentifierCandidate returns the ASCII-uppercase form of name when
+ * name has lowercase letters and no uppercase ones, and NULL otherwise.
+ * Snowflake stores unquoted identifiers in uppercase, and those are ASCII
+ * only, so a lowercase name typed in Postgres usually means the uppercase one.
+ */
+static char *
+UppercaseIdentifierCandidate(const char *name)
+{
+	bool		hasLowercase = false;
+
+	for (const char *cursor = name; *cursor != '\0'; cursor++)
 	{
-		/*
-		 * A 404 could mean the namespace doesn't exist, or the catalog itself
-		 * doesn't exist. Verify that the catalog exists first.
-		 */
-		if (!RestCatalogExists(opts, catalogName))
-		{
+		if (*cursor >= 'A' && *cursor <= 'Z')
+			return NULL;
+		if (*cursor >= 'a' && *cursor <= 'z')
+			hasLowercase = true;
+	}
+
+	if (!hasLowercase)
+		return NULL;
+
+	char	   *uppercaseName = pstrdup(name);
+
+	for (char *cursor = uppercaseName; *cursor != '\0'; cursor++)
+		*cursor = pg_ascii_toupper((unsigned char) *cursor);
+
+	return uppercaseName;
+}
+
+
+/*
+ * ResolveReadOnlyRestCatalogTable loads a table that a read-only REST catalog
+ * table is about to attach to. Each of the catalog, namespace and table names
+ * is used as given when it exists, and otherwise in uppercase when that
+ * exists, in which case the pointer is replaced with the uppercase name so
+ * the caller can store the name that matched.
+ */
+RestCatalogLoadTableResult
+ResolveReadOnlyRestCatalogTable(RestCatalogOptions * opts, char **catalogName,
+								char **namespaceName, char **tableName)
+{
+	bool		namespaceExists = RestNamespaceExists(opts, *catalogName, *namespaceName);
+
+	/* a 404 on the namespace can also mean the catalog does not exist */
+	if (!namespaceExists && !RestCatalogExists(opts, *catalogName))
+	{
+		char	   *uppercaseCatalogName = UppercaseIdentifierCandidate(*catalogName);
+
+		if (uppercaseCatalogName == NULL ||
+			!RestCatalogExists(opts, uppercaseCatalogName))
 			ereport(ERROR,
 					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
 					 errmsg("catalog \"%s\" does not exist in the rest catalog server",
-							catalogName),
+							*catalogName),
 					 errhint("Create the catalog in the rest catalog server, "
 							 "or check the catalog_name option.")));
-		}
 
-		ereport(ERROR,
-				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-				 errmsg("namespace \"%s\" does not exist in the rest catalog while creating on catalog \"%s\"",
-						namespaceName, catalogName)));
+		*catalogName = uppercaseCatalogName;
+		namespaceExists = RestNamespaceExists(opts, *catalogName, *namespaceName);
 	}
-	else if (httpResult.status != 200)
+
+	if (!namespaceExists)
 	{
-		/*
-		 * Report the error to the user. Expected errors: 400 - Bad Request
-		 * 401 - Unauthorized 403 - Forbidden 419 - Credentials timed out 503
-		 * - Slowdown 5XX - Internal Server Error
-		 */
-		ReportHTTPError(httpResult, ERROR);
+		char	   *uppercaseNamespaceName = UppercaseIdentifierCandidate(*namespaceName);
+
+		if (uppercaseNamespaceName == NULL ||
+			!RestNamespaceExists(opts, *catalogName, uppercaseNamespaceName))
+			ereport(ERROR,
+					(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+					 errmsg("namespace \"%s\" does not exist in the rest catalog while creating on catalog \"%s\"",
+							*namespaceName, *catalogName)));
+
+		*namespaceName = uppercaseNamespaceName;
 	}
+
+	RestCatalogLoadTableResult result = {0};
+	bool		missingOk = true;
+
+	if (TryLoadTableFromRestCatalog(opts, *catalogName, *namespaceName,
+									*tableName, missingOk, &result))
+		return result;
+
+	char	   *uppercaseTableName = UppercaseIdentifierCandidate(*tableName);
+
+	if (uppercaseTableName != NULL &&
+		TryLoadTableFromRestCatalog(opts, *catalogName, *namespaceName,
+									uppercaseTableName, missingOk, &result))
+	{
+		*tableName = uppercaseTableName;
+		return result;
+	}
+
+	/* repeat the load as given to report the catalog's own error */
+	return LoadTableFromRestCatalog(opts, *catalogName, *namespaceName, *tableName);
 }
 
 
@@ -788,6 +862,26 @@ RestCatalogLoadTableResult
 LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 						 const char *namespaceName, const char *relationName)
 {
+	RestCatalogLoadTableResult result = {0};
+	bool		missingOk = false;
+
+	TryLoadTableFromRestCatalog(opts, restCatalogName, namespaceName,
+								relationName, missingOk, &result);
+
+	return result;
+}
+
+
+/*
+ * TryLoadTableFromRestCatalog is LoadTableFromRestCatalog that, when
+ * missingOk is set, returns false instead of raising an error when the
+ * catalog answers 404.
+ */
+static bool
+TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
+							const char *namespaceName, const char *relationName,
+							bool missingOk, RestCatalogLoadTableResult * result)
+{
 	char	   *getUrl =
 		psprintf(REST_CATALOG_TABLE,
 				 opts->baseUri, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
@@ -800,13 +894,14 @@ LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 
 	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL, headers);
 
+	if (hr.status == 404 && missingOk)
+		return false;
+
 	if (hr.status != 200)
 		ReportHTTPError(hr, ERROR);
 
-	RestCatalogLoadTableResult result = {0};
-
-	result.metadataLocation = JsonbGetStringByPath(hr.body, 1, "metadata-location");
-	if (result.metadataLocation == NULL)
+	result->metadataLocation = JsonbGetStringByPath(hr.body, 1, "metadata-location");
+	if (result->metadataLocation == NULL)
 		ereport(ERROR,
 				(errmsg("key \"metadata-location\" missing in json response")));
 
@@ -818,22 +913,22 @@ LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 	Datum		bodyDatum = DirectFunctionCall1(jsonb_in, CStringGetDatum(hr.body));
 	Jsonb	   *body = DatumGetJsonbP(bodyDatum);
 
-	result.metadata = JsonbGetObject(body, "metadata");
+	result->metadata = JsonbGetObject(body, "metadata");
 
 	if (opts->enableVendedCredentials)
 	{
-		result.vendedCredentials = ExtractVendedCredentials(body, opts,
-															restCatalogName,
-															namespaceName,
-															relationName);
+		result->vendedCredentials = ExtractVendedCredentials(body, opts,
+															 restCatalogName,
+															 namespaceName,
+															 relationName);
 
-		StoreVendedCredentialsInCache(result.vendedCredentials,
+		StoreVendedCredentialsInCache(result->vendedCredentials,
 									  opts->userMappingOid,
 									  restCatalogName, namespaceName,
 									  relationName);
 	}
 
-	return result;
+	return true;
 }
 
 

@@ -903,11 +903,15 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			RestCatalogOptions *opts =
 				ResolveRestCatalogOptions(catalogOptionValue);
 
-			ErrorIfRestNamespaceDoesNotExist(opts, catalogName, catalogNamespace);
-
 			RestCatalogLoadTableResult loadResult =
-				LoadTableFromRestCatalog(opts, catalogName, catalogNamespace,
-										 catalogTableName);
+				ResolveReadOnlyRestCatalogTable(opts, &catalogName,
+												&catalogNamespace,
+												&catalogTableName);
+
+			/* store the names that matched, which may be uppercase */
+			SetStringOptionValue(createStmt->options, "catalog_name", catalogName);
+			SetStringOptionValue(createStmt->options, "catalog_namespace", catalogNamespace);
+			SetStringOptionValue(createStmt->options, "catalog_table_name", catalogTableName);
 
 			metadataLocation = loadResult.metadataLocation;
 			catalogTableMetadata = loadResult.metadata;

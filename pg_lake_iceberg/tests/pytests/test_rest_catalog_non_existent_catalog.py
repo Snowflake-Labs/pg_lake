@@ -384,3 +384,158 @@ def test_error_if_rest_namespace_does_not_exist_when_catalog_exists(
         pg_conn.rollback()
         _drop_server(superuser_conn, server_name)
         httpd.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Uppercase fallback for read-only table identifiers
+# ---------------------------------------------------------------------------
+
+_LOAD_TABLE_BODY = json.dumps(
+    {"metadata-location": "s3://test-bucket/tbl/metadata/00000.metadata.json"}
+)
+
+
+def _catalog_identifier_options(conn, table_name):
+    rows = run_query(
+        f"""
+        SELECT option_name, option_value
+        FROM pg_options_to_table(
+            (SELECT ftoptions FROM pg_foreign_table
+             WHERE ftrelid = '{table_name}'::regclass))
+        WHERE option_name IN ('catalog_name', 'catalog_namespace', 'catalog_table_name')
+        ORDER BY option_name
+        """,
+        conn,
+    )
+    return {row[0]: row[1] for row in rows}
+
+
+def _create_read_only_table(
+    conn, table_name, server_name, catalog_name, namespace, table
+):
+    return run_command(
+        f"""
+        CREATE TABLE {table_name}(a int) USING iceberg WITH (
+            catalog='{server_name}',
+            read_only=true,
+            catalog_name='{catalog_name}',
+            catalog_namespace='{namespace}',
+            catalog_table_name='{table}'
+        )
+        """,
+        conn,
+        raise_error=False,
+    )
+
+
+def test_read_only_table_falls_back_to_uppercase_identifiers(
+    superuser_conn, pg_conn, extension
+):
+    """Lowercase catalog, namespace and table names that do not exist resolve
+    to their uppercase forms, and the uppercase names are stored."""
+    httpd, port, handler = _start_mock_server(
+        get_responses={
+            "/v1/MYDB/namespaces": (200, json.dumps({"namespaces": [["PUBLIC"]]})),
+            "/v1/MYDB/namespaces/PUBLIC": (200, json.dumps({"namespace": ["PUBLIC"]})),
+            "/v1/MYDB/namespaces/PUBLIC/tables/ORDERS": (200, _LOAD_TABLE_BODY),
+        }
+    )
+    server_name = "test_srv_ro_uppercase"
+
+    try:
+        _create_server(superuser_conn, server_name, f"http://127.0.0.1:{port}")
+
+        res = _create_read_only_table(
+            pg_conn, "orders_upper", server_name, "mydb", "public", "orders"
+        )
+        assert res is None, res
+
+        assert _catalog_identifier_options(pg_conn, "orders_upper") == {
+            "catalog_name": "MYDB",
+            "catalog_namespace": "PUBLIC",
+            "catalog_table_name": "ORDERS",
+        }
+    finally:
+        pg_conn.rollback()
+        _drop_server(superuser_conn, server_name)
+        httpd.shutdown()
+
+
+def test_read_only_table_prefers_exact_identifiers(superuser_conn, pg_conn, extension):
+    """When the lowercase names exist they are used, even if uppercase ones
+    exist too, and a mixed-case name is never folded."""
+    httpd, port, handler = _start_mock_server(
+        get_responses={
+            "/v1/mydb/namespaces/public": (200, json.dumps({"namespace": ["public"]})),
+            "/v1/mydb/namespaces/public/tables/orders": (200, _LOAD_TABLE_BODY),
+            "/v1/mydb/namespaces/public/tables/ORDERS": (200, _LOAD_TABLE_BODY),
+            "/v1/MYDB/namespaces/PUBLIC": (200, json.dumps({"namespace": ["PUBLIC"]})),
+        }
+    )
+    server_name = "test_srv_ro_exact"
+
+    try:
+        _create_server(superuser_conn, server_name, f"http://127.0.0.1:{port}")
+
+        res = _create_read_only_table(
+            pg_conn, "orders_exact", server_name, "mydb", "public", "orders"
+        )
+        assert res is None, res
+
+        assert _catalog_identifier_options(pg_conn, "orders_exact") == {
+            "catalog_name": "mydb",
+            "catalog_namespace": "public",
+            "catalog_table_name": "orders",
+        }
+
+        # no request went to the uppercase names
+        assert not [req for req in handler.recorded_requests if "MYDB" in req[1]]
+        pg_conn.rollback()
+
+        # Orders is not folded to ORDERS, so the catalog's 404 is reported
+        res = _create_read_only_table(
+            pg_conn, "orders_mixed", server_name, "mydb", "public", "Orders"
+        )
+        assert "Not found" in str(res), res
+        assert not [
+            req for req in handler.recorded_requests if req[1].endswith("/ORDERS")
+        ]
+    finally:
+        pg_conn.rollback()
+        _drop_server(superuser_conn, server_name)
+        httpd.shutdown()
+
+
+def test_read_only_table_uppercase_fallback_reports_given_names(
+    superuser_conn, pg_conn, extension
+):
+    """When neither form exists, errors name the identifiers as given."""
+    httpd, port, handler = _start_mock_server(
+        get_responses={
+            "/v1/MYDB/namespaces": (200, json.dumps({"namespaces": []})),
+        }
+    )
+    server_name = "test_srv_ro_upper_missing"
+
+    try:
+        _create_server(superuser_conn, server_name, f"http://127.0.0.1:{port}")
+
+        res = _create_read_only_table(
+            pg_conn, "missing_catalog", server_name, "otherdb", "public", "orders"
+        )
+        assert 'catalog "otherdb" does not exist in the rest catalog server' in str(
+            res
+        ), res
+        pg_conn.rollback()
+
+        res = _create_read_only_table(
+            pg_conn, "missing_namespace", server_name, "mydb", "public", "orders"
+        )
+        assert (
+            'namespace "public" does not exist in the rest catalog while creating on catalog "MYDB"'
+            in str(res)
+        ), res
+    finally:
+        pg_conn.rollback()
+        _drop_server(superuser_conn, server_name)
+        httpd.shutdown()

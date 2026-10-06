@@ -398,7 +398,8 @@ List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
 extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
-extern PGDLLEXPORT void ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
+extern PGDLLEXPORT RestCatalogLoadTableResult ResolveReadOnlyRestCatalogTable(RestCatalogOptions * opts, char **catalogName,
+																			  char **namespaceName, char **tableName);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogNamespace(Oid relationId);
 extern PGDLLEXPORT char *GetRestCatalogTableName(Oid relationId);

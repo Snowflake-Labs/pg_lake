@@ -249,6 +249,11 @@ SELECT region, sum(amount) FROM orders GROUP BY region;
 | `catalog_table_name` | Name of the table in the catalog. Defaults to the PostgreSQL table name. |
 | `lowercase_column_names` | Fold column and struct field names to lowercase. Valid for read-only REST and `object_store` catalog tables; defaults to `false`. |
 
+When a lowercase catalog, namespace or table name does not exist in a REST catalog, pg_lake
+tries the uppercase name, which is how Snowflake stores unquoted identifiers. The name that
+matched is stored in the table options. Names that contain uppercase letters are only used as
+given.
+
 An attached table always reads the catalog's current version, so queries see new commits from
 other engines without any changes in PostgreSQL. Dropping it only removes it from PostgreSQL.
 
@@ -281,14 +286,15 @@ into it.
 Some engines write Iceberg column names in uppercase. PostgreSQL folds unquoted identifiers to
 lowercase, so a column named `"ID"` normally has to be quoted. Set
 `lowercase_column_names = true` to expose it as `id`; nested struct field names are folded too.
-The option changes column and struct field names only; catalog, namespace and table names must
-still match the catalog. For example, the catalog identifiers below remain uppercase:
+The option changes column and struct field names only. Lowercase catalog, namespace and table
+names find their uppercase counterparts on their own, so the example below attaches
+`PUBLIC.SALES`:
 
 ```sql
 CREATE TABLE sales () USING iceberg
 WITH (catalog = 'polaris', read_only = true,
-      catalog_name = 'sales', catalog_namespace = 'PUBLIC',
-      catalog_table_name = 'SALES', lowercase_column_names = true);
+      catalog_name = 'sales', catalog_namespace = 'public',
+      lowercase_column_names = true);
 
 SELECT id, (address).city FROM sales;
 ```
@@ -390,7 +396,8 @@ and composite types as strings, which Snowflake requires, while keeping the colu
 
 Conversely, when pg_lake reads tables written by Snowflake, column and nested field names may
 be uppercase. Set `lowercase_column_names = true` when attaching the table through a read-only
-catalog or a metadata file; catalog identifiers themselves are unchanged. See
+catalog or a metadata file. Lowercase catalog, namespace and table names in a REST catalog
+resolve to Snowflake's uppercase names when the lowercase ones do not exist. See
 [lowercase column names from external engines](#lowercase-column-names-from-external-engines)
 and [external metadata files](#external-iceberg-tables-from-metadata-files).
 

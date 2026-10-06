@@ -20,4 +20,5 @@
 extern PGDLLEXPORT DefElem *GetOption(List *options, char *optionName);
 extern PGDLLEXPORT bool HasOption(List *options, char *optionName);
 extern PGDLLEXPORT char *GetStringOption(List *options, char *optionName, bool errorOnMissing);
+extern PGDLLEXPORT void SetStringOptionValue(List *options, char *optionName, char *value);
 extern PGDLLEXPORT bool GetBoolOption(List *options, char *optionName, bool defaultValue);
