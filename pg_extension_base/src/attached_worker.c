@@ -97,7 +97,7 @@ static char *ProcessProtocolMessages(AttachedWorker * worker, bool nowait,
 static void ValidateWorkerTupleDesc(TupleDesc workerDesc, TupleDesc expectedDesc);
 static void ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue);
 static void TrackLiveAttachedWorker(BackgroundWorkerHandle *workerHandle);
-static void ForgetLiveAttachedWorker(BackgroundWorkerHandle *workerHandle);
+static void RemoveAttachedWorkerHandle(BackgroundWorkerHandle *workerHandle);
 static void StopLiveAttachedWorkersAtExit(int code, Datum arg);
 
 #if PG_VERSION_NUM < 170000
@@ -799,7 +799,7 @@ EndAttachedWorker(AttachedWorker * worker)
 	 * After the detach, not before: the queue handles were given this handle
 	 * (shm_mq_set_handle), so it has to outlive them.
 	 */
-	ForgetLiveAttachedWorker(worker->workerHandle);
+	RemoveAttachedWorkerHandle(worker->workerHandle);
 	worker->workerHandle = NULL;
 }
 
@@ -830,12 +830,12 @@ TrackLiveAttachedWorker(BackgroundWorkerHandle *workerHandle)
 
 
 /*
- * ForgetLiveAttachedWorker drops a reaped worker from the list and frees its
+ * RemoveAttachedWorkerHandle drops a reaped worker from the list and frees its
  * handle.  The worker is gone by the time this is called, so the handle has no
  * reader left: IsAttachedWorkerRunning reports a worker without one as stopped.
  */
 static void
-ForgetLiveAttachedWorker(BackgroundWorkerHandle *workerHandle)
+RemoveAttachedWorkerHandle(BackgroundWorkerHandle *workerHandle)
 {
 	pid_t		workerPid PG_USED_FOR_ASSERTS_ONLY = 0;
 
