@@ -29,6 +29,7 @@
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/catalog_type.h"
+#include "catalog/heap.h"
 #include "parser/scansup.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -207,17 +208,27 @@ GetDataFileSchemaFieldById(DataFileSchema * schema, int fieldId)
 
 /*
  * LowercaseIcebergTableMetadataNames folds the column and struct field names
- * of every schema in the metadata to lowercase, in place. Field ids are left
- * alone, so data is still bound by id.
+ * of the current schema to lowercase, in place. Field ids are left alone, so
+ * data is still bound by id. Older schemas are not read, so they are skipped.
  */
 void
 LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata)
 {
-	for (size_t schemaIdx = 0; schemaIdx < metadata->schemas_length; schemaIdx++)
-	{
-		IcebergTableSchema *schema = &metadata->schemas[schemaIdx];
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
 
-		LowercaseStructElementNames(schema->fields, schema->fields_length);
+	LowercaseStructElementNames(schema->fields, schema->fields_length);
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+	{
+		const char *columnName = schema->fields[fieldIdx].name;
+
+		if (columnName != NULL && SystemAttributeByName(columnName) != NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_DUPLICATE_COLUMN),
+					 errmsg("Iceberg column \"%s\" conflicts with a system column "
+							"name when lowercased", columnName),
+					 errhint("Create the table without the %s option.",
+							 LOWERCASE_COLUMN_NAMES_OPTION)));
 	}
 }
 

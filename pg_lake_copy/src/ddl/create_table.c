@@ -359,6 +359,13 @@ ExtractDataImportOptions(CopyDataFormat format, List *options)
 	{
 		DefElem    *option = lfirst(optionCell);
 
+		if (strcmp(option->defname, LOWERCASE_COLUMN_NAMES_OPTION) == 0 &&
+			format != DATA_FORMAT_ICEBERG)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("%s is only supported when loading from Iceberg metadata",
+							LOWERCASE_COLUMN_NAMES_OPTION)));
+
 		if (strcmp(option->defname, LOAD_FROM_OPTION_NAME) == 0)
 		{
 			/* extract load_from */

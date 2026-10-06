@@ -43,6 +43,13 @@ def uppercase_source(pg_conn, superuser_conn, s3, extension, with_default_locati
         FROM generate_series(1,10) i;
 
         CREATE TABLE {SCHEMA}.colliding ("ID" int, id int) USING iceberg;
+        CREATE TABLE {SCHEMA}.system_names ("XMIN" int, "XMAX" int) USING iceberg;
+
+        -- only an older schema has a case collision
+        CREATE TABLE {SCHEMA}.old_collision ("ID" int) USING iceberg;
+        ALTER TABLE {SCHEMA}.old_collision ADD COLUMN id int;
+        ALTER TABLE {SCHEMA}.old_collision DROP COLUMN id;
+        INSERT INTO {SCHEMA}.old_collision VALUES (1);
         """,
         pg_conn,
     )
@@ -51,6 +58,8 @@ def uppercase_source(pg_conn, superuser_conn, s3, extension, with_default_locati
     yield {
         "source": metadata_location(pg_conn, "source"),
         "colliding": metadata_location(pg_conn, "colliding"),
+        "system_names": metadata_location(pg_conn, "system_names"),
+        "old_collision": metadata_location(pg_conn, "old_collision"),
     }
 
     pg_conn.rollback()
@@ -182,6 +191,22 @@ def test_metadata_path_table_errors(pg_conn, uppercase_source):
     assert 'Iceberg field "id" collides with another field' in str(error)
     pg_conn.rollback()
 
+    # inferred columns are folded at creation, explicit ones on first read
+    for columns, query in [("()", ""), ("(other int)", "SELECT * FROM {table}")]:
+        table = f"{SCHEMA}.system_lowered"
+        error = run_command(
+            f"""
+            CREATE FOREIGN TABLE {table} {columns} SERVER pg_lake
+            OPTIONS (path '{uppercase_source["system_names"]}',
+                     lowercase_column_names 'true');
+            {query.format(table=table)}
+            """,
+            pg_conn,
+            raise_error=False,
+        )
+        assert 'Iceberg column "xmin" conflicts with a system column' in str(error)
+        pg_conn.rollback()
+
     parquet_url = f"s3://{TEST_BUCKET}/{SCHEMA}/data.parquet"
     run_command(f"COPY (SELECT 1 AS \"ID\") TO '{parquet_url}'", pg_conn)
     error = run_command(
@@ -213,6 +238,21 @@ def test_metadata_path_table_errors(pg_conn, uppercase_source):
         raise_error=False,
     )
     assert "The following table options can be changed: path" in str(error)
+    pg_conn.rollback()
+
+
+def test_collision_in_old_schema(pg_conn, uppercase_source):
+    # only the current schema is read, so an old collision does not matter
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE {SCHEMA}.old_lowered () SERVER pg_lake
+        OPTIONS (path '{uppercase_source["old_collision"]}',
+                 lowercase_column_names 'true')
+        """,
+        pg_conn,
+    )
+    assert column_names(pg_conn, f"{SCHEMA}.old_lowered") == ["id"]
+    assert run_query(f"SELECT id FROM {SCHEMA}.old_lowered", pg_conn) == [[1]]
     pg_conn.rollback()
 
 
@@ -301,6 +341,28 @@ def test_create_table_from_metadata(pg_conn, uppercase_source, option):
         )
     else:
         assert run_query(f"SELECT count(*) FROM {SCHEMA}.created", pg_conn) == [[0]]
+
+
+@pytest.mark.parametrize("option", ["load_from", "definition_from"])
+def test_create_table_from_parquet_rejects_option(pg_conn, uppercase_source, option):
+    parquet_url = f"s3://{TEST_BUCKET}/{SCHEMA}/create_from.parquet"
+    run_command(f"COPY (SELECT 1 AS \"ID\") TO '{parquet_url}'", pg_conn)
+    pg_conn.commit()
+
+    for access_method in ["USING iceberg", ""]:
+        error = run_command(
+            f"""
+            CREATE TABLE {SCHEMA}.created () {access_method}
+            WITH ({option} = '{parquet_url}', lowercase_column_names = true)
+            """,
+            pg_conn,
+            raise_error=False,
+        )
+        assert (
+            "lowercase_column_names is only supported when loading from Iceberg"
+            in str(error)
+        )
+        pg_conn.rollback()
 
 
 @pytest.mark.parametrize("lowercase", [True, False])

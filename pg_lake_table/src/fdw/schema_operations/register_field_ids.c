@@ -344,10 +344,11 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		columnMapping->field = field;
 
 		columnMapping->attrNum = get_attnum(relationId, field->name);
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum == InvalidAttrNumber)
+		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum <= InvalidAttrNumber)
 		{
 			/*
-			 * If no such column exists, skip.
+			 * If no such user column exists, skip. System columns have
+			 * negative attnums.
 			 */
 			continue;
 		}
@@ -364,7 +365,7 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		 * TupleDescAttr(InvalidAttrNumber - 1), which trips PG19's new bounds
 		 * Assert in TupleDescAttr().
 		 */
-		if (columnMapping->attrNum != InvalidAttrNumber)
+		if (columnMapping->attrNum > InvalidAttrNumber)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupDesc, columnMapping->attrNum - 1);
 
