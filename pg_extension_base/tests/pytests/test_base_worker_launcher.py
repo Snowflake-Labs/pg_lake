@@ -1164,3 +1164,99 @@ def test_worker_launched_from_an_open_deregister_does_not_run(
             superuser_conn,
         )
         superuser_conn.autocommit = False
+
+
+WORKER_START_POINT = "base-worker-before-exit-handler"
+
+
+def test_starting_worker_does_not_deadlock_drop_pg_extension_base(
+    superuser_conn, create_injection_extension
+):
+    """A base worker checks its registration under the database-starter lock.
+    DROP EXTENSION pg_extension_base locks the workers table before it takes
+    that lock, so a worker taking them in the opposite order while it starts
+    deadlocks the DROP.
+
+    The explicit LOCK TABLE holds the DROP between its two locks, so the worker
+    reliably reaches its registration check in that window.
+    """
+    if get_pg_version_num(superuser_conn) < 170000:
+        pytest.skip("Injection points not available (requires PostgreSQL 17+)")
+
+    superuser_conn.rollback()
+    superuser_conn.autocommit = True
+
+    drop_conn = None
+    try:
+        run_command(
+            f"SELECT injection_points_attach('{WORKER_START_POINT}', 'wait')",
+            superuser_conn,
+        )
+
+        start_offset = log_end_offset()
+        run_command(
+            "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
+        )
+
+        assert wait_until_equal(
+            lambda: "starting pg base extension worker"
+            in "".join(read_new_log_lines(start_offset)),
+            True,
+        ), "the worker was never launched"
+
+        drop_conn = psycopg2.connect(
+            f"dbname={server_params.PG_DATABASE} user={server_params.PG_USER} "
+            f"password={server_params.PG_PASSWORD} port={server_params.PG_PORT} "
+            f"host={server_params.PG_HOST}"
+        )
+        run_command(
+            "LOCK TABLE extension_base.workers IN ACCESS EXCLUSIVE MODE", drop_conn
+        )
+
+        run_command(
+            f"SELECT injection_points_wakeup('{WORKER_START_POINT}')", superuser_conn
+        )
+        run_command(
+            f"SELECT injection_points_detach('{WORKER_START_POINT}')", superuser_conn
+        )
+
+        assert wait_until_equal(
+            lambda: run_query(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE backend_type = 'pg base extension worker' "
+                "AND wait_event_type = 'Lock'",
+                superuser_conn,
+            )[0]["count"],
+            1,
+        ), "the worker never waited for the DROP"
+
+        # The deadlock detector may abort either side, so check the log
+        # rather than whether the DROP succeeded
+        run_command("DROP EXTENSION pg_extension_base CASCADE", drop_conn)
+        drop_conn.commit()
+
+        log = "".join(read_new_log_lines(start_offset))
+        assert "deadlock detected" not in log, log
+
+        assert (
+            wait_until_equal(lambda: count_pg_extension_base_workers(superuser_conn), 0)
+            == 0
+        )
+    finally:
+        if drop_conn is not None:
+            drop_conn.close()
+        run_command(
+            f"SELECT injection_points_wakeup('{WORKER_START_POINT}')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            f"SELECT injection_points_detach('{WORKER_START_POINT}')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            "DROP EXTENSION IF EXISTS pg_extension_base_test_scheduler CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.autocommit = False

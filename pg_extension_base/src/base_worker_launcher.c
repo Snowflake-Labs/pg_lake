@@ -2430,7 +2430,15 @@ PgExtensionBaseWorkerMain(Datum arg)
 	 * A starter may launch us from a stale registration list. Wait for any
 	 * in-progress deregistration before checking our registration; a later
 	 * one sees our PID after this lock is released and signals us.
+	 *
+	 * Lock the workers table first, the order register, deregister and DROP
+	 * EXTENSION pg_extension_base use, to avoid deadlocking with them.
 	 */
+	Oid			workerTableId = PgExtensionBaseWorkersRelationId();
+
+	if (OidIsValid(workerTableId))
+		LockRelationOid(workerTableId, AccessShareLock);
+
 	bool		waitForLock = true;
 
 	LockDatabaseStarter(databaseId, RowExclusiveLock, waitForLock);
