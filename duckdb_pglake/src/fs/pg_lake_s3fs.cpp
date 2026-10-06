@@ -820,12 +820,29 @@ SetEncryptionFields(optional_ptr<ClientContext> context, ParsedS3Url &parsed_s3_
 /*
  * IsAuthError determines whether a response failed in a way that expired
  * credentials would explain.
+ *
+ * S3 returns expired session tokens as HTTP 400 with an XML body whose
+ * <Code> is ExpiredToken or TokenRefreshRequired, not 401/403.  Match
+ * those so TryRefreshAuthParams gets a chance to refresh and retry.
  */
 static bool
 IsAuthError(const HTTPResponse &response)
 {
-	return response.status == HTTPStatusCode::Unauthorized_401 ||
-		   response.status == HTTPStatusCode::Forbidden_403;
+  if (response.status == HTTPStatusCode::Unauthorized_401 ||
+      response.status == HTTPStatusCode::Forbidden_403)
+    return true;
+
+  if (response.status == HTTPStatusCode::BadRequest_400) {
+    /*
+     * The httpfs pinned on this branch predates
+     * S3FileSystem::TryGetS3ErrorCode, so read <Error><Code> ourselves.
+     */
+    string code = ExtractXmlElementText(
+        ExtractXmlElementText(response.body, "Error"), "Code");
+    return code == "ExpiredToken" || code == "TokenRefreshRequired";
+  }
+
+  return false;
 }
 
 
