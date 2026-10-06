@@ -491,9 +491,10 @@ IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
 {
 	char	   *newCatalog = *newvalue;
 
-	if (pg_strcasecmp(newCatalog, POSTGRES_CATALOG_NAME) == 0 ||
-		pg_strcasecmp(newCatalog, REST_CATALOG_NAME) == 0 ||
-		pg_strcasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME) == 0)
+  if (pg_strcasecmp(newCatalog, POSTGRES_CATALOG_NAME) == 0 ||
+    pg_strcasecmp(newCatalog, REST_CATALOG_NAME) == 0 ||
+    pg_strcasecmp(newCatalog, SNOWFLAKE_CATALOG_NAME) == 0 ||
+    pg_strcasecmp(newCatalog, OBJECT_STORE_CATALOG_NAME) == 0)
 		return true;
 
 	/*
@@ -509,9 +510,9 @@ IcebergDefaultCatalogCheckHook(char **newvalue, void **extra, GucSource source)
 	if (IsRestCatalog(newCatalog))
 		return true;
 
-	GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "
-						"'" REST_CATALOG_NAME "', '" OBJECT_STORE_CATALOG_NAME
-						"', or the name of a user-created iceberg_catalog server with TYPE 'rest'");
+  GUC_check_errdetail("pg_lake_iceberg: allowed iceberg catalog options are '" POSTGRES_CATALOG_NAME "', "
+            "'" REST_CATALOG_NAME "', '" SNOWFLAKE_CATALOG_NAME "', '" OBJECT_STORE_CATALOG_NAME
+            "', or the name of a user-created iceberg_catalog server with TYPE 'rest'");
 
 	return false;
 }
