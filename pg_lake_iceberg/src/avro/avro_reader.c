@@ -31,6 +31,7 @@ static bool GetFieldValue(avro_value_t * record, char *fieldName, AvroFieldRequi
 						  avro_value_t * fieldValue);
 static bool GetFieldArrayValue(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 							   avro_value_t * fieldValue, size_t *itemCount);
+static void *AllocateFieldEntries(char *fieldName, size_t entrySize, size_t itemCount);
 static bool AvroPrepareGetNullable(avro_value_t * record, char *fieldName,
 								   AvroFieldRequired required, avro_value_t * innerValue);
 static avro_type_t AvroGetUnionNotNullType(avro_value_t * unionValue);
@@ -338,7 +339,7 @@ AvroGetObjectArrayField(avro_value_t * record, char *fieldName, AvroFieldRequire
 	}
 
 	/* allocate N entries */
-	char	   *entries = palloc0(entrySize * itemCount);
+	char	   *entries = AllocateFieldEntries(fieldName, entrySize, itemCount);
 
 	*arrayPointer = entries;
 	*lengthPointer = itemCount;
@@ -375,7 +376,7 @@ AvroGetInt32ArrayField(avro_value_t * record, char *fieldName, AvroFieldRequired
 	}
 
 	/* allocate N entries */
-	int32_t    *entries = palloc0(sizeof(int32_t) * itemCount);
+	int32_t    *entries = AllocateFieldEntries(fieldName, sizeof(int32_t), itemCount);
 
 	*arrayPointer = entries;
 	*lengthPointer = itemCount;
@@ -413,7 +414,7 @@ AvroGetInt64ArrayField(avro_value_t * record, char *fieldName, AvroFieldRequired
 	}
 
 	/* allocate N entries */
-	int64_t    *entries = palloc0(sizeof(int64_t) * itemCount);
+	int64_t    *entries = AllocateFieldEntries(fieldName, sizeof(int64_t), itemCount);
 
 	*arrayPointer = entries;
 	*lengthPointer = itemCount;
@@ -459,7 +460,7 @@ AvroGetMapField(avro_value_t * record, char *fieldName, AvroFieldRequired requir
 	}
 
 	/* allocate N entries */
-	entries = palloc0(entrySize * itemCount);
+	entries = AllocateFieldEntries(fieldName, entrySize, itemCount);
 
 	*arrayPointer = entries;
 	*lengthPointer = itemCount;
@@ -469,7 +470,7 @@ AvroGetMapField(avro_value_t * record, char *fieldName, AvroFieldRequired requir
 		avro_value_t child;
 		const char *key = NULL;
 
-		if (avro_value_get_by_index(&fieldValue, 0, &child, &key) != 0)
+		if (avro_value_get_by_index(&fieldValue, itemIndex, &child, &key) != 0)
 		{
 			ereport(ERROR, (errmsg("could not get map element %d", itemIndex)));
 		}
@@ -687,6 +688,27 @@ GetFieldArrayValue(avro_value_t * record, char *fieldName, AvroFieldRequired req
 	}
 
 	return true;
+}
+
+
+/*
+ * AllocateFieldEntries allocates a zeroed array of itemCount entries of
+ * entrySize bytes for fieldName. itemCount comes from the file, so check
+ * that the size does not overflow before allocating.
+ */
+static void *
+AllocateFieldEntries(char *fieldName, size_t entrySize, size_t itemCount)
+{
+	Assert(entrySize > 0);
+
+	if (itemCount > MaxAllocSize / entrySize)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
+				 errmsg("%s has too many entries: %zu", fieldName, itemCount)));
+	}
+
+	return palloc0(entrySize * itemCount);
 }
 
 
