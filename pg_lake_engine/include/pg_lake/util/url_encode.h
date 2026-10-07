@@ -18,3 +18,4 @@
 #pragma once
 
 extern PGDLLEXPORT char *URLEncodePath(const char *input);
+extern PGDLLEXPORT char *URLEncodePrefix(const char *input);

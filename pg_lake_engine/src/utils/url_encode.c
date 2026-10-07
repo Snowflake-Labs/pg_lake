@@ -24,6 +24,7 @@
 #include <string.h>
 #include <postgres.h>
 #include <fmgr.h>
+#include "lib/stringinfo.h"
 
 #include "pg_lake/util/url_encode.h"
 
@@ -77,6 +78,41 @@ URLEncodePath(const char *input)
 	*encoded_ptr = '\0';
 
 	return encoded_str;
+}
+
+
+/*
+ * URLEncodePrefix URL-encodes a REST catalog prefix, keeping '/' as a
+ * path separator. Iceberg REST prefixes may span several path segments
+ * (e.g. Unity Catalog's "catalogs/<name>"), and the reference client
+ * joins the prefix into the path as-is. Each segment is encoded with
+ * URLEncodePath, so other reserved characters are still escaped.
+ * It returns a newly palloced string.
+ */
+char *
+URLEncodePrefix(const char *input)
+{
+	StringInfoData encoded;
+	const char *segmentStart = input;
+
+	initStringInfo(&encoded);
+
+	for (;;)
+	{
+		const char *slash = strchr(segmentStart, '/');
+		size_t		segmentLen = slash ? (size_t) (slash - segmentStart) : strlen(segmentStart);
+		char	   *segment = pnstrdup(segmentStart, segmentLen);
+
+		appendStringInfoString(&encoded, URLEncodePath(segment));
+
+		if (slash == NULL)
+			break;
+
+		appendStringInfoChar(&encoded, '/');
+		segmentStart = slash + 1;
+	}
+
+	return encoded.data;
 }
 
 

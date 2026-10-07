@@ -189,7 +189,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 
 	char	   *postUrl =
 		psprintf(REST_CATALOG_TABLES, opts->baseUri,
-				 URLEncodePath(catalogName), URLEncodePath(namespaceName));
+				 URLEncodePrefix(catalogName), URLEncodePath(namespaceName));
 	List	   *headers = PostHeadersWithAuth(opts);
 
 	if (opts->enableVendedCredentials)
@@ -347,7 +347,7 @@ RestCatalogExists(RestCatalogOptions * opts, const char *catalogName)
 {
 	char	   *catalogUrl =
 		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
-				 URLEncodePath(catalogName));
+				 URLEncodePrefix(catalogName));
 	HttpResult	catalogResult =
 		SendRequestToRestCatalog(opts, HTTP_GET, catalogUrl, NULL,
 								 GetHeadersWithAuth(opts));
@@ -378,7 +378,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 	 */
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
-				 opts->baseUri, URLEncodePath(catalogName),
+				 opts->baseUri, URLEncodePrefix(catalogName),
 				 URLEncodePath(namespaceName));
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
@@ -484,7 +484,7 @@ ErrorIfRestNamespaceDoesNotExist(RestCatalogOptions * opts, const char *catalogN
 	 */
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
-				 opts->baseUri, URLEncodePath(catalogName),
+				 opts->baseUri, URLEncodePrefix(catalogName),
 				 URLEncodePath(namespaceName));
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
@@ -790,7 +790,7 @@ LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 {
 	char	   *getUrl =
 		psprintf(REST_CATALOG_TABLE,
-				 opts->baseUri, URLEncodePath(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
+				 opts->baseUri, URLEncodePrefix(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth(opts);
 
@@ -2123,7 +2123,7 @@ CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName,
 
 	char	   *postUrl =
 		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
-				 URLEncodePath(catalogName));
+				 URLEncodePrefix(catalogName));
 
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body.data,
 													  PostHeadersWithAuth(opts));
