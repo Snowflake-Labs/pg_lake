@@ -458,7 +458,8 @@ PostAllRestCatalogRequests(void)
 		appendStringInfoChar(batchRequestBody, '}');	/* close json body */
 
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT,
-								   PgLakeXactRestCatalog->catalogOpts->baseUri, catalogName);
+								   PgLakeXactRestCatalog->catalogOpts->baseUri,
+								   URLEncodePrefix(catalogName));
 		HttpResult	httpResult = SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
 														  url, batchRequestBody->data,
 														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
@@ -801,7 +802,7 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogTableName(relationId));
 
 		requestPerTable->urlEncodedCatalogName =
-			MemoryContextStrdup(TopTransactionContext, URLEncodePath(GetRestCatalogName(relationId)));
+			MemoryContextStrdup(TopTransactionContext, URLEncodePrefix(GetRestCatalogName(relationId)));
 		requestPerTable->urlEncodedCatalogNamespace =
 			MemoryContextStrdup(TopTransactionContext, URLEncodePath(GetRestCatalogNamespace(relationId)));
 		requestPerTable->urlEncodedCatalogTableName =
