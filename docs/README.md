@@ -36,7 +36,10 @@ For the main project overview, see the [root README](../README.md).
 
 ## Working on the docs site
 
-GitHub Pages builds the site from this directory on every push to `main`, using the
+The [Publish documentation](../.github/workflows/docs.yml) workflow builds the site from this
+directory on every push to `main` that changes it, and deploys the result to the `gh-pages`
+branch. GitHub Pages serves the site from that branch. Pull requests that touch `docs/` run the
+same build without deploying. The site uses the
 [Just the Docs](https://just-the-docs.com/) theme configured in `_config.yml`. Each page's
 front matter sets its title and place in the sidebar (`parent`, `grand_parent`, `nav_order`), so
 a new page needs a front matter block to show up in the navigation. Please also add new pages

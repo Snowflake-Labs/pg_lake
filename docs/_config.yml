@@ -1,14 +1,17 @@
 # Site configuration for https://snowflake-labs.github.io/pg_lake/
 #
-# GitHub Pages builds this directory with its default Jekyll pipeline, and
-# remote_theme pulls in Just the Docs. See docs/README.md for how to preview
-# the site locally.
+# .github/workflows/docs.yml builds this directory with Jekyll and pushes the
+# result to gh-pages. GitHub Pages serves the site from that branch.
 
 title: pg_lake
-description: Postgres for Iceberg and data lakes
+description: >-
+  Create and query Iceberg tables, read and write Parquet, CSV and JSON files
+  in object storage — all from PostgreSQL, with queries running on DuckDB.
 url: https://snowflake-labs.github.io
 baseurl: /pg_lake
 lang: en-US
+
+og_image: https://snowflake-labs.github.io/pg_lake/assets/images/og-card.png
 
 remote_theme: just-the-docs/just-the-docs@v0.12.0
 plugins:
