@@ -249,10 +249,10 @@ SELECT region, sum(amount) FROM orders GROUP BY region;
 | `catalog_table_name` | Name of the table in the catalog. Defaults to the PostgreSQL table name. |
 | `lowercase_column_names` | Fold column and struct field names to lowercase. Valid for read-only REST and `object_store` catalog tables; defaults to `false`. |
 
-When a lowercase catalog, namespace or table name does not exist in a REST catalog, pg_lake
-tries the uppercase name, which is how Snowflake stores unquoted identifiers. The name that
-matched is stored in the table options. Names that contain uppercase letters are only used as
-given.
+When a read-only table is created and its lowercase catalog, namespace or table name does not
+exist in a REST catalog, pg_lake tries the uppercase name, which is how Snowflake stores
+unquoted identifiers. The name that matched is stored in the table options. Names that contain
+uppercase letters, and names set later with `ALTER`, are used as given.
 
 An attached table always reads the catalog's current version, so queries see new commits from
 other engines without any changes in PostgreSQL. Dropping it only removes it from PostgreSQL.
