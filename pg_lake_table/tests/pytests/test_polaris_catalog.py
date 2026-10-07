@@ -1137,6 +1137,71 @@ def test_rest_catalog_lowercase_column_names(
     rest_catalog.drop_namespace(namespace)
 
 
+def test_rest_catalog_uppercase_identifiers(
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """A read-only table whose namespace and table names default to lowercase
+    Postgres names attaches to the uppercase names an engine like Snowflake
+    writes, and stores the names that matched."""
+
+    if installcheck:
+        return
+
+    namespace = "TEST_UPPERCASE_IDENTIFIERS"
+    table_name = "ORDERS"
+    rest_catalog = create_iceberg_rest_catalog(namespace)
+
+    iceberg_table = rest_catalog.create_table(
+        identifier=f"{namespace}.{table_name}",
+        schema=Schema(NestedField(1, "ID", LongType(), required=False)),
+    )
+    iceberg_table.append(pyarrow.Table.from_pylist([{"ID": 1}, {"ID": 2}]))
+
+    run_command("CREATE SCHEMA test_uppercase_identifiers", pg_conn)
+    run_command(
+        """
+        CREATE TABLE test_uppercase_identifiers.orders ()
+        USING iceberg
+        WITH (catalog='rest', read_only=True, lowercase_column_names=True)
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    options = run_query(
+        """
+        SELECT option_name, option_value
+        FROM pg_options_to_table(
+            (SELECT ftoptions FROM pg_foreign_table
+             WHERE ftrelid = 'test_uppercase_identifiers.orders'::regclass))
+        WHERE option_name IN ('catalog_namespace', 'catalog_table_name')
+        ORDER BY option_name
+        """,
+        pg_conn,
+    )
+    assert options == [
+        ["catalog_namespace", namespace],
+        ["catalog_table_name", table_name],
+    ]
+
+    # later queries go to the stored uppercase names
+    iceberg_table.append(pyarrow.Table.from_pylist([{"ID": 3}]))
+    result = run_query(
+        "SELECT id FROM test_uppercase_identifiers.orders ORDER BY id", pg_conn
+    )
+    assert result == [[1], [2], [3]]
+
+    run_command("DROP SCHEMA test_uppercase_identifiers CASCADE", pg_conn)
+    pg_conn.commit()
+    rest_catalog.drop_table(f"{namespace}.{table_name}")
+    rest_catalog.drop_namespace(namespace)
+
+
 def test_rest_catalog_required_columns_autodetect(
     pg_conn,
     s3,

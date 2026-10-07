@@ -103,6 +103,22 @@ GetStringOption(List *options, char *optionName, bool errorOnMissing)
 
 
 /*
+ * SetStringOptionValue replaces the value of an option that is already in
+ * the list.
+ */
+void
+SetStringOptionValue(List *options, char *optionName, char *value)
+{
+	DefElem    *option = GetOption(options, optionName);
+
+	if (option == NULL)
+		elog(ERROR, "%s option not found", optionName);
+
+	option->arg = (Node *) makeString(value);
+}
+
+
+/*
  * GetBoolOption returns the value of a boolean option.
  */
 bool
