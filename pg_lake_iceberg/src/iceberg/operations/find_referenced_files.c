@@ -51,7 +51,8 @@ PG_FUNCTION_INFO_V1(find_unreferenced_files_via_snapshot_ids);
 
 
 static void IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash);
-static void IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash);
+static void IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash,
+												 bool skipDataFiles);
 static List *FindUnreferencedFiles(List *prevMetadataList, char *currentMetadataPath);
 static IcebergSnapshot * GetIcebergSnapshotsViaSnapshotIdList(IcebergTableMetadata * metadata, List *snapshotIdList);
 
@@ -133,7 +134,7 @@ find_all_referenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 		int64	   *snapshotId = (int64 *) lfirst(snapshotIdCell);
 		IcebergSnapshot *snapshot = GetIcebergSnapshotViaId(metadata, *snapshotId);
 
-		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash);
+		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash, false);
 	}
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
@@ -225,7 +226,8 @@ find_unreferenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 	IcebergSnapshot *currentSnapshots = GetIcebergSnapshotsViaSnapshotIdList(metadata, currentSnapshotIdList);
 
 	List	   *unreferencedFiles = FindUnreferencedFilesForSnapshots(prevSnapshots, list_length(prevSnapshotIdList),
-																	  currentSnapshots, list_length(currentSnapshotIdList));
+																	  currentSnapshots, list_length(currentSnapshotIdList),
+																	  false);
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
@@ -314,10 +316,18 @@ FindUnreferencedFiles(List *prevMetadataList, char *currentMetadataPath)
 /*
 * Similar to FindUnreferencedFiles, but this function takes two lists of
 * snapshot ids instead of metadata paths.
+*
+* When skipDataFiles is true the enumeration only collects manifest lists and
+* manifest paths, not the data files inside each manifest.  Use this when the
+* caller already knows no data files were removed (append-only commit): the
+* data file set in currentSnapshots is then a strict superset of prevSnapshots,
+* so the diff would be empty, but the manifest list and individual manifests of
+* the expired snapshots may still be unreferenced and need to be queued.
 */
 List *
 FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnapshotCount,
-								  IcebergSnapshot * currentSnapshots, int currentSnapshotCount)
+								  IcebergSnapshot * currentSnapshots, int currentSnapshotCount,
+								  bool skipDataFiles)
 {
 	HTAB	   *prevReferencedFileHash = CreateFilesHash();
 
@@ -327,7 +337,7 @@ FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnaps
 	{
 		IcebergSnapshot *snapshot = &prevSnapshots[snapshotIndex];
 
-		IcebergSnapshotAddAllReferencedFiles(snapshot, prevReferencedFileHash);
+		IcebergSnapshotAddAllReferencedFiles(snapshot, prevReferencedFileHash, skipDataFiles);
 	}
 
 	HTAB	   *currentReferencedFileHash = CreateFilesHash();
@@ -336,7 +346,7 @@ FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnaps
 	{
 		IcebergSnapshot *snapshot = &currentSnapshots[snapshotIndex];
 
-		IcebergSnapshotAddAllReferencedFiles(snapshot, currentReferencedFileHash);
+		IcebergSnapshotAddAllReferencedFiles(snapshot, currentReferencedFileHash, skipDataFiles);
 	}
 
 	return FindUnreferencedFilesAmongHTABs(prevReferencedFileHash, currentReferencedFileHash);
@@ -434,7 +444,7 @@ IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash)
 	{
 		IcebergSnapshot *snapshot = &metadata->snapshots[snapshotIndex];
 
-		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash);
+		IcebergSnapshotAddAllReferencedFiles(snapshot, fileHash, false);
 	}
 }
 
@@ -442,9 +452,13 @@ IcebergMetadataAddAllReferencedFiles(char *metadataPath, HTAB *fileHash)
 /*
 * IcebergSnapshotAddAllReferencedFiles adds all the files that are referenced
 * in the snapshot to the hash table.
+*
+* When skipDataFiles is true the walk collects only the manifest list and the
+* manifest paths, without reading the data file entries inside each manifest.
 */
 static void
-IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
+IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash,
+									 bool skipDataFiles)
 {
 	bool		fileAlreadyExists = AppendFileToHash(snapshot->manifest_list, fileHash);
 
@@ -457,15 +471,27 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
 		return;
 	}
 
+	/* add all the manifest files */
+	List	   *manifests = FetchManifestsFromSnapshot(snapshot, NULL);
+	ListCell   *manifestCell = NULL;
+
+	if (skipDataFiles)
+	{
+		foreach(manifestCell, manifests)
+		{
+			IcebergManifest *manifest = lfirst(manifestCell);
+
+			AppendFileToHash(manifest->manifest_path, fileHash);
+		}
+
+		return;
+	}
+
 	/* avoid keeping avro contents allocated */
 	MemoryContext manifestDataFileFetchContext =
 		AllocSetContextCreate(CurrentMemoryContext,
 							  "FetchDataFilesFromManifest for IcebergSnapshotAddAllReferencedFiles",
 							  ALLOCSET_DEFAULT_SIZES);
-
-	/* add all the manifest files */
-	List	   *manifests = FetchManifestsFromSnapshot(snapshot, NULL);
-	ListCell   *manifestCell = NULL;
 
 	foreach(manifestCell, manifests)
 	{
@@ -482,6 +508,9 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash)
 		}
 
 		MemoryContext oldContext = MemoryContextSwitchTo(manifestDataFileFetchContext);
+
+		/* tests attach here to check that expiry skips data file enumeration */
+		INJECTION_POINT_COMPAT("expiry-fetch-data-files-from-manifest");
 
 		List	   *manifestDataFiles = FetchDataFilesFromManifest(manifest, NULL, IsManifestEntryStatusScannable, NULL);
 		ListCell   *dataFileCell = NULL;

@@ -72,7 +72,8 @@ int			IcebergMaxSnapshotAge = 0;	/* seconds */
 static void WriteMetadataJsonToTemporaryFile(IcebergTableMetadata * metadata, FILE *localFile);
 static void AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, IcebergSnapshot * newSnapshot);
 static void DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata * metadata, IcebergSnapshot * expiredSnapshots,
-									int expiredSnapshotCount, IcebergSnapshot * nonExpiredSnapshots, int nonExpiredSnapshotCount);
+									int expiredSnapshotCount, IcebergSnapshot * nonExpiredSnapshots, int nonExpiredSnapshotCount,
+									bool appendOnlyCommit);
 static void SetSnapshotReference(IcebergTableMetadata * metadata, uint64_t snapshotId);
 static void GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
 								  IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
@@ -219,7 +220,8 @@ AddIcebergSnapshotToMetadata(IcebergTableMetadata * metadata, IcebergSnapshot * 
  */
 List *
 RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
-							   int maxSnapshotAgeInSecs, bool isVerbose)
+							   int maxSnapshotAgeInSecs, bool isVerbose,
+							   bool appendOnlyCommit)
 {
 	if (metadata->snapshots_length == 0)
 	{
@@ -279,7 +281,8 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 						get_rel_name(relationId))));
 	}
 
-	DeleteUnreferencedFiles(relationId, metadata, expiredSnapshots, expiredSnapshotCount, nonExpiredSnapshots, nonExpiredSnapshotCount);
+	DeleteUnreferencedFiles(relationId, metadata, expiredSnapshots, expiredSnapshotCount, nonExpiredSnapshots, nonExpiredSnapshotCount,
+							appendOnlyCommit);
 
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 	bool		writableRestCatalogTable = catalogType == REST_CATALOG_READ_WRITE;
@@ -295,18 +298,26 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 
 
 /*
-* DeleteUnreferencedFiles firsts finds the unreferenced files for the expired snapshots
-* and then deletes them from the remote storage.
+* DeleteUnreferencedFiles finds files that the expired snapshots referenced
+* and the surviving snapshots do not, then queues them for deletion.
+*
+* When appendOnlyCommit is true the commit added files and removed none, so
+* every data file in the expired snapshots is also in the surviving ones.
+* The enumeration then skips reading manifest entries (O(data files)) and only
+* compares manifest lists and manifest paths (O(manifests)), which is enough
+* to catch unreferenced manifests and manifest list files.
 */
 static void
 DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata * metadata, IcebergSnapshot * expiredSnapshots, int expiredSnapshotCount,
-						IcebergSnapshot * nonExpiredSnapshots, int nonExpiredSnapshotCount)
+						IcebergSnapshot * nonExpiredSnapshots, int nonExpiredSnapshotCount,
+						bool appendOnlyCommit)
 {
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 
 	List	   *unreferencedFiles =
 		FindUnreferencedFilesForSnapshots(expiredSnapshots, expiredSnapshotCount,
-										  nonExpiredSnapshots, nonExpiredSnapshotCount);
+										  nonExpiredSnapshots, nonExpiredSnapshotCount,
+										  appendOnlyCommit);
 	ListCell   *unreferencedFileCell = NULL;
 
 	foreach(unreferencedFileCell, unreferencedFiles)

@@ -334,8 +334,30 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	/* if we need to expire old snapshots, we do it here */
 	if (builder->expireOldSnapshots)
 	{
+		/*
+		 * A commit that only added data files has a surviving snapshot that
+		 * is a strict superset of the expired ones, so the unreferenced-file
+		 * enumeration can skip reading data file entries inside manifests.
+		 *
+		 * The check requires that the commit itself added at least one data
+		 * or position-delete file and removed none.  A metadata-only commit
+		 * such as VACUUM's CompactMetadata has empty dataEntries and
+		 * removedEntries too, but the expired snapshots it cleans up may
+		 * reference data files that a prior compaction in a separate
+		 * transaction replaced.
+		 */
+		bool		hasAddedFiles =
+			(hash_get_num_entries(builder->dataEntries) > 0 ||
+			 hash_get_num_entries(builder->positionalDeleteEntries) > 0);
+
+		bool		appendOnlyCommit =
+			hasAddedFiles &&
+			builder->removedEntries == NIL &&
+			!builder->removeAllEntries;
+
 		List	   *expiredSnapshotIds =
-			RemoveOldSnapshotsFromMetadata(relationId, metadata, maxSnapshotAgeInSecs, isVerbose);
+			RemoveOldSnapshotsFromMetadata(relationId, metadata, maxSnapshotAgeInSecs, isVerbose,
+										   appendOnlyCommit);
 
 		if (expiredSnapshotIds != NIL)
 		{

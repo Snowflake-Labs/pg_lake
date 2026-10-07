@@ -23,7 +23,8 @@
 #include "pg_lake/util/path_hash.h"
 
 extern PGDLLEXPORT List *FindUnreferencedFilesForSnapshots(IcebergSnapshot * prevSnapshots, int prevSnapshotCount,
-														   IcebergSnapshot * currentSnapshots, int currentSnapshotCount);
+														   IcebergSnapshot * currentSnapshots, int currentSnapshotCount,
+														   bool skipDataFiles);
 extern PGDLLEXPORT List *IcebergFindAllReferencedFiles(char *metadataPath);
 
 /*
