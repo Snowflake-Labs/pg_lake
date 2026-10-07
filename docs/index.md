@@ -3,7 +3,10 @@ title: Home
 layout: home
 nav_order: 1
 permalink: /
-description: pg_lake integrates Iceberg and data lake files into Postgres.
+description: >-
+  Create and query Iceberg tables, read and write Parquet, CSV and JSON files
+  in object storage — all from PostgreSQL, with queries running on DuckDB.
+image: /pg_lake/assets/images/og-card.png
 ---
 
 <div class="pglake-hero">
