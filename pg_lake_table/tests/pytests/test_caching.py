@@ -1,5 +1,6 @@
 import os
 import pytest
+from contextlib import closing
 from utils_pytest import *
 
 CACHE_FILE_PREFIX = "pgl-cache."
@@ -341,3 +342,65 @@ def test_pg_lake_file_cache_worker(s3, superuser_conn, extension):
     assert cached_path.exists()
 
     superuser_conn.commit()
+
+
+def test_pg_lake_file_cache_worker_reload(
+    s3, superuser_conn, extension, tmp_path, installcheck
+):
+    if installcheck:
+        pytest.skip("requires cache worker settings from test-cluster startup")
+
+    key = "test_pg_lake_file_cache_worker_reload/data.csv"
+    url = f"s3://{TEST_BUCKET}/{key}"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}/test_pg_lake_file_cache_worker_reload/{CACHE_FILE_PREFIX}data.csv"
+    )
+    local_path = tmp_path / "data.csv"
+    local_path.write_text("1\n")
+    s3.upload_file(str(local_path), TEST_BUCKET, key)
+
+    setting = "pg_lake_engine.max_cache_size"
+    with closing(open_pg_conn()) as config_conn:
+        config_conn.autocommit = True
+        enabled, size = run_query(
+            f"SELECT current_setting('pg_lake_engine.enable_cache_manager')::boolean, setting::bigint FROM pg_settings WHERE name = '{setting}'",
+            config_conn,
+        )[0]
+        if not enabled or size == 0:
+            pytest.skip("requires an enabled cache worker with a nonzero initial limit")
+
+        original_value = run_query(f"SHOW {setting}", config_conn)[0][0]
+        auto_values = run_query(
+            f"SELECT setting FROM pg_file_settings WHERE name = '{setting}' AND sourcefile = current_setting('data_directory') || '/postgresql.auto.conf' ORDER BY seqno",
+            config_conn,
+        )
+        worker_query = "SELECT pid FROM pg_stat_activity WHERE backend_type = 'pg_lake cache worker'"
+        worker = run_query(worker_query, config_conn)
+        assert len(worker) == 1
+
+        try:
+            run_command(f"SELECT lake_file_cache.add('{url}')", superuser_conn)
+            assert cached_path.exists()
+
+            run_command(f"ALTER SYSTEM SET {setting} = '0'", config_conn)
+            run_command("SELECT pg_reload_conf()", config_conn)
+
+            deadline = time.monotonic() + 5
+            while cached_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+
+            assert (
+                not cached_path.exists()
+            ), "cache worker did not apply the reloaded size limit"
+            assert run_query(worker_query, config_conn) == worker
+        finally:
+            superuser_conn.rollback()
+            if auto_values:
+                with config_conn.cursor() as cursor:
+                    cursor.execute(
+                        f"ALTER SYSTEM SET {setting} = %s", (auto_values[-1][0],)
+                    )
+            else:
+                run_command(f"ALTER SYSTEM RESET {setting}", config_conn)
+            run_command("SELECT pg_reload_conf()", config_conn)
+            wait_for_reloaded_settings([config_conn], {setting: original_value})

@@ -29,6 +29,7 @@
 #include "storage/shmem.h"
 #include "tcop/tcopprot.h"
 #include "utils/backend_status.h"
+#include "utils/guc.h"
 #include "utils/memutils.h"
 #include "pg_lake/pgduck/cache_worker.h"
 #include "pg_lake/pgduck/client.h"
@@ -129,6 +130,14 @@ PgLakeCacheWorkerMain(Datum arg)
 
 	while (true)
 	{
+		CHECK_FOR_INTERRUPTS();
+
+		if (ConfigReloadPending)
+		{
+			ConfigReloadPending = false;
+			ProcessConfigFile(PGC_SIGHUP);
+		}
+
 		if (EnableCacheManager)
 		{
 			pgstat_report_activity(STATE_RUNNING, NULL);
@@ -175,7 +184,9 @@ PgLakeCacheWorkerMain(Datum arg)
 		if (isCachingEnabled)
 			delay = Max(delay, 60000);
 
-		LightSleep(delay);
+		/* The pgduck client may have consumed the SIGHUP latch wakeup. */
+		if (!ConfigReloadPending)
+			LightSleep(delay);
 	}
 }
 
