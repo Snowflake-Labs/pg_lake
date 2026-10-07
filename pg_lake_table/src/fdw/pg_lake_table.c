@@ -363,6 +363,7 @@ typedef struct FindResultRelationScanStateContext
 
 
 PgLakeModifyValidityCheckHookType PgLakeModifyValidityCheckHook = NULL;
+PgLakeForeignScanTupleHookType PgLakeForeignScanTupleHook = NULL;
 
 
 /*
@@ -1909,6 +1910,9 @@ postgresIterateForeignScan(ForeignScanState *node)
 	ExecStoreHeapTuple(fsstate->tuples[fsstate->next_tuple++],
 					   slot,
 					   false);
+
+	if (PgLakeForeignScanTupleHook != NULL)
+		PgLakeForeignScanTupleHook(node, slot);
 
 	return slot;
 }
