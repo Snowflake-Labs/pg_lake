@@ -35,9 +35,9 @@ typedef struct TableMetadataOperationTracker
 
 	/*
 	 * Set when a single data file was removed from the relation, by a DELETE,
-	 * an UPDATE or a rewrite. The commit-time diff needs the last pushed
-	 * metadata only to find such files, so a transaction that never set this
-	 * can build its operations from the catalog alone.
+	 * an UPDATE or a rewrite. The catalog-based commit path uses the per-tx
+	 * remove-tracking temp table for these; TRUNCATE (remove-all) still needs
+	 * the dedicated REMOVE_ALL shortcut.
 	 */
 	bool		relationDataFileRemoveSeen;
 
@@ -59,7 +59,7 @@ typedef struct TableMetadataOperationTracker
 }			TableMetadataOperationTracker;
 
 extern PGDLLEXPORT int CommitTimeCatalogAnalyzeThreshold;
-extern PGDLLEXPORT bool EnableAppendOnlyCommitFastPath;
+extern PGDLLEXPORT bool EnableCatalogCommitFastPath;
 
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);
