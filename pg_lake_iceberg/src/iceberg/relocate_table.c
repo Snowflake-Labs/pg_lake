@@ -118,7 +118,7 @@ CopyRemoteFileCommand(const char *srcUri, const char *dstUri)
  * regenerated with rewritten paths in the next pass.
  */
 static HTAB *
-RelocateDataFiles(IcebergTableMetadata *metadata,
+RelocateDataFiles(IcebergTableMetadata * metadata,
 				  const char *oldLocation, size_t oldLocationLen,
 				  const char *newLocation)
 {
@@ -223,7 +223,7 @@ LookupNewPath(HTAB *rewriteHash, const char *oldPath)
  * snapshot's manifest_list in place.
  */
 static void
-RewriteSnapshotManifests(IcebergTableMetadata *metadata,
+RewriteSnapshotManifests(IcebergTableMetadata * metadata,
 						 HTAB *rewriteHash,
 						 const char *oldLocation, size_t oldLocationLen,
 						 const char *newLocation)
@@ -311,7 +311,7 @@ RewriteSnapshotManifests(IcebergTableMetadata *metadata,
  * statistics paths.
  */
 static void
-RewriteMetadataPaths(IcebergTableMetadata *metadata,
+RewriteMetadataPaths(IcebergTableMetadata * metadata,
 					 const char *oldLocation, size_t oldLocationLen,
 					 const char *newLocation)
 {
