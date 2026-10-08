@@ -189,7 +189,7 @@ RelocateDataFiles(IcebergTableMetadata *metadata,
 		ereport(NOTICE,
 				(errmsg("relocating %d data file(s)", filesCopied)));
 
-		ExecuteCommandsInParallelInPGDuck(copyCommands, MaxParallelFileUploads);
+		ExecuteCommandsInParallelInPGDuck(copyCommands, DEFAULT_MAX_PARALLEL_FILE_UPLOADS);
 	}
 
 	return rewriteHash;
