@@ -46,6 +46,7 @@
 #include "duckdb.h"
 #include "duckdb/duckdb.h"
 #include "duckdb/type_conversion.h"
+#include "duckdb/binary_transmit.h"
 #include "duckdb/duckdb_pglake.h"
 #include "pgsession/pgsession.h"
 #include "pgsession/pgsession_io.h"
@@ -93,6 +94,9 @@ typedef struct DuckDBResultColumn
 {
 	duckdb_type duckType;
 	duckdb_logical_type logicalType;
+
+	/* how to write values when the response uses the binary COPY format */
+	BinaryColumnWriter binaryWriter;
 }			DuckDBResultColumn;
 
 typedef struct DuckDBQueryResult
@@ -139,6 +143,14 @@ static DuckDBStatus process_and_send_data_chunks(DuckDBQueryResult * duckdb_quer
 												 ResponseFormat * responseFormat,
 												 idx_t * rowsReturned,
 												 char **errorMessage);
+static bool choose_binary_writers(duckdb_result * duckResult,
+								  DuckDBResultColumn * resultColumns,
+								  idx_t columnCount,
+								  ResponseFormat * responseFormat);
+static DuckDBStatus process_data_chunk_binary(duckdb_data_chunk chunk, StringInfoData *buf,
+											  PGSession * clientSession,
+											  DuckDBResultColumn * resultColumns,
+											  idx_t columnCount);
 static DuckDBStatus process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf,
 									   PGSession * clientSession,
 									   DuckDBResultColumn * resultColumns,
@@ -1189,6 +1201,24 @@ return_query_result_to_pgsession(DuckDBSession * duckSession, duckdb_result duck
 		return processChunkStatus;
 	}
 
+	if (responseFormat->isBinary)
+	{
+		/* the binary COPY format ends with a trailer */
+		StringInfoData *buf = &duckdb_query_result.buf;
+
+		pq_beginmessage_reuse(buf, 'd');
+		binary_transmit_append_trailer(buf);
+
+		if (!IsOK(pq_endmessage_reuse(duckSession->clientSession, buf)))
+		{
+			duckdb_query_result_destroy(&duckdb_query_result);
+
+			PGDUCK_SERVER_ERROR("could not send CopyData to the client");
+
+			return DUCKDB_PG_COMMUNICATION_ERROR;
+		}
+	}
+
 	if (responseFormat->isTransmit)
 	{
 		/* send CopyDone response */
@@ -1284,9 +1314,18 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 
 	if (responseFormat->isTransmit)
 	{
+		/*
+		 * Decide whether we can use the binary COPY format, which requires
+		 * every column to have a binary writer for its target type.
+		 */
+		responseFormat->isBinary =
+			choose_binary_writers(duckResult, resultColumns, columnCount,
+								  responseFormat);
+
 		/* send CopyOutResponse */
 		pq_beginmessage_reuse(buf, 'H');
-		pq_sendbyte(buf, PG_WIRE_TEXT_FORMAT);
+		pq_sendbyte(buf, responseFormat->isBinary ?
+					PG_WIRE_BINARY_FORMAT : PG_WIRE_TEXT_FORMAT);
 	}
 	else
 	{
@@ -1350,7 +1389,8 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 			pq_writeint32(buf, -1);
 		}
 
-		pq_writeint16(buf, PG_WIRE_TEXT_FORMAT);
+		pq_writeint16(buf, responseFormat->isBinary ?
+					  PG_WIRE_BINARY_FORMAT : PG_WIRE_TEXT_FORMAT);
 
 		resultColumn->duckType = duckType;
 	}
@@ -1361,6 +1401,21 @@ duckdb_query_result_send_column_metadata(DuckDBQueryResult * duckdb_query_result
 
 		/* pq_flush failed */
 		return DUCKDB_PG_COMMUNICATION_ERROR;
+	}
+
+	if (responseFormat->isBinary)
+	{
+		/* the binary COPY format starts with a header */
+		pq_beginmessage_reuse(buf, 'd');
+		binary_transmit_append_header(buf);
+
+		if (!IsOK(pq_endmessage_reuse(clientSession, buf)))
+		{
+			PGDUCK_SERVER_ERROR("could not send CopyData to the client");
+
+			/* pq_flush failed */
+			return DUCKDB_PG_COMMUNICATION_ERROR;
+		}
 	}
 
 	return DUCKDB_SUCCESS;
@@ -1433,9 +1488,12 @@ process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
 
 		create_result_column_state(resultColumns, chunk, columnCount);
 
-		status =
-			process_data_chunk(chunk, buf, clientSession, resultColumns, columnCount,
-							   responseFormat);
+		if (responseFormat->isBinary)
+			status = process_data_chunk_binary(chunk, buf, clientSession,
+											   resultColumns, columnCount);
+		else
+			status = process_data_chunk(chunk, buf, clientSession, resultColumns,
+										columnCount, responseFormat);
 
 		*rowsReturned += duckdb_data_chunk_get_size(chunk);
 
@@ -1562,6 +1620,110 @@ process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf, PGSession * cli
 	}
 
 	return DUCKDB_SUCCESS;
+}
+
+
+/*
+ * choose_binary_writers determines whether all result columns can be sent in
+ * the binary send format of the target types requested by the client, and
+ * sets up the binary writer of each column if so.
+ */
+static bool
+choose_binary_writers(duckdb_result * duckResult, DuckDBResultColumn * resultColumns,
+					  idx_t columnCount, ResponseFormat * responseFormat)
+{
+	if (responseFormat->targetTypeIds == NULL ||
+		responseFormat->targetTypeCount != (int) columnCount)
+		return false;
+
+	for (idx_t columnIndex = 0; columnIndex < columnCount; columnIndex++)
+	{
+		duckdb_logical_type logicalType =
+			duckdb_column_logical_type(duckResult, columnIndex);
+
+		bool		canWriteBinary =
+			binary_transmit_choose_writer(logicalType,
+										  responseFormat->targetTypeIds[columnIndex],
+										  &resultColumns[columnIndex].binaryWriter);
+
+		duckdb_destroy_logical_type(&logicalType);
+
+		if (!canWriteBinary)
+			return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * process_data_chunk_binary sends the rows of a data chunk as CopyData
+ * messages in the binary COPY format.
+ */
+static DuckDBStatus
+process_data_chunk_binary(duckdb_data_chunk chunk, StringInfoData *buf,
+						  PGSession * clientSession,
+						  DuckDBResultColumn * resultColumns, idx_t columnCount)
+{
+	idx_t		chunkSize = duckdb_data_chunk_get_size(chunk);
+	void	  **columnData = palloc(sizeof(void *) * columnCount);
+	uint64_t  **columnValidity = palloc(sizeof(uint64_t *) * columnCount);
+	DuckDBStatus status = DUCKDB_SUCCESS;
+
+	for (idx_t columnIndex = 0; columnIndex < columnCount; columnIndex++)
+	{
+		duckdb_vector vector = duckdb_data_chunk_get_vector(chunk, columnIndex);
+
+		columnData[columnIndex] = duckdb_vector_get_data(vector);
+		columnValidity[columnIndex] = duckdb_vector_get_validity(vector);
+	}
+
+	pq_beginmessage_reuse(buf, 'd');
+
+	for (idx_t rowInChunk = 0; rowInChunk < chunkSize; rowInChunk++)
+	{
+		if (buf->len >= TRANSMIT_MESSAGE_SIZE_THRESHOLD)
+		{
+			if (!IsOK(pq_endmessage_reuse(clientSession, buf)))
+			{
+				PGDUCK_SERVER_ERROR("could not send CopyData to the client");
+				status = DUCKDB_PG_COMMUNICATION_ERROR;
+				goto done;
+			}
+
+			pq_beginmessage_reuse(buf, 'd');
+		}
+
+		/* tuple field count */
+		pq_sendint16(buf, (uint16) columnCount);
+
+		for (idx_t columnIndex = 0; columnIndex < columnCount; columnIndex++)
+		{
+			uint64_t   *validity = columnValidity[columnIndex];
+
+			if (validity != NULL && !duckdb_validity_row_is_valid(validity, rowInChunk))
+			{
+				/* -1 length indicates NULL */
+				pq_sendint32(buf, (uint32) -1);
+				continue;
+			}
+
+			binary_transmit_append_value(buf, &resultColumns[columnIndex].binaryWriter,
+										 columnData[columnIndex], rowInChunk);
+		}
+	}
+
+	if (!IsOK(pq_endmessage_reuse(clientSession, buf)))
+	{
+		PGDUCK_SERVER_ERROR("could not send CopyData to the client");
+		status = DUCKDB_PG_COMMUNICATION_ERROR;
+	}
+
+done:
+	pfree(columnData);
+	pfree(columnValidity);
+
+	return status;
 }
 
 
