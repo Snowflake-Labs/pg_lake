@@ -1,5 +1,0 @@
-{
-    "name": "openssl",
-    "version": "9.9.9",
-    "description": "Empty port to force usage of system OpenSSL"
-}

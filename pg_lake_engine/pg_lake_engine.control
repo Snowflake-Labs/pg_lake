@@ -1,7 +1,0 @@
-comment = 'Query engine for data lake queries'
-default_version = '3.6'
-module_pathname = '$libdir/pg_lake_engine'
-relocatable = false
-schema = pg_catalog
-requires = 'pg_extension_base,pg_map'
-#!shared_preload_libraries

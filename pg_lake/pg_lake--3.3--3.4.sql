@@ -1,1 +1,0 @@
--- Upgrade script for pg_lake from 3.3 to 3.4

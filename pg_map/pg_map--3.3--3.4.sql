@@ -1,1 +1,0 @@
--- Upgrade script for pg_map from 3.3 to 3.4

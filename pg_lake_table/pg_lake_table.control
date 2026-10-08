@@ -1,8 +1,0 @@
-# pg_lake_table extension
-comment = 'Data lake tables and Iceberg tables'
-default_version = '3.6'
-module_pathname = '$libdir/pg_lake_table'
-relocatable = false
-schema = pg_catalog
-requires = 'pg_lake_engine,pg_lake_iceberg,btree_gist'
-#!shared_preload_libraries = '$libdir/pg_lake_engine,$libdir/pg_lake_iceberg,$libdir/pg_lake_table'

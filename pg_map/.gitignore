@@ -1,7 +1,0 @@
-tests/results/
-regression.diffs
-regression.out
-.pytest_cache
-tests/.pytest_cache
-tests/pytests/.pytest_cache
-*.so

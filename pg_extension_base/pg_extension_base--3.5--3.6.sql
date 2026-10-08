@@ -1,1 +1,0 @@
--- Upgrade script for pg_extension_base from 3.5 to 3.6

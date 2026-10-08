@@ -1,8 +1,0 @@
-# pg_lake extension
-comment = 'Data lake extension by Snowflake'
-default_version = '3.6'
-module_pathname = '$libdir/pg_lake'
-relocatable = false
-schema = pg_catalog
-requires = 'pg_lake_table,pg_lake_copy'
-#!shared_preload_libraries = '$libdir/pg_lake'

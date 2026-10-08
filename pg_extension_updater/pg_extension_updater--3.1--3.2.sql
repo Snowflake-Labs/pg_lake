@@ -1,1 +1,0 @@
--- Upgrade script for pg_extension_updater from 3.1 to 3.2

@@ -1,7 +1,0 @@
-comment = 'PG extension base test 3 extension'
-default_version = '1.1'
-module_pathname = '$libdir/pg_extension_base_test_ext3'
-relocatable = false
-requires = 'pg_extension_base_test_ext2'
-schema = pg_catalog
-#!shared_preload_libraries = 'pg_extension_base_test_common,$libdir/pg_extension_base_test_ext3'
