@@ -58,6 +58,9 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
+#include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/iceberg/partitioning/partition.h"
+#include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "utils/hsearch.h"
 
@@ -74,6 +77,10 @@ static char *ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
 									 IcebergTableSchema * schema);
 static List *BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
 											  IcebergTableSchema * schema);
+static void InsertDataFileColumnStats(Oid relationId, const char *path,
+									  List *columnStatsList);
+static void InsertDataFilePartitionValues(Oid relationId, int32 partitionSpecId,
+										  int64 fileId, Partition * partition);
 
 
 /*
@@ -336,7 +343,8 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 
 		RegisterIcebergColumnMapping(relationId, icebergField->type,
 									 newAttNum, parentFieldId, pgType,
-									 fieldId, writeDefault, initialDefault);
+									 fieldId, writeDefault, initialDefault,
+									   NIL);
 	}
 
 	/*
@@ -554,19 +562,19 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 						BuildColumnStatsForManifestEntry(entry, icebergSchema);
 
 					if (columnStatsList != NIL)
-						AddDataFileColumnStatsToCatalog(relationId,
-														dataFile->file_path,
-														columnStatsList);
+						InsertDataFileColumnStats(relationId,
+													  dataFile->file_path,
+													  columnStatsList);
 				}
 
 				if (dataFile->partition.fields_length > 0 &&
 					(content == CONTENT_DATA ||
 					 content == CONTENT_POSITION_DELETES))
 				{
-					AddDataFilePartitionValueToCatalog(relationId,
-													   manifest->partition_spec_id,
-													   fileId,
-													   &dataFile->partition);
+					InsertDataFilePartitionValues(relationId,
+														  manifest->partition_spec_id,
+														  fileId,
+														  &dataFile->partition);
 				}
 			}
 		}
@@ -721,4 +729,95 @@ ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
 	char	   *boundText = OidOutputFunctionCall(typoutput, boundDatum);
 
 	return boundText;
+}
+
+/*
+ * InsertDataFileColumnStats inserts column stats for a data file.
+ */
+static void
+InsertDataFileColumnStats(Oid relationId, const char *path, List *columnStatsList)
+{
+	ListCell   *columnStatsCell = NULL;
+
+	foreach(columnStatsCell, columnStatsList)
+	{
+		DataFileColumnStats *columnStats = lfirst(columnStatsCell);
+
+		if (columnStats->lowerBoundText == NULL)
+		{
+			Assert(columnStats->upperBoundText == NULL);
+			continue;
+		}
+
+		char	   *query =
+			"insert into " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " "
+			"(table_name, path, field_id, lower_bound, upper_bound) "
+			"values ($1,$2,$3,$4,$5)";
+
+		DECLARE_SPI_ARGS(5);
+		SPI_ARG_VALUE(1, OIDOID, relationId, false);
+		SPI_ARG_VALUE(2, TEXTOID, path, false);
+		SPI_ARG_VALUE(3, INT8OID, columnStats->leafField.fieldId, false);
+		SPI_ARG_VALUE(4, TEXTOID, columnStats->lowerBoundText, columnStats->lowerBoundText == NULL);
+		SPI_ARG_VALUE(5, TEXTOID, columnStats->upperBoundText, columnStats->upperBoundText == NULL);
+
+		SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+		bool		readOnly = false;
+
+		SPI_EXECUTE(query, readOnly);
+
+		SPI_END();
+	}
+}
+
+
+/*
+ * InsertDataFilePartitionValues inserts partition values for a data file.
+ */
+static void
+InsertDataFilePartitionValues(Oid relationId, int32 partitionSpecId, int64 fileId,
+												  Partition * partition)
+{
+	Assert(partition != NULL);
+	Assert(partition->fields_length > 0);
+	Assert(partition->fields != NULL);
+	Assert(partitionSpecId != DEFAULT_SPEC_ID);
+
+	List	   *transforms = AllPartitionTransformList(relationId);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	for (size_t fieldIndex = 0; fieldIndex < partition->fields_length; fieldIndex++)
+	{
+		PartitionField *partitionField = &partition->fields[fieldIndex];
+
+		bool		errorIfMissing = true;
+
+		IcebergPartitionTransform *transform =
+			FindPartitionTransformById(transforms, partitionField->field_id, errorIfMissing);
+
+		const char *partitionValue =
+			SerializePartitionValueToPGText(partitionField->value,
+											partitionField->value_length,
+											transform);
+
+		char	   *query =
+			"INSERT INTO " DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED " "
+			"(table_name, id, partition_field_id, value) "
+			"VALUES ($1,$2,$3,$4)";
+
+		DECLARE_SPI_ARGS(4);
+
+		SPI_ARG_VALUE(1, OIDOID, relationId, false);
+		SPI_ARG_VALUE(2, INT8OID, fileId, false);
+		SPI_ARG_VALUE(3, INT4OID, partitionField->field_id, false);
+		SPI_ARG_VALUE(4, TEXTOID, partitionValue, partitionValue == NULL);
+
+		bool		readOnly = false;
+
+		SPI_EXECUTE(query, readOnly);
+	}
+
+	SPI_END();
 }
