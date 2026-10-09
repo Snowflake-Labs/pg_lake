@@ -46,6 +46,16 @@ PG_MAJOR_VERSION := $(shell $(PG_CONFIG) --version | cut -f2 -d' ' | cut -f 1 -d
 # Detect operating system
 UNAME_S := $(shell uname -s)
 
+# Number of cores for building dependencies (e.g. DuckDB)
+ifeq ($(UNAME_S),Linux)
+  NCORES ?= $(shell nproc 2>/dev/null || echo 4)
+else ifeq ($(UNAME_S),Darwin)
+  NCORES ?= $(shell sysctl -n hw.ncpu 2>/dev/null || echo 4)
+else
+  NCORES ?= 4
+endif
+export NCORES
+
 # List of targets for indent checks
 INDENT_TARGETS = pgduck_server $(EXTENSION_TARGETS)
 
