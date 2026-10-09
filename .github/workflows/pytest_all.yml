@@ -160,6 +160,7 @@ jobs:
           - 'check-pg_lake'
           - 'check-pg_lake_benchmark'
           - 'check-pg_extension_base'
+          - 'check-pg_job_scheduler'
           - 'check-pg_map'
 
     steps:
@@ -228,6 +229,7 @@ jobs:
           - 'installcheck-pg_lake'
           - 'installcheck-pg_lake_benchmark'
           - 'installcheck-pg_extension_base'
+          - 'installcheck-pg_job_scheduler'
           - 'installcheck-pg_map'
 
     steps:
