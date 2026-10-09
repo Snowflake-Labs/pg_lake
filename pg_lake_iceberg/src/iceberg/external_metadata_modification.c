@@ -23,11 +23,8 @@
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
 #include "commands/dbcommands.h"
-#include "commands/extension.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
-#include "nodes/makefuncs.h"
-#include "parser/parse_func.h"
 #include "utils/builtins.h"
 #include "utils/elog.h"
 #include "utils/rel.h"
@@ -36,7 +33,6 @@
 
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
-#include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_extension_base/spi_helpers.h"
 
 PG_FUNCTION_INFO_V1(external_catalog_modification);
@@ -249,43 +245,12 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 						   prevMetadataLocation,
 						   currentMetadataLocation ? currentMetadataLocation : "(null)")));
 
-	/* update the internal catalog with the new metadata location */
+	/*
+	 * Update the internal catalog with the new metadata location. If
+	 * pg_lake_table is installed, its AFTER UPDATE trigger on tables_internal
+	 * fires automatically and syncs the pg_lake catalog (data files, schema,
+	 * partition specs) from the new metadata.
+	 */
 	UpdateInternalCatalogMetadataLocation(relationId, metadataLocation,
 										  prevMetadataLocation);
-
-	/*
-	 * If pg_lake_table is installed, trigger a sync of the internal catalog
-	 * (data files, schema, partition specs) from the new metadata.
-	 */
-	Oid			pgLakeTableExtOid = get_extension_oid(PG_LAKE_TABLE, true);
-
-	if (OidIsValid(pgLakeTableExtOid))
-	{
-		Oid			savedUserId = InvalidOid;
-		int			savedSecurityContext = 0;
-
-		GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-		SetUserIdAndSecContext(ExtensionOwnerId(PgLakeIceberg),
-							   SECURITY_LOCAL_USERID_CHANGE);
-
-		/*
-		 * Use OidFunctionCall1 to call the sync function. This is safe
-		 * because OidFunctionCall doesn't use SPI - it calls the function
-		 * directly via the function manager. The sync function itself uses
-		 * SPI internally, but that's fine since we're not in an SPI context
-		 * here.
-		 */
-		Oid			argTypes[1] = {REGCLASSOID};
-		Oid			syncFuncOid = LookupFuncName(
-												 list_make2(makeString("lake_table"),
-															makeString("sync_iceberg_metadata_from_external_write")),
-												 1, argTypes, true);
-
-		if (OidIsValid(syncFuncOid))
-		{
-			OidFunctionCall1(syncFuncOid, ObjectIdGetDatum(relationId));
-		}
-
-		SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-	}
 }
