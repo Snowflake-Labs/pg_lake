@@ -33,8 +33,12 @@
 
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
+#include "pg_extension_base/spi_helpers.h"
 
 PG_FUNCTION_INFO_V1(external_catalog_modification);
+
+static void HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
+										char *metadataLocation, char *prevMetadataLocation);
 
 
 /*
@@ -106,38 +110,147 @@ external_catalog_modification(PG_FUNCTION_ARGS)
 		prevMetadataLocationIsNull ? NULL : TextDatumGetCString(prevMetadataLocationDatum);
 
 	char	   *databaseName = get_database_name(MyDatabaseId);
+	bool		isInternalCatalog = (strcmp(catalogName, databaseName) == 0);
 
-	if (strcmp(catalogName, databaseName) == 0)
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("writes to the %s catalog are currently only supported via pg_lake_iceberg tables",
-						databaseName)));
-	}
-
-	/*
-	 * Postgres only allows INSTEAD OF triggers on views. We are using this
-	 * trigger to prevent external tools from modifying the iceberg catalog.
-	 * But given that we use INSTEAD OF trigger on a view, we still need to
-	 * handle the INSERT, UPDATE, DELETE operations on the base table.
-	 */
+	/* For UPDATE, check if catalog_name is being changed */
 	if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
 	{
-		UpdateExternalCatalogMetadataLocation(catalogName, namespaceName, tableName, metadataLocation, prevMetadataLocation);
+		Datum		oldCatalogNameDatum = heap_getattr(trigdata->tg_trigtuple, 1,
+													   trigdata->tg_relation->rd_att, &isnull);
+		char	   *oldCatalogName = TextDatumGetCString(oldCatalogNameDatum);
+		bool		wasInternalCatalog = (strcmp(oldCatalogName, databaseName) == 0);
+
+		if (isInternalCatalog != wasInternalCatalog)
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("modifying the internal catalog is currently only supported via pg_lake_iceberg tables")));
+		}
 	}
-	else if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+
+	if (isInternalCatalog)
 	{
-		InsertExternalIcebergCatalogTable(catalogName, namespaceName, tableName, metadataLocation);
-	}
-	else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
-	{
-		DeleteExternalIcebergCatalogTable(catalogName, namespaceName, tableName);
+		/*
+		 * For the current database catalog, only UPDATE is supported. This
+		 * allows external Iceberg clients to write new metadata and then
+		 * update the metadata_location, triggering a sync of the internal
+		 * pg_lake catalog state.
+		 */
+		if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		{
+			HandleInternalCatalogUpdate(namespaceName, tableName,
+										metadataLocation, prevMetadataLocation);
+		}
+		else if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("modifying the internal catalog is currently only supported via pg_lake_iceberg tables")));
+		}
+		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+		{
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("modifying the internal catalog is currently only supported via pg_lake_iceberg tables")));
+		}
+		else
+		{
+			pg_unreachable();
+		}
 	}
 	else
 	{
-		/* no other command is supported on view triggers */
-		pg_unreachable();
+		/*
+		 * Postgres only allows INSTEAD OF triggers on views. We are using
+		 * this trigger to prevent external tools from modifying the iceberg
+		 * catalog. But given that we use INSTEAD OF trigger on a view, we
+		 * still need to handle the INSERT, UPDATE, DELETE operations on the
+		 * base table.
+		 */
+		if (TRIGGER_FIRED_BY_UPDATE(trigdata->tg_event))
+		{
+			UpdateExternalCatalogMetadataLocation(catalogName, namespaceName, tableName, metadataLocation, prevMetadataLocation);
+		}
+		else if (TRIGGER_FIRED_BY_INSERT(trigdata->tg_event))
+		{
+			InsertExternalIcebergCatalogTable(catalogName, namespaceName, tableName, metadataLocation);
+		}
+		else if (TRIGGER_FIRED_BY_DELETE(trigdata->tg_event))
+		{
+			DeleteExternalIcebergCatalogTable(catalogName, namespaceName, tableName);
+		}
+		else
+		{
+			/* no other command is supported on view triggers */
+			pg_unreachable();
+		}
 	}
 
 	return PointerGetDatum(rettuple);
+}
+
+
+/*
+ * HandleInternalCatalogUpdate handles UPDATE to the iceberg_tables view
+ * for tables that belong to the current database catalog (i.e., internal
+ * pg_lake iceberg tables).
+ *
+ * This allows external Iceberg clients (Spark, PyIceberg) to:
+ * 1. Write new data/metadata files to object storage
+ * 2. UPDATE iceberg_tables SET metadata_location = <new>, previous_metadata_location = <old>
+ *
+ * The function validates optimistic concurrency via previous_metadata_location,
+ * updates the internal catalog, and triggers a sync of the pg_lake catalog
+ * state (data files, schema, partition specs) from the new metadata.
+ */
+static void
+HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
+							char *metadataLocation, char *prevMetadataLocation)
+{
+	if (metadataLocation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("metadata_location cannot be NULL")));
+
+	if (prevMetadataLocation == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+				 errmsg("previous_metadata_location is required for optimistic concurrency control")));
+
+	/* resolve namespace + table name to a relation OID */
+	bool		missingOk = false;
+	Oid			namespaceOid = get_namespace_oid(namespaceName, missingOk);
+	Oid			relationId = get_relname_relid(tableName, namespaceOid);
+
+	if (!OidIsValid(relationId))
+		ereport(ERROR,
+				(errcode(ERRCODE_UNDEFINED_TABLE),
+				 errmsg("table \"%s.%s\" does not exist",
+						namespaceName, tableName)));
+
+	/*
+	 * Lock the row and get the current metadata_location for optimistic
+	 * concurrency validation.
+	 */
+	bool		forUpdate = true;
+	char	   *currentMetadataLocation =
+		GetIcebergMetadataLocation(relationId, forUpdate);
+
+	if (currentMetadataLocation == NULL ||
+		strcmp(currentMetadataLocation, prevMetadataLocation) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_T_R_SERIALIZATION_FAILURE),
+				 errmsg("metadata_location has been modified concurrently"),
+				 errdetail("Expected previous_metadata_location \"%s\" but found \"%s\".",
+						   prevMetadataLocation,
+						   currentMetadataLocation ? currentMetadataLocation : "(null)")));
+
+	/*
+	 * Update the internal catalog with the new metadata location. If
+	 * pg_lake_table is installed, its AFTER UPDATE trigger on tables_internal
+	 * fires automatically and syncs the pg_lake catalog (data files, schema,
+	 * partition specs) from the new metadata.
+	 */
+	UpdateInternalCatalogMetadataLocation(relationId, metadataLocation,
+										  prevMetadataLocation);
 }

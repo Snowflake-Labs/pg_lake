@@ -24,3 +24,4 @@ ALTER TABLE lake_table.data_file_column_stats SET (
     autovacuum_analyze_scale_factor = 0.05,
     autovacuum_analyze_threshold    = 500
 );
+

@@ -130,6 +130,7 @@ static bool DisallowedForWritableRestSetSchema(Node *arg, Oid relationId);
 
 PgLakeAlterTableHookType PgLakeAlterTableHook = NULL;
 PgLakeAlterTableRenameColumnHookType PgLakeAlterTableRenameColumnHook = NULL;
+bool		SkipIcebergDDLProcessing = false;
 
 /*
  * Below is the support matrix for ALTER TABLE commands, which pg_lake
@@ -348,6 +349,14 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	 * so PgLakeCommonProcessUtility would recurse back into this function.
 	 */
 	PgLakeCommonParentProcessUtility(processUtilityParams);
+
+	/*
+	 * When syncing from externally-written Iceberg metadata, we only need the
+	 * ALTER TABLE to modify pg_attribute.  Skip field_id registration and
+	 * metadata tracking so we don't conflict with the external metadata.
+	 */
+	if (SkipIcebergDDLProcessing)
+		return true;
 
 	List	   *schemaDDLOperations = NIL;
 
@@ -814,6 +823,14 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 		!(renameStmt->renameType == OBJECT_TABLE ||
 		  renameStmt->renameType == OBJECT_FOREIGN_TABLE))
 	{
+		/*
+		 * When syncing from externally-written Iceberg metadata, the rename
+		 * is already reflected in the new metadata file; skip our own DDL
+		 * tracking and metadata write.
+		 */
+		if (SkipIcebergDDLProcessing)
+			return;
+
 		/* schema has changed, update the metadata */
 		IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
 
