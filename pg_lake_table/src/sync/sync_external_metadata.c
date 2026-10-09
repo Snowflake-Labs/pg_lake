@@ -21,11 +21,10 @@
  * Syncs the internal pg_lake catalog state (schema, partition specs, data files)
  * from new Iceberg metadata written by an external client.
  *
- * Called via:
- *   SELECT lake_table.sync_iceberg_metadata_from_external_write(regclass)
- *
- * This is triggered by an UPDATE to the iceberg_tables view for tables in the
- * current database catalog.
+ * Installed as an AFTER UPDATE trigger on lake_iceberg.tables_internal by
+ * the pg_lake_table extension. Fires on every update to the catalog row, but
+ * skips the sync when the current transaction has tracked iceberg metadata
+ * operations (i.e. a normal pg_lake commit is in progress).
  */
 
 #include "postgres.h"
@@ -35,6 +34,7 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "catalog/namespace.h"
+#include "commands/trigger.h"
 #include "executor/spi.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
@@ -42,6 +42,7 @@
 #include "utils/snapmgr.h"
 
 #include "pg_lake/cleanup/deletion_queue.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/ddl/alter_table.h"
@@ -100,10 +101,44 @@ static void InsertDataFilePartitionValues(Oid relationId, int32 partitionSpecId,
  * 3. Data file full resync: clear and repopulate lake_table.files and
  *    associated stats/partition values from the metadata snapshot.
  */
+/*
+ * sync_iceberg_metadata_from_external_write is an AFTER UPDATE trigger on
+ * lake_iceberg.tables_internal that syncs the pg_lake catalog state when
+ * an external Iceberg client (Spark, PyIceberg) updates the metadata.
+ *
+ * Normal pg_lake commits also update tables_internal, so we skip the sync
+ * when the current transaction has tracked iceberg metadata operations
+ * (meaning pg_lake's DML path is handling the catalog itself).
+ */
 Datum
 sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 {
-	Oid			relationId = PG_GETARG_OID(0);
+	TriggerData *trigdata = (TriggerData *) fcinfo->context;
+
+	if (!CALLED_AS_TRIGGER(fcinfo))
+		elog(ERROR, "sync_iceberg_metadata_from_external_write: not called as trigger");
+
+	HeapTuple	rettuple = trigdata->tg_newtuple;
+
+	/*
+	 * Normal pg_lake commits (INSERT/DELETE/ALTER on the iceberg table) also
+	 * update tables_internal.metadata_location. Those transactions have
+	 * tracked metadata operations and handle the catalog themselves. Only run
+	 * the sync for external writes, which have no tracked operations.
+	 */
+	if (HasAnyTrackedIcebergMetadataChanges())
+		return PointerGetDatum(rettuple);
+
+	/* extract the table OID from the trigger tuple (table_name column) */
+	bool		isNull = false;
+	Datum		tableNameDatum = heap_getattr(trigdata->tg_newtuple, 1,
+											  trigdata->tg_relation->rd_att,
+											  &isNull);
+
+	if (isNull)
+		return PointerGetDatum(rettuple);
+
+	Oid			relationId = DatumGetObjectId(tableNameDatum);
 
 	/* read the new metadata from object storage */
 	bool		forUpdate = false;
@@ -117,10 +152,6 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 	 * field_id_mappings ourselves and the metadata is already final on disk,
 	 * so we don't want the hooks to register duplicate mappings or schedule a
 	 * metadata write.
-	 *
-	 * This is the only intended caller of SkipIcebergDDLProcessing. The flag
-	 * is process-global; we restore it in PG_FINALLY to avoid leaking state
-	 * if the sync errors out partway through.
 	 */
 	SkipIcebergDDLProcessing = true;
 
@@ -136,7 +167,7 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 	}
 	PG_END_TRY();
 
-	PG_RETURN_VOID();
+	return PointerGetDatum(rettuple);
 }
 
 
