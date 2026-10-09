@@ -144,7 +144,7 @@ static TupleDesc RemoveSkippedColumnsFromTupleDesc(TupleDesc tupleDesc);
 static void VerifyNoDuplicateNames(TupleDesc tupleDesc);
 static int	CopyReceivedTransmitDataToBuffer(void *outbuf, int minread, int maxread);
 static bool ReceiveCopyData(PGDuckConnection * pgDuckConn, StringInfo buffer);
-static bool CanUseBinaryTransmit(PGDuckConnection * pgDuckConn);
+static bool CanUseBinaryTransmit(void);
 static List *TransmitFormatOptions(bool isBinaryTransmit);
 static char *AddBinaryTransmitTypes(char *transmitQuery, TupleDesc tupleDesc);
 
@@ -670,7 +670,7 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 * query whether all columns can be sent in binary, and otherwise falls
 	 * back to CSV, so we check the format of the response below.
 	 */
-	if (CanUseBinaryTransmit(pgDuckConn))
+	if (CanUseBinaryTransmit())
 		readQuery = AddBinaryTransmitTypes(readQuery, tupleDesc);
 
 	/* start the transmit command */
@@ -1767,7 +1767,7 @@ ReceiveCopyData(PGDuckConnection * pgDuckConnection, StringInfo buffer)
  * in the binary COPY format.
  */
 static bool
-CanUseBinaryTransmit(PGDuckConnection * pgDuckConn)
+CanUseBinaryTransmit(void)
 {
 	if (!EnableBinaryTransmit)
 		return false;
@@ -1777,14 +1777,7 @@ CanUseBinaryTransmit(PGDuckConnection * pgDuckConn)
 	 * COPY's ENCODING option, but binary receive functions like textrecv
 	 * convert from the client encoding, so we require both to be UTF-8.
 	 */
-	if (GetDatabaseEncoding() != PG_UTF8 || pg_get_client_encoding() != PG_UTF8)
-		return false;
-
-	/* older pgduck_server versions do not understand TRANSMIT BINARY */
-	const char *transmitBinary = PQparameterStatus(pgDuckConn->conn,
-												   "pg_lake_transmit_binary");
-
-	return transmitBinary != NULL && strcmp(transmitBinary, "on") == 0;
+	return GetDatabaseEncoding() == PG_UTF8 && pg_get_client_encoding() == PG_UTF8;
 }
 
 

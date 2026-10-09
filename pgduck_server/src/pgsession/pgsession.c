@@ -121,8 +121,6 @@ static int	process_execute_message(PGSession * pgSession, StringInfo inputMessag
 static bool is_transmit_query(const char *queryString);
 static const char *parse_transmit_prefix(const char *queryString,
 										 ResponseFormat * responseFormat);
-static int	pgsession_send_parameter_status(PGSession * pgSession, const char *name,
-											const char *value);
 
 /* global flag on whether to exit on OOM */
 int			oom_is_fatal = true;
@@ -182,9 +180,6 @@ pgsession_handle_connection(void *input)
 	check(pgsession_send_cancellation_key(&pgSession, pgClient->cancellationProcId, pgClient->cancellationToken), pgSession, "failed to send cancellation key");
 #endif
 	check(pgsession_send_server_version(&pgSession, DUCKPG_SERVER_VERSION), pgSession, "failed to send server version");
-
-	/* advertise support for TRANSMIT BINARY to pg_lake */
-	check(pgsession_send_parameter_status(&pgSession, "pg_lake_transmit_binary", "on"), pgSession, "failed to send pg_lake_transmit_binary");
 
 	/* todo: should be configurable via CLI/configuration file */
 	check(pgsession_send_client_encoding(&pgSession, "UTF8"), pgSession, "failed to send server version");
@@ -1100,28 +1095,6 @@ pgsession_send_cancellation_key(PGSession * pgSession, int cancellationProcId, i
 	return OK;
 }
 #endif
-
-
-/*
- * pgsession_send_parameter_status sends a ParameterStatus message.
- */
-static int
-pgsession_send_parameter_status(PGSession * pgSession, const char *name,
-								const char *value)
-{
-	StringInfoData buf;
-
-	pq_beginmessage(&buf, 'S');
-	pq_sendstring(&buf, name);
-	pq_sendstring(&buf, value);
-
-	if (!IsOK(pq_endmessage(pgSession, &buf)))
-	{
-		return EOF;
-	}
-
-	return OK;
-}
 
 
 /*
