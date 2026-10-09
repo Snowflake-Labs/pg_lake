@@ -254,3 +254,4 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 	UpdateInternalCatalogMetadataLocation(relationId, metadataLocation,
 										  prevMetadataLocation);
 }
+
