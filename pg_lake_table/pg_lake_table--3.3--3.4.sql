@@ -25,9 +25,3 @@ ALTER TABLE lake_table.data_file_column_stats SET (
     autovacuum_analyze_threshold    = 500
 );
 
--- Sync function for external writes to Iceberg tables.
--- Called by the iceberg_tables INSTEAD OF trigger when an external client
--- updates metadata_location for a table in the current database catalog.
-CREATE FUNCTION lake_table.sync_iceberg_metadata_from_external_write(regclass)
-    RETURNS void AS 'MODULE_PATHNAME', 'sync_iceberg_metadata_from_external_write'
-    LANGUAGE C STRICT;
