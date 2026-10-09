@@ -72,7 +72,7 @@ typedef struct FieldMapping
 {
 	int			fieldId;
 	AttrNumber	attnum;
-} FieldMapping;
+}			FieldMapping;
 
 static List *FetchExistingFieldMappings(Oid relationId);
 static void ExecuteAlterTableViaSPI(const char *cmd);
@@ -80,7 +80,7 @@ static void SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata 
 static void SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 									  const char *metadataLocation);
 static char *ColumnBoundBinaryToText(ColumnBound * bound,
-				   Field * icebergType, PGType pgType);
+									 Field * icebergType, PGType pgType);
 static List *BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
 											  IcebergTableSchema * schema);
 static void InsertDataFileColumnStats(Oid relationId, const char *path,
@@ -158,8 +158,8 @@ FetchExistingFieldMappings(Oid relationId)
 	bool		readOnly = true;
 
 	SPI_EXECUTE("SELECT field_id, pg_attnum FROM " MAPPING_TABLE_NAME
-		  " WHERE table_name OPERATOR(pg_catalog.=) $1"
-		  " AND parent_field_id IS NULL", readOnly);
+				" WHERE table_name OPERATOR(pg_catalog.=) $1"
+				" AND parent_field_id IS NULL", readOnly);
 
 	if (SPI_processed > 0)
 	{
@@ -344,7 +344,7 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 		RegisterIcebergColumnMapping(relationId, icebergField->type,
 									 newAttNum, parentFieldId, pgType,
 									 fieldId, writeDefault, initialDefault,
-									   NIL);
+									 NIL);
 	}
 
 	/*
@@ -484,9 +484,9 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 
 	/*
 	 * Copy the paths into the current memory context. The TableDataFile
-	 * structs returned by GetTableDataFilesFromCatalog point into SPI
-	 * memory that gets freed when a later SPI_connect/SPI_finish cycle
-	 * runs (e.g. RemoveAllDataFilesFromPgLakeCatalogFromTable below).
+	 * structs returned by GetTableDataFilesFromCatalog point into SPI memory
+	 * that gets freed when a later SPI_connect/SPI_finish cycle runs (e.g.
+	 * RemoveAllDataFilesFromPgLakeCatalogFromTable below).
 	 */
 	List	   *oldFilePaths = NIL;
 	ListCell   *cfCell = NULL;
@@ -582,8 +582,8 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 
 					if (columnStatsList != NIL)
 						InsertDataFileColumnStats(relationId,
-													  dataFile->file_path,
-													  columnStatsList);
+												  dataFile->file_path,
+												  columnStatsList);
 				}
 
 				if (dataFile->partition.fields_length > 0 &&
@@ -591,9 +591,9 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 					 content == CONTENT_POSITION_DELETES))
 				{
 					InsertDataFilePartitionValues(relationId,
-														  manifest->partition_spec_id,
-														  fileId,
-														  &dataFile->partition);
+												  manifest->partition_spec_id,
+												  fileId,
+												  &dataFile->partition);
 				}
 			}
 		}
@@ -672,14 +672,14 @@ BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
 		PGType		pgType = IcebergFieldToPostgresType(icebergField->type);
 
 		char	   *lowerBoundText = ColumnBoundBinaryToText(lowerBound,
-													   icebergField->type,
-													   pgType);
+															 icebergField->type,
+															 pgType);
 		char	   *upperBoundText = NULL;
 
 		if (upperBound != NULL)
 			upperBoundText = ColumnBoundBinaryToText(upperBound,
-														 icebergField->type,
-														 pgType);
+													 icebergField->type,
+													 pgType);
 
 		if (lowerBoundText == NULL)
 			continue;
@@ -720,9 +720,9 @@ ColumnBoundBinaryToText(ColumnBound * bound, Field * icebergType, PGType pgType)
 		return NULL;
 
 	Datum		boundDatum = PGIcebergBinaryDeserialize(bound->value,
-											bound->value_length,
-											icebergType,
-											pgType);
+														bound->value_length,
+														icebergType,
+														pgType);
 
 	Oid			typoutput;
 	bool		typIsVarlena;
@@ -778,7 +778,7 @@ InsertDataFileColumnStats(Oid relationId, const char *path, List *columnStatsLis
  */
 static void
 InsertDataFilePartitionValues(Oid relationId, int32 partitionSpecId, int64 fileId,
-												  Partition * partition)
+							  Partition * partition)
 {
 	Assert(partition != NULL);
 	Assert(partition->fields_length > 0);

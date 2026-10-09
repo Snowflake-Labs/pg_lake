@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 import pyarrow as pa
 from pyiceberg.catalog.sql import SqlCatalog
@@ -336,6 +338,198 @@ def test_external_write_null_previous_metadata_location(
 
     assert error_raised
 
+    pg_conn.rollback()
+
+
+def test_concurrent_external_writes_second_writer_fails(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Two external writes to the same table. The second sees a stale
+    previous_metadata_location and gets a serialization error.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_race"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{TABLE_NAME}_race")
+
+    # capture the current metadata_location before any external write
+    stale_prev = run_query(
+        f"""
+        SELECT metadata_location FROM iceberg_tables
+        WHERE table_namespace = '{TABLE_NAMESPACE}'
+          AND table_name = '{TABLE_NAME}_race'
+        """,
+        pg_conn,
+    )[0][0]
+    pg_conn.rollback()
+
+    # first external write succeeds (advances metadata_location)
+    data1 = pa.table(
+        {"a": [10]},
+        schema=pa.schema([pa.field("a", pa.int32())]),
+    )
+    pyiceberg_table.append(data1)
+
+    # second writer uses stale previous_metadata_location — should fail
+    ext_conn = open_pg_conn(server_params.PG_USER)
+    ext_conn.set_isolation_level(0)
+
+    run_command(
+        f"""
+        GRANT SELECT ON lake_iceberg.tables_internal TO {server_params.PG_USER};
+        GRANT UPDATE ON pg_catalog.iceberg_tables TO {server_params.PG_USER};
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    error_raised = False
+    try:
+        run_command(
+            f"""
+            UPDATE iceberg_tables
+            SET metadata_location = 's3://fake/stale-write.metadata.json',
+                previous_metadata_location = '{stale_prev}'
+            WHERE table_namespace = '{TABLE_NAMESPACE}'
+              AND table_name = '{TABLE_NAME}_race'
+            """,
+            ext_conn,
+        )
+    except Exception as e:
+        error_raised = True
+        assert "metadata_location has been modified concurrently" in str(e)
+        ext_conn.rollback()
+
+    assert error_raised
+    ext_conn.close()
+    pg_conn.rollback()
+
+
+def test_concurrent_pglake_insert_blocks_external_write(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_access,
+):
+    """
+    A pg_lake INSERT holds the catalog row lock from DML time through
+    commit. An external write UPDATE blocks until the INSERT commits,
+    then fails because the metadata changed.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_lock"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    pg_conn.commit()
+
+    prev_meta = run_query(
+        f"""
+        SELECT metadata_location FROM iceberg_tables
+        WHERE table_namespace = '{TABLE_NAMESPACE}'
+          AND table_name = '{TABLE_NAME}_lock'
+        """,
+        pg_conn,
+    )[0][0]
+    pg_conn.rollback()
+
+    # session 1: begin a pg_lake INSERT (acquires catalog row lock)
+    run_command("BEGIN", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (42)", pg_conn)
+
+    # session 2: try an external write UPDATE — should block then fail
+    ext_conn = open_pg_conn(server_params.PG_USER)
+    ext_conn.set_isolation_level(0)
+    run_command("SET statement_timeout = '3s'", ext_conn)
+
+    error_raised = False
+    try:
+        run_command(
+            f"""
+            UPDATE iceberg_tables
+            SET metadata_location = 's3://fake/blocked.metadata.json',
+                previous_metadata_location = '{prev_meta}'
+            WHERE table_namespace = '{TABLE_NAMESPACE}'
+              AND table_name = '{TABLE_NAME}_lock'
+            """,
+            ext_conn,
+        )
+    except Exception as e:
+        error_raised = True
+        # either statement_timeout (blocked on lock) or serialization failure
+        assert "timeout" in str(e).lower() or "concurrently" in str(e).lower()
+        ext_conn.rollback()
+
+    assert error_raised
+
+    pg_conn.commit()
+
+    result = run_query(f"SELECT a FROM {tbl}", pg_conn)
+    assert result == [[42]]
+
+    ext_conn.close()
+    pg_conn.rollback()
+
+
+def test_concurrent_read_during_external_write_sees_consistent_data(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    A SELECT under REPEATABLE READ during an external write sync sees
+    either all old data or all new data, never a partial state from the
+    delete-then-reinsert cycle in SyncDataFilesFromMetadata.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_read_consistency"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(
+        f"INSERT INTO {tbl} SELECT i FROM generate_series(1,100) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # reader holds a REPEATABLE READ snapshot
+    reader_conn = open_pg_conn(server_params.PG_USER)
+    reader_conn.set_isolation_level(2)  # REPEATABLE READ
+    run_command("BEGIN", reader_conn)
+    count_before = run_query(f"SELECT count(*) FROM {tbl}", reader_conn)[0][0]
+    assert count_before == 100
+
+    # external write appends rows (sync clears and repopulates catalog)
+    pyiceberg_table = iceberg_catalog.load_table(
+        f"{TABLE_NAMESPACE}.{TABLE_NAME}_read_consistency"
+    )
+    new_data = pa.table(
+        {"a": list(range(101, 151))},
+        schema=pa.schema([pa.field("a", pa.int32())]),
+    )
+    pyiceberg_table.append(new_data)
+
+    # reader still sees old count (MVCC snapshot isolation)
+    count_during = run_query(f"SELECT count(*) FROM {tbl}", reader_conn)[0][0]
+    assert count_during == 100
+
+    reader_conn.commit()
+
+    # new read sees all 150 rows
+    count_after = run_query(f"SELECT count(*) FROM {tbl}", pg_conn)[0][0]
+    assert count_after == 150
+
+    reader_conn.close()
     pg_conn.rollback()
 
 
