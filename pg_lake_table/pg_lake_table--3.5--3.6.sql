@@ -37,3 +37,11 @@ AS 'MODULE_PATHNAME', 'pg_lake_catalog_export_worker'
 LANGUAGE C STRICT;
 
 SELECT extension_base.register_worker('pg_lake catalog export worker', 'lake_iceberg.catalog_export');
+
+
+-- Sync function for external writes to Iceberg tables.
+-- Called by the iceberg_tables INSTEAD OF trigger when an external client
+-- updates metadata_location for a table in the current database catalog.
+CREATE FUNCTION lake_table.sync_iceberg_metadata_from_external_write(regclass)
+    RETURNS void AS 'MODULE_PATHNAME', 'sync_iceberg_metadata_from_external_write'
+    LANGUAGE C STRICT;
