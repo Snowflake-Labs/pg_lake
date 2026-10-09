@@ -730,25 +730,25 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 	InodeBudget inodes =
 		GetInodeBudget(context, file_system, cacheDir, cacheFiles);
 
-  bool inodePressure = inodes.Deficit() > 0;
+	bool inodePressure = inodes.Deficit() > 0;
 
-  /*
-   * Once triggered, evict toward purgeTarget rather than floor: cache-on-write
-   * has no reservation in this budget, so an eviction that stops exactly at
-   * floor is back under pressure as soon as writes between this round and the
-   * next outpace what aged out. Sizing the eviction to purgeTarget instead
-   * buys headroom for however many rounds it takes writes to eat through it.
-   *
-   * The cache normally shares a file system with other things, so the inodes
-   * can also run out for reasons that have nothing to do with us. Evicting
-   * the whole cache does not help then: it throws away a cache we can still
-   * read from and leaves us just as far below the floor. So we only evict for
-   * inodes when our own cache files can close the gap, and otherwise leave
-   * the cache alone and stop adding to it.
-   */
-  int64_t inodesNeeded = inodes.PurgeDeficit();
-  bool canRelieveInodePressure =
-    inodePressure && inodes.evictableFiles >= inodesNeeded;
+	/*
+	 * Once triggered, evict toward purgeTarget rather than floor: cache-on-write
+	 * has no reservation in this budget, so an eviction that stops exactly at
+	 * floor is back under pressure as soon as writes between this round and the
+	 * next outpace what aged out. Sizing the eviction to purgeTarget instead
+	 * buys headroom for however many rounds it takes writes to eat through it.
+	 *
+	 * The cache normally shares a file system with other things, so the inodes
+	 * can also run out for reasons that have nothing to do with us. Evicting
+	 * the whole cache does not help then: it throws away a cache we can still
+	 * read from and leaves us just as far below the floor. So we only evict for
+	 * inodes when our own cache files can close the gap, and otherwise leave
+	 * the cache alone and stop adding to it.
+	 */
+	int64_t inodesNeeded = inodes.PurgeDeficit();
+	bool canRelieveInodePressure =
+		inodePressure && inodes.evictableFiles >= inodesNeeded;
 	bool skipDownloads = inodePressure && !canRelieveInodePressure;
 
 	if (skipDownloads)
@@ -771,21 +771,21 @@ FileCacheManager::ManageCache(ClientContext &context, int64_t maxCacheSize)
 	{
 		bool needBytes = totalCacheSize + queueSize >= maxCacheSize;
 
-    /*
-     * How many inodes we still have to free, derived from the queue the way
-     * needBytes is, so that a candidate we skip below also releases the
-     * inode it reserved. Sized against purgeTarget, not floor, for the same
-     * reason inodesNeeded above is: we are evicting for headroom, not just
-     * to clear the immediate deficit.
-     *
-     * We also keep applying the check we did before the loop, now against
-     * what we have actually freed and what is left to evict, because an
-     * eviction that loses the race for the cache file lock frees no inode: a
-     * round that can no longer reach the target stops rather than emptying
-     * the cache on its way there. Pruning directories can free more than we
-     * count here, which only makes us stop a little early.
-     */
-    int64_t inodesStillNeeded = inodes.PurgeDeficit();
+		/*
+		 * How many inodes we still have to free, derived from the queue the way
+		 * needBytes is, so that a candidate we skip below also releases the
+		 * inode it reserved. Sized against purgeTarget, not floor, for the same
+		 * reason inodesNeeded above is: we are evicting for headroom, not just
+		 * to clear the immediate deficit.
+		 *
+		 * We also keep applying the check we did before the loop, now against
+		 * what we have actually freed and what is left to evict, because an
+		 * eviction that loses the race for the cache file lock frees no inode: a
+		 * round that can no longer reach the target stops rather than emptying
+		 * the cache on its way there. Pruning directories can free more than we
+		 * count here, which only makes us stop a little early.
+		 */
+		int64_t inodesStillNeeded = inodes.PurgeDeficit();
 		bool needInodes = canRelieveInodePressure && inodesStillNeeded > 0 &&
 			remainingEvictableFiles >= inodesStillNeeded;
 
