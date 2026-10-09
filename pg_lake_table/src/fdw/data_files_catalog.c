@@ -1046,8 +1046,6 @@ AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileS
 }
 
 
-
-
 /*
  * AddDeletionFileMapping inserts a new deletion file -> source file mapping
  * that indicates the deletion file has at least 1 deletion from the source

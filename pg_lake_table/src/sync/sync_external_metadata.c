@@ -62,19 +62,25 @@
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_extension_base/spi_helpers.h"
+#include "pg_lake/util/path_hash.h"
 #include "utils/hsearch.h"
 
 PG_FUNCTION_INFO_V1(sync_iceberg_metadata_from_external_write);
 
 static void SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
-static void FetchExistingFieldMappings(Oid relationId, int **fieldIds,
-									   int16 **attnums, int *count);
+typedef struct FieldMapping
+{
+	int			fieldId;
+	AttrNumber	attnum;
+} FieldMapping;
+
+static List *FetchExistingFieldMappings(Oid relationId);
 static void ExecuteAlterTableViaSPI(const char *cmd);
 static void SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
 static void SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 									  const char *metadataLocation);
-static char *ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
-									 IcebergTableSchema * schema);
+static char *ColumnBoundBinaryToText(ColumnBound * bound,
+				   Field * icebergType, PGType pgType);
 static List *BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
 											  IcebergTableSchema * schema);
 static void InsertDataFileColumnStats(Oid relationId, const char *path,
@@ -138,11 +144,11 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
  * FetchExistingFieldMappings retrieves all top-level field_id_mappings
  * for the given relation via SPI.
  */
-static void
-FetchExistingFieldMappings(Oid relationId, int **fieldIds,
-						   int16 **attnums, int *count)
+static List *
+FetchExistingFieldMappings(Oid relationId)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
+	List	   *mappings = NIL;
 
 	DECLARE_SPI_ARGS(1);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
@@ -152,32 +158,29 @@ FetchExistingFieldMappings(Oid relationId, int **fieldIds,
 	bool		readOnly = true;
 
 	SPI_EXECUTE("SELECT field_id, pg_attnum FROM " MAPPING_TABLE_NAME
-				" WHERE table_name OPERATOR(pg_catalog.=) $1"
-				" AND parent_field_id IS NULL", readOnly);
+		  " WHERE table_name OPERATOR(pg_catalog.=) $1"
+		  " AND parent_field_id IS NULL", readOnly);
 
-	*count = SPI_processed;
-	*fieldIds = NULL;
-	*attnums = NULL;
-
-	if (*count > 0)
+	if (SPI_processed > 0)
 	{
 		MemoryContext spiContext = MemoryContextSwitchTo(callerContext);
 
-		*fieldIds = palloc(sizeof(int) * *count);
-		*attnums = palloc(sizeof(int16) * *count);
-
-		MemoryContextSwitchTo(spiContext);
-
-		for (int i = 0; i < *count; i++)
+		for (uint64 i = 0; i < SPI_processed; i++)
 		{
 			bool		isNull = false;
+			FieldMapping *mapping = palloc(sizeof(FieldMapping));
 
-			(*fieldIds)[i] = GET_SPI_VALUE(INT4OID, i, 1, &isNull);
-			(*attnums)[i] = GET_SPI_VALUE(INT2OID, i, 2, &isNull);
+			mapping->fieldId = GET_SPI_VALUE(INT4OID, i, 1, &isNull);
+			mapping->attnum = GET_SPI_VALUE(INT2OID, i, 2, &isNull);
+			mappings = lappend(mappings, mapping);
 		}
+
+		MemoryContextSwitchTo(spiContext);
 	}
 
 	SPI_END();
+
+	return mappings;
 }
 
 
@@ -209,13 +212,7 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 {
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
 
-	/* fetch existing field_id_mappings */
-	int		   *existingFieldIds = NULL;
-	int16	   *existingAttnums = NULL;
-	int			existingMappingCount = 0;
-
-	FetchExistingFieldMappings(relationId, &existingFieldIds,
-							   &existingAttnums, &existingMappingCount);
+	List	   *existingMappings = FetchExistingFieldMappings(relationId);
 
 	/* get relation's schema and namespace names for ALTER TABLE */
 	char	   *schemaName = get_namespace_name(get_rel_namespace(relationId));
@@ -233,13 +230,16 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 		/* check if this field_id already has a mapping */
 		bool		found = false;
 		AttrNumber	existingAttnum = InvalidAttrNumber;
+		ListCell   *mappingCell = NULL;
 
-		for (int mappingIdx = 0; mappingIdx < existingMappingCount; mappingIdx++)
+		foreach(mappingCell, existingMappings)
 		{
-			if (existingFieldIds[mappingIdx] == fieldId)
+			FieldMapping *mapping = lfirst(mappingCell);
+
+			if (mapping->fieldId == fieldId)
 			{
 				found = true;
-				existingAttnum = existingAttnums[mappingIdx];
+				existingAttnum = mapping->attnum;
 				break;
 			}
 		}
@@ -352,10 +352,13 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 	 * is not in the current Iceberg schema, drop the column from the foreign
 	 * table.
 	 */
-	for (int mappingIdx = 0; mappingIdx < existingMappingCount; mappingIdx++)
+	ListCell   *dropCell = NULL;
+
+	foreach(dropCell, existingMappings)
 	{
-		int			mappedFieldId = existingFieldIds[mappingIdx];
-		AttrNumber	mappedAttnum = existingAttnums[mappingIdx];
+		FieldMapping *mapping = lfirst(dropCell);
+		int			mappedFieldId = mapping->fieldId;
+		AttrNumber	mappedAttnum = mapping->attnum;
 
 		/* check if this field_id still exists in the Iceberg schema */
 		bool		stillExists = false;
@@ -475,9 +478,25 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 	bool		forUpdate = false;
 	Snapshot	snapshot = GetTransactionSnapshot();
 
-	List	   *oldDataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly,
+	List	   *catalogFiles = GetTableDataFilesFromCatalog(relationId, dataOnly,
 															newFilesOnly, forUpdate,
 															NULL, snapshot);
+
+	/*
+	 * Copy the paths into the current memory context. The TableDataFile
+	 * structs returned by GetTableDataFilesFromCatalog point into SPI
+	 * memory that gets freed when a later SPI_connect/SPI_finish cycle
+	 * runs (e.g. RemoveAllDataFilesFromPgLakeCatalogFromTable below).
+	 */
+	List	   *oldFilePaths = NIL;
+	ListCell   *cfCell = NULL;
+
+	foreach(cfCell, catalogFiles)
+	{
+		TableDataFile *file = lfirst(cfCell);
+
+		oldFilePaths = lappend(oldFilePaths, pstrdup(file->path));
+	}
 
 	/*
 	 * Build the set of files referenced by ANY snapshot in the new metadata.
@@ -487,7 +506,7 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 	 */
 	HTAB	   *referencedFileHash = CreateFilesHash();
 
-	if (oldDataFiles != NIL)
+	if (oldFilePaths != NIL)
 	{
 		List	   *referencedFiles = IcebergFindAllReferencedFiles((char *) metadataLocation);
 		ListCell   *fileCell = NULL;
@@ -585,17 +604,17 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 	 * retained snapshot in the new metadata. Files referenced only by older
 	 * but still-retained snapshots are intentionally left alone.
 	 */
-	ListCell   *oldFileCell = NULL;
+	ListCell   *oldPathCell = NULL;
 
-	foreach(oldFileCell, oldDataFiles)
+	foreach(oldPathCell, oldFilePaths)
 	{
-		TableDataFile *oldFile = lfirst(oldFileCell);
+		char	   *oldPath = lfirst(oldPathCell);
 		bool		found = false;
 
-		hash_search(referencedFileHash, oldFile->path, HASH_FIND, &found);
+		PathHashSearch(referencedFileHash, oldPath, HASH_FIND, &found);
 
 		if (!found)
-			InsertDeletionQueueRecord(oldFile->path, relationId, orphanedAt);
+			InsertDeletionQueueRecord(oldPath, relationId, orphanedAt);
 	}
 }
 
@@ -635,16 +654,7 @@ BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
 			}
 		}
 
-		char	   *lowerBoundText = ColumnBoundBinaryToText(lowerBound, fieldId, schema);
-		char	   *upperBoundText = NULL;
-
-		if (upperBound != NULL)
-			upperBoundText = ColumnBoundBinaryToText(upperBound, fieldId, schema);
-
-		if (lowerBoundText == NULL)
-			continue;
-
-		/* find the iceberg field in the schema to get the PGType */
+		/* find the iceberg field in the schema */
 		DataFileSchemaField *icebergField = NULL;
 
 		for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
@@ -660,6 +670,19 @@ BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
 			continue;
 
 		PGType		pgType = IcebergFieldToPostgresType(icebergField->type);
+
+		char	   *lowerBoundText = ColumnBoundBinaryToText(lowerBound,
+													   icebergField->type,
+													   pgType);
+		char	   *upperBoundText = NULL;
+
+		if (upperBound != NULL)
+			upperBoundText = ColumnBoundBinaryToText(upperBound,
+														 icebergField->type,
+														 pgType);
+
+		if (lowerBoundText == NULL)
+			continue;
 
 		DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
 
@@ -691,44 +714,22 @@ BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
  * deserialization fails.
  */
 static char *
-ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
-						IcebergTableSchema * schema)
+ColumnBoundBinaryToText(ColumnBound * bound, Field * icebergType, PGType pgType)
 {
 	if (bound->value == NULL || bound->value_length == 0)
 		return NULL;
 
-	/* find the Iceberg field in the schema */
-	DataFileSchemaField *icebergField = NULL;
-
-	for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
-	{
-		if (schema->fields[fieldIdx].id == fieldId)
-		{
-			icebergField = &schema->fields[fieldIdx];
-			break;
-		}
-	}
-
-	if (icebergField == NULL)
-		return NULL;
-
-	PGType		pgType = IcebergFieldToPostgresType(icebergField->type);
-
-	/* deserialize from Iceberg binary to Postgres Datum */
 	Datum		boundDatum = PGIcebergBinaryDeserialize(bound->value,
-														bound->value_length,
-														icebergField->type,
-														pgType);
+											bound->value_length,
+											icebergType,
+											pgType);
 
-	/* convert Datum to text representation */
 	Oid			typoutput;
 	bool		typIsVarlena;
 
 	getTypeOutputInfo(pgType.postgresTypeOid, &typoutput, &typIsVarlena);
 
-	char	   *boundText = OidOutputFunctionCall(typoutput, boundDatum);
-
-	return boundText;
+	return OidOutputFunctionCall(typoutput, boundDatum);
 }
 
 /*
@@ -737,6 +738,8 @@ ColumnBoundBinaryToText(ColumnBound * bound, int fieldId,
 static void
 InsertDataFileColumnStats(Oid relationId, const char *path, List *columnStatsList)
 {
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
 	ListCell   *columnStatsCell = NULL;
 
 	foreach(columnStatsCell, columnStatsList)
@@ -761,14 +764,12 @@ InsertDataFileColumnStats(Oid relationId, const char *path, List *columnStatsLis
 		SPI_ARG_VALUE(4, TEXTOID, columnStats->lowerBoundText, columnStats->lowerBoundText == NULL);
 		SPI_ARG_VALUE(5, TEXTOID, columnStats->upperBoundText, columnStats->upperBoundText == NULL);
 
-		SPI_START_EXTENSION_OWNER(PgLakeTable);
-
 		bool		readOnly = false;
 
 		SPI_EXECUTE(query, readOnly);
-
-		SPI_END();
 	}
+
+	SPI_END();
 }
 
 
