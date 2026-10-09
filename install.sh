@@ -17,7 +17,31 @@ fi
 PG_VERSION=18
 INSTALL_PREFIX="$HOME/pgsql"
 PGLAKE_DEPS_DIR="$HOME/pg_lake-deps"
-JOBS=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+CPU_CORES=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)
+
+# Detect total system memory in GB (DuckDB linking requires ~2-3 GB RAM per parallel job)
+TOTAL_MEM_GB=0
+if [[ -f /proc/meminfo ]]; then
+    TOTAL_MEM_KB=$(awk '/MemTotal/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
+    TOTAL_MEM_GB=$((TOTAL_MEM_KB / 1024 / 1024))
+elif command -v sysctl &>/dev/null; then
+    MEM_BYTES=$(sysctl -n hw.memsize 2>/dev/null || echo 0)
+    TOTAL_MEM_GB=$((MEM_BYTES / 1024 / 1024 / 1024))
+fi
+
+if [[ $TOTAL_MEM_GB -gt 0 ]]; then
+    MEM_JOBS=$((TOTAL_MEM_GB / 3))
+    [[ $MEM_JOBS -lt 1 ]] && MEM_JOBS=1
+    if [[ $MEM_JOBS -lt $CPU_CORES ]]; then
+        DEFAULT_JOBS=$MEM_JOBS
+    else
+        DEFAULT_JOBS=$CPU_CORES
+    fi
+else
+    DEFAULT_JOBS=$CPU_CORES
+fi
+
+JOBS=$DEFAULT_JOBS
 VCPKG_VERSION=2025.10.17
 
 # Feature flags (defaults optimized for adding pg_lake to existing PostgreSQL)
@@ -66,7 +90,7 @@ OPTIONS:
     --pg-version VERSION        PostgreSQL version to build (16, 17, 18, or 19) [default: 18]
     --prefix DIR                PostgreSQL installation prefix [default: auto-detect or \$HOME/pgsql]
     --deps-dir DIR              Directory for dependencies [default: \$HOME/pg_lake-deps]
-    --jobs N                    Number of parallel build jobs [default: nproc]
+    -j, --jobs N                Number of parallel build jobs [default: auto based on CPUs and RAM]
 
     --with-system-deps          Install system build dependencies (auto-enabled with --build-postgres)
     --skip-vcpkg                Skip vcpkg and Azure SDK installation
@@ -111,7 +135,7 @@ while [[ $# -gt 0 ]]; do
             PGLAKE_DEPS_DIR="$2"
             shift 2
             ;;
-        --jobs)
+        -j|--jobs)
             JOBS="$2"
             shift 2
             ;;
@@ -267,6 +291,8 @@ install_system_deps() {
                 git \
                 pkg-config \
                 python3-dev \
+                libkrb5-dev \
+                libnuma-dev \
                 pipenv \
                 zip \
                 unzip \
@@ -313,7 +339,9 @@ install_system_deps() {
                 git \
                 pkgconfig \
                 python3-devel \
-                gmp-devel
+                gmp-devel \
+                krb5-devel \
+                numactl-devel
             ;;
         macos)
             # Check for Xcode command line tools
@@ -544,7 +572,8 @@ install_pg_lake() {
 
     print_info "Building pg_lake from repository at: $PG_LAKE_REPO_DIR"
     cd "$PG_LAKE_REPO_DIR"
-    make install-fast
+    export NCORES="$JOBS"
+    make install-fast NCORES="$JOBS"
 
     print_info "pg_lake extensions installed successfully"
 }
@@ -908,7 +937,11 @@ main() {
         print_info "Mode: Building PostgreSQL from source"
     fi
     print_info "Dependencies directory: $PGLAKE_DEPS_DIR"
-    print_info "Build jobs: $JOBS"
+    if [[ $TOTAL_MEM_GB -gt 0 && $DEFAULT_JOBS -lt $CPU_CORES && "$JOBS" -eq "$DEFAULT_JOBS" ]]; then
+        print_info "Build jobs: $JOBS (limited by ${TOTAL_MEM_GB}GB RAM to avoid DuckDB build OOM)"
+    else
+        print_info "Build jobs: $JOBS"
+    fi
     echo
 
     install_system_deps
