@@ -1011,15 +1011,8 @@ GetTotalDeletedRowCountFromCatalog(Oid relationId)
  */
 int64
 AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileSize,
-			   DataFileContent content, int64 rowIdStart)
+				   DataFileContent content, int64 rowIdStart)
 {
-	/* switch to schema owner, we assume callers checked permissions */
-	Oid			savedUserId = InvalidOid;
-	int			savedSecurityContext = 0;
-
-	GetUserIdAndSecContext(&savedUserId, &savedSecurityContext);
-	SetUserIdAndSecContext(ExtensionOwnerId(PgLakeTable), SECURITY_LOCAL_USERID_CHANGE);
-
 	char	   *query =
 		"insert into " DATA_FILES_TABLE_QUALIFIED " "
 		"(table_name, path, row_count, file_size, content, first_row_id) "
@@ -1034,7 +1027,7 @@ AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileS
 	SPI_ARG_VALUE(5, INT4OID, (int) content, false);
 	SPI_ARG_VALUE(6, INT8OID, rowIdStart, rowIdStart == INVALID_ROW_ID);
 
-	SPI_START();
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 	bool		readOnly = false;
 
@@ -1043,17 +1036,15 @@ AddDataFileToTable(Oid relationId, const char *path, int64 rowCount, int64 fileS
 	Assert(SPI_processed == 1);
 
 	bool		isNull = false;
-	int64		fileId = DatumGetInt64(SPI_getbinval(SPI_tuptable->vals[0],
-										SPI_tuptable->tupdesc,
-										1, &isNull));
+	int64		fileId = GET_SPI_VALUE(INT8OID, 0, 1, &isNull);
+
 	Assert(!isNull);
 
 	SPI_END();
 
-	SetUserIdAndSecContext(savedUserId, savedSecurityContext);
-
 	return fileId;
 }
+
 
 
 
