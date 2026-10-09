@@ -426,3 +426,20 @@ def test_binary_transmit_iceberg_source(superuser_conn, iceberg_catalog):
         options="format 'iceberg'",
     )
     assert len(rows) == 1000
+
+
+def test_binary_transmit_composite_falls_back(superuser_conn, duckdb_conn, tmp_path):
+    """Composite columns have no binary writer, so the COPY uses CSV."""
+    path = tmp_path / "composite.parquet"
+
+    write_parquet(duckdb_conn, path, "SELECT 1 AS id, {'a': 1, 'b': 'x'} AS v")
+
+    run_command("CREATE TYPE bintx_pair AS (a int, b text)", superuser_conn)
+
+    rows = assert_same_load(
+        superuser_conn,
+        "CREATE TEMP TABLE {name} (id int, v bintx_pair)",
+        path,
+        expect_binary=False,
+    )
+    assert len(rows) == 1
