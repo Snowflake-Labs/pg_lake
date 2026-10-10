@@ -23,6 +23,7 @@
 #include "catalog/pg_type_d.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "nodes/bitmapset.h"
+#include "port/pg_bswap.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/fdw/partition_transform.h"
@@ -80,6 +81,10 @@ static bool AvroTypesEqual(IcebergScalarAvroType left, IcebergScalarAvroType rig
 static DataFileSchema * EqualityKeySchema(IcebergTableMetadata * metadata, DataFile * file);
 static bool KeySchemasEqual(DataFileSchema * left, DataFileSchema * right);
 static void AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile);
+static bool ReadIntegerBound(ColumnBound * bounds, size_t count, int id, bool isLong, int64 *value, size_t *width);
+static bool IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion);
+static void ValidateEqualityDeletesForTableScan(PgLakeTableScan * tableScan);
+static bool TableScanHasEqualityDeletes(PgLakeTableScan * tableScan);
 static void ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan, int startRow, int endRow);
 static bool EqualityDeleteKeyTypeMatches(const char *icebergType, const char *parquetType);
 
@@ -502,6 +507,7 @@ KeySchemasEqual(DataFileSchema * left, DataFileSchema * right)
 	return true;
 }
 
+/* Keep only older data files whose known integer bounds may overlap. */
 static void
 AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile)
 {
@@ -512,10 +518,120 @@ AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile)
 		if (dataFile->data_sequence_number < file->data_sequence_number &&
 			(deletion->isGlobal ||
 			 (dataFile->partition_spec_id == file->partition_spec_id &&
-			  PartitionsEqual(&dataFile->partition, &file->partition))))
+			  PartitionsEqual(&dataFile->partition, &file->partition))) &&
+			!IntegerBoundsDisjoint(dataFile, deletion))
 			*mask = bms_add_member(*mask, deletion->index);
 	}
 }
+
+/* Missing, ambiguous or invalid metrics cannot prove that a delete is irrelevant. */
+static bool
+ReadIntegerBound(ColumnBound * bounds, size_t count, int id, bool isLong, int64 *value, size_t *width)
+{
+	ColumnBound *match = NULL;
+
+	for (size_t i = 0; i < count; i++)
+	{
+		if (bounds[i].column_id != id)
+			continue;
+		if (match != NULL)
+			return false;
+		match = &bounds[i];
+	}
+	if (match == NULL || match->value == NULL)
+		return false;
+
+	/* Iceberg bounds are little-endian; memcpy avoids alignment assumptions. */
+	if (match->value_length == sizeof(int32))
+	{
+		uint32		encoded;
+
+		memcpy(&encoded, match->value, sizeof(encoded));
+#ifdef WORDS_BIGENDIAN
+		encoded = pg_bswap32(encoded);
+#endif
+		*value = (int32) encoded;
+		*width = sizeof(encoded);
+		return true;
+	}
+	/* A promoted long may still carry four-byte int bounds in an older file. */
+	if (isLong && match->value_length == sizeof(int64))
+	{
+		uint64		encoded;
+
+		memcpy(&encoded, match->value, sizeof(encoded));
+#ifdef WORDS_BIGENDIAN
+		encoded = pg_bswap64(encoded);
+#endif
+		*value = (int64) encoded;
+		*width = sizeof(encoded);
+		return true;
+	}
+	return false;
+}
+
+/*
+ * One disjoint component proves a composite equality key cannot match.
+ * Bounds omit NULLs, so require an explicit zero delete null count for that
+ * component. Otherwise NULL-safe equality could still delete NULL data keys.
+ */
+static bool
+IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion)
+{
+	DataFile   *deleteFile = deletion->file;
+
+	for (size_t i = 0; i < deletion->schema->nfields; i++)
+	{
+		DataFileSchemaField *key = &deletion->schema->fields[i];
+		const char *type = key->type->field.scalar.typeName;
+		bool		isLong = strcmp(type, "long") == 0;
+
+		if (!isLong && strcmp(type, "int") != 0)
+			continue;
+
+		int			nullStats = 0;
+		bool		noDeleteNulls = false;
+
+		for (size_t j = 0; j < deleteFile->null_value_counts_length; j++)
+		{
+			ColumnStat *stat = &deleteFile->null_value_counts[j];
+
+			if (stat->column_id == key->id)
+			{
+				nullStats++;
+				noDeleteNulls = stat->value == 0;
+			}
+		}
+		if (nullStats != 1 || !noDeleteNulls)
+			continue;
+
+		int64		dataLower,
+					dataUpper,
+					deleteLower,
+					deleteUpper;
+		size_t		dataLowerWidth,
+					dataUpperWidth,
+					deleteLowerWidth,
+					deleteUpperWidth;
+
+		if (!ReadIntegerBound(dataFile->lower_bounds, dataFile->lower_bounds_length,
+							  key->id, isLong, &dataLower, &dataLowerWidth) ||
+			!ReadIntegerBound(dataFile->upper_bounds, dataFile->upper_bounds_length,
+							  key->id, isLong, &dataUpper, &dataUpperWidth) ||
+			!ReadIntegerBound(deleteFile->lower_bounds, deleteFile->lower_bounds_length,
+							  key->id, isLong, &deleteLower, &deleteLowerWidth) ||
+			!ReadIntegerBound(deleteFile->upper_bounds, deleteFile->upper_bounds_length,
+							  key->id, isLong, &deleteUpper, &deleteUpperWidth))
+			continue;
+		if (dataLowerWidth != dataUpperWidth || deleteLowerWidth != deleteUpperWidth ||
+			dataLower > dataUpper || deleteLower > deleteUpper)
+			continue;
+		if (dataUpper < deleteLower || deleteUpper < dataLower)
+			return true;
+	}
+	return false;
+}
+
 
 List *
 PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
@@ -681,6 +797,68 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
 }
 
 /*
+ * TableScanHasEqualityDeletes includes inherited child scans when deciding
+ * whether plain EXPLAIN must avoid physical equality delete files.
+ */
+static bool
+TableScanHasEqualityDeletes(PgLakeTableScan * tableScan)
+{
+	if (tableScan->equalityDeleteReadGroups != NIL)
+		return true;
+
+	foreach_ptr(PgLakeTableScan, childScan, tableScan->childScans)
+	{
+		if (TableScanHasEqualityDeletes(childScan))
+			return true;
+	}
+
+	return false;
+}
+
+/*
+ * SnapshotHasEqualityDeletes returns whether any table or inherited child
+ * in the snapshot has planned equality delete read groups.
+ */
+bool
+SnapshotHasEqualityDeletes(PgLakeScanSnapshot * snapshot)
+{
+	if (snapshot == NULL)
+		return false;
+
+	foreach_ptr(PgLakeTableScan, tableScan, snapshot->tableScans)
+	{
+		if (TableScanHasEqualityDeletes(tableScan))
+			return true;
+	}
+
+	return false;
+}
+
+/* Validate at execution time; SQL generation and EXPLAIN need no footer I/O. */
+void
+ValidateEqualityDeletesForSnapshot(PgLakeScanSnapshot * snapshot)
+{
+	if (!EnableEqualityDeleteValidation)
+		return;
+
+	foreach_ptr(PgLakeTableScan, tableScan, snapshot->tableScans)
+		ValidateEqualityDeletesForTableScan(tableScan);
+}
+
+static void
+ValidateEqualityDeletesForTableScan(PgLakeTableScan * tableScan)
+{
+	if (!tableScan->equalityDeleteFilesValidated)
+	{
+		ValidateEqualityDeleteFiles(tableScan->equalityDeleteScans);
+		tableScan->equalityDeleteFilesValidated = true;
+	}
+
+	foreach_ptr(PgLakeTableScan, childScan, tableScan->childScans)
+		ValidateEqualityDeletesForTableScan(childScan);
+}
+
+/*
  * Unlike old data files, a delete file must physically contain every declared
  * key. The ordinary schema reader fills missing columns with NULL, which here
  * could incorrectly delete real NULL keys. deleteScans is the per-file list
@@ -689,7 +867,7 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
  * does not skip other files sharing the same equality key schema.
  *
  * Batch footer queries to bound query size and reduce pgduck_server round trips.
- * No delete rows are read, including during ordinary EXPLAIN.
+ * No delete rows are read.
  */
 void
 ValidateEqualityDeleteFiles(List *deleteScans)

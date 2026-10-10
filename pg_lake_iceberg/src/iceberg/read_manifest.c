@@ -82,6 +82,7 @@ static void ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManif
 static HTAB *CreateManifestPartitionFieldMap(AvroReader * manifestReader);
 static IcebergScalarAvroType IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeName);
 static avro_schema_t ManifestRecordFieldSchema(avro_schema_t parent, const char *fieldName);
+static avro_schema_t NonNullPartitionFieldSchema(avro_schema_t schema);
 static PartitionFieldIdMapEntry * ReferencedPartitionField(avro_schema_t partitionSchema,
 														   const char *fieldName, HTAB *partitionFieldMap);
 
@@ -568,6 +569,11 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 												 " SELECT part_field, field_index "
 												 " FROM partition_obj, jsonb_array_elements(partition_fields) "
 												 " WITH ORDINALITY AS fields(part_field, field_index)"
+												 "), partition_field_types AS ( "
+												 " SELECT part_field, field_index, "
+												 " CASE WHEN part_field->'type'->>0 = 'null' "
+												 " THEN part_field->'type'->1 ELSE part_field->'type'->0 END AS field_type "
+												 " FROM partition_fields_unrolled "
 												 ") "
 
 	/*
@@ -578,18 +584,18 @@ CreateManifestPartitionFieldMap(AvroReader * manifestReader)
 												 "       part_field->>'field-id'               AS partition_field_id,"
 												 "       CASE "
 	/* "type" could be JSON string like ["null", "int"] */
-												 "	      WHEN jsonb_typeof(part_field->'type'->1) = 'string' THEN part_field->'type'->>1  "
+												 "	      WHEN jsonb_typeof(field_type) = 'string' THEN field_type #>> '{}'  "
 
 	/*
 	 * "type" could be JSON object like ["null", {"type": "int",
 	 * "logicalType": "date"}]
 	 */
-												 "	      ELSE part_field->'type'->1->>'type' "
+												 "	      ELSE field_type->>'type' "
 												 "       END                                   AS partition_field_physical_type,"
-												 "       part_field->'type'->1->>'logicalType' AS partition_field_logical_type "
-												 "       , part_field->'type'->1->>'precision' AS precision"
-												 "       , part_field->'type'->1->>'scale' AS scale "
-												 "FROM partition_fields_unrolled ORDER BY field_index;");
+												 "       field_type->>'logicalType' AS partition_field_logical_type "
+												 "       , field_type->>'precision' AS precision"
+												 "       , field_type->>'scale' AS scale "
+												 "FROM partition_field_types ORDER BY field_index;");
 
 	/* References must follow their definitions, as in the Avro schema. */
 	avro_schema_t dataFileSchema = ManifestRecordFieldSchema(manifestReader->dataSchema, "data_file");
@@ -769,6 +775,18 @@ ManifestRecordFieldSchema(avro_schema_t parent, const char *fieldName)
 }
 
 
+/* Nullable partition fields can use either ["null", T] or [T, "null"]. */
+static avro_schema_t
+NonNullPartitionFieldSchema(avro_schema_t schema)
+{
+	if (!is_avro_union(schema))
+		return schema;
+
+	avro_schema_t first = avro_schema_union_branch(schema, 0);
+
+	return is_avro_null(first) ? avro_schema_union_branch(schema, 1) : first;
+}
+
 /*
  * Reuse the type of the earlier partition field defining a named fixed type.
  * Avro resolves names and namespaces for us; pointer identity avoids matching
@@ -783,8 +801,7 @@ ReferencedPartitionField(avro_schema_t partitionSchema, const char *fieldName,
 	if (fieldIndex < 0)
 		ereport(ERROR, (errmsg("missing Iceberg partition field %s", fieldName)));
 	avro_schema_t fieldSchema = avro_schema_record_field_get_by_index(partitionSchema, fieldIndex);
-	avro_schema_t fieldType = is_avro_union(fieldSchema) ?
-		avro_schema_union_branch(fieldSchema, 1) : fieldSchema;
+	avro_schema_t fieldType = NonNullPartitionFieldSchema(fieldSchema);
 
 	if (!is_avro_link(fieldType))
 		return NULL;
@@ -794,8 +811,7 @@ ReferencedPartitionField(avro_schema_t partitionSchema, const char *fieldName,
 	{
 		avro_schema_t candidate = avro_schema_record_field_get_by_index(partitionSchema, i);
 
-		if (is_avro_union(candidate))
-			candidate = avro_schema_union_branch(candidate, 1);
+		candidate = NonNullPartitionFieldSchema(candidate);
 		if (candidate == target)
 		{
 			const char *name = avro_schema_record_field_name(partitionSchema, i);
@@ -820,6 +836,13 @@ ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary * summary, void *co
 static void
 ReadColumnStatFromAvro(avro_value_t * record, ColumnStat * stat, void *context)
 {
+	/*
+	 * A missing metric must not become zero and prove that a file has no
+	 * NULLs.
+	 */
+	if (!AvroFieldExists(record, "key") || !AvroFieldExists(record, "value"))
+		ereport(ERROR, (errmsg("Iceberg column metrics require non-null key and value")));
+
 	memset(stat, '\0', sizeof(ColumnStat));
 	AvroGetInt32Field(record, "key", AVRO_FIELD_REQUIRED, &stat->column_id);
 	AvroGetInt64Field(record, "value", AVRO_FIELD_REQUIRED, &stat->value);

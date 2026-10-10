@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "pg_lake/fdw/equality_delete.h"
 #include "utils/hsearch.h"
 #include "catalog/pg_type_d.h"
 #include "funcapi.h"
@@ -1549,6 +1550,10 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	char	   *pgDuckSQLTemplate = PreparePGDuckSQLTemplate(scanQuery);
 
 	bool		explainRequested = eflags & EXEC_FLAG_EXPLAIN_ONLY;
+
+	if (!explainRequested)
+		ValidateEqualityDeletesForSnapshot(snapshot);
+
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);
@@ -1867,15 +1872,20 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 		ExplainPropertyText("Vectorized SQL", queryString, es);
 	}
-	char	   *realQuery = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
-														  snapshot, false);
-
 	if (scanState->insertIntoRelid != InvalidOid)
 	{
 		char	   *insertTableName = get_rel_name(scanState->insertIntoRelid);
 
 		ExplainPropertyText("INSERT INTO", insertTableName, es);
 	}
+
+
+	/* Binding the DuckDB plan would read physical equality-delete footers. */
+	if (!es->analyze && SnapshotHasEqualityDeletes(snapshot))
+		return;
+
+	char	   *realQuery = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
+														  snapshot, false);
 
 
 	ExplainPGDuckQuery(realQuery, scanState->numParams, scanState->parameterValues, es);

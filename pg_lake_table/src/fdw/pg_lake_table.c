@@ -81,6 +81,7 @@
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/fdw/snapshot.h"
+#include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/fdw/update_tracking.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
@@ -3204,6 +3205,10 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	if (fsstate->skipFullMatchFiles)
 		scanFlags |= SKIP_FULL_MATCH_FILES;
 
+	/* Binding the DuckDB plan would read physical equality-delete footers. */
+	if (!es->analyze && SnapshotHasEqualityDeletes(fsstate->scanSnapshot))
+		return;
+
 	char	   *fullQuery = ReplaceReadTableFunctionCalls(fsstate->query,
 														  fsstate->scanSnapshot,
 														  scanFlags);
@@ -3449,6 +3454,9 @@ static void
 send_prepared_statement(ForeignScanState *node)
 {
 	PgLakeScanState *fsstate = (PgLakeScanState *) node->fdw_state;
+
+	ValidateEqualityDeletesForSnapshot(fsstate->scanSnapshot);
+
 	ExprContext *econtext = node->ss.ps.ps_ExprContext;
 	int			numParams = fsstate->numParams;
 	const char **values = fsstate->param_values;
