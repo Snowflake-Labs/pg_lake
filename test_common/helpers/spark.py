@@ -7,6 +7,7 @@ that don't need Spark don't pull in the pyspark package.
 
 import os
 import importlib.metadata
+import time
 
 import pytest
 from . import server_params
@@ -23,8 +24,16 @@ from utils_pytest import (
     MOTO_PORT,
 )
 
-from pyspark.errors import NumberFormatException
+from pyspark.errors import NumberFormatException, PySparkRuntimeError
 from pyspark.sql import SparkSession
+
+# Starting a session downloads the Iceberg jars from Maven Central through ivy,
+# and a transient failure there is reported as an unresolved dependency: the JVM
+# exits before the gateway is up, so pyspark raises JAVA_GATEWAY_EXITED and
+# every Spark test in the run errors in setup. A resolution only has to get
+# through once, so retry before giving up.
+SPARK_SESSION_START_ATTEMPTS = 3
+SPARK_SESSION_RETRY_INTERVAL = 15
 
 
 def assert_query_result_on_spark_and_pg(
@@ -168,6 +177,55 @@ def create_spark_catalog_database(installcheck, superuser_conn):
         )
 
 
+def build_spark_session():
+    return (
+        SparkSession.builder.appName("spark catalog test")
+        .config(
+            f"spark.sql.extensions",
+            "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
+        )
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}",
+            "org.apache.iceberg.spark.SparkCatalog",
+        )
+        .config("spark.driver.host", "localhost")
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}.catalog-impl",
+            "org.apache.iceberg.jdbc.JdbcCatalog",
+        )
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}.uri",
+            f"jdbc:postgresql://localhost:{server_params.PG_PORT}/{server_params.SPARK_CATALOG_PG_DATABASE}",
+        )
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}.jdbc.user",
+            server_params.PG_USER,
+        )
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}.jdbc.password",
+            server_params.PG_PASSWORD,
+        )
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}.io-impl",
+            "org.apache.iceberg.aws.s3.S3FileIO",
+        )
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}.warehouse",
+            f"s3://{TEST_BUCKET}/",
+        )
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}.s3.endpoint",
+            f"http://localhost:{MOTO_PORT}",
+        )
+        .config(
+            f"spark.sql.catalog.{server_params.SPARK_CATALOG}.s3.path-style-access",
+            "true",
+        )
+        .config(f"spark.driver.extraClassPath", os.getenv("JDBC_DRIVER_PATH"))
+        .getOrCreate()
+    )
+
+
 @pytest.fixture(scope="module")
 def spark_session(installcheck, create_spark_catalog_database):
     spark_session = None
@@ -193,52 +251,15 @@ def spark_session(installcheck, create_spark_catalog_database):
         prev_tz = os.environ.get("TZ")
         os.environ["TZ"] = "UTC"
 
-        spark_session = (
-            SparkSession.builder.appName("spark catalog test")
-            .config(
-                f"spark.sql.extensions",
-                "org.apache.iceberg.spark.extensions.IcebergSparkSessionExtensions",
-            )
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}",
-                "org.apache.iceberg.spark.SparkCatalog",
-            )
-            .config("spark.driver.host", "localhost")
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}.catalog-impl",
-                "org.apache.iceberg.jdbc.JdbcCatalog",
-            )
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}.uri",
-                f"jdbc:postgresql://localhost:{server_params.PG_PORT}/{server_params.SPARK_CATALOG_PG_DATABASE}",
-            )
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}.jdbc.user",
-                server_params.PG_USER,
-            )
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}.jdbc.password",
-                server_params.PG_PASSWORD,
-            )
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}.io-impl",
-                "org.apache.iceberg.aws.s3.S3FileIO",
-            )
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}.warehouse",
-                f"s3://{TEST_BUCKET}/",
-            )
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}.s3.endpoint",
-                f"http://localhost:{MOTO_PORT}",
-            )
-            .config(
-                f"spark.sql.catalog.{server_params.SPARK_CATALOG}.s3.path-style-access",
-                "true",
-            )
-            .config(f"spark.driver.extraClassPath", os.getenv("JDBC_DRIVER_PATH"))
-            .getOrCreate()
-        )
+        for attempt in range(1, SPARK_SESSION_START_ATTEMPTS + 1):
+            try:
+                spark_session = build_spark_session()
+                break
+            except PySparkRuntimeError as error:
+                if attempt == SPARK_SESSION_START_ATTEMPTS:
+                    raise
+                print(f"spark session did not start ({error}), retrying")
+                time.sleep(SPARK_SESSION_RETRY_INTERVAL)
 
         # we do not need to specify catalog name in queries or DDLs anymore
         spark_session.catalog.setCurrentCatalog(server_params.SPARK_CATALOG)
