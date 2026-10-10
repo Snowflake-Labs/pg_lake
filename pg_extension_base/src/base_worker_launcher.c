@@ -2507,7 +2507,8 @@ PgExtensionBaseWorkerMain(Datum arg)
 
 	/*
 	 * If a restart was requested, store it in shared memory before the exit
-	 * handler runs. The exit handler will respect this setting.
+	 * handler runs. The exit handler will respect this setting, and is also
+	 * what wakes whoever has to act on it -- see below.
 	 *
 	 * -1 means restart immediately, >0 means restart after N milliseconds. 0
 	 * or any other value means no restart.
@@ -2528,11 +2529,28 @@ PgExtensionBaseWorkerMain(Datum arg)
 				workerEntry->restartAfter = 0;	/* immediate */
 			else
 				workerEntry->restartAfter = GetDelayedTimestamp(restartDelayMs);
-
-			SignalDatabaseStarterLocked(databaseId);
 		}
 
 		LWLockRelease(&BaseWorkerControl->lock);
+
+		/*
+		 * Deliberately no SignalDatabaseStarterLocked here: our workerPid is
+		 * still set until the exit handler clears it, and a database starter
+		 * launched by the wake reads that as "already running"
+		 * (BASE_WORKER_EXISTS), finds nothing to wait for and exits again. It
+		 * is also the one launch that consumes the starter's own needsRestart
+		 * flag, so once it is gone nothing is left watching: the server
+		 * starter only ever looks at database-starter entries, and
+		 * ReclaimStaleBaseWorkerLaunches only covers launches stuck in
+		 * WORKER_STARTING.  Shortening worker_starter_sleep_time does not
+		 * help, because no poll of either starter revisits a base worker
+		 * entry; the restart waits for an unrelated wake that may never come.
+		 *
+		 * PgExtensionBaseWorkerSharedMemoryExit sends the wake instead, after
+		 * it has cleared workerPid, which is the order the failure path in
+		 * that same handler already uses.
+		 */
+		INJECTION_POINT_COMPAT("base-worker-restart-requested");
 	}
 
 	ereport(LOG, (errmsg("pg extension base worker %d in database %s finished",
@@ -2575,7 +2593,18 @@ PgExtensionBaseWorkerSharedMemoryExit(int code, Datum arg)
 			{
 				workerEntry->state = WORKER_STOPPED;
 			}
-			/* else: state already set to WORKER_RESTARTING in main function */
+			else
+			{
+				/* state already set to WORKER_RESTARTING in main function */
+
+				/*
+				 * Wake whoever can bring us back, now that workerPid is 0 and
+				 * a database starter launched by the wake can see the pending
+				 * restart and wait it out.  Sending this from the main
+				 * function instead races our own exit: see the comment there.
+				 */
+				SignalDatabaseStarterLocked(databaseId);
+			}
 		}
 		else if (workerEntry->needsRestart)
 		{
