@@ -59,6 +59,7 @@
 #include "pg_lake/extensions/pg_lake_spatial.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/shippable.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/shippable_builtin_functions.h"
 #include "pg_lake/pgduck/shippable_spatial_functions.h"
 #include "pg_lake/pgduck/shippable_builtin_operators.h"
@@ -756,6 +757,10 @@ GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId)
  * pushed down (say for FieldSelect), but some uses (such as casting) are
  * prohibited due to there being no equivalent behavior on the DuckDB side.
  *
+ * Subscripting a map type is one such use: on the Postgres side a map is an
+ * array of (key, val) pairs and m[i] is the i-th pair, whereas in DuckDB m[i]
+ * on a MAP is the value for key i.
+ *
  * This shared routine encapsulates the logic of for which nodes UDTs are not
  * pushdownable.  It is very likely we will need to expand the list of node
  * types to check here.
@@ -767,6 +772,17 @@ bool
 is_non_shippable_udt_context(Node *node)
 {
 	int			nodeType = nodeTag(node);
+
+	/*
+	 * The container type of a SubscriptingRef is the domain's base array
+	 * type, so look at refexpr to see whether we are subscripting a map.
+	 */
+	if (nodeType == T_SubscriptingRef)
+	{
+		SubscriptingRef *sbsref = (SubscriptingRef *) node;
+
+		return IsMapTypeOid(exprType((Node *) sbsref->refexpr));
+	}
 
 	/*
 	 * Not all nodes are expression types, so exprType() can fail; since this
