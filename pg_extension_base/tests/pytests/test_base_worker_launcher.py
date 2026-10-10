@@ -962,6 +962,116 @@ def test_worker_restart_does_not_wait_for_the_starter_poll(superuser_conn):
         reset_backoff_gucs(superuser_conn)
 
 
+RESTART_REQUESTED_POINT = "base-worker-restart-requested"
+
+
+def test_delayed_restart_survives_a_starter_launched_before_the_worker_exits(
+    superuser_conn, create_injection_extension
+):
+    """
+    A worker that asks for a delayed restart on a clean exit comes back even if a
+    database starter gets launched while it is still winding down.
+
+    The wake for such a restart has to be sent after the exit handler has cleared
+    workerPid.  A database starter launched any earlier reads the worker as still
+    running, finds nothing to wait for and exits again -- and it is the one
+    launch that consumes the starter's own needsRestart flag, so after it is gone
+    nothing is watching the pending restart: the server starter only looks at
+    database-starter entries, and ReclaimStaleBaseWorkerLaunches only covers
+    launches stuck in WORKER_STARTING.
+
+    The injection point holds the worker in exactly that window, which is only a
+    few milliseconds wide in a real exit, and worker_starter_sleep_time is an
+    hour, so a restart that fell back to the next poll never happens inside the
+    test.  The sibling test above covers the same wake on the failure path, which
+    already sends it from the exit handler and so was never exposed.
+    """
+    if get_pg_version_num(superuser_conn) < 170000:
+        pytest.skip("Injection points not available (requires PostgreSQL 17+)")
+
+    # fail_after = -1 leaves the fault injection off, so the hibernate worker
+    # takes the clean-exit path and asks for its 5s restart by return value.
+    set_backoff_gucs(
+        superuser_conn,
+        initial_ms=100,
+        max_ms=400,
+        healthy_ms=30000,
+        fail_after_ms=-1,
+        starter_sleep="1h",
+    )
+
+    superuser_conn.rollback()
+    superuser_conn.autocommit = True
+
+    try:
+        run_command(
+            f"SELECT injection_points_attach('{RESTART_REQUESTED_POINT}', 'wait')",
+            superuser_conn,
+        )
+
+        run_command(
+            "CREATE EXTENSION pg_extension_base_test_hibernate CASCADE", superuser_conn
+        )
+
+        # the worker runs for 5s before it requests the restart and parks
+        assert (
+            wait_until_equal(
+                lambda: run_query(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE backend_type = 'pg base extension worker' "
+                    f"AND wait_event = '{RESTART_REQUESTED_POINT}'",
+                    superuser_conn,
+                )[0]["count"],
+                1,
+                timeout=30.0,
+            )
+            == 1
+        ), "the worker never reached the restart-requested injection point"
+
+        # Give a wake sent from this window the time it needs to launch a
+        # database starter and have it exit again, which is what used to drop
+        # the restart.  There is nothing to wait for when the order is right,
+        # so this is a settle interval rather than a poll.
+        time.sleep(1)
+
+        run_command(
+            f"SELECT injection_points_wakeup('{RESTART_REQUESTED_POINT}')",
+            superuser_conn,
+        )
+        run_command(
+            f"SELECT injection_points_detach('{RESTART_REQUESTED_POINT}')",
+            superuser_conn,
+        )
+
+        # restartAfter was stamped 5s before the park, so the worker is due back
+        # almost immediately; the margin is for the starter launch itself.
+        assert (
+            wait_until_equal(
+                lambda: count_pg_extension_base_workers(superuser_conn),
+                1,
+                timeout=15.0,
+            )
+            == 1
+        ), "the worker never came back after its delayed restart"
+    finally:
+        run_command(
+            f"SELECT injection_points_wakeup('{RESTART_REQUESTED_POINT}')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            f"SELECT injection_points_detach('{RESTART_REQUESTED_POINT}')",
+            superuser_conn,
+            raise_error=False,
+        )
+        run_command(
+            "DROP EXTENSION IF EXISTS pg_extension_base_test_hibernate CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.autocommit = False
+        reset_backoff_gucs(superuser_conn)
+
+
 def test_worker_restart_backoff_resets_after_healthy_uptime(superuser_conn):
     """
     A worker that stays up longer than the healthy threshold before failing
