@@ -40,7 +40,7 @@ runs:
       id: cache_libduckdb
       name: Cache libduckdb
       with:
-        key: duckdb_pglake-${{ inputs.container_os }}-${{ hashFiles('duckdb_pglake/src/**', 'duckdb_pglake/Makefile', 'duckdb_pglake/patches/**', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt') }}
+        key: duckdb_pglake-${{ inputs.container_os }}-${{ hashFiles('duckdb_pglake/src/**', 'duckdb_pglake/Makefile', 'duckdb_pglake/patches/**', 'duckdb_pglake/extension_config.cmake', 'duckdb_pglake/CMakeLists.txt', 'duckdb_pglake/vcpkg.json', 'duckdb_pglake/vcpkg_ports/**') }}
         path: |
           ${{ env.PG_LIBDIR }}/libduckdb.so
           ${{ env.PG_INCLUDEDIR }}/duckdb
