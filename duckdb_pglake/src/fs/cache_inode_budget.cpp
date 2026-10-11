@@ -221,22 +221,8 @@ DeriveInodeFloor(int64_t totalInodes)
 
 
 /*
- * DerivePurgeTarget returns the number of inodes to evict toward once floor
- * is breached, rather than evicting only up to floor itself.
- *
- * Cache-on-write is not reflected anywhere in this budget: it creates files
- * outside of a ManageCache round, with no reservation of its own the way a
- * queued download gets one. Evicting exactly to floor leaves nothing to
- * absorb that, so the next round is back under floor as soon as writes
- * between the two rounds outpace what aged out. Evicting to a target well
- * above floor instead means a round of eviction buys headroom for however
- * many rounds it takes cache-on-write to eat through the gap, rather than
- * re-triggering immediately.
- *
- * DEFAULT_PURGE_FRACTION mirrors DEFAULT_FREE_INODE_FRACTION's shape (a
- * fraction of the file system, bounded both ways) but five times as large,
- * so the gap between floor and purgeTarget is itself a usable margin rather
- * than rounding error.
+ * DerivePurgeTarget chooses the target from the file system's inode count,
+ * bounded by absolute limits and never below an explicit floor.
  */
 static const int64_t DEFAULT_PURGE_FRACTION = 4;
 static const int64_t DEFAULT_MIN_PURGE_TARGET = 5000;
@@ -458,22 +444,22 @@ LogInodePressure(const string &cacheDir, InodeBudget budget,
 	}
 
 	PGDUCK_SERVER_LOG("cache directory %s is low on inodes: %" PRIu64
-			"/%" PRIu64 " available, keeping %" PRIu64
-			" available (evicting toward %" PRIu64
-			"); freed %" PRIu64 " inodes this round by "
-			"evicting %" PRIu64 " files and %" PRIu64 " empty "
-			"directories%s",
-			cacheDir.c_str(),
-			(uint64_t) budget.freeInodes,
-			(uint64_t) budget.totalInodes,
-			(uint64_t) budget.floor,
-			(uint64_t) budget.purgeTarget,
-			(uint64_t) budget.freed,
-			(uint64_t) evictedFiles,
-			(uint64_t) prunedDirectories,
-			skippedDownloads ?
-			", cache files alone cannot free enough inodes so "
-			"nothing was added" : "");
+					  "/%" PRIu64 " available, keeping %" PRIu64
+					  " available (evicting toward %" PRIu64
+					  "); freed %" PRIu64 " inodes this round by "
+					  "evicting %" PRIu64 " files and %" PRIu64 " empty "
+					  "directories%s",
+					  cacheDir.c_str(),
+					  (uint64_t) budget.freeInodes,
+					  (uint64_t) budget.totalInodes,
+					  (uint64_t) budget.floor,
+					  (uint64_t) budget.purgeTarget,
+					  (uint64_t) budget.freed,
+					  (uint64_t) evictedFiles,
+					  (uint64_t) prunedDirectories,
+					  skippedDownloads ?
+					  ", cache files alone cannot free enough inodes so "
+					  "nothing was added" : "");
 }
 
 } // namespace duckdb

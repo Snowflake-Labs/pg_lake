@@ -57,12 +57,9 @@ struct InodeBudget
 	int64_t floor = 0;
 
 	/*
-	 * Inodes we evict toward once floor is breached, well above floor so that a
-	 * round of eviction buys the next several rounds of headroom instead of
-	 * landing exactly back on the trigger. Cache-on-write has no reservation of
-	 * its own (unlike queued downloads, below), so whatever it adds between
-	 * rounds has to fit in this margin rather than push us under floor again
-	 * immediately. Always >= floor.
+	 * Inodes to evict toward once floor is breached. Cache-on-write has no
+	 * reservation in this budget, so this target provides headroom for files
+	 * added between management rounds. Always >= floor.
 	 */
 	int64_t purgeTarget = 0;
 
@@ -86,10 +83,8 @@ struct InodeBudget
 	}
 
 	/*
-	 * PurgeDeficit returns the number of inodes still needed to reach
-	 * purgeTarget rather than floor. This is what decides how much to evict
-	 * once Deficit() has said we should act: evicting only up to floor would
-	 * leave no margin for cache-on-write between this round and the next.
+	 * PurgeDeficit returns the inodes needed to reach purgeTarget after queued
+	 * downloads are accounted for. Deficit() decides whether to act at all.
 	 */
 	int64_t PurgeDeficit() const
 	{
