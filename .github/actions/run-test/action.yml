@@ -91,10 +91,25 @@ runs:
         fi
 
     - uses: actions/cache@v5
+      id: cache_pipenv
       name: Cache pipenv
       with:
         path: ~/.local/share/virtualenvs
         key: pipenv-${{ inputs.container_os }}-${{ hashFiles('Pipfile.lock') }}
+
+    # The build job writes this same key, so a full run normally restores it
+    # here.  It does not when the entry is gone but the build job is not re-run
+    # to recreate it, which is what re-running a failed test job on a run older
+    # than the 7-day cache eviction does.  Without this step `pipenv run pytest`
+    # then builds an empty virtualenv and the job dies with
+    # "pytest: command not found" and exit 127, which reads like a broken image
+    # rather than a missing cache.  Same two steps as build-and-install and
+    # lint.yml.
+    - name: Install pipenv dependencies
+      if: steps.cache_pipenv.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        python3.11 -m pipenv install --dev
 
     - name: Run test
       shell: bash
