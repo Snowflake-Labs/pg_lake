@@ -37,6 +37,21 @@ def _scan(table, schema="public"):
     return f"postgres_scan('{_connstr()}', '{schema}', '{table}')"
 
 
+SPLIT_READER_ROLE = "scanner_split_reader"
+
+
+def _scan_as_split_reader(table, schema="public"):
+    """Scan as a role without superuser, so grants and row level security apply."""
+    connstr = (
+        f"host={server_params.PG_HOST} "
+        f"port={server_params.PG_PORT} "
+        f"dbname={server_params.PG_DATABASE} "
+        f"user={SPLIT_READER_ROLE} "
+        f"password={SPLIT_READER_ROLE}"
+    )
+    return f"postgres_scan('{connstr}', '{schema}', '{table}')"
+
+
 @pytest.fixture(scope="module")
 def pg_tables(postgres):
     """Create test tables in PostgreSQL."""
@@ -354,6 +369,37 @@ def pg_tables(postgres):
     )
     cur.execute("ANALYZE scanner_large_partitioned_tbl")
 
+    # -- grants and row level security on the parent only ------------------
+    cur.execute("DROP TABLE IF EXISTS scanner_rls_partitioned_tbl CASCADE")
+    cur.execute(f"DROP ROLE IF EXISTS {SPLIT_READER_ROLE}")
+    cur.execute(f"CREATE ROLE {SPLIT_READER_ROLE} LOGIN PASSWORD '{SPLIT_READER_ROLE}'")
+    cur.execute(
+        "CREATE TABLE scanner_rls_partitioned_tbl (id int, val text) PARTITION BY RANGE (id)"
+    )
+    cur.execute(
+        "CREATE TABLE scanner_rls_part_1 PARTITION OF scanner_rls_partitioned_tbl FOR VALUES FROM (1) TO (5000)"
+    )
+    cur.execute(
+        "CREATE TABLE scanner_rls_part_2 PARTITION OF scanner_rls_partitioned_tbl FOR VALUES FROM (5000) TO (10000)"
+    )
+    cur.execute(
+        "INSERT INTO scanner_rls_partitioned_tbl "
+        "SELECT generator_index, 'text_' || generator_index FROM generate_series(1, 9999) generator_index"
+    )
+    cur.execute("ANALYZE scanner_rls_partitioned_tbl")
+    cur.execute("ALTER TABLE scanner_rls_partitioned_tbl ENABLE ROW LEVEL SECURITY")
+    cur.execute(
+        "CREATE POLICY scanner_even_ids ON scanner_rls_partitioned_tbl "
+        "FOR SELECT USING (id % 2 = 0)"
+    )
+    # the reader can read the partitions too, so only the policy tells the scans apart
+    cur.execute(
+        f"GRANT SELECT ON scanner_rls_partitioned_tbl, scanner_rls_part_1, scanner_rls_part_2 "
+        f"TO {SPLIT_READER_ROLE}"
+    )
+    # the reader can read the parent but not its partitions
+    cur.execute(f"GRANT SELECT ON scanner_large_partitioned_tbl TO {SPLIT_READER_ROLE}")
+
     cur.close()
     conn.close()
 
@@ -393,6 +439,8 @@ def pg_tables(postgres):
     cur.execute("DROP SCHEMA IF EXISTS scanner_part_schema CASCADE")
     cur.execute("DROP TABLE IF EXISTS scanner_empty_partitioned_tbl CASCADE")
     cur.execute("DROP TABLE IF EXISTS scanner_large_partitioned_tbl CASCADE")
+    cur.execute("DROP TABLE IF EXISTS scanner_rls_partitioned_tbl CASCADE")
+    cur.execute(f"DROP ROLE IF EXISTS {SPLIT_READER_ROLE}")
     cur.close()
     conn.close()
 
@@ -1096,11 +1144,75 @@ def test_partitioned_table_parallel_ctid_chunks(pg_tables, pgduck_conn):
     """Parallel scan splits large partitions into ctid tasks across partitions."""
     scan_query = _scan("scanner_large_partitioned_tbl")
     perform_query_on_cursor("SET pg_pages_per_task = 5", pgduck_conn)
-    result_rows = perform_query_on_cursor(
-        f"SELECT count(*), min(id), max(id) FROM {scan_query}",
-        pgduck_conn,
-    )
-    assert result_rows == [(9999, 1, 9999)]
+    try:
+        result_rows = perform_query_on_cursor(
+            f"SELECT count(*), min(id), max(id) FROM {scan_query}",
+            pgduck_conn,
+        )
+        assert result_rows == [(9999, 1, 9999)]
+    finally:
+        perform_query_on_cursor("RESET pg_pages_per_task", pgduck_conn)
+
+
+def test_partitioned_table_limit_offset(pg_tables, pgduck_conn):
+    """A pushed-down LIMIT/OFFSET applies to the whole table, not to each partition task."""
+    scan_query = _scan("scanner_large_partitioned_tbl")
+    perform_query_on_cursor("SET pg_pages_per_task = 5", pgduck_conn)
+    try:
+        result_rows = perform_query_on_cursor(
+            f"SELECT count(*), count(DISTINCT id) FROM (SELECT id FROM {scan_query} LIMIT 10 OFFSET 5)",
+            pgduck_conn,
+        )
+        assert result_rows == [(10, 10)]
+        result_rows = perform_query_on_cursor(
+            f"SELECT count(*), count(DISTINCT id) FROM (SELECT id FROM {scan_query} LIMIT 3)",
+            pgduck_conn,
+        )
+        assert result_rows == [(3, 3)]
+    finally:
+        perform_query_on_cursor("RESET pg_pages_per_task", pgduck_conn)
+
+
+def test_partitioned_table_parent_grant_only(pg_tables, pgduck_conn):
+    """A role granted SELECT on the parent only can scan it, as it can in Postgres."""
+    scan_query = _scan_as_split_reader("scanner_large_partitioned_tbl")
+    perform_query_on_cursor("SET pg_pages_per_task = 5", pgduck_conn)
+    try:
+        result_rows = perform_query_on_cursor(
+            f"SELECT count(*), min(id), max(id) FROM {scan_query}",
+            pgduck_conn,
+        )
+        assert result_rows == [(9999, 1, 9999)]
+    finally:
+        perform_query_on_cursor("RESET pg_pages_per_task", pgduck_conn)
+
+
+def test_partitioned_table_row_level_security(pg_tables, pgduck_conn):
+    """The parent's row level security policy applies to a parallel scan."""
+    scan_query = _scan_as_split_reader("scanner_rls_partitioned_tbl")
+    perform_query_on_cursor("SET pg_pages_per_task = 5", pgduck_conn)
+    try:
+        result_rows = perform_query_on_cursor(
+            f"SELECT count(*), count(*) FILTER (WHERE id % 2 = 1) FROM {scan_query}",
+            pgduck_conn,
+        )
+        assert result_rows == [(4999, 0)]
+    finally:
+        perform_query_on_cursor("RESET pg_pages_per_task", pgduck_conn)
+
+
+def test_partitioned_table_filter_on_partition_key(pg_tables, pgduck_conn):
+    """A filter on the partition key still returns the matching rows of every partition."""
+    scan_query = f"postgres_scan_pushdown('{_connstr()}', 'public', 'scanner_large_partitioned_tbl')"
+    perform_query_on_cursor("SET pg_pages_per_task = 5", pgduck_conn)
+    try:
+        result_rows = perform_query_on_cursor(
+            f"SELECT count(*), min(id), max(id) FROM {scan_query} WHERE id >= 4000",
+            pgduck_conn,
+        )
+        assert result_rows == [(6000, 4000, 9999)]
+    finally:
+        perform_query_on_cursor("RESET pg_pages_per_task", pgduck_conn)
 
 
 def test_partitioned_table_filters_and_projections(pg_tables, pgduck_conn):
