@@ -30,7 +30,7 @@ index 156b5ee..b074401 100644
  	int64_t type_modifier = 0;
  	string type_name;
 diff --git a/src/include/storage/postgres_table_entry.hpp b/src/include/storage/postgres_table_entry.hpp
-index b97677c..023c9c5 100644
+index b97677c..0662acc 100644
 --- a/src/include/storage/postgres_table_entry.hpp
 +++ b/src/include/storage/postgres_table_entry.hpp
 @@ -36,6 +36,9 @@ struct PostgresTableInfo {
@@ -47,51 +47,47 @@ index b97677c..023c9c5 100644
  	vector<string> postgres_names;
  	//! The approximate number of pages a table consumes in Postgres
  	std::atomic<int64_t> approx_num_pages;
-+	char relkind = 'r';
++	//! Whether this is a partitioned table, and its members as of the catalog load
 +	bool is_partitioned = false;
 +	vector<PostgresPartitionInfo> partitions;
  };
  
  } // namespace duckdb
 diff --git a/src/include/storage/postgres_table_set.hpp b/src/include/storage/postgres_table_set.hpp
-index 2b4157b..2049e6c 100644
+index 2b4157b..934e2ea 100644
 --- a/src/include/storage/postgres_table_set.hpp
 +++ b/src/include/storage/postgres_table_set.hpp
-@@ -36,6 +36,11 @@ public:
+@@ -36,6 +36,9 @@ public:
  	static string GetInitializeQuery(const vector<string> &schemas, const string &table = string());
  	static string GetInitializeQueryInformationSchema(const string &schema = string(), const string &table = string());
  	static string GetInitializeQueryInformationSchema(const vector<string> &schemas, const string &table = string());
-+	static string GetPartitionsQuery(const string &schema, const string &table);
-+	static vector<PostgresPartitionInfo> GetPartitions(ClientContext &context, PostgresConnection &connection,
-+	                                                   const string &schema_name, const string &table_name);
-+	static vector<PostgresPartitionInfo> GetPartitions(PostgresTransaction &transaction, const string &schema_name,
-+	                                                   const string &table_name);
++	static string GetPartitionsQuery(const string &schema, const string &table = string());
++	static string GetScanMembersQuery(const string &schema, const string &table, const vector<string> &filter_columns,
++	                                  bool has_partitioned_tables);
  
  protected:
  	void LoadEntries(ClientContext &context, PostgresTransaction &transaction) override;
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index b8b92b2..f0ac3e2 100644
+index b8b92b2..e57ea9c 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -40,13 +40,16 @@ struct PostgresLocalState : public LocalTableFunctionState {
- };
- 
- struct PostgresGlobalState : public GlobalTableFunctionState {
--	explicit PostgresGlobalState(idx_t max_threads) : page_idx(0), batch_idx(0), max_threads(max_threads) {
-+	explicit PostgresGlobalState(idx_t max_threads)
-+	    : page_idx(0), batch_idx(0), max_threads(max_threads), partition_idx(0), partition_page_idx(0) {
- 	}
- 
- 	mutable mutex lock;
+@@ -47,6 +47,15 @@ struct PostgresGlobalState : public GlobalTableFunctionState {
  	idx_t page_idx;
  	idx_t batch_idx;
  	idx_t max_threads;
-+	idx_t partition_idx;
-+	idx_t partition_page_idx;
++	//! the pages split into ctid ranges when one relation is queried
++	idx_t pages_approx = 0;
++	//! partitioned tables scanned one member table at a time
++	bool scan_members = false;
++	vector<PostgresPartitionInfo> members;
++	idx_t member_idx = 0;
++	idx_t member_page_idx = 0;
++	idx_t member_tasks_total = 0;
++	idx_t member_tasks_started = 0;
  	unique_ptr<ColumnDataCollection> collection;
  	ColumnDataScanState scan_state;
  	bool used_main_thread = false;
-@@ -132,10 +135,11 @@ void PostgresScanFunction::PrepareBind(PostgresVersion version, ClientContext &c
+@@ -132,10 +141,11 @@ void PostgresScanFunction::PrepareBind(PostgresVersion version, ClientContext &c
  		use_ctid_scan = false;
  	}
  	if (approx_num_pages < 0) {
@@ -105,7 +101,7 @@ index b8b92b2..f0ac3e2 100644
  		approx_num_pages = 0;
  	}
  	bind_data.SetTablePages(static_cast<idx_t>(approx_num_pages));
-@@ -162,6 +166,17 @@ void PostgresBindData::SetTablePages(idx_t approx_num_pages) {
+@@ -162,6 +172,17 @@ void PostgresBindData::SetTablePages(idx_t approx_num_pages) {
  	this->pages_approx = approx_num_pages;
  	if (!read_only || use_text_protocol) {
  		max_threads = 1;
@@ -123,7 +119,7 @@ index b8b92b2..f0ac3e2 100644
  	} else {
  		max_threads = MaxValue<idx_t>(pages_approx / pages_per_task, 1);
  	}
-@@ -219,6 +234,8 @@ static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFuncti
+@@ -219,6 +240,8 @@ static unique_ptr<FunctionData> PostgresBind(ClientContext &context, TableFuncti
  	bind_data->types = return_types;
  	bind_data->can_use_main_thread = true;
  	bind_data->requires_materialization = false;
@@ -132,43 +128,17 @@ index b8b92b2..f0ac3e2 100644
  
  	PostgresScanFunction::PrepareBind(version, context, *bind_data, info->approx_num_pages);
  	return std::move(bind_data);
-@@ -275,7 +292,8 @@ static string BuildVarcharCastProjection(const string &expr, const LogicalType &
+@@ -275,7 +298,8 @@ static string BuildVarcharCastProjection(const string &expr, const LogicalType &
  }
  
  static void PostgresInitInternal(ClientContext &context, const PostgresBindData *bind_data_p,
 -                                 PostgresLocalState &lstate, idx_t task_min, idx_t task_max) {
-+                                 PostgresLocalState &lstate, idx_t task_min, idx_t task_max,
-+                                 const string &target_schema, const string &target_table, bool use_ctid) {
++                                 PostgresLocalState &lstate, idx_t task_min, idx_t task_max, bool use_ctid,
++                                 optional_ptr<const PostgresPartitionInfo> member = nullptr) {
  	D_ASSERT(bind_data_p);
  	D_ASSERT(task_min <= task_max);
  
-@@ -287,7 +305,7 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
- 			col_names += ", ";
- 		}
- 		if (column_id == COLUMN_IDENTIFIER_ROW_ID) {
--			if (bind_data->table_name.empty() || !bind_data->emit_ctid) {
-+			if (target_table.empty() || !bind_data->emit_ctid) {
- 				// count(*) over postgres_query
- 				col_names += "NULL";
- 			} else {
-@@ -317,14 +335,14 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
- 					// binary value of the leaf to the varchar reader.
- 					throw NotImplementedException("Error reading table \"%s\" - cast to varchar not implemented below "
- 					                              "column \"%s\" (type %s)",
--					                              bind_data->table_name, bind_data->names[column_id],
-+					                              target_table, bind_data->names[column_id],
- 					                              bind_data->types[column_id].ToString());
- 				}
- 			} else {
- 				if (ContainsCastToVarchar(bind_data->postgres_types[column_id])) {
- 					auto projection = BuildVarcharCastProjection(
- 					    quoted_name, bind_data->types[column_id], bind_data->postgres_types[column_id],
--					    bind_data->table_name, bind_data->names[column_id]);
-+					    target_table, bind_data->names[column_id]);
- 					// replace the plain column name appended above
- 					col_names.resize(col_names.size() - quoted_name.size());
- 					col_names += projection;
-@@ -340,7 +358,7 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
+@@ -340,7 +364,7 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
  
  	lstate.exec = false;
  	lstate.done = false;
@@ -177,108 +147,211 @@ index b8b92b2..f0ac3e2 100644
  		filter = StringUtil::Format("WHERE ctid BETWEEN '(%d,0)'::tid AND '(%d,0)'::tid", task_min, task_max);
  	}
  	if (!filter_string.empty()) {
-@@ -352,15 +370,18 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
- 		filter += filter_string;
- 	}
- 	string query;
--	if (bind_data->table_name.empty()) {
-+	if (target_table.empty()) {
- 		D_ASSERT(!bind_data->sql.empty());
+@@ -357,6 +381,10 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
  		query = StringUtil::Format(R"(SELECT %s FROM (%s) AS __unnamed_subquery %s%s)", col_names, bind_data->sql,
  		                           filter, bind_data->limit);
  
-+	} else if (target_schema.empty()) {
-+		query = StringUtil::Format(R"(SELECT %s FROM %s %s%s)", col_names,
-+		                           KeywordHelper::WriteQuoted(target_table, '"'), filter, bind_data->limit);
++	} else if (member) {
++		query = StringUtil::Format(R"(SELECT %s FROM %s.%s %s%s)", col_names,
++		                           KeywordHelper::WriteQuoted(member->schema_name, '"'),
++		                           KeywordHelper::WriteQuoted(member->table_name, '"'), filter, bind_data->limit);
  	} else {
  		query = StringUtil::Format(R"(SELECT %s FROM %s.%s %s%s)", col_names,
--		                           KeywordHelper::WriteQuoted(bind_data->schema_name, '"'),
--		                           KeywordHelper::WriteQuoted(bind_data->table_name, '"'), filter, bind_data->limit);
-+		                           KeywordHelper::WriteQuoted(target_schema, '"'),
-+		                           KeywordHelper::WriteQuoted(target_table, '"'), filter, bind_data->limit);
+ 		                           KeywordHelper::WriteQuoted(bind_data->schema_name, '"'),
+@@ -400,6 +428,87 @@ static void PostgresScanConnect(ClientContext &context, PostgresConnection &conn
  	}
- 	if (!bind_data->use_text_protocol) {
- 		query = StringUtil::Format(R"(COPY (%s) TO STDOUT (FORMAT "binary");)", query);
-@@ -459,6 +480,41 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
+ }
+ 
++static idx_t MemberTaskCount(const PostgresBindData &bind_data, const PostgresPartitionInfo &member) {
++	if (!bind_data.use_ctid_scan || member.approx_num_pages == 0) {
++		return 1;
++	}
++	return MaxValue<idx_t>((member.approx_num_pages + bind_data.pages_per_task - 1) / bind_data.pages_per_task, 1);
++}
++
++static idx_t MaxMemberPages(const vector<PostgresPartitionInfo> &members) {
++	idx_t max_pages = 0;
++	for (auto &member : members) {
++		max_pages = MaxValue<idx_t>(max_pages, member.approx_num_pages);
++	}
++	return max_pages;
++}
++
++// Scans a partitioned table with queries on the parent itself. Its ctid ranges
++// apply to every member, so they only need to cover the largest one.
++static void PostgresUseParentScan(const PostgresBindData &bind_data, PostgresGlobalState &gstate,
++                                  idx_t max_member_pages) {
++	gstate.scan_members = false;
++	gstate.members.clear();
++	gstate.member_tasks_total = 0;
++	if (bind_data.use_ctid_scan && max_member_pages > 0) {
++		gstate.pages_approx = max_member_pages;
++	} else {
++		gstate.max_threads = 1;
++	}
++}
++
++// Plans the scan of a partitioned table. The members are read again here, in the
++// scan's transaction, so the scan sees the members that exist in its snapshot rather than the ones
++// cached at bind time.
++static void PostgresInitMemberScan(ClientContext &context, const PostgresBindData &bind_data,
++                                   TableFunctionInitInput &input, PostgresGlobalState &gstate) {
++	// pages_approx sums the pages of all members, which a ctid range on the parent does not cover
++	gstate.pages_approx = 0;
++	if (gstate.max_threads <= 1 || bind_data.requires_materialization) {
++		// nothing to split up: query the parent once
++		gstate.max_threads = 1;
++		return;
++	}
++	vector<string> filter_columns;
++	if (input.filters) {
++		for (auto &entry : input.filters->filters) {
++			auto column_id = input.column_ids[entry.first];
++			if (!IsVirtualColumn(column_id)) {
++				filter_columns.push_back(bind_data.names[column_id]);
++			}
++		}
++	}
++	auto query = PostgresTableSet::GetScanMembersQuery(bind_data.schema_name, bind_data.table_name, filter_columns,
++	                                                   bind_data.version.major_v >= 10);
++	auto result = gstate.GetConnection().Query(context, query);
++	if (result->Count() == 0) {
++		// a partitioned table without partitions (or a table dropped since bind): let the parent query decide
++		gstate.max_threads = 1;
++		return;
++	}
++	vector<PostgresPartitionInfo> members;
++	for (idx_t row = 0; row < result->Count(); row++) {
++		PostgresPartitionInfo member;
++		member.schema_name = result->GetString(row, 0);
++		member.table_name = result->GetString(row, 1);
++		member.approx_num_pages = result->IsNull(row, 2) ? 0 : result->GetInt64(row, 2);
++		members.push_back(std::move(member));
++	}
++	auto split_safe = result->GetBool(0, 3);
++	auto prunable = result->GetBool(0, 4);
++	if (split_safe && !prunable) {
++		gstate.scan_members = true;
++		for (auto &member : members) {
++			gstate.member_tasks_total += MemberTaskCount(bind_data, member);
++		}
++		gstate.members = std::move(members);
++		return;
++	}
++	// Query the parent so row level security, grants and partition pruning behave as they do in
++	// Postgres.
++	PostgresUseParentScan(bind_data, gstate, MaxMemberPages(members));
++}
++
+ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContext &context,
+                                                                     TableFunctionInitInput &input) {
+ 	auto &bind_data = input.bind_data->Cast<PostgresBindData>();
+@@ -421,6 +530,10 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
+ 		}
+ 		result->SetConnection(std::move(con));
+ 	}
++	result->pages_approx = bind_data.pages_approx;
++	if (bind_data.is_partitioned) {
++		PostgresInitMemberScan(context, bind_data, input, *result);
++	}
+ 	if (bind_data.requires_materialization) {
+ 		// if requires_materialization is enabled we scan and materialize the table in its entirety up-front
+ 		vector<LogicalType> types;
+@@ -448,6 +561,11 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
+ 	} else {
+ 		// we create a transaction here, and get the snapshot id to enable transaction-safe parallelism
+ 		PostgresGetSnapshot(context, bind_data.version, bind_data, *result);
++		if (result->scan_members && result->snapshot.empty()) {
++			// Without a shared snapshot, worker connections could see different member sets. Keep
++			// the scan on the parent and run it as one query on one connection.
++			PostgresUseParentScan(bind_data, *result, 0);
++		}
+ 	}
+ 	return std::move(result);
+ }
+@@ -459,14 +577,46 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
  
  	lock_guard<mutex> parallel_lock(gstate.lock);
  	lstate.batch_idx = gstate.batch_idx++;
+-	if (gstate.page_idx < bind_data->pages_approx) {
 +
-+	if (bind_data->is_partitioned) {
-+		while (gstate.partition_idx < bind_data->partitions.size()) {
-+			auto &partition_entry = bind_data->partitions[gstate.partition_idx];
-+			auto partition_pages = partition_entry.approx_num_pages;
++	if (gstate.scan_members) {
++		if (gstate.member_idx >= gstate.members.size()) {
++			lstate.done = true;
++			return false;
++		}
++		auto &member = gstate.members[gstate.member_idx];
++		auto member_pages = member.approx_num_pages;
++		gstate.member_tasks_started++;
 +
-+			// branch partitions are not in the list; 0 pages is an empty leaf or a foreign table
-+			if (!bind_data->use_ctid_scan || partition_pages == 0) {
-+				gstate.partition_idx++;
-+				gstate.partition_page_idx = 0;
-+				PostgresInitInternal(context, bind_data, lstate, 0, POSTGRES_TID_MAX, partition_entry.schema_name,
-+				                     partition_entry.table_name, /*use_ctid=*/false);
-+				return true;
-+			}
-+
-+			auto task_min = gstate.partition_page_idx;
-+			auto task_max = task_min + bind_data->pages_per_task;
-+			if (task_max >= partition_pages || task_max > POSTGRES_TID_MAX) {
-+				task_max = POSTGRES_TID_MAX;
-+				gstate.partition_idx++;
-+				gstate.partition_page_idx = 0;
-+				gstate.page_idx += (partition_pages > task_min ? partition_pages - task_min : 0);
-+			} else {
-+				gstate.partition_page_idx = task_max;
-+				gstate.page_idx += bind_data->pages_per_task;
-+			}
-+
-+			PostgresInitInternal(context, bind_data, lstate, task_min, task_max, partition_entry.schema_name,
-+			                     partition_entry.table_name, /*use_ctid=*/true);
++		// 0 pages is an empty member or a foreign table
++		if (!bind_data->use_ctid_scan || member_pages == 0) {
++			gstate.member_idx++;
++			gstate.member_page_idx = 0;
++			PostgresInitInternal(context, bind_data, lstate, 0, POSTGRES_TID_MAX, /*use_ctid=*/false, &member);
 +			return true;
 +		}
-+		lstate.done = true;
-+		return false;
++
++		auto task_min = gstate.member_page_idx;
++		auto task_max = task_min + bind_data->pages_per_task;
++		if (task_max >= member_pages || task_max > POSTGRES_TID_MAX) {
++			// the page count is not the real max, so make the last task of a member bigger
++			task_max = POSTGRES_TID_MAX;
++			gstate.member_idx++;
++			gstate.member_page_idx = 0;
++		} else {
++			gstate.member_page_idx = task_max;
++		}
++		PostgresInitInternal(context, bind_data, lstate, task_min, task_max, /*use_ctid=*/true, &member);
++		return true;
 +	}
 +
- 	if (gstate.page_idx < bind_data->pages_approx) {
++	if (gstate.page_idx < gstate.pages_approx) {
  		auto page_max = gstate.page_idx + bind_data->pages_per_task;
- 		if (page_max >= bind_data->pages_approx || page_max > POSTGRES_TID_MAX) {
-@@ -466,7 +522,8 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
+-		if (page_max >= bind_data->pages_approx || page_max > POSTGRES_TID_MAX) {
++		if (page_max >= gstate.pages_approx || page_max > POSTGRES_TID_MAX) {
+ 			// the relpages entry is not the real max, so make the last task bigger
  			page_max = POSTGRES_TID_MAX;
  		}
  
 -		PostgresInitInternal(context, bind_data, lstate, gstate.page_idx, page_max);
-+		PostgresInitInternal(context, bind_data, lstate, gstate.page_idx, page_max, bind_data->schema_name,
-+		                     bind_data->table_name, /*use_ctid=*/true);
++		PostgresInitInternal(context, bind_data, lstate, gstate.page_idx, page_max, /*use_ctid=*/true);
  		gstate.page_idx = page_max;
  		return true;
  	}
-@@ -529,8 +586,9 @@ static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context,
+@@ -529,8 +679,8 @@ static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context,
  		local_state->no_connection = true;
  		return std::move(local_state);
  	}
 -	if (bind_data.pages_approx == 0 || bind_data.requires_materialization) {
 -		PostgresInitInternal(context, &bind_data, *local_state, 0, POSTGRES_TID_MAX);
-+	if (!bind_data.is_partitioned && (bind_data.pages_approx == 0 || bind_data.requires_materialization)) {
-+		PostgresInitInternal(context, &bind_data, *local_state, 0, POSTGRES_TID_MAX, bind_data.schema_name,
-+		                     bind_data.table_name, /*use_ctid=*/false);
++	if (!gstate.scan_members && (gstate.pages_approx == 0 || bind_data.requires_materialization)) {
++		PostgresInitInternal(context, &bind_data, *local_state, 0, POSTGRES_TID_MAX, /*use_ctid=*/false);
  		lock_guard<mutex> parallel_lock(gstate.lock);
  		gstate.page_idx = POSTGRES_TID_MAX;
  	} else if (!PostgresParallelStateNext(context, input.bind_data.get(), *local_state, gstate)) {
-@@ -642,6 +700,13 @@ double PostgresScanProgress(ClientContext &context, const FunctionData *bind_dat
+@@ -642,7 +792,18 @@ double PostgresScanProgress(ClientContext &context, const FunctionData *bind_dat
  	auto &gstate = global_state->Cast<PostgresGlobalState>();
  
  	lock_guard<mutex> parallel_lock(gstate.lock);
-+	if (bind_data.pages_approx == 0) {
-+		if (bind_data.is_partitioned && !bind_data.partitions.empty()) {
-+			double progress = 100 * double(gstate.partition_idx) / double(bind_data.partitions.size());
-+			return MinValue<double>(100, progress);
+-	double progress = 100 * double(gstate.page_idx) / double(bind_data.pages_approx);
++	if (gstate.scan_members) {
++		// counts started tasks, as the page count below does
++		if (gstate.member_idx >= gstate.members.size()) {
++			return 100;
 +		}
-+		return 100;
++		double progress = 100 * double(gstate.member_tasks_started) / double(gstate.member_tasks_total);
++		return MinValue<double>(100, progress);
 +	}
- 	double progress = 100 * double(gstate.page_idx) / double(bind_data.pages_approx);
++	if (gstate.pages_approx == 0) {
++		return gstate.page_idx == POSTGRES_TID_MAX ? 100 : 0;
++	}
++	double progress = 100 * double(gstate.page_idx) / double(gstate.pages_approx);
  	return MinValue<double>(100, progress);
  }
+ 
 diff --git a/src/storage/postgres_table_entry.cpp b/src/storage/postgres_table_entry.cpp
-index a746a45..042c31e 100644
+index a746a45..648de7c 100644
 --- a/src/storage/postgres_table_entry.cpp
 +++ b/src/storage/postgres_table_entry.cpp
 @@ -23,7 +23,8 @@ PostgresTableEntry::PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &sch
@@ -286,7 +359,7 @@ index a746a45..042c31e 100644
  PostgresTableEntry::PostgresTableEntry(Catalog &catalog, SchemaCatalogEntry &schema, PostgresTableInfo &info)
      : TableCatalogEntry(catalog, schema, *info.create_info), postgres_types(std::move(info.postgres_types)),
 -      postgres_names(std::move(info.postgres_names)) {
-+      postgres_names(std::move(info.postgres_names)), relkind(info.relkind), is_partitioned(info.is_partitioned),
++      postgres_names(std::move(info.postgres_names)), is_partitioned(info.is_partitioned),
 +      partitions(std::move(info.partitions)) {
  	D_ASSERT(postgres_types.size() == columns.LogicalColumnCount());
  	approx_num_pages.store(info.approx_num_pages, std::memory_order_release);
@@ -301,7 +374,7 @@ index a746a45..042c31e 100644
  	                                  approx_num_pages.load(std::memory_order_acquire));
  
 diff --git a/src/storage/postgres_table_set.cpp b/src/storage/postgres_table_set.cpp
-index 1456608..2ffaed9 100644
+index 1456608..8107d84 100644
 --- a/src/storage/postgres_table_set.cpp
 +++ b/src/storage/postgres_table_set.cpp
 @@ -33,7 +33,8 @@ SELECT pg_namespace.oid AS namespace_id, relname,
@@ -334,72 +407,143 @@ index 1456608..2ffaed9 100644
  FROM information_schema.columns
  WHERE table_schema NOT IN ('information_schema', 'pg_catalog', 'pg_toast') ${CONDITION}
  ORDER BY table_schema, table_name, ordinal_position;
-@@ -91,6 +94,64 @@ ORDER BY table_schema, table_name, ordinal_position;
+@@ -91,6 +94,135 @@ ORDER BY table_schema, table_name, ordinal_position;
  	return StringUtil::Replace(base_query, "${CONDITION}", condition);
  }
  
++// One row per leaf partition of every partitioned table in the schema, or only of `table` when it is
++// given.
 +string PostgresTableSet::GetPartitionsQuery(const string &schema, const string &table) {
 +	string query = R"(
 +WITH RECURSIVE inh AS (
-+    SELECT relation_class.oid, relation_class.relnamespace, relation_class.relname, relation_class.relkind
++    SELECT relation_class.oid AS root_oid, relation_class.oid
++    FROM pg_class relation_class
++    JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace
++    WHERE relation_namespace.nspname = ${SCHEMA} ${CONDITION}
++      AND relation_class.relkind = 'p'
++  UNION ALL
++    SELECT inh.root_oid, inheritance.inhrelid
++    FROM pg_inherits inheritance
++    JOIN inh ON inheritance.inhparent = inh.oid
++)
++SELECT root_class.relname AS root_name,
++       relation_namespace.nspname AS member_schema,
++       relation_class.relname AS member_name,
++       pg_relation_size(relation_class.oid) / current_setting('block_size')::bigint AS relpages
++FROM inh
++JOIN pg_class root_class ON root_class.oid = inh.root_oid
++JOIN pg_class relation_class ON relation_class.oid = inh.oid
++JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace
++WHERE relation_class.relkind IN ('r', 'm', 'f')
++ORDER BY root_name, member_schema, member_name;
++)";
++	string condition;
++	if (!table.empty()) {
++		condition = "AND relation_class.relname = " + KeywordHelper::WriteQuoted(table, '\'');
++	}
++	query = StringUtil::Replace(query, "${SCHEMA}", KeywordHelper::WriteQuoted(schema, '\''));
++	query = StringUtil::Replace(query, "${CONDITION}", condition);
++	return query;
++}
++
++// Run at scan time inside the scan's transaction: the members of `table` as they are in the scan
++// snapshot, plus whether scanning them one at a time is equivalent to querying the parent.
++// split_safe is false when row level security or a missing SELECT grant on a member would make a
++// direct member query see different rows than the parent query. prunable is true when a filtered
++// column is a partition key or appears in a CHECK constraint, so a parent query can skip members.
++string PostgresTableSet::GetScanMembersQuery(const string &schema, const string &table,
++                                             const vector<string> &filter_columns, bool has_partitioned_tables) {
++	string query = R"(
++WITH RECURSIVE inh AS (
++    SELECT relation_class.oid
 +    FROM pg_class relation_class
 +    JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace
 +    WHERE relation_namespace.nspname = ${SCHEMA} AND relation_class.relname = ${TABLE}
 +  UNION ALL
-+    SELECT relation_class.oid, relation_class.relnamespace, relation_class.relname, relation_class.relkind
++    SELECT inheritance.inhrelid
 +    FROM pg_inherits inheritance
 +    JOIN inh ON inheritance.inhparent = inh.oid
-+    JOIN pg_class relation_class ON inheritance.inhrelid = relation_class.oid
++),
++tree AS (
++    SELECT bool_and(has_table_privilege(inh.oid, 'SELECT') AND NOT relation_class.relrowsecurity) AS split_safe,
++           ${PRUNABLE} AS prunable
++    FROM inh
++    JOIN pg_class relation_class ON relation_class.oid = inh.oid
 +)
-+SELECT relation_namespace.nspname AS partition_schema,
-+       inh.relname AS partition_name,
-+       pg_relation_size(inh.oid) / current_setting('block_size')::bigint AS relpages
++SELECT relation_namespace.nspname AS member_schema,
++       relation_class.relname AS member_name,
++       pg_relation_size(relation_class.oid) / current_setting('block_size')::bigint AS relpages,
++       tree.split_safe,
++       tree.prunable
 +FROM inh
-+JOIN pg_namespace relation_namespace ON relation_namespace.oid = inh.relnamespace
-+WHERE inh.relkind != 'p' AND inh.relkind IN ('r', 'm', 'f')
-+ORDER BY partition_schema, partition_name;
++JOIN pg_class relation_class ON relation_class.oid = inh.oid
++JOIN pg_namespace relation_namespace ON relation_namespace.oid = relation_class.relnamespace
++CROSS JOIN tree
++WHERE relation_class.relkind IN ('r', 'm', 'f')
++ORDER BY member_schema, member_name;
 +)";
++	string prunable = "false";
++	if (!filter_columns.empty()) {
++		string columns;
++		for (auto &column : filter_columns) {
++			if (!columns.empty()) {
++				columns += ", ";
++			}
++			columns += KeywordHelper::WriteQuoted(column, '\'');
++		}
++		prunable = R"(EXISTS (
++        SELECT 1 FROM inh
++        JOIN pg_constraint check_constraint ON check_constraint.conrelid = inh.oid AND check_constraint.contype = 'c'
++        JOIN pg_attribute check_attribute ON check_attribute.attrelid = inh.oid
++            AND check_attribute.attnum = ANY (check_constraint.conkey)
++        WHERE check_attribute.attname IN (${COLUMNS})))";
++		if (has_partitioned_tables) {
++			// a key column number of 0 is an expression key, which any filter might prune on
++			prunable += R"( OR EXISTS (
++        SELECT 1 FROM inh
++        JOIN pg_partitioned_table partition_key ON partition_key.partrelid = inh.oid
++        WHERE 0 = ANY (partition_key.partattrs::int2[]) OR EXISTS (
++            SELECT 1 FROM pg_attribute key_attribute
++            WHERE key_attribute.attrelid = inh.oid AND key_attribute.attnum = ANY (partition_key.partattrs::int2[])
++              AND key_attribute.attname IN (${COLUMNS}))))";
++		}
++		prunable = StringUtil::Replace(prunable, "${COLUMNS}", columns);
++	}
 +	query = StringUtil::Replace(query, "${SCHEMA}", KeywordHelper::WriteQuoted(schema, '\''));
 +	query = StringUtil::Replace(query, "${TABLE}", KeywordHelper::WriteQuoted(table, '\''));
++	query = StringUtil::Replace(query, "${PRUNABLE}", prunable);
 +	return query;
 +}
 +
-+vector<PostgresPartitionInfo> PostgresTableSet::GetPartitions(ClientContext &context, PostgresConnection &connection,
-+                                                              const string &schema_name, const string &table_name) {
-+	auto query = GetPartitionsQuery(schema_name, table_name);
-+	auto result = connection.Query(context, query);
-+	auto row_count = result->Count();
-+	vector<PostgresPartitionInfo> partitions;
-+	for (idx_t row_index = 0; row_index < row_count; row_index++) {
++// Reads the GetPartitionsQuery result, keyed by the partitioned table's name.
++static unordered_map<string, vector<PostgresPartitionInfo>> ReadPartitions(PostgresResult &result) {
++	unordered_map<string, vector<PostgresPartitionInfo>> partitions;
++	for (idx_t row = 0; row < result.Count(); row++) {
 +		PostgresPartitionInfo partition_info;
-+		partition_info.schema_name = result->GetString(row_index, 0);
-+		partition_info.table_name = result->GetString(row_index, 1);
-+		partition_info.approx_num_pages = result->IsNull(row_index, 2) ? 0 : result->GetInt64(row_index, 2);
-+		partitions.push_back(std::move(partition_info));
++		partition_info.schema_name = result.GetString(row, 1);
++		partition_info.table_name = result.GetString(row, 2);
++		partition_info.approx_num_pages = result.IsNull(row, 3) ? 0 : result.GetInt64(row, 3);
++		partitions[result.GetString(row, 0)].push_back(std::move(partition_info));
 +	}
 +	return partitions;
 +}
 +
-+vector<PostgresPartitionInfo> PostgresTableSet::GetPartitions(PostgresTransaction &transaction,
-+                                                              const string &schema_name, const string &table_name) {
-+	auto query = GetPartitionsQuery(schema_name, table_name);
-+	auto result = transaction.Query(query);
-+	auto row_count = result->Count();
-+	vector<PostgresPartitionInfo> partitions;
-+	for (idx_t row_index = 0; row_index < row_count; row_index++) {
-+		PostgresPartitionInfo partition_info;
-+		partition_info.schema_name = result->GetString(row_index, 0);
-+		partition_info.table_name = result->GetString(row_index, 1);
-+		partition_info.approx_num_pages = result->IsNull(row_index, 2) ? 0 : result->GetInt64(row_index, 2);
-+		partitions.push_back(std::move(partition_info));
++static void SetPartitions(PostgresTableInfo &table_info,
++                          unordered_map<string, vector<PostgresPartitionInfo>> &partitions) {
++	auto entry = partitions.find(table_info.GetTableName());
++	if (entry != partitions.end()) {
++		table_info.partitions = std::move(entry->second);
 +	}
-+	return partitions;
++	table_info.approx_num_pages = 0;
++	for (auto &partition_entry : table_info.partitions) {
++		table_info.approx_num_pages += partition_entry.approx_num_pages;
++	}
 +}
 +
  void PostgresTableSet::AddColumn(optional_ptr<PostgresTransaction> transaction,
                                   optional_ptr<PostgresSchemaEntry> schema, PostgresResult &result, idx_t row,
                                   PostgresTableInfo &table_info, PostgresConnection *connection) {
-@@ -161,8 +222,7 @@ void PostgresTableSet::AddConstraint(PostgresResult &result, idx_t row, Postgres
+@@ -161,8 +293,7 @@ void PostgresTableSet::AddConstraint(PostgresResult &result, idx_t row, Postgres
  
  void PostgresTableSet::AddColumnOrConstraint(optional_ptr<PostgresTransaction> transaction,
                                               optional_ptr<PostgresSchemaEntry> schema, PostgresResult &result,
@@ -409,13 +553,14 @@ index 1456608..2ffaed9 100644
  	if (result.IsNull(row, 3)) {
  		// constraint
  		AddConstraint(result, row, table_info);
-@@ -187,14 +247,25 @@ void PostgresTableSet::CreateEntries(PostgresTransaction &transaction, PostgresR
+@@ -187,14 +318,30 @@ void PostgresTableSet::CreateEntries(PostgresTransaction &transaction, PostgresR
  			if (!result.IsNull(row, 14)) {
  				info->create_info->comment = Value(result.GetString(row, 14));
  			}
 +			if (!result.IsNull(row, 16)) {
 +				info->relkind = result.GetString(row, 16)[0];
 +			}
++			info->is_partitioned = info->relkind == 'p';
  		}
  		AddColumnOrConstraint(&transaction, &schema, result, row, *info);
  	}
@@ -424,51 +569,74 @@ index 1456608..2ffaed9 100644
  	}
 -	for (auto &tbl_info : tables) {
 -		auto table_entry = make_shared_ptr<PostgresTableEntry>(catalog, schema, *tbl_info);
++	unordered_map<string, vector<PostgresPartitionInfo>> partitions;
 +	for (auto &table_info_entry : tables) {
-+		if (table_info_entry->relkind == 'p') {
-+			table_info_entry->is_partitioned = true;
-+			table_info_entry->partitions = GetPartitions(transaction, schema.name, table_info_entry->GetTableName());
-+			table_info_entry->approx_num_pages = 0;
-+			for (auto &partition_entry : table_info_entry->partitions) {
-+				table_info_entry->approx_num_pages += partition_entry.approx_num_pages;
-+			}
++		if (table_info_entry->is_partitioned) {
++			// one query for the members of every partitioned table in the schema
++			auto partitions_result = transaction.Query(GetPartitionsQuery(schema.name));
++			partitions = ReadPartitions(*partitions_result);
++			break;
++		}
++	}
++	for (auto &table_info_entry : tables) {
++		if (table_info_entry->is_partitioned) {
++			SetPartitions(*table_info_entry, partitions);
 +		}
 +		auto table_entry = make_shared_ptr<PostgresTableEntry>(catalog, schema, *table_info_entry);
  		CreateEntry(transaction, std::move(table_entry));
  	}
  }
-@@ -255,6 +326,17 @@ unique_ptr<PostgresTableInfo> PostgresTableSet::GetTableInfo(PostgresTransaction
+@@ -226,12 +373,20 @@ string PostgresTableSet::GetStalenessQuery(ClientContext &context) const {
+ 		}
+ 		return StringUtil::Replace(custom_query, "${SCHEMA}", KeywordHelper::WriteQuoted(schema.name));
+ 	}
++	// attaching or detaching a partition that lives in another schema leaves this schema's pg_class
++	// rows untouched, so the members of each table are tracked through pg_inherits as well
+ 	string base_query = R"(
+-SELECT pg_class.oid, relname, pg_class.xmin
++SELECT pg_class.oid, relname::text, pg_class.xmin
+ FROM pg_class
+ JOIN pg_namespace ON relnamespace = pg_namespace.oid
+ WHERE relkind IN ('r', 'v', 'm', 'f', 'p') AND pg_namespace.nspname = ${SCHEMA}
+-ORDER BY pg_class.oid;
++UNION ALL
++SELECT inhrelid, pg_class.relname::text, pg_inherits.xmin
++FROM pg_inherits
++JOIN pg_class ON inhparent = pg_class.oid
++JOIN pg_namespace ON relnamespace = pg_namespace.oid
++WHERE pg_namespace.nspname = ${SCHEMA}
++ORDER BY 1, 2;
+ )";
+ 	return StringUtil::Replace(base_query, "${SCHEMA}", KeywordHelper::WriteQuoted(schema.name));
+ }
+@@ -255,6 +410,15 @@ unique_ptr<PostgresTableInfo> PostgresTableSet::GetTableInfo(PostgresTransaction
  	if (!result->IsNull(0, 14)) {
  		table_info->create_info->comment = Value(result->GetString(0, 14));
  	}
 +	if (!result->IsNull(0, 16)) {
 +		table_info->relkind = result->GetString(0, 16)[0];
 +	}
-+	if (table_info->relkind == 'p') {
-+		table_info->is_partitioned = true;
-+		table_info->partitions = GetPartitions(transaction, schema.name, table_name);
-+		table_info->approx_num_pages = 0;
-+		for (auto &partition_entry : table_info->partitions) {
-+			table_info->approx_num_pages += partition_entry.approx_num_pages;
-+		}
++	table_info->is_partitioned = table_info->relkind == 'p';
++	if (table_info->is_partitioned) {
++		auto partitions_result = transaction.Query(GetPartitionsQuery(schema.name, table_name));
++		auto partitions = ReadPartitions(*partitions_result);
++		SetPartitions(*table_info, partitions);
 +	}
  	return table_info;
  }
  
-@@ -277,6 +359,17 @@ unique_ptr<PostgresTableInfo> PostgresTableSet::GetTableInfo(ClientContext &cont
+@@ -277,6 +441,15 @@ unique_ptr<PostgresTableInfo> PostgresTableSet::GetTableInfo(ClientContext &cont
  	if (!result->IsNull(0, 14)) {
  		table_info->create_info->comment = Value(result->GetString(0, 14));
  	}
 +	if (!result->IsNull(0, 16)) {
 +		table_info->relkind = result->GetString(0, 16)[0];
 +	}
-+	if (table_info->relkind == 'p') {
-+		table_info->is_partitioned = true;
-+		table_info->partitions = GetPartitions(context, connection, schema_name, table_name);
-+		table_info->approx_num_pages = 0;
-+		for (auto &partition_entry : table_info->partitions) {
-+			table_info->approx_num_pages += partition_entry.approx_num_pages;
-+		}
++	table_info->is_partitioned = table_info->relkind == 'p';
++	if (table_info->is_partitioned) {
++		auto partitions_result = connection.Query(context, GetPartitionsQuery(schema_name, table_name));
++		auto partitions = ReadPartitions(*partitions_result);
++		SetPartitions(*table_info, partitions);
 +	}
  	return table_info;
  }
