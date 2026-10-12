@@ -750,7 +750,7 @@ static Expr *
 PartitionFieldBoundConstraint(PartitionField * partitionField, IcebergPartitionTransform * partitionTransform,
 							  ColumnToFieldIdMapping * entry)
 {
-	IcebergPartitionTransformType type = partitionTransform->type;
+	IcebergPartitionTransformType type = partitionTransform->parsedTransform.type;
 
 	if (type != PARTITION_TRANSFORM_IDENTITY &&
 		partitionField->value == NULL)
@@ -802,7 +802,7 @@ IdentityPartitionFieldBoundConstraint(PartitionField * partitionField,
 	{
 		bool		isNull = false;
 		Datum		partitionDatum =
-			PartitionValueToDatum(partitionTransform->type, partitionField->value, partitionField->value_length,
+			PartitionValueToDatum(partitionTransform->parsedTransform.type, partitionField->value, partitionField->value_length,
 								  partitionTransform->resultPgType, &isNull);
 
 		OpExpr	   *columnBoundEquality = copyObject(entry->equalityOperatorExpression);
@@ -831,7 +831,7 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 	if (pgType.postgresTypeOid == INT4OID || pgType.postgresTypeOid == INT2OID)
 	{
 		int32		partitionValue = *(int32_t *) partitionField->value;
-		int			truncateLen = partitionTransform->truncateLen;
+		int			truncateLen = partitionTransform->parsedTransform.truncateLen;
 
 		int32		upperBound;
 
@@ -849,7 +849,7 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 	else if (pgType.postgresTypeOid == INT8OID)
 	{
 		int64		partitionValue = *(int64_t *) partitionField->value;
-		int			truncateLen = partitionTransform->truncateLen;
+		int			truncateLen = partitionTransform->parsedTransform.truncateLen;
 
 		int64		upperBound;
 
@@ -876,7 +876,7 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 			return NULL;
 		}
 
-		int			truncateLen = partitionTransform->truncateLen;
+		int			truncateLen = partitionTransform->parsedTransform.truncateLen;
 		char	   *truncatedUpperBound = TruncateUpperBoundForText(pstrdup(partitionValue), truncateLen);
 
 		if (truncatedUpperBound == NULL)
@@ -899,7 +899,7 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 		memcpy(VARDATA_ANY(partitionValue), partitionField->value, partitionField->value_length);
 
 		bytea	   *partitionValueCopy = (bytea *) pg_detoast_datum_copy((struct varlena *) partitionValue);
-		int			truncateLen = partitionTransform->truncateLen;
+		int			truncateLen = partitionTransform->parsedTransform.truncateLen;
 
 		/* increment the last byte of the upper bound, which does not overflow */
 		partitionValueCopy = TruncateUpperBoundForBytea(partitionValueCopy, truncateLen);
@@ -1893,7 +1893,7 @@ ExtendClausesForBucketPartitioning(Partition * partition, List *partitionTransfo
 		if (partitionTransform == NULL)
 			continue;
 
-		if (partitionTransform->type != PARTITION_TRANSFORM_BUCKET)
+		if (partitionTransform->parsedTransform.type != PARTITION_TRANSFORM_BUCKET)
 		{
 			/* only extend restrict info for bucket transform */
 			continue;
