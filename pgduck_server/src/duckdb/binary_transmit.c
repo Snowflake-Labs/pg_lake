@@ -28,6 +28,7 @@
  */
 #include "c.h"
 
+#include <assert.h>
 #include <string.h>
 
 #include "catalog/pg_type_d.h"
@@ -376,7 +377,8 @@ binary_transmit_append_value(StringInfo buf, BinaryColumnWriter * writer,
 			}
 
 		case BINARY_WRITER_NONE:
-			/* not reachable, writers are only used if all columns have one */
+			/* writers are only used if all columns have one */
+			assert(false);
 			break;
 	}
 }
