@@ -32,3 +32,11 @@ typedef void (*PgLakeAlterTableRenameColumnHookType) (Oid relationOid, RenameStm
 
 extern PGDLLEXPORT PgLakeAlterTableHookType PgLakeAlterTableHook;
 extern PGDLLEXPORT PgLakeAlterTableRenameColumnHookType PgLakeAlterTableRenameColumnHook;
+
+/*
+ * When true, ProcessAlterTable skips Iceberg DDL processing (field_id
+ * registration and metadata tracking).  Used by
+ * sync_iceberg_metadata_from_external_write to add/drop columns without
+ * triggering a new metadata write.
+ */
+extern bool SkipIcebergDDLProcessing;
