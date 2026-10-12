@@ -950,3 +950,17 @@ def test_default_chunk_cap_value(pgduck_conn):
         "SELECT current_setting('pg_max_chunk_size_bytes')::BIGINT", pgduck_conn
     )
     assert rows[0][0] == 16 * 1024 * 1024
+
+
+def test_text_protocol_returns_final_chunk_before_next_task(pg_tables, pgduck_conn):
+    """A task's final partial chunk is emitted before the next task scans."""
+    try:
+        perform_query_on_cursor("SET threads = 1", pgduck_conn)
+        perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
+        rows = perform_query_on_cursor(
+            f"SELECT count(id) FROM {_scan('scanner_mixed_rows_tbl')}", pgduck_conn
+        )
+        assert rows == [(8448,)]
+    finally:
+        perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
+        perform_query_on_cursor("RESET threads", pgduck_conn)
