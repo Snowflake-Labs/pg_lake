@@ -60,6 +60,118 @@ def test_dbt_materialized_incremental(installcheck, s3, superuser_conn, extensio
     superuser_conn.commit()
 
 
+@pytest.mark.parametrize("application_name", ["dbt", "pg_lake_test"])
+@pytest.mark.parametrize(
+    "predicate, expected",
+    [
+        pytest.param("IN (1, 2)", [[1, 1], [1, 2]], id="in"),
+        pytest.param("NOT IN (1, 2)", [[1, 3]], id="not_in"),
+        pytest.param("= ANY (ARRAY[1, 2])", [[1, 1], [1, 2]], id="any"),
+        pytest.param("<> ALL (ARRAY[1, 2])", [[1, 3]], id="all"),
+    ],
+)
+def test_dbt_query_context_nested_scalar(
+    pg_conn, application_name, predicate, expected
+):
+    # Visiting the scalar subquery must not replace the outer query's range table.
+    query = f"""
+        SELECT (SELECT 1) AS scalar, a
+        FROM (VALUES (1), (2), (3), (NULL::integer)) AS x(a)
+        WHERE a {predicate}
+        ORDER BY a
+    """
+    run_command(f"SET LOCAL application_name = '{application_name}'", pg_conn)
+    plan = run_query(f"EXPLAIN (FORMAT JSON) {query}", pg_conn)
+    assert "Plan" in plan[0][0][0]
+    assert run_query(query, pg_conn) == expected
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize("application_name", ["dbt", "pg_lake_test"])
+def test_dbt_query_context_correlated_var(pg_conn, application_name):
+    # x is the second outer RTE, but the nested query has only one RTE.
+    # Its correlated Var must not be looked up in the nested range table.
+    query = """
+        SELECT x.a,
+               (SELECT y.b FROM (VALUES (10)) AS y(b) WHERE x.a IN (1, 2))
+        FROM (VALUES (0)) AS first_rte(n), (VALUES (1), (2), (3)) AS x(a)
+        ORDER BY x.a
+    """
+    run_command(f"SET LOCAL application_name = '{application_name}'", pg_conn)
+    plan = run_query(f"EXPLAIN (FORMAT JSON) {query}", pg_conn)
+    assert "Plan" in plan[0][0][0]
+    assert run_query(query, pg_conn) == [[1, 10], [2, 10], [3, None]]
+    pg_conn.rollback()
+
+
+def test_dbt_query_context_non_catalog_var(pg_conn):
+    # Only pg_class.relkind should have 'f' added, not ordinary char columns.
+    query = """
+        SELECT (SELECT 1) AS scalar, kind
+        FROM (VALUES ('r'::"char"), ('p'::"char"), ('f'::"char")) AS x(kind)
+        WHERE kind IN ('r'::"char", 'p'::"char")
+        ORDER BY kind
+    """
+    run_command("SET LOCAL application_name = 'dbt'", pg_conn)
+    assert run_query(query, pg_conn) == [[1, "p"], [1, "r"]]
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "application_name, expected",
+    [
+        ("dbt", [[1, "foreign_table"], [1, "heap_table"]]),
+        ("pg_lake_test", [[1, "heap_table"]]),
+    ],
+)
+def test_dbt_query_context_foreign_table_discovery(
+    superuser_conn, application_name, expected
+):
+    # A handlerless FDW is sufficient: this only exercises catalog discovery.
+    run_command(
+        """
+        CREATE SCHEMA test_dbt_query_context;
+        CREATE FOREIGN DATA WRAPPER dbt_query_context_fdw;
+        CREATE SERVER dbt_query_context_server
+            FOREIGN DATA WRAPPER dbt_query_context_fdw;
+        CREATE FOREIGN TABLE test_dbt_query_context.foreign_table (a integer)
+            SERVER dbt_query_context_server;
+        CREATE TABLE test_dbt_query_context.heap_table (a integer) USING heap;
+        """,
+        superuser_conn,
+    )
+    run_command(f"SET LOCAL application_name = '{application_name}'", superuser_conn)
+    assert (
+        run_query(
+            """
+            SELECT (SELECT 1), tablename
+            FROM pg_catalog.pg_tables
+            WHERE schemaname = 'test_dbt_query_context'
+            ORDER BY tablename
+            """,
+            superuser_conn,
+        )
+        == expected
+    )
+    # Keep the catalog filter in the outer query, after visiting SELECT 1.
+    # A bounds check alone would avoid the crash but fail to add foreign tables.
+    assert (
+        run_query(
+            """
+            SELECT (SELECT 1), c.relname
+            FROM pg_catalog.pg_class AS c
+            JOIN pg_catalog.pg_namespace AS n ON n.oid = c.relnamespace
+            WHERE n.nspname = 'test_dbt_query_context'
+              AND c.relkind = ANY (ARRAY['r'::"char", 'p'::"char"])
+            ORDER BY c.relname
+            """,
+            superuser_conn,
+        )
+        == expected
+    )
+    superuser_conn.rollback()
+
+
 def dbt_run_helper(models, repeat=1):
     try:
         for _ in range(repeat):
