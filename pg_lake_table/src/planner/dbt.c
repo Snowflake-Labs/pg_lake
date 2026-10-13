@@ -52,12 +52,14 @@ AddForeignTablesToRelkindInArrayFilter(Node *node, void *context)
 	if (IsA(node, Query))
 	{
 		Query	   *query = (Query *) node;
+		DbtApplicationQueryContext queryContext = *dbtContext;
 
-		dbtContext->rtable = query->rtable;
+		/* A nested query must not overwrite its parent's range table. */
+		queryContext.rtable = query->rtable;
 
 		return query_tree_walker((Query *) node,
 								 AddForeignTablesToRelkindInArrayFilter,
-								 context,
+								 &queryContext,
 								 0);
 	}
 	else if (IsA(node, ScalarArrayOpExpr))
@@ -80,14 +82,20 @@ AddForeignTablesToRelkindInArrayFilter(Node *node, void *context)
 
 		Var		   *var = (Var *) leftArg;
 
+		/* Only resolve Vars that belong to the current query's range table. */
+		if (var->varlevelsup != 0 || var->varno <= 0 ||
+			var->varno > list_length(dbtContext->rtable))
+		{
+			return false;
+		}
+
 		RangeTblEntry *referencedRte = rt_fetch(var->varno, dbtContext->rtable);
 
 		/* left argument should be "pg_class.relkind". */
 		if (referencedRte == NULL ||
+			referencedRte->rtekind != RTE_RELATION ||
 			referencedRte->relid != RelationRelationId ||
-			var->varattno != Anum_pg_class_relkind ||
-		/* we only care about top level query */
-			var->varlevelsup != 0)
+			var->varattno != Anum_pg_class_relkind)
 		{
 			return false;
 		}
