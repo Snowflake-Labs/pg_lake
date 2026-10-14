@@ -128,7 +128,12 @@ AddForeignTablesToRelkindInArrayFilter(Node *node, void *context)
 			const3->constvalue = CharGetDatum('f');
 
 			arrayExpr->elements = lappend(arrayExpr->elements, const3);
-			return true;
+
+			/*
+			 * Returning true here would abort the whole walk and leave any
+			 * later relkind filter in the statement unrewritten.
+			 */
+			return false;
 		}
 
 		return false;

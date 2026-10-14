@@ -172,6 +172,45 @@ def test_dbt_query_context_foreign_table_discovery(
     superuser_conn.rollback()
 
 
+def test_dbt_query_context_two_relkind_filters(superuser_conn):
+    # A handlerless FDW is sufficient: this only exercises catalog discovery.
+    run_command(
+        """
+        CREATE SCHEMA test_dbt_two_filters;
+        CREATE FOREIGN DATA WRAPPER dbt_two_filters_fdw;
+        CREATE SERVER dbt_two_filters_server
+            FOREIGN DATA WRAPPER dbt_two_filters_fdw;
+        CREATE FOREIGN TABLE test_dbt_two_filters.foreign_table (a integer)
+            SERVER dbt_two_filters_server;
+        CREATE TABLE test_dbt_two_filters.heap_table (a integer) USING heap;
+        """,
+        superuser_conn,
+    )
+    run_command("SET LOCAL application_name = 'dbt'", superuser_conn)
+    expected = [
+        ["foreign_table", "foreign_table"],
+        ["foreign_table", "heap_table"],
+        ["heap_table", "foreign_table"],
+        ["heap_table", "heap_table"],
+    ]
+    # Every filter in the statement must be rewritten, not only the first one
+    # the walker reaches.
+    assert (
+        run_query(
+            """
+            SELECT a.tablename, b.tablename
+            FROM pg_catalog.pg_tables AS a, pg_catalog.pg_tables AS b
+            WHERE a.schemaname = 'test_dbt_two_filters'
+              AND b.schemaname = 'test_dbt_two_filters'
+            ORDER BY a.tablename, b.tablename
+            """,
+            superuser_conn,
+        )
+        == expected
+    )
+    superuser_conn.rollback()
+
+
 def dbt_run_helper(models, repeat=1):
     try:
         for _ in range(repeat):
