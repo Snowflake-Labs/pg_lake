@@ -40,6 +40,12 @@ extern bool EnablePgLakeCopyJson;
 extern bool IncludeGeneratedColumnsInCopyTo;
 
 /*
+ * EnableBinaryTransmit controls whether COPY .. FROM a data lake file asks
+ * pgduck_server to transmit rows in the binary COPY format when possible.
+ */
+extern bool EnableBinaryTransmit;
+
+/*
  * JsonCopyMode controls who handles a JSON COPY. It is a hidden, test-only knob
  * (see pg_lake_copy.json_copy_mode); normal users never set it and rely on the
  * "auto" default. We follow the same rule as CSV: Postgres gets precedence
