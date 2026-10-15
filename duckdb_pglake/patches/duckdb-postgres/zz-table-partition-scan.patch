@@ -70,7 +70,7 @@ index 2b4157b..2049e6c 100644
  protected:
  	void LoadEntries(ClientContext &context, PostgresTransaction &transaction) override;
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index b8b92b2..f0ac3e2 100644
+index b8b92b2..9bd8ee7 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
 @@ -40,13 +40,16 @@ struct PostgresLocalState : public LocalTableFunctionState {
@@ -177,7 +177,7 @@ index b8b92b2..f0ac3e2 100644
  		filter = StringUtil::Format("WHERE ctid BETWEEN '(%d,0)'::tid AND '(%d,0)'::tid", task_min, task_max);
  	}
  	if (!filter_string.empty()) {
-@@ -352,15 +370,18 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
+@@ -352,21 +370,28 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
  		filter += filter_string;
  	}
  	string query;
@@ -188,6 +188,7 @@ index b8b92b2..f0ac3e2 100644
  		                           filter, bind_data->limit);
  
 +	} else if (target_schema.empty()) {
++		D_ASSERT(!target_schema.empty());
 +		query = StringUtil::Format(R"(SELECT %s FROM %s %s%s)", col_names,
 +		                           KeywordHelper::WriteQuoted(target_table, '"'), filter, bind_data->limit);
  	} else {
@@ -199,7 +200,16 @@ index b8b92b2..f0ac3e2 100644
  	}
  	if (!bind_data->use_text_protocol) {
  		query = StringUtil::Format(R"(COPY (%s) TO STDOUT (FORMAT "binary");)", query);
-@@ -459,6 +480,41 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
+ 	} else {
+ 		query += ";";
+ 	}
++	if (target_schema.empty() && !target_table.empty()) {
++		query = "SET search_path = pg_catalog, public; " + query;
++	}
+ 	lstate.sql = std::move(query);
+ }
+ 
+@@ -459,6 +484,41 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
  
  	lock_guard<mutex> parallel_lock(gstate.lock);
  	lstate.batch_idx = gstate.batch_idx++;
@@ -241,7 +251,7 @@ index b8b92b2..f0ac3e2 100644
  	if (gstate.page_idx < bind_data->pages_approx) {
  		auto page_max = gstate.page_idx + bind_data->pages_per_task;
  		if (page_max >= bind_data->pages_approx || page_max > POSTGRES_TID_MAX) {
-@@ -466,7 +522,8 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
+@@ -466,7 +526,8 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
  			page_max = POSTGRES_TID_MAX;
  		}
  
@@ -251,7 +261,7 @@ index b8b92b2..f0ac3e2 100644
  		gstate.page_idx = page_max;
  		return true;
  	}
-@@ -529,8 +586,9 @@ static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context,
+@@ -529,8 +590,9 @@ static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context,
  		local_state->no_connection = true;
  		return std::move(local_state);
  	}
@@ -263,7 +273,7 @@ index b8b92b2..f0ac3e2 100644
  		lock_guard<mutex> parallel_lock(gstate.lock);
  		gstate.page_idx = POSTGRES_TID_MAX;
  	} else if (!PostgresParallelStateNext(context, input.bind_data.get(), *local_state, gstate)) {
-@@ -642,6 +700,13 @@ double PostgresScanProgress(ClientContext &context, const FunctionData *bind_dat
+@@ -642,6 +704,13 @@ double PostgresScanProgress(ClientContext &context, const FunctionData *bind_dat
  	auto &gstate = global_state->Cast<PostgresGlobalState>();
  
  	lock_guard<mutex> parallel_lock(gstate.lock);
