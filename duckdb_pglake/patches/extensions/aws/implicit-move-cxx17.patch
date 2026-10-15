@@ -1,0 +1,27 @@
+Move explicitly when returning unique_ptr<KeyValueSecret> as unique_ptr<BaseSecret>.
+
+That conversion is only an implicit move under C++20 (P1825); gcc 11 (AlmaLinux 9)
+rejects it at the C++17 standard duckdb builds extensions with.
+
+diff --git a/src/aws_secret.cpp b/src/aws_secret.cpp
+index a91e1b6..f2ed2ed 100644
+--- a/src/aws_secret.cpp
++++ b/src/aws_secret.cpp
+@@ -330,7 +330,7 @@ CreateRDSSecretWithProvider(std::shared_ptr<DuckDBCustomAWSCredentialsProviderCh
+ 		for (auto &en : input.options) {
+ 			result->secret_map[Identifier(en.first)] = en.second;
+ 		}
+-		return result;
++		return std::move(result);
+ 	}
+ 
+ 	// "rds_template_secret_name" was specified when creting the secret,
+@@ -341,7 +341,7 @@ CreateRDSSecretWithProvider(std::shared_ptr<DuckDBCustomAWSCredentialsProviderCh
+ 	// instead the consumer must do appropriate checks and report the error without
+ 	// including the whole input `CREATE SECRET` query into the error message.
+ 	result->secret_map["session_token"] = Value(token);
+-	return result;
++	return std::move(result);
+ }
+ 
+ //! This is the actual callback function

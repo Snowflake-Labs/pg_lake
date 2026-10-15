@@ -63,7 +63,7 @@ static unique_ptr<GlobalTableFunctionState> StatActivityInitGlobal(ClientContext
 static unique_ptr<FunctionData> StatActivityBind(ClientContext &context,
 											     TableFunctionBindInput &input,
 											     vector<LogicalType> &return_types,
-											     vector<string> &names) {
+											     vector<Identifier> &names) {
 
 	/* Get the arguments */
 	auto functionData = make_uniq<StatActivityFunctionData>();
@@ -215,7 +215,7 @@ static unique_ptr<GlobalTableFunctionState> QueryProgressInitGlobal(ClientContex
 static unique_ptr<FunctionData> QueryProgressBind(ClientContext &context,
 												  TableFunctionBindInput &input,
 												  vector<LogicalType> &return_types,
-												  vector<string> &names) {
+												  vector<Identifier> &names) {
 	auto functionData = make_uniq<QueryProgressFunctionData>();
 
 	/*
@@ -293,7 +293,7 @@ static void QueryProgressExec(ClientContext &context, TableFunctionInput &data_p
 		QueryProgress progress = connection->GetQueryProgress();
 
 		output.SetValue(0, 0, Value::DOUBLE(progress.GetPercentage()));
-		output.SetValue(1, 0, Value::BIGINT(progress.GetRowsProcesseed()));
+		output.SetValue(1, 0, Value::BIGINT(progress.GetRowsProcessed()));
 		output.SetValue(2, 0, Value::BIGINT(progress.GetTotalRowsToProcess()));
 		output.SetCardinality(1);
 		return;
@@ -345,7 +345,7 @@ SleepScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 
 			/* do small sleeps and check for interrupts */
 			while (elapsed < totalSleepMillis) {
-				if (context.interrupted)
+				if (context.IsInterrupted())
 					throw InterruptException();
 
 				const auto remaining = totalSleepMillis - elapsed;

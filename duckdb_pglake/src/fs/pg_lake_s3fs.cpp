@@ -28,8 +28,8 @@
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "create_secret_functions.hpp"
-#include "httpfs.hpp"
-#include "s3fs.hpp"
+#include "http/httpfs.hpp"
+#include "s3/s3fs.hpp"
 #include "httplib.hpp"
 
 #include "pg_lake/fs/pg_lake_s3fs.hpp"
@@ -759,7 +759,7 @@ IsPgLakeManagedStorageBucket(optional_ptr<ClientContext> context, string prefix,
 
 	Value setting;
 
-	if (!context->TryGetCurrentSetting(MANAGED_STORAGE_BUCKET_SETTING, setting))
+	if (!context->TryGetCurrentSetting(Identifier(MANAGED_STORAGE_BUCKET_SETTING), setting))
 		return false;
 
 	string managedStorageBucket = setting.ToString();
@@ -798,7 +798,7 @@ SetEncryptionFields(optional_ptr<ClientContext> context, ParsedS3Url &parsed_s3_
 
 	Value setting;
 
-	if (context->TryGetCurrentSetting(MANAGED_STORAGE_KEY_ID_SETTING, setting) &&
+	if (context->TryGetCurrentSetting(Identifier(MANAGED_STORAGE_KEY_ID_SETTING), setting) &&
 		IsPgLakeManagedStorageBucket(context, parsed_s3_url.prefix, parsed_s3_url.bucket))
 	{
 		/* use customer managed key */
@@ -1203,7 +1203,7 @@ PgLakeS3FileSystem::List(const string &glob_pattern, bool is_glob, FileOpener *o
 
 	// Main paging loop
 	do {
-		if (context->interrupted)
+		if (context->IsInterrupted())
 			throw InterruptException();
 
 		// List without a delimiter so that a single request set returns every key

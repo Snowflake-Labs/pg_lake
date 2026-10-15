@@ -1,0 +1,18 @@
+Move explicitly when returning unique_ptr<HTTPFSParams> as unique_ptr<HTTPParams>.
+
+That conversion is only an implicit move under C++20 (P1825); gcc 11 (AlmaLinux 9)
+rejects it at the C++17 standard duckdb builds extensions with.
+
+diff --git a/src/http/httpfs.cpp b/src/http/httpfs.cpp
+index 9dbdd18..30046f2 100644
+--- a/src/http/httpfs.cpp
++++ b/src/http/httpfs.cpp
+@@ -212,7 +212,7 @@ unique_ptr<HTTPParams> HTTPFSUtil::InitializeParameters(optional_ptr<FileOpener>
+                                                         optional_ptr<FileOpenerInfo> info) {
+ 	auto result = InitializeRawParameters(*this, opener, info);
+ 	result->RefreshTransportReuseDomain();
+-	return result;
++	return std::move(result);
+ }
+ 
+ unique_ptr<HTTPFSParams> HTTPFSUtil::InitializeRawParameters(HTTPFSUtil &http_util, optional_ptr<FileOpener> opener,

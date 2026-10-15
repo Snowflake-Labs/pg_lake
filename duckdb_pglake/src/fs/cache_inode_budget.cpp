@@ -114,7 +114,7 @@ GetMinFreeInodes(ClientContext &context)
 	Value setting;
 	int64_t minFreeInodes;
 
-	if (!context.TryGetCurrentSetting(MIN_FREE_CACHE_INODES_SETTING, setting) ||
+	if (!context.TryGetCurrentSetting(Identifier(MIN_FREE_CACHE_INODES_SETTING), setting) ||
 		setting.IsNull() ||
 		!TryParseMinFreeInodes(setting.ToString(), minFreeInodes))
 		return MIN_FREE_INODES_AUTO;

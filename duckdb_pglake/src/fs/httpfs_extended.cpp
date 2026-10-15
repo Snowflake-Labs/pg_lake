@@ -20,7 +20,7 @@
 #define CPPHTTPLIB_OPENSSL_SUPPORT
 #include "httplib.hpp"
 
-#include "httpfs.hpp"
+#include "http/httpfs.hpp"
 #include "pg_lake/fs/httpfs_extended.hpp"
 
 
@@ -86,7 +86,7 @@ PgLakeHTTPFileSystem::Download(ClientContext &context, FileHandle &inputHandle, 
 							   },
 							   [&](const_data_ptr_t data, idx_t data_length) {
 								   total_request_bytes += data_length;
-								   if (context.interrupted)
+								   if (context.IsInterrupted())
 									   throw InterruptException();
 
 								   outputHandle.Write((void *) data, data_length);

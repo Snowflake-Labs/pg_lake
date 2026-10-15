@@ -14,13 +14,13 @@ find_package(azure-identity-cpp CONFIG)
 find_package(azure-storage-blobs-cpp CONFIG)
 find_package(azure-storage-files-datalake-cpp CONFIG)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Optimize Github Actions builds by avoiding vcpkg rebuild
 set(VCPKG_DISABLE_COMPILER_TRACKING on)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 project(${TARGET_NAME})

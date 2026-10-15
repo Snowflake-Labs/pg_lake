@@ -17,11 +17,11 @@ surface types) keep scanning instead of failing to parse.
 
 Note: ST_AsBinary drops the SRID. If SRID preservation is needed, a separate
 column or in-reader EWKB stripping would be required.
-
 diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
+index d95262f..6255463 100644
 --- a/src/include/postgres_utils.hpp
 +++ b/src/include/postgres_utils.hpp
-@@ -37,7 +37,8 @@ enum class PostgresTypeAnnotation {
+@@ -53,7 +53,8 @@ enum class PostgresTypeAnnotation {
  	GEOM_BOX,
  	GEOM_PATH,
  	GEOM_POLYGON,
@@ -29,52 +29,18 @@ diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
 +	GEOM_CIRCLE,
 +	POSTGIS_GEOMETRY
  };
-
+ 
  struct PostgresType {
-diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
---- a/src/postgres_utils.cpp
-+++ b/src/postgres_utils.cpp
-@@ -52,12 +52,21 @@ string PostgresUtils::TypeToString(const LogicalType &input) {
- 	}
- }
-
-+LogicalType GetGeometryType() {
-+	auto blob_type = LogicalType(LogicalTypeId::BLOB);
-+	blob_type.SetAlias("WKB_BLOB");
-+	return blob_type;
-+}
-+
- LogicalType PostgresUtils::RemoveAlias(const LogicalType &type) {
- 	if (!type.HasAlias()) {
- 		return type;
- 	}
- 	if (StringUtil::CIEquals(type.GetAlias(), "json")) {
- 		return type;
- 	}
-+	if (StringUtil::CIEquals(type.GetAlias(), "geometry")) {
-+		return GetGeometryType();
-+	}
- 	switch (type.id()) {
- 	case LogicalTypeId::STRUCT: {
-@@ -256,7 +265,8 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
- 	} else if (pgtypename == "jsonb") {
- 		postgres_type.info = PostgresTypeAnnotation::JSONB;
- 		return LogicalType::VARCHAR;
- 	} else if (pgtypename == "geometry") {
--		return LogicalType::GEOMETRY();
-+		postgres_type.info = PostgresTypeAnnotation::POSTGIS_GEOMETRY;
-+		return GetGeometryType();
- 	} else if (pgtypename == "date") {
- 		return LogicalType::DATE;
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
+index 2ea4442..019f15d 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -243,7 +243,15 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
+@@ -213,7 +213,15 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
  				col_names += "ctid";
  			}
  		} else {
--			col_names += KeywordHelper::WriteQuoted(bind_data->names[column_id], '"');
-+			auto quoted_name = KeywordHelper::WriteQuoted(bind_data->names[column_id], '"');
+-			col_names += PostgresUtils::WriteIdentifier(bind_data->names[column_id]);
++			auto quoted_name = PostgresUtils::WriteIdentifier(bind_data->names[column_id]);
 +			if (bind_data->postgres_types[column_id].info == PostgresTypeAnnotation::POSTGIS_GEOMETRY) {
 +				// PostGIS emits EWKB by default (with SRID prefix when set), but DuckDB
 +				// spatial expects standard WKB. Use ST_AsBinary() server-side to get
@@ -86,3 +52,52 @@ diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
  			if (bind_data->postgres_types[column_id].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
  				col_names += "::VARCHAR";
  			} else if (bind_data->types[column_id].id() == LogicalTypeId::LIST) {
+diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
+index adf6059..d98e4b4 100644
+--- a/src/postgres_utils.cpp
++++ b/src/postgres_utils.cpp
+@@ -117,6 +117,10 @@ string PostgresUtils::TypeToString(const LogicalType &input) {
+ 	}
+ }
+ 
++LogicalType GetGeometryType() {
++	return LogicalType(LogicalTypeId::BLOB).WithAlias("WKB_BLOB");
++}
++
+ LogicalType PostgresUtils::RemoveAlias(const LogicalType &type) {
+ 	if (!type.HasAlias()) {
+ 		return type;
+@@ -124,6 +128,9 @@ LogicalType PostgresUtils::RemoveAlias(const LogicalType &type) {
+ 	if (StringUtil::CIEquals(type.GetAlias(), "json")) {
+ 		return type;
+ 	}
++	if (StringUtil::CIEquals(type.GetAlias(), "geometry")) {
++		return GetGeometryType();
++	}
+ 	switch (type.id()) {
+ 	case LogicalTypeId::STRUCT: {
+ 		auto child_types = StructType::GetChildTypes(type);
+@@ -343,21 +350,8 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+ 		postgres_type.info = PostgresTypeAnnotation::JSONB;
+ 		return LogicalType::VARCHAR;
+ 	} else if (pgtypename == "geometry") {
+-		// PostGIS encodes the column-level SRID in the type modifier of
+-		// `geometry(TYPE, SRID)` columns. The bit layout is:
+-		//   bits  0    : has-M
+-		//   bits  1    : has-Z
+-		//   bits  2-7  : geometry type code (POINT=1, LINESTRING=2, ...)
+-		//   bits  8-29 : SRID
+-		// Untyped `geometry` columns carry typmod -1 and we fall back to
+-		// plain GEOMETRY (no CRS), matching the previous behavior.
+-		if (type_info.type_modifier > 0) {
+-			int32_t srid = static_cast<int32_t>((static_cast<uint32_t>(type_info.type_modifier) & 0x0FFFFF00u) >> 8);
+-			if (srid > 0) {
+-				return LogicalType::GEOMETRY("EPSG:" + std::to_string(srid));
+-			}
+-		}
+-		return LogicalType::GEOMETRY();
++		postgres_type.info = PostgresTypeAnnotation::POSTGIS_GEOMETRY;
++		return GetGeometryType();
+ 	} else if (pgtypename == "date") {
+ 		return LogicalType::DATE;
+ 	} else if (pgtypename == "bytea") {
