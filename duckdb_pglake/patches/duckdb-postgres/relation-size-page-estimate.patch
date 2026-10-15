@@ -1,8 +1,8 @@
 diff --git a/src/storage/postgres_table_set.cpp b/src/storage/postgres_table_set.cpp
-index 9f5e7fc..1456608 100644
+index 060634f..4a6e1d4 100644
 --- a/src/storage/postgres_table_set.cpp
 +++ b/src/storage/postgres_table_set.cpp
-@@ -27,7 +27,8 @@ string PostgresTableSet::GetInitializeQuery(const string &schema, const string &
+@@ -32,7 +32,8 @@ string PostgresTableSet::GetInitializeQuery(const string &schema, const string &
  
  string PostgresTableSet::GetInitializeQuery(const vector<string> &schemas, const string &table) {
  	string base_query = R"(

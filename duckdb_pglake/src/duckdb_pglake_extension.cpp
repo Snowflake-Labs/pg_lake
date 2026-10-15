@@ -38,9 +38,11 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/types/geometry_crs.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
-#include "httpfs.hpp"
-#include "s3fs.hpp"
+#include "http/httpfs.hpp"
+#include "s3/s3fs.hpp"
 #include "hffs.hpp"
 #include "azure_blob_filesystem.hpp"
 #include "azure_dfs_filesystem.hpp"
@@ -273,8 +275,8 @@ PgLakeGeometryToHexWKB(shared_ptr<DatabaseInstance> db, string_t input)
 				catalogEntry->Cast<ScalarFunctionCatalogEntry>();
 
 			ScalarFunctionSet scalarFunctionSet = scalarFunctionCatalogEntry.functions;
-			ScalarFunction scalarFunction = scalarFunctionSet.GetFunctionByOffset(0);
-			st_ashexwkb = scalarFunction.function;
+			auto scalarFunction = scalarFunctionSet.GetFunctionByOffset(0);
+			st_ashexwkb = scalarFunction->GetFunctionCallback();
 		}
 
 		/* create the input value */
@@ -323,10 +325,9 @@ PgLakeGeometryToHexWKB(shared_ptr<DatabaseInstance> db, string_t input)
  * (pass-through or NULL/error).
  */
 static unique_ptr<FunctionData>
-NestedListBind(ClientContext &context, ScalarFunction &bound_function,
-			   vector<unique_ptr<Expression>> &arguments)
+NestedListBind(BindScalarFunctionInput &input)
 {
-	bound_function.return_type = arguments[0]->return_type;
+	input.GetBoundFunction().SetReturnType(input.GetArguments()[0]->GetReturnType());
 	return nullptr;
 }
 
@@ -450,7 +451,7 @@ IcebergComputeByteSize(Vector &v, idx_t row, idx_t row_count)
 			int64_t total = 0;
 
 			for (auto &child : children)
-				total += IcebergComputeByteSize(*child, row, row_count);
+				total += IcebergComputeByteSize(child, row, row_count);
 
 			return total;
 		}
@@ -470,8 +471,8 @@ IcebergByteSizeFun(DataChunk &args, ExpressionState &state, Vector &result)
 	if (input.GetVectorType() != VectorType::FLAT_VECTOR)
 		input.Flatten(count);
 
-	auto out = FlatVector::GetData<int64_t>(result);
-	auto &out_validity = FlatVector::Validity(result);
+	auto out = FlatVector::GetDataMutable<int64_t>(result);
+	auto &out_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++)
 	{
@@ -486,10 +487,9 @@ IcebergByteSizeFun(DataChunk &args, ExpressionState &state, Vector &result)
 
 
 static unique_ptr<FunctionData>
-IcebergByteSizeBind(ClientContext &context, ScalarFunction &bound_function,
-					vector<unique_ptr<Expression>> &arguments)
+IcebergByteSizeBind(BindScalarFunctionInput &input)
 {
-	bound_function.return_type = LogicalType::BIGINT;
+	input.GetBoundFunction().SetReturnType(LogicalType::BIGINT);
 	return nullptr;
 }
 

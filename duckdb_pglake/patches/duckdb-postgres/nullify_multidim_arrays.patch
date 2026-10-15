@@ -1,8 +1,8 @@
 diff --git a/src/postgres_binary_parser.cpp b/src/postgres_binary_parser.cpp
-index 96d5bc6..20215d0 100644
+index 07c7f8a..85acb1c 100644
 --- a/src/postgres_binary_parser.cpp
 +++ b/src/postgres_binary_parser.cpp
-@@ -338,6 +338,19 @@ void PostgresBinaryParser::ReadValue(const LogicalType &type, const PostgresType
+@@ -463,6 +463,19 @@ void PostgresBinaryParser::ParseValue(const LogicalType &type, const PostgresTyp
  			expected_dimensions++;
  		}
  		if (expected_dimensions != array_dim) {
@@ -23,12 +23,12 @@ index 96d5bc6..20215d0 100644
  			    "Expected an array with %llu dimensions, but this array has %llu dimensions. The array stored in "
  			    "Postgres does not match the schema. Postgres does not enforce that arrays match the provided "
 diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
-index 3f41a8f..c4d81fe 100644
+index 4c91ede..1c75481 100644
 --- a/src/postgres_text_reader.cpp
 +++ b/src/postgres_text_reader.cpp
-@@ -205,6 +205,9 @@ void PostgresTextReader::ConvertList(Vector &source, Vector &target, const Postg
+@@ -210,6 +210,9 @@ void PostgresTextReader::ConvertList(Vector &source, Vector &target, const Postg
  	auto strings = UnifiedVectorFormat::GetData<string_t>(vdata);
- 	auto list_data = FlatVector::GetData<list_entry_t>(target);
+ 	auto list_data = FlatVector::GetDataMutable<list_entry_t>(target);
  
 +	auto &child_type = ListType::GetChildType(target.GetType());
 +	bool is_flat_list = child_type.id() != LogicalTypeId::LIST;
@@ -36,7 +36,7 @@ index 3f41a8f..c4d81fe 100644
  	PostgresListParser list_parser;
  	for (idx_t i = 0; i < count; i++) {
  		if (!vdata.validity.RowIsValid(i)) {
-@@ -213,6 +216,14 @@ void PostgresTextReader::ConvertList(Vector &source, Vector &target, const Postg
+@@ -218,6 +221,14 @@ void PostgresTextReader::ConvertList(Vector &source, Vector &target, const Postg
  			continue;
  		}
  		list_data[i].offset = list_parser.size;
