@@ -232,3 +232,53 @@ def test_pgduck_crash_mid_query_no_sigsegv(
             pg_conn.commit()
         except Exception:
             pg_conn.rollback()
+
+
+def _cache_worker_pid(superuser_conn):
+    superuser_conn.rollback()
+    rows = run_query(
+        "SELECT pid FROM pg_stat_activity WHERE backend_type = 'pg_lake cache worker'",
+        superuser_conn,
+    )
+    return rows[0]["pid"] if rows else None
+
+
+def test_cache_worker_survives_pgduck_down(superuser_conn, extension, pgduck_server):
+    """The cache worker keeps running while pgduck_server is unreachable.
+
+    It used to throw "could not start query engine" and exit, so the
+    postmaster restarted it every 5 seconds and logged an ERROR each time,
+    for example while pgduck_server was still starting after a reboot.
+    """
+    worker_pid = _cache_worker_pid(superuser_conn)
+    if worker_pid is None:
+        pytest.skip("requires the pg_lake cache worker")
+
+    restarted = False
+    try:
+        _kill_pgduck_server()
+
+        # SIGHUP wakes the worker, so it tries to connect right away
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        superuser_conn.commit()
+
+        # a worker that exits is restarted after 5 seconds
+        deadline = time.time() + 7
+        while time.time() < deadline:
+            assert _cache_worker_pid(superuser_conn) == worker_pid
+            time.sleep(0.5)
+
+        _restart_pgduck_server()
+        restarted = True
+
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        superuser_conn.commit()
+        time.sleep(2)
+
+        assert _cache_worker_pid(superuser_conn) == worker_pid
+    finally:
+        if not restarted:
+            try:
+                _restart_pgduck_server()
+            except Exception:
+                pass
