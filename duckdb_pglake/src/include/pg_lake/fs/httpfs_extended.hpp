@@ -18,7 +18,7 @@
 #pragma once
 
 #include "duckdb/common/file_system.hpp"
-#include "httpfs.hpp"
+#include "http/httpfs.hpp"
 
 namespace duckdb {
 

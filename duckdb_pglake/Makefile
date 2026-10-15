@@ -11,7 +11,7 @@ EXT_FLAGS=-DBUILD_EXTENSIONS="tpch;json;icu"
 # GitHub actions uses a hash of the Makefile and source
 # files as a cache key. When we update the DuckDB version,
 # we should update the line below to trigger a new hash.
-DUCKDB_VERSION=1.5.6
+DUCKDB_VERSION=2.0.0-dev
 
 # We install libduckdb.so into the postgres direcotry
 PG_CONFIG ?= pg_config
@@ -143,12 +143,14 @@ patch_duckdb: $(shell find patches -type f -name '*.patch')
 		done;) \
 	done
 	# Out-of-tree extensions are fetched by CMake, which applies the patches it
-	# finds in the DuckDB source tree, so copy ours there before building.
+	# finds in the DuckDB source tree. DuckDB ships patches of its own there for
+	# some extensions, so reset that directory and add ours alongside them.
+	git -C duckdb checkout -f -- .github/patches/extensions
+	git -C duckdb clean -fdq -- .github/patches/extensions
 	for extdir in patches/extensions/*/ ; do \
 		[ -d "$$extdir" ] || continue ; \
 		ext=$$(basename $$extdir) ; \
 		echo "staging patches for extension $$ext" ; \
-		rm -rf duckdb/.github/patches/extensions/$$ext && \
 		mkdir -p duckdb/.github/patches/extensions/$$ext && \
 		cp $$extdir*.patch duckdb/.github/patches/extensions/$$ext/ ; \
 	done
@@ -158,10 +160,8 @@ clean_patches:
 		(cd $$patchdir && \
 		git checkout -f . ); \
 	done
-	for extdir in patches/extensions/*/ ; do \
-		[ -d "$$extdir" ] || continue ; \
-		rm -rf duckdb/.github/patches/extensions/$$(basename $$extdir) ; \
-	done
+	git -C duckdb checkout -f -- .github/patches/extensions
+	git -C duckdb clean -fdq -- .github/patches/extensions
 
 format:
 	find src/ -iname *.hpp -o -iname *.cpp | xargs clang-format --sort-includes=0 -style=file -i

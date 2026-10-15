@@ -20,7 +20,7 @@
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
-#include "httpfs.hpp"
+#include "http/httpfs.hpp"
 
 #include "pg_lake/fs/file_cache_manager.hpp"
 
@@ -195,7 +195,7 @@ public:
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 
 		/* add an additional cancellation check */
-		if (pg_lakeHandle.context->interrupted)
+		if (pg_lakeHandle.context->IsInterrupted())
 			throw InterruptException();
 
 		wrappedHandle.file_system.Read(wrappedHandle, buffer, byteCount, location);
@@ -206,7 +206,7 @@ public:
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 
 		/* add an additional cancellation check */
-		if (pg_lakeHandle.context->interrupted)
+		if (pg_lakeHandle.context->IsInterrupted())
 			throw InterruptException();
 
 		return wrappedHandle.file_system.Read(wrappedHandle, buffer, byteCount);
@@ -217,7 +217,7 @@ public:
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 
 		/* add an additional cancellation check */
-		if (pg_lakeHandle.context->interrupted)
+		if (pg_lakeHandle.context->IsInterrupted())
 			throw InterruptException();
 
 		try
@@ -238,7 +238,7 @@ public:
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 
 		/* add an additional cancellation check */
-		if (pg_lakeHandle.context->interrupted)
+		if (pg_lakeHandle.context->IsInterrupted())
 			throw InterruptException();
 
 		bool cleanupCacheOnWriteFile = false;

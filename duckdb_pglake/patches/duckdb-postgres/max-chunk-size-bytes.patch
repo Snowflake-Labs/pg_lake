@@ -1,25 +1,29 @@
 diff --git a/src/include/postgres_binary_parser.hpp b/src/include/postgres_binary_parser.hpp
-index c82da4d..72816a8 100644
+index e477bd4..d1e475c 100644
 --- a/src/include/postgres_binary_parser.hpp
 +++ b/src/include/postgres_binary_parser.hpp
-@@ -20,7 +20,11 @@ public:
- 	PostgresBinaryParser(vector<LogicalType> types, vector<PostgresType> postgres_types);
+@@ -23,11 +23,13 @@ public:
+ 	                     PostgresTypeConfig type_config);
  
  	void SetBuffer(data_ptr_t buf, idx_t len);
+-	//! Decode rows from the buffer into output until it is full or the buffer runs out;
+-	//! returns true if output is full. Only the chunk's count is updated, not its vectors'
++	//! Decode rows from the buffer into output until it is full, the buffer runs out, or
++	//! (when limit is given) the accumulated payload bytes reach the bound; returns false
++	//! only when the buffer ran out. Only the chunk's count is updated, not its vectors'
+ 	//! sizes: the caller must call output.SetChildCardinality(output.size()) once it is
+ 	//! done filling the chunk.
 -	bool ReadChunk(DataChunk &output, const vector<column_t> &column_ids);
-+	//! Reads rows into output until it is full, the buffer runs out, or (when limit is
-+	//! given) the accumulated payload bytes reach the bound. Returns false only when the
-+	//! buffer ran out, i.e. when the caller has to hand us the next one.
 +	bool ReadChunk(DataChunk &output, const vector<column_t> &column_ids,
 +	               optional_ptr<PostgresChunkSizeLimit> limit = nullptr);
  	void CheckHeader();
- 
- private:
+ 	void ParseValue(const LogicalType &type, const PostgresType &postgres_type, int32_t value_len, Vector &out_vec,
+ 	                idx_t output_offset);
 diff --git a/src/include/postgres_result_reader.hpp b/src/include/postgres_result_reader.hpp
-index 1915c3b..7aba891 100644
+index 13d4d7d..b2f5dfe 100644
 --- a/src/include/postgres_result_reader.hpp
 +++ b/src/include/postgres_result_reader.hpp
-@@ -34,10 +34,30 @@ public:
+@@ -35,10 +35,30 @@ public:
  	virtual void BeginCopy(ClientContext &context, const string &sql) = 0;
  	virtual PostgresReadResult Read(DataChunk &result) = 0;
  
@@ -51,10 +55,10 @@ index 1915c3b..7aba891 100644
  
  } // namespace duckdb
 diff --git a/src/include/postgres_scanner.hpp b/src/include/postgres_scanner.hpp
-index 447ed8e..257100d 100644
+index 46a4b28..46a7b7c 100644
 --- a/src/include/postgres_scanner.hpp
 +++ b/src/include/postgres_scanner.hpp
-@@ -22,6 +22,15 @@ class PostgresTransaction;
+@@ -24,6 +24,15 @@ class PostgresTransaction;
  
  struct PostgresBindData : public FunctionData {
  	static constexpr const idx_t DEFAULT_PAGES_PER_TASK = 1000;
@@ -69,8 +73,8 @@ index 447ed8e..257100d 100644
 +	static constexpr const idx_t DEFAULT_MAX_CHUNK_SIZE_BYTES = 16ULL * 1024 * 1024;
  
  public:
- 	PostgresBindData(ClientContext &context);
-@@ -39,6 +48,7 @@ public:
+ 	PostgresBindData(ClientContext &context, const Identifier &catalog_name);
+@@ -48,6 +57,7 @@ public:
  	vector<LogicalType> types;
  
  	idx_t pages_per_task = DEFAULT_PAGES_PER_TASK;
@@ -79,10 +83,10 @@ index 447ed8e..257100d 100644
  	string attach_path;
  
 diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
-index 9d9cdc3..156b5ee 100644
+index 5df8679..d95262f 100644
 --- a/src/include/postgres_utils.hpp
 +++ b/src/include/postgres_utils.hpp
-@@ -59,6 +59,24 @@ struct PostgresCopyState {
+@@ -72,6 +72,24 @@ struct PostgresCopyState {
  	void Initialize(ClientContext &context);
  };
  
@@ -106,12 +110,12 @@ index 9d9cdc3..156b5ee 100644
 +
  enum class PostgresIsolationLevel { READ_COMMITTED, REPEATABLE_READ, SERIALIZABLE };
  
- class PostgresUtils {
+ enum class PostgresConnectCheck { THROW_ON_CONNECTION_BAD, RETURN_ON_CONNECTION_BAD };
 diff --git a/src/postgres_binary_parser.cpp b/src/postgres_binary_parser.cpp
-index 41881a3..2a29254 100644
+index 2073cfe..07c7f8a 100644
 --- a/src/postgres_binary_parser.cpp
 +++ b/src/postgres_binary_parser.cpp
-@@ -12,12 +12,17 @@ void PostgresBinaryParser::SetBuffer(data_ptr_t buf, idx_t len) {
+@@ -18,12 +18,17 @@ void PostgresBinaryParser::SetBuffer(data_ptr_t buf, idx_t len) {
  	end = buf + len;
  }
  
@@ -127,10 +131,10 @@ index 41881a3..2a29254 100644
  		}
  
 +		auto row_start = buffer_ptr;
- 		auto tuple_count = ReadInteger<int16_t>();
- 		if (tuple_count <= 0) {
- 			// tuple_count of -1 signifies the file trailer (i.e. footer)
-@@ -41,6 +46,12 @@ bool PostgresBinaryParser::ReadChunk(DataChunk &output, const vector<column_t> &
+ 		auto field_count = ReadInteger<int16_t>();
+ 		if (field_count <= 0) {
+ 			// a field count of -1 signifies the file trailer (i.e. footer)
+@@ -50,6 +55,12 @@ bool PostgresBinaryParser::ReadChunk(DataChunk &output, const vector<column_t> &
  				ReadValue(types[col_idx], postgres_types[col_idx], out_vec, output_offset);
  			}
  		}
@@ -140,29 +144,29 @@ index 41881a3..2a29254 100644
 +			// writing downstream.
 +			limit->Add(idx_t(buffer_ptr - row_start));
 +		}
- 		output.SetCardinality(output_offset + 1);
+ 		// only update the count; this runs every row, and SetChildCardinality would visit every vector each time
+ 		output.SetCardinalityUnsafe(output_offset + 1);
  	}
- 	return true;
 diff --git a/src/postgres_binary_reader.cpp b/src/postgres_binary_reader.cpp
-index c006175..14ab35a 100644
+index ff6251a..5cc79cc 100644
 --- a/src/postgres_binary_reader.cpp
 +++ b/src/postgres_binary_reader.cpp
-@@ -21,8 +21,8 @@ void PostgresBinaryReader::BeginCopy(ClientContext &context, const string &sql)
- }
+@@ -46,8 +46,8 @@ PostgresReadResult PostgresBinaryReader::Read(DataChunk &result) {
  
- PostgresReadResult PostgresBinaryReader::Read(DataChunk &output) {
+ PostgresReadResult PostgresBinaryReader::ReadCopy(DataChunk &output) {
+ 	auto result = PostgresReadResult::HAVE_MORE_TUPLES;
 -	while (output.size() < STANDARD_VECTOR_SIZE) {
 -		if (parser.ReadChunk(output, column_ids)) {
 +	while (output.size() < STANDARD_VECTOR_SIZE && !ChunkSizeLimitReached()) {
 +		if (parser.ReadChunk(output, column_ids, chunk_size_limit)) {
- 			return PostgresReadResult::HAVE_MORE_TUPLES;
+ 			break;
  		}
  		FreeBuffer();
 diff --git a/src/postgres_extension.cpp b/src/postgres_extension.cpp
-index 07119bd..61bc942 100644
+index 9560218..76aba41 100644
 --- a/src/postgres_extension.cpp
 +++ b/src/postgres_extension.cpp
-@@ -204,6 +204,13 @@ static void LoadInternal(ExtensionLoader &loader) {
+@@ -209,6 +209,12 @@ static void LoadInternal(ExtensionLoader &loader) {
  	                          "OAuth bearer token for PostgreSQL OAUTHBEARER authentication. "
  	                          "Takes priority over the PGOAUTHTOKEN environment variable",
  	                          LogicalType::VARCHAR, Value(), nullptr, SetScope::SESSION);
@@ -171,16 +175,15 @@ index 07119bd..61bc942 100644
 +	                          "Chunks are still capped at 2048 rows; this additionally caps them by size so that "
 +	                          "tables with large values do not produce chunks that overshoot the row group size "
 +	                          "of whatever writes them. Zero disables the bound.",
-+	                          LogicalType::UBIGINT,
-+	                          Value::UBIGINT(PostgresBindData::DEFAULT_MAX_CHUNK_SIZE_BYTES));
++	                          LogicalType::UBIGINT, Value::UBIGINT(PostgresBindData::DEFAULT_MAX_CHUNK_SIZE_BYTES));
  	config.AddExtensionOption("pg_use_text_protocol",
  	                          "Whether or not to use TEXT protocol to read data. This is slower, but provides better "
  	                          "compatibility with non-Postgres systems",
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index eb0aa47..3a71dca 100644
+index 3a98b83..2ea4442 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -152,6 +152,10 @@ PostgresBindData::PostgresBindData(ClientContext &context) {
+@@ -149,6 +149,10 @@ PostgresBindData::PostgresBindData(ClientContext &context, const Identifier &cat
  			use_text_protocol = true;
  		}
  	}
@@ -191,7 +194,7 @@ index eb0aa47..3a71dca 100644
  }
  
  void PostgresBindData::SetTablePages(idx_t approx_num_pages) {
-@@ -503,7 +507,11 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
+@@ -510,7 +514,11 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
  		} else {
  			reader = make_uniq<PostgresBinaryReader>(connection, column_ids, bind_data);
  		}
@@ -203,7 +206,7 @@ index eb0aa47..3a71dca 100644
  	while (true) {
  		if (done && !PostgresParallelStateNext(context, &bind_data, *this, gstate)) {
  			no_connection = true;
-@@ -518,7 +526,7 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
+@@ -525,7 +533,7 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
  			done = true;
  			continue;
  		}
@@ -213,25 +216,24 @@ index eb0aa47..3a71dca 100644
  		}
  	}
 diff --git a/src/postgres_text_reader.cpp b/src/postgres_text_reader.cpp
-index 3d865b4..a61ac3a 100644
+index daf8c4f..4c91ede 100644
 --- a/src/postgres_text_reader.cpp
 +++ b/src/postgres_text_reader.cpp
-@@ -415,8 +415,10 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
- 		scan_chunk.Initialize(context, types);
+@@ -394,7 +394,9 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
  	}
  	scan_chunk.Reset();
--	for (; scan_chunk.size() < STANDARD_VECTOR_SIZE && row_offset < result->Count(); row_offset++) {
-+	for (; scan_chunk.size() < STANDARD_VECTOR_SIZE && row_offset < result->Count() && !ChunkSizeLimitReached();
-+	     row_offset++) {
- 		idx_t output_offset = scan_chunk.size();
+ 	idx_t output_offset = 0;
+-	for (; output_offset < STANDARD_VECTOR_SIZE && row_offset < result->Count(); row_offset++, output_offset++) {
++	for (; output_offset < STANDARD_VECTOR_SIZE && row_offset < result->Count() && !ChunkSizeLimitReached();
++	     row_offset++, output_offset++) {
 +		idx_t row_size_bytes = 0;
  		for (idx_t output_idx = 0; output_idx < output.ColumnCount(); output_idx++) {
  			auto col_idx = column_ids[output_idx];
  			auto &out_vec = scan_chunk.data[output_idx];
-@@ -425,9 +427,11 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
+@@ -403,9 +405,11 @@ PostgresReadResult PostgresTextReader::Read(DataChunk &output) {
  				continue;
  			}
- 			auto col_data = FlatVector::GetData<string_t>(out_vec);
+ 			auto col_data = FlatVector::GetDataMutable<string_t>(out_vec);
 -			col_data[output_offset] =
 -			    StringVector::AddStringOrBlob(out_vec, result->GetStringRef(row_offset, output_idx));
 +			auto str = result->GetStringRef(row_offset, output_idx);
@@ -239,6 +241,6 @@ index 3d865b4..a61ac3a 100644
 +			col_data[output_offset] = StringVector::AddStringOrBlob(out_vec, str);
  		}
 +		AddChunkSizeBytes(row_size_bytes);
- 		scan_chunk.SetCardinality(scan_chunk.size() + 1);
  	}
+ 	scan_chunk.SetChildCardinality(output_offset);
  	for (idx_t c = 0; c < output.ColumnCount(); c++) {
