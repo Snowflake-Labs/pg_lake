@@ -39,6 +39,7 @@
 
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "nodes/miscnodes.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
@@ -265,8 +266,21 @@ ReportHTTPError(HttpResult httpResult, int level)
 		return;
 	}
 
-	const char *message = httpResult.body ? JsonbGetStringByPath(httpResult.body, 2, "error", "message") : NULL;
-	const char *type = httpResult.body ? JsonbGetStringByPath(httpResult.body, 2, "error", "type") : NULL;
+	const char *message = NULL;
+	const char *type = NULL;
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	Datum		parsed;
+
+	/* A proxy or strict request decoder may return text, not a JSON envelope. */
+	if (httpResult.body != NULL &&
+		DirectInputFunctionCallSafe(jsonb_in, httpResult.body, InvalidOid, -1,
+									(Node *) &escontext, &parsed))
+	{
+		Jsonb	   *response = DatumGetJsonbP(parsed);
+
+		message = JsonbGetOptionalString(response, 2, "error", "message");
+		type = JsonbGetOptionalString(response, 2, "error", "type");
+	}
 
 	ereport(level,
 			(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),

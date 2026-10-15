@@ -154,13 +154,11 @@ static VendedCredentialsCacheKey BuildVendedCredentialsCacheKey(Oid serverOid,
 * in the rest catalog. On any failure, an error is raised. If the table exists,
 * an error is raised as well.
 *
-* As per REST catalog spec, we need to provide an empty schema when creating
-* a table. The schema will be updated when we make this table visible/committed.
-* The main reason for staging early is to be able to get the vended credentials
-* for writable tables.
+* Field-ID mappings must exist before staging. The catalog chooses the table
+* location and UUID; credentials are cached before any CTAS data is written.
 */
-void
-StartStageRestCatalogIcebergTableCreate(Oid relationId)
+RestCatalogStagedTable
+StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema)
 {
 	const char *relationName = GetRestCatalogTableName(relationId);
 
@@ -170,20 +168,13 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 	appendJsonString(body, "name", relationName);
 
 	appendStringInfoString(body, ", ");
-	appendJsonKey(body, "schema");
+	int			lastColumnId = 0;
+	IcebergTableSchema *schema =
+		RebuildIcebergSchemaFromDataFileSchema(relationId, dataFileSchema, &lastColumnId);
 
-	appendStringInfoChar(body, '{');	/* start schema object */
-
-	appendJsonString(body, "type", "struct");
-	appendStringInfoString(body, ", ");
-	appendJsonKey(body, "fields");
-	appendStringInfoString(body, "[]"); /* empty fields array, we don't know
-										 * the schema yet */
-
-	appendStringInfoChar(body, '}');	/* close schema object */
-	appendStringInfoString(body, ", ");
-
-	appendJsonString(body, "stage-create", "true");
+	AppendIcebergTableSchemaForRestCatalog(body, schema, 1);
+	/* pg_lake's metadata-file reader currently expects uncompressed JSON. */
+	appendStringInfoString(body, ",\"stage-create\":true,\"properties\":{\"format-version\":\"2\",\"write.metadata.compression-codec\":\"none\"}");
 
 	appendStringInfoChar(body, '}');	/* close body */
 
@@ -212,6 +203,18 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 		ReportHTTPError(httpResult, ERROR);
 	}
 
+	RestCatalogStagedTable staged = {0};
+
+	staged.uuid = JsonbGetOptionalStringByPath(httpResult.body, 2, "metadata", "table-uuid");
+	staged.location = JsonbGetOptionalStringByPath(httpResult.body, 2, "metadata", "location");
+	if (staged.uuid == NULL || staged.uuid[0] == '\0' ||
+		staged.location == NULL || staged.location[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+				 errmsg("REST stage-create response must include a table UUID and location")));
+	/* Validate before saving the UUID for the post-commit create request. */
+	(void) DirectFunctionCall1(uuid_in, CStringGetDatum(staged.uuid));
+
 	/*
 	 * If the stage-create response includes vended credentials, cache them
 	 * for subsequent writes to this table's storage prefix.
@@ -229,6 +232,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 									  catalogName, namespaceName,
 									  relationName);
 	}
+	return staged;
 }
 
 
@@ -238,7 +242,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 * catalog.
 */
 char *
-FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs)
+FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs, const char *stagedUuid)
 {
 	StringInfo	body = makeStringInfo();
 
@@ -258,6 +262,13 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	appendJsonKey(body, "updates");
 	appendStringInfoChar(body, '[');	/* start updates array */
 	appendStringInfoChar(body, '{');	/* start updates element */
+
+	Assert(stagedUuid != NULL);
+	appendJsonString(body, "action", "assign-uuid");
+	appendStringInfoChar(body, ',');
+	appendJsonString(body, "uuid", stagedUuid);
+	appendStringInfoString(body, "},{\"action\":\"upgrade-format-version\",\"format-version\":2},{");
+	appendStringInfoString(body, "\"action\":\"set-properties\",\"updates\":{\"write.metadata.compression-codec\":\"none\"}},{");
 
 	appendJsonString(body, "action", "add-schema");
 
@@ -295,19 +306,11 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	appendJsonString(body, "action", "set-location");
 	appendStringInfoChar(body, ',');
 
-	/*
-	 * construct location.  The storage path keeps the database name even when
-	 * the table's catalog prefix differs (a Lakekeeper warehouse ID, say), so
-	 * it matches the default location CREATE TABLE gave the table.
-	 */
-	StringInfo	location = makeStringInfo();
-	const char *storageCatalogName = get_database_name(MyDatabaseId);
-	const char *namespaceName = GetRestCatalogNamespace(relationId);
-	const char *relationName = GetRestCatalogTableName(relationId);
-	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
+	ForeignTable *table = GetForeignTable(relationId);
+	const char *location = GetStringOption(table->options, "location", false);
 
-	appendStringInfo(location, "%s/%s/%s/%s/%d", opts->locationPrefix, storageCatalogName, namespaceName, relationName, relationId);
-	appendJsonString(body, "location", location->data);
+	Assert(location != NULL);
+	appendJsonString(body, "location", location);
 	appendStringInfoChar(body, '}');	/* end set-location */
 
 	/* add partition spec */

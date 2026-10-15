@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -32,7 +33,11 @@ def _find_free_port():
 class _MockCatalog:
     """Just enough of the Iceberg REST API for a writable CREATE/DROP TABLE."""
 
-    def __init__(self, config_status=400, config_body=None):
+    def __init__(
+        self, config_status=400, config_body=None, stage_status=200, stage_body=None
+    ):
+        self.stage_status = stage_status
+        self.stage_body = stage_body
         self.config_status = config_status
         self.config_body = config_body or {
             "error": {"message": "Please specify a warehouse", "code": 400}
@@ -50,7 +55,9 @@ class _MockCatalog:
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 if body is not None:
-                    self.wfile.write(json.dumps(body).encode())
+                    self.wfile.write(
+                        (body if isinstance(body, str) else json.dumps(body)).encode()
+                    )
 
             def _handle(self):
                 mock.requests.append((self.command, self.path))
@@ -74,7 +81,19 @@ class _MockCatalog:
                         200, {"namespace": [m.group(1)], "properties": {}}
                     )
                 if self.command == "POST" and "/tables" in path:
-                    # stage-create and the finish-create both expect 200
+                    if path.endswith("/tables"):
+                        assert mock.bodies[-1]["stage-create"] is True
+                        if mock.stage_body is not None:
+                            return self._reply(mock.stage_status, mock.stage_body)
+                        return self._reply(
+                            200,
+                            {
+                                "metadata": {
+                                    "table-uuid": str(uuid.uuid4()),
+                                    "location": f"s3://{TEST_BUCKET}/staged-prefix/{uuid.uuid4()}",
+                                }
+                            },
+                        )
                     return self._reply(200, {})
                 return self._reply(404, {"error": {"message": "not mocked"}})
 
@@ -557,3 +576,77 @@ def test_mixed_prefix_alter_rejected_at_statement_time(
     for table in ("t1", "t2"):
         run_command(f"DROP TABLE {SCHEMA}.{table}", superuser_conn)
         superuser_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "status,body,message",
+    [
+        (200, {}, "must include a table UUID and location"),
+        (422, "stage-create must be a boolean", "HTTP request failed (HTTP 422)"),
+    ],
+)
+def test_invalid_stage_response_aborts_create(
+    installcheck, superuser_conn, writable_schema, mock_catalog, status, body, message
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog(stage_status=status, stage_body=body)
+    writable_schema.append("wp_bad_stage")
+    _create_server(superuser_conn, "wp_bad_stage", mock.endpoint, "first")
+    err = run_command(
+        f"CREATE TABLE {SCHEMA}.bad_stage (id int) USING iceberg WITH (catalog='wp_bad_stage')",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert message in str(err), err
+    superuser_conn.rollback()
+    assert (
+        run_query(f"SELECT to_regclass('{SCHEMA}.bad_stage')", superuser_conn)[0][0]
+        is None
+    )
+
+
+def test_catalog_location_uuid_and_schema_used_for_create(
+    installcheck, superuser_conn, writable_schema, mock_catalog
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    table_uuid = str(uuid.uuid4())
+    location = f"s3://{TEST_BUCKET}/catalog-chosen/{table_uuid}"
+    mock = mock_catalog(
+        stage_body={
+            "metadata": {
+                "table-uuid": table_uuid,
+                "location": location,
+            }
+        }
+    )
+    writable_schema.append("wp_stage")
+    _create_server(superuser_conn, "wp_stage", mock.endpoint, "first")
+    run_command("ALTER SERVER wp_stage OPTIONS (DROP location_prefix)", superuser_conn)
+    superuser_conn.commit()
+    run_command(
+        f"CREATE TABLE {SCHEMA}.staged (id int, labels text[]) USING iceberg "
+        f"WITH (catalog='wp_stage', location='s3://{TEST_BUCKET}/ignored-client-location')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    assert _table_option(superuser_conn, "staged", "location") == location
+    stage = next(
+        body
+        for (_, path), body in zip(mock.requests, mock.bodies)
+        if path.endswith("/tables")
+    )
+    assert stage["stage-create"] is True
+    assert "location" not in stage
+    assert [field["name"] for field in stage["schema"]["fields"]] == ["id", "labels"]
+    assert stage["schema"]["fields"][1]["type"]["type"] == "list"
+    final = next(
+        body
+        for (method, path), body in zip(mock.requests, mock.bodies)
+        if method == "POST" and path.endswith("/tables/staged")
+    )
+    updates = {update["action"]: update for update in final["updates"]}
+    assert updates["assign-uuid"]["uuid"] == table_uuid
+    assert updates["set-location"]["location"] == location
+    assert updates["upgrade-format-version"]["format-version"] == 2
