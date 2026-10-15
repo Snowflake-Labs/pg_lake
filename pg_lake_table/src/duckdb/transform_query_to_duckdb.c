@@ -236,12 +236,6 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 
 	if (tableScan->equalityDeleteReadGroups != NIL)
 	{
-		if (EnableEqualityDeleteValidation && !tableScan->equalityDeleteFilesValidated)
-		{
-			ValidateEqualityDeleteFiles(tableScan->equalityDeleteScans);
-			tableScan->equalityDeleteFilesValidated = true;
-		}
-
 		/*
 		 * A child projection can omit delete keys; read the full child
 		 * schema.

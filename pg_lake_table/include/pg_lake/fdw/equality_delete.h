@@ -40,3 +40,5 @@ extern List *PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata,
 										List *dataFiles, List *deleteFiles,
 										List *fileScans, List **equalityDeleteScans);
 extern void ValidateEqualityDeleteFiles(List *deleteScans);
+extern void ValidateEqualityDeletesForSnapshot(PgLakeScanSnapshot * snapshot);
+extern bool SnapshotHasEqualityDeletes(PgLakeScanSnapshot * snapshot);

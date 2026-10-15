@@ -415,11 +415,15 @@ projecting that key as NULL. Incompatible physical key types are also rejected.
 pg_lake does not write equality delete files.
 
 Both query pushdown and Foreign Scan apply the same deletion rules, including
-when a query projects only non-key columns or uses `count(*)`. Plain `EXPLAIN`
-does not scan delete contents, but may inspect file footers, as for other
-Parquet scans. Read-query construction validates referenced delete file footers
-through the existing file access and credential path. When pruning removes all
-data files, delete files are not opened.
+when a query projects only non-key columns or uses `count(*)`. When equality
+delete files remain after pruning, plain `EXPLAIN` reports the PostgreSQL plan
+without opening the physical files; it omits the DuckDB physical plan.
+`EXPLAIN VERBOSE` also reports vectorized SQL and file counts. When all equality
+deletes are pruned, the DuckDB physical plan remains available. Queries and
+`EXPLAIN ANALYZE` validate referenced delete file footers through
+the existing file access and credential path, reusing successful validation for
+rescans of the same snapshot. When pruning removes all data files, delete files
+are not opened.
 
 `pg_lake_table.enable_equality_delete_validation` defaults to `on`. Set it to
 `off` to skip the additional Parquet footer validation when the external writer
@@ -430,7 +434,17 @@ because the reader fills missing columns with NULL. This setting can be changed
 per session or transaction with `SET` or `SET LOCAL`.
 
 Planning indexes partition candidates and groups data files by their exact
-applicable delete set. Each group uses one anti join per equality key set;
+applicable delete set. Manifest min/max bounds can exclude an equality delete
+from a data file when an integer key's ranges are strictly disjoint and the
+delete file has a known zero NULL count for that key. This also works for a
+component of a composite key and for `int` to `long` promotion. Missing,
+ambiguous or invalid bounds and missing, ambiguous or nonzero delete NULL counts
+retain the delete file; other key types are not pruned by bounds. Count metric
+entries with NULL keys or values are rejected as structurally invalid. A delete
+excluded from every retained data file is not opened or included in footer
+validation.
+
+Each group uses one anti join per equality key set;
 groups are combined with a balanced `UNION ALL` tree. This keeps parser depth
 logarithmic, but SQL size and execution work still grow with the number of
 groups and key sets. Global deletes or many deletes in one partition can require
