@@ -193,7 +193,7 @@ CREATE SERVER polaris TYPE 'rest'
 | Option | Where | Description |
 |:--|:--|:--|
 | `rest_endpoint` | server | Base URL of the REST catalog API. |
-| `location_prefix` | server | Storage location for tables pg_lake creates in this catalog. pg_lake adds the database, schema and table name to it. |
+| `location_prefix` | server | Legacy client storage prefix. New writable REST tables use the location assigned by the catalog instead. |
 | `catalog_name` | server | Catalog (warehouse) that tables use. Without it, pg_lake uses the prefix the catalog advertises, or the database name. A table created by pg_lake keeps the catalog it was created in, even if this option changes later, see [below](#create-tables-in-an-external-catalog). |
 | `warehouse` | server | Warehouse to name when pg_lake asks the catalog for its prefix (`GET /v1/config?warehouse=...`). Polaris and Lakekeeper need it to advertise a prefix: use the catalog name on Polaris and the warehouse name on Lakekeeper, which returns the warehouse ID. `catalog_name` still wins if set. |
 | `oauth_endpoint` | server | OAuth2 token endpoint URL, if the catalog does not serve it at `<rest_endpoint>/v1/oauth/tokens`. |
@@ -335,10 +335,19 @@ accept `catalog_namespace` or `catalog_table_name` overrides and cannot be renam
 moved to another schema. One transaction may modify only one REST server and prefix;
 rolling back a savepoint discards its pending catalog work and restores the prior binding.
 
-pg_lake creates the namespace if it does not exist. Storage paths still use the PostgreSQL
-database name, not the REST prefix. The catalog must accept these paths under the server's
-`location_prefix`; catalog and namespace storage roots must match that layout. Prefix
-selection alone does not provide writable interoperability with every REST catalog.
+pg_lake creates the namespace if it does not exist, then stages table creation with its
+schema. The catalog must return a table UUID and storage location. pg_lake uses that
+location for both data and metadata, rather than constructing a path from the database
+name or `location_prefix`. A `location` included in replayed DDL is replaced by the new
+catalog-assigned location; this does not attach or restore data from the old location.
+Existing tables retain their storage locations.
+
+Storage access must be configured directly or supplied through catalog-vended credentials.
+pg_lake obtains staged credentials before storage checks and CTAS writes. The chosen
+location must be empty and satisfy the configured managed-storage-region restriction.
+New writable tables request Iceberg format version 2 and uncompressed metadata JSON,
+which the current metadata-file reader requires. The catalog must support staged creation
+and the commit operations used by pg_lake; REST catalog support alone is not sufficient.
 
 {: .warning }
 pg_lake sends its changes to the catalog after the PostgreSQL transaction commits. If the
