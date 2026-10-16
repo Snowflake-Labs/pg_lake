@@ -25,6 +25,7 @@ bool		ErrorUnsupportedCreatePgLakeTableHandler(ProcessUtilityParams * params, vo
 void		CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * params, void *arg);
 bool		ColumnDefIsPseudoSerial(ColumnDef *column);
 List	   *GetRestrictedColumnDefList(List *columnDefList);
+void		ErrorIfInvalidBloomFilterColumnOptions(Oid relationId, List *options);
 
 typedef bool (*PgLakeIsReservedColumnNameHookType) (const char *columnName);
 
