@@ -46,6 +46,7 @@ accepts the same options.
 | `max_snapshot_age`<span class="pglake-meta">Default `pg_lake_iceberg.max_snapshot_age`; can be changed</span> | Snapshot retention in seconds. `0` expires old snapshots on every write. |
 | `column_stats_mode`<span class="pglake-meta">Default `truncate(16)`; can be changed</span> | Which column statistics to keep for file pruning: `full`, `none`, or `truncate(N)` to keep the first `N` bytes of string bounds. |
 | `out_of_range_values`<span class="pglake-meta">Default `error`; can be changed</span> | `error` or `clamp`. See [out-of-range values](data-types.md#out-of-range-values). |
+| `cache_data_on_write`<span class="pglake-meta">Default `true`; can be changed</span> | Whether newly written data files stay in the local pgduck cache. Set to `false` for tables whose data files are written here but read elsewhere, so they don't evict hotter cache entries. Metadata files remain cached because they are read back to build the next snapshot. |
 | `compatibility_mode`<span class="pglake-meta">Default `pg_lake_iceberg.default_compatibility_mode`; fixed at creation</span> | `auto` or `snowflake`. With `snowflake`, `uuid` values nested in arrays or composites are stored as strings. |
 
 `CREATE TABLE ... USING iceberg` also accepts the options for
