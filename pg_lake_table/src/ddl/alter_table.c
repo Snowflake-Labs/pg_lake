@@ -1617,7 +1617,13 @@ HandleIcebergOptionsChanges(Oid relationId, AlterTableStmt *alterStmt)
 		{
 			DefElem    *newOption = lfirst(optionCell);
 
-			if (strcmp(newOption->defname, "catalog") == 0)
+			/*
+			 * catalog picks the server and catalog_name the REST prefix a
+			 * writable table was created under; changing either would point
+			 * the table at a catalog that does not hold it.
+			 */
+			if (strcmp(newOption->defname, "catalog") == 0 ||
+				strcmp(newOption->defname, "catalog_name") == 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("Changing option \"%s\" is not supported",

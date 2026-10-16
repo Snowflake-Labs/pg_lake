@@ -2062,7 +2062,7 @@ def test_drop_server_blocks_on_active_query(
         dropper_conn.close()
 
 
-def test_reject_writable_table_on_server_with_catalog_name(
+def test_writable_table_on_server_with_catalog_name(
     installcheck,
     superuser_conn,
     pg_conn,
@@ -2073,12 +2073,13 @@ def test_reject_writable_table_on_server_with_catalog_name(
     create_http_helper_functions,
 ):
     """
-    Creating a writable table on a server that has catalog_name set must
-    be rejected, because writable tables always derive the catalog name
-    from the database name.
+    A writable table on a server with catalog_name set is created under that
+    catalog (#690).  Here catalog_name is the database name, which is the
+    Polaris catalog CI provisions, so the prefix is not stored on the table
+    and the table behaves like one on a server without catalog_name.
     """
     if installcheck:
-        return
+        pytest.skip("Requires an isolated test cluster")
 
     SERVER_NAME = "rest_catalog_has_catname"
     SCHEMA_NAME = TABLE_NAMESPACE
@@ -2111,9 +2112,9 @@ def test_reject_writable_table_on_server_with_catalog_name(
     )
     superuser_conn.commit()
 
-    # Own the schema with pg_conn so the CREATE TABLE below reaches the
-    # catalog_name rejection rather than tripping a permission check. Drop any
-    # leftover first (as superuser, so it works regardless of who leaked it):
+    # Own the schema with pg_conn so the CREATE TABLE below does not trip a
+    # permission check. Drop any leftover first (as superuser, so it works
+    # regardless of who leaked it):
     # this test shares TABLE_NAMESPACE with the other writable-REST tests, and
     # they may land in the same pytest-split group in any order.
     run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", superuser_conn)
@@ -2121,18 +2122,55 @@ def test_reject_writable_table_on_server_with_catalog_name(
     run_command(f"CREATE SCHEMA {SCHEMA_NAME}", pg_conn)
     pg_conn.commit()
 
-    err = run_command(
-        f"CREATE TABLE {SCHEMA_NAME}.reject_catname (id bigint) "
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.server_catname (id bigint) "
         f"USING iceberg WITH (catalog='{SERVER_NAME}')",
         pg_conn,
-        raise_error=False,
     )
-    assert err is not None
+    pg_conn.commit()
+
+    run_command(f"INSERT INTO {SCHEMA_NAME}.server_catname VALUES (1)", pg_conn)
+    pg_conn.commit()
     assert (
-        "writable REST catalog tables cannot use a server with catalog_name set"
-        in str(err)
+        run_query(f"SELECT count(*) FROM {SCHEMA_NAME}.server_catname", pg_conn)[0][0]
+        == 1
     )
-    pg_conn.rollback()
+
+    # the prefix equals the database name, so nothing is stored on the table
+    stored = run_query(
+        f"""
+        SELECT option_value FROM pg_options_to_table(
+            (SELECT ftoptions FROM pg_foreign_table
+             WHERE ftrelid = '{SCHEMA_NAME}.server_catname'::regclass))
+        WHERE option_name = 'catalog_name'
+        """,
+        pg_conn,
+    )
+    assert stored == []
+
+    # Child RELEASE keeps work provisional until its parent is committed.
+    # Verify rollback through a REST attachment, not just the local table.
+    run_command(f"INSERT INTO {SCHEMA_NAME}.server_catname VALUES (2)", pg_conn)
+    run_command("SAVEPOINT parent", pg_conn)
+    run_command(f"UPDATE {SCHEMA_NAME}.server_catname SET id=99 WHERE id=1", pg_conn)
+    run_command(
+        f"ALTER TABLE {SCHEMA_NAME}.server_catname ADD COLUMN discarded int", pg_conn
+    )
+    run_command("SAVEPOINT child", pg_conn)
+    run_command(f"DELETE FROM {SCHEMA_NAME}.server_catname WHERE id=2", pg_conn)
+    run_command("RELEASE child", pg_conn)
+    run_command("ROLLBACK TO parent", pg_conn)
+    pg_conn.commit()
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.rest_check () USING iceberg "
+        f"WITH (catalog='{SERVER_NAME}', read_only=true, "
+        f"catalog_namespace='{SCHEMA_NAME}', catalog_table_name='server_catname')",
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert run_query(
+        f"SELECT * FROM {SCHEMA_NAME}.rest_check ORDER BY id", pg_conn
+    ) == [[1], [2]]
 
     # Clean up so we do not leak the schema to a later test in the same group.
     run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", pg_conn)

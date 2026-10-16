@@ -295,14 +295,18 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	appendJsonString(body, "action", "set-location");
 	appendStringInfoChar(body, ',');
 
-	/* construct location */
+	/*
+	 * construct location.  The storage path keeps the database name even when
+	 * the table's catalog prefix differs (a Lakekeeper warehouse ID, say), so
+	 * it matches the default location CREATE TABLE gave the table.
+	 */
 	StringInfo	location = makeStringInfo();
-	const char *catalogName = GetRestCatalogName(relationId);
+	const char *storageCatalogName = get_database_name(MyDatabaseId);
 	const char *namespaceName = GetRestCatalogNamespace(relationId);
 	const char *relationName = GetRestCatalogTableName(relationId);
 	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
 
-	appendStringInfo(location, "%s/%s/%s/%s/%d", opts->locationPrefix, catalogName, namespaceName, relationName, relationId);
+	appendStringInfo(location, "%s/%s/%s/%s/%d", opts->locationPrefix, storageCatalogName, namespaceName, relationName, relationId);
 	appendJsonString(body, "location", location->data);
 	appendStringInfoChar(body, '}');	/* end set-location */
 
@@ -2306,9 +2310,12 @@ GetRestCatalogNamespace(Oid relationId)
 /*
  * Returns the catalog name to use for REST API calls.
  *
- * Writable tables always use the current database name so that a
- * subsequent ALTER SERVER ? ADD/SET catalog_name cannot silently
- * re-route an existing table to a different REST namespace.
+ * Writable tables use the catalog_name stored in their options at CREATE
+ * TABLE, which is only set when it differs from the database name (see
+ * ResolveWritableRestCatalogName); tables without it use the current
+ * database name, as they always have.  The value is fixed at CREATE and
+ * cannot be changed with ALTER, so a later ALTER SERVER ... catalog_name
+ * cannot silently re-route an existing table.
  *
  * Read-only tables always have catalog_name baked into their table
  * options at CREATE TABLE time (inherited from the server option or
@@ -2322,14 +2329,14 @@ GetRestCatalogName(Oid relationId)
 	Assert(catalogType == REST_CATALOG_READ_ONLY ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
-	if (catalogType == REST_CATALOG_READ_WRITE)
-		return get_database_name(MyDatabaseId);
-
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	char	   *catalogName = GetStringOption(foreignTable->options, "catalog_name", false);
 
 	if (catalogName != NULL)
 		return catalogName;
+
+	if (catalogType == REST_CATALOG_READ_WRITE)
+		return get_database_name(MyDatabaseId);
 
 	elog(ERROR, "catalog_name missing on read-only REST catalog table %u", relationId);
 }

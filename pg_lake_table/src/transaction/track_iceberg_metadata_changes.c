@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 #include "utils/hsearch.h"
+#include "utils/lsyscache.h"
 #include "access/xact.h"
 #include "common/int.h"
 #include "utils/memutils.h"
@@ -144,9 +145,114 @@ typedef struct PgLakeXactRestCatalogContext
 	HTAB	   *requestsHash;
 	MemoryContext commitContext;
 	RestCatalogOptions *catalogOpts;
+	char	   *catalogName;	/* REST prefix every table in this transaction
+								 * commits under, or NULL before the first
+								 * table binds */
 }			PgLakeXactRestCatalogContext;
 
 static PgLakeXactRestCatalogContext * PgLakeXactRestCatalog = NULL;
+
+typedef struct IcebergSubXactState
+{
+	SubTransactionId subid;
+	HTAB	   *trackedOperations;
+	PgLakeXactRestCatalogContext *restCatalog;
+	struct IcebergSubXactState *previous;
+}			IcebergSubXactState;
+
+static IcebergSubXactState * IcebergSubXactStates = NULL;
+
+/* Values in these hashes own immutable strings/requests in TopTransactionContext. */
+static HTAB *
+CopyMetadataHash(HTAB *source, Size entrySize, bool restRequests)
+{
+	if (source == NULL)
+		return NULL;
+
+	HASHCTL		ctl = {0};
+
+	ctl.keysize = sizeof(Oid);
+	ctl.entrysize = entrySize;
+	ctl.hash = oid_hash;
+	ctl.hcxt = TopTransactionContext;
+	HTAB	   *copy = hash_create("Iceberg subtransaction state", 32, &ctl,
+								   HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
+	HASH_SEQ_STATUS scan;
+	void	   *entry;
+
+	hash_seq_init(&scan, source);
+	while ((entry = hash_seq_search(&scan)) != NULL)
+	{
+		void	   *copiedEntry = hash_search(copy, entry, HASH_ENTER, NULL);
+
+		memcpy(copiedEntry, entry, entrySize);
+		if (restRequests)
+		{
+			RestCatalogRequestPerTable *request = copiedEntry;
+
+			request->tableModifyRequests = list_copy(request->tableModifyRequests);
+		}
+	}
+	return copy;
+}
+
+/*
+ * Preserve both the binding and the work that owns it across savepoints.
+ * Clearing only the prefix would let rolled-back tracker entries rebind the
+ * transaction at pre-commit. Aborting restores pointers without allocating or
+ * looking up catalogs; releasing retains the child's state for its parent.
+ */
+void
+IcebergMetadataSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+							   SubTransactionId parentSubid, void *arg)
+{
+	if (event == SUBXACT_EVENT_START_SUB)
+	{
+		MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+		IcebergSubXactState *state = palloc(sizeof(IcebergSubXactState));
+
+		state->subid = mySubid;
+		state->trackedOperations = TrackedIcebergMetadataOperationsHash;
+		state->restCatalog = PgLakeXactRestCatalog;
+		state->previous = IcebergSubXactStates;
+		IcebergSubXactStates = state;
+
+		TrackedIcebergMetadataOperationsHash = CopyMetadataHash(
+																TrackedIcebergMetadataOperationsHash, sizeof(TableMetadataOperationTracker), false);
+		if (PgLakeXactRestCatalog != NULL)
+		{
+			PgLakeXactRestCatalogContext *copy = palloc(sizeof(PgLakeXactRestCatalogContext));
+
+			*copy = *PgLakeXactRestCatalog;
+			copy->requestsHash = CopyMetadataHash(copy->requestsHash,
+												  sizeof(RestCatalogRequestPerTable), true);
+			PgLakeXactRestCatalog = copy;
+		}
+		MemoryContextSwitchTo(oldContext);
+	}
+	else if (event == SUBXACT_EVENT_ABORT_SUB || event == SUBXACT_EVENT_COMMIT_SUB)
+	{
+		IcebergSubXactState *state = IcebergSubXactStates;
+
+		/* No START callback ran if first loaded inside this savepoint. */
+		if (state == NULL || state->subid != mySubid)
+		{
+			if (event == SUBXACT_EVENT_ABORT_SUB)
+			{
+				TrackedIcebergMetadataOperationsHash = NULL;
+				PgLakeXactRestCatalog = NULL;
+			}
+			return;
+		}
+		if (event == SUBXACT_EVENT_ABORT_SUB)
+		{
+			TrackedIcebergMetadataOperationsHash = state->trackedOperations;
+			PgLakeXactRestCatalog = state->restCatalog;
+		}
+		IcebergSubXactStates = state->previous;
+		pfree(state);
+	}
+}
 
 
 /*
@@ -159,6 +265,12 @@ TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes)
 {
 	if (ShouldSkipMetadataChangeToIceberg(metadataOperationTypes))
 		return;
+
+	/*
+	 * Include DDL paths that otherwise defer their REST request to
+	 * pre-commit.
+	 */
+	BindRelationToXactRestCatalog(relationId);
 
 	/*
 	 * We might also defer acquiring locks to precommit hook but let's keep
@@ -239,6 +351,8 @@ void
 ResetRestCatalogRequests(void)
 {
 	PgLakeXactRestCatalog = NULL;
+	if (!IsSubTransaction())
+		IcebergSubXactStates = NULL;
 }
 
 
@@ -380,9 +494,10 @@ PostAllRestCatalogRequests(void)
 
 		/*
 		 * EnsureXactBoundToRestCatalog() already guarantees every entry
-		 * belongs to the same REST catalog server.  Capture the catalog name
-		 * from the first valid entry and Assert the invariant holds for all
-		 * subsequent ones.
+		 * belongs to the same REST catalog server and catalog prefix, since
+		 * the whole batch goes to a single transactions/commit URL.  Capture
+		 * the catalog name from the first valid entry; the Assert documents
+		 * the invariant that the statement-time check enforces.
 		 */
 		if (catalogName == NULL)
 			catalogName = requestPerTable->catalogName;
@@ -464,7 +579,8 @@ PostAllRestCatalogRequests(void)
 														  url, batchRequestBody->data,
 														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
-		if (httpResult.status != 204)
+		/* Polaris and Nessie answer 204, Lakekeeper 200 */
+		if (httpResult.status != 200 && httpResult.status != 204)
 		{
 			ReportHTTPError(httpResult, WARNING);
 		}
@@ -520,13 +636,8 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 	}
 
 	/*
-	 * flags are not reset in case a subtransaction rollbacks. But this is not
-	 * a problem because we calculate the difference between our catalogs and
-	 * the last pushed metadata and then apply the difference to the new
-	 * metadata. Only exception is TABLE_DDL operations, for which we always
-	 * create a snapshot even if the subtransaction rollbacks. In future, we
-	 * might want to apply the diff algorithm to see if the schema changes as
-	 * well.
+	 * Savepoint rollback restores these flags along with pending REST
+	 * requests, so rolled-back work cannot rebind a REST catalog at commit.
 	 */
 	switch (operationType)
 	{
@@ -669,6 +780,8 @@ EnsureXactBoundToRestCatalog(Oid relationId)
 
 		PgLakeXactRestCatalog->catalogOpts =
 			CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
+		PgLakeXactRestCatalog->catalogName =
+			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
 		return;
 	}
 
@@ -688,6 +801,37 @@ EnsureXactBoundToRestCatalog(Oid relationId)
 						   PgLakeXactRestCatalog->catalogOpts->catalog,
 						   catalog)));
 	}
+
+	/*
+	 * The transaction may have been bound without a relation (a same-txn DROP
+	 * USER MAPPING captures credentials first); take the prefix from the
+	 * first relation that arrives.
+	 */
+	char	   *relationCatalogName = GetRestCatalogName(relationId);
+
+	if (PgLakeXactRestCatalog->catalogName == NULL)
+	{
+		PgLakeXactRestCatalog->catalogName =
+			MemoryContextStrdup(TopTransactionContext, relationCatalogName);
+		return;
+	}
+
+	/*
+	 * Tables on one server can still carry different prefixes: the prefix is
+	 * fixed per table at CREATE TABLE, from the server's catalog_name or from
+	 * /v1/config, and either can change between two CREATEs.  All changes in
+	 * a transaction go to one transactions/commit URL, so refuse the mix
+	 * here, before anything is sent.
+	 */
+	if (strcmp(PgLakeXactRestCatalog->catalogName, relationCatalogName) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot modify tables from different REST catalog "
+						"prefixes in the same transaction"),
+				 errdetail("This transaction already targets catalog prefix \"%s\", "
+						   "but table \"%s\" uses \"%s\".",
+						   PgLakeXactRestCatalog->catalogName,
+						   get_rel_name(relationId), relationCatalogName)));
 }
 
 
