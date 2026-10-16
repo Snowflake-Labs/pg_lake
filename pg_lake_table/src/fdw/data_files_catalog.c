@@ -85,6 +85,7 @@ static void AddNewRowIdMapping(Oid relationId, const char *path, List *rowIdRang
 static int64 GetFileIdForPath(Oid relatoinId, const char *path);
 static void UpdateDeletedRowCount(Oid relationId, const char *path, int64 deletedRowCount);
 static void RemoveDataFileFromTable(Oid relationId, const char *path);
+static void TrackRemovedPaths(Datum *pathDatums, int count);
 static void RemoveAllDataFilesFromCatalog(Oid relationId);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
@@ -1179,6 +1180,11 @@ RemoveDataFileFromTable(Oid relationId, const char *path)
 	 * mappings. We return these deletion files to the caller as metadata
 	 * operation.
 	 *
+	 * The outer DELETE returns the paths of cascaded deletion-file removals.
+	 * Together with $2 (the data file path), these are all the paths the
+	 * catalog-based commit fast path needs to emit DATA_FILE_REMOVE
+	 * operations without reading the last pushed metadata.
+	 *
 	 * Note: We do have an ON CASCADE DELETE foreign key from
 	 * deletion_file_map to files, so step 1 would happen automatically in
 	 * step 2, but we would not know which deletion files were affected and
@@ -1225,6 +1231,27 @@ RemoveDataFileFromTable(Oid relationId, const char *path)
 
 	SPI_EXECUTE(query, readOnly);
 
+	SPI_END();
+
+	/* TODO: track removed paths in a follow-up */
+}
+
+
+static void
+TrackRemovedPaths(Datum *pathDatums, int count)
+{
+	ArrayType  *pathArray = MakeArrayFromDatums(pathDatums, NULL,
+												count, TEXTOID);
+
+	char	   *insertQuery =
+		"INSERT INTO " TX_REMOVED_FILE_PATHS_TABLE_NAME " (path) "
+		"SELECT path FROM pg_catalog.unnest($1) AS t(path)";
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, TEXTARRAYOID, pathArray, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+	SPI_EXECUTE(insertQuery, /* readOnly = */ false);
 	SPI_END();
 }
 
