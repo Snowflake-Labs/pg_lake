@@ -152,107 +152,6 @@ typedef struct PgLakeXactRestCatalogContext
 
 static PgLakeXactRestCatalogContext * PgLakeXactRestCatalog = NULL;
 
-typedef struct IcebergSubXactState
-{
-	SubTransactionId subid;
-	HTAB	   *trackedOperations;
-	PgLakeXactRestCatalogContext *restCatalog;
-	struct IcebergSubXactState *previous;
-}			IcebergSubXactState;
-
-static IcebergSubXactState * IcebergSubXactStates = NULL;
-
-/* Values in these hashes own immutable strings/requests in TopTransactionContext. */
-static HTAB *
-CopyMetadataHash(HTAB *source, Size entrySize, bool restRequests)
-{
-	if (source == NULL)
-		return NULL;
-
-	HASHCTL		ctl = {0};
-
-	ctl.keysize = sizeof(Oid);
-	ctl.entrysize = entrySize;
-	ctl.hash = oid_hash;
-	ctl.hcxt = TopTransactionContext;
-	HTAB	   *copy = hash_create("Iceberg subtransaction state", 32, &ctl,
-								   HASH_ELEM | HASH_FUNCTION | HASH_CONTEXT);
-	HASH_SEQ_STATUS scan;
-	void	   *entry;
-
-	hash_seq_init(&scan, source);
-	while ((entry = hash_seq_search(&scan)) != NULL)
-	{
-		void	   *copiedEntry = hash_search(copy, entry, HASH_ENTER, NULL);
-
-		memcpy(copiedEntry, entry, entrySize);
-		if (restRequests)
-		{
-			RestCatalogRequestPerTable *request = copiedEntry;
-
-			request->tableModifyRequests = list_copy(request->tableModifyRequests);
-		}
-	}
-	return copy;
-}
-
-/*
- * Preserve both the binding and the work that owns it across savepoints.
- * Clearing only the prefix would let rolled-back tracker entries rebind the
- * transaction at pre-commit. Aborting restores pointers without allocating or
- * looking up catalogs; releasing retains the child's state for its parent.
- */
-void
-IcebergMetadataSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
-							   SubTransactionId parentSubid, void *arg)
-{
-	if (event == SUBXACT_EVENT_START_SUB)
-	{
-		MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
-		IcebergSubXactState *state = palloc(sizeof(IcebergSubXactState));
-
-		state->subid = mySubid;
-		state->trackedOperations = TrackedIcebergMetadataOperationsHash;
-		state->restCatalog = PgLakeXactRestCatalog;
-		state->previous = IcebergSubXactStates;
-		IcebergSubXactStates = state;
-
-		TrackedIcebergMetadataOperationsHash = CopyMetadataHash(
-																TrackedIcebergMetadataOperationsHash, sizeof(TableMetadataOperationTracker), false);
-		if (PgLakeXactRestCatalog != NULL)
-		{
-			PgLakeXactRestCatalogContext *copy = palloc(sizeof(PgLakeXactRestCatalogContext));
-
-			*copy = *PgLakeXactRestCatalog;
-			copy->requestsHash = CopyMetadataHash(copy->requestsHash,
-												  sizeof(RestCatalogRequestPerTable), true);
-			PgLakeXactRestCatalog = copy;
-		}
-		MemoryContextSwitchTo(oldContext);
-	}
-	else if (event == SUBXACT_EVENT_ABORT_SUB || event == SUBXACT_EVENT_COMMIT_SUB)
-	{
-		IcebergSubXactState *state = IcebergSubXactStates;
-
-		/* No START callback ran if first loaded inside this savepoint. */
-		if (state == NULL || state->subid != mySubid)
-		{
-			if (event == SUBXACT_EVENT_ABORT_SUB)
-			{
-				TrackedIcebergMetadataOperationsHash = NULL;
-				PgLakeXactRestCatalog = NULL;
-			}
-			return;
-		}
-		if (event == SUBXACT_EVENT_ABORT_SUB)
-		{
-			TrackedIcebergMetadataOperationsHash = state->trackedOperations;
-			PgLakeXactRestCatalog = state->restCatalog;
-		}
-		IcebergSubXactStates = state->previous;
-		pfree(state);
-	}
-}
 
 
 /*
@@ -351,8 +250,6 @@ void
 ResetRestCatalogRequests(void)
 {
 	PgLakeXactRestCatalog = NULL;
-	if (!IsSubTransaction())
-		IcebergSubXactStates = NULL;
 }
 
 
@@ -636,8 +533,13 @@ RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operat
 	}
 
 	/*
-	 * Savepoint rollback restores these flags along with pending REST
-	 * requests, so rolled-back work cannot rebind a REST catalog at commit.
+	 * flags are not reset in case a subtransaction rollbacks. But this is not
+	 * a problem because we calculate the difference between our catalogs and
+	 * the last pushed metadata and then apply the difference to the new
+	 * metadata. Only exception is TABLE_DDL operations, for which we always
+	 * create a snapshot even if the subtransaction rollbacks. In future, we
+	 * might want to apply the diff algorithm to see if the schema changes as
+	 * well.
 	 */
 	switch (operationType)
 	{

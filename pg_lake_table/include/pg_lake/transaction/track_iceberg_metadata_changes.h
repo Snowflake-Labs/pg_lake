@@ -19,7 +19,6 @@
 
 #include "postgres.h"
 #include "access/hash.h"
-#include "access/xact.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 typedef struct TableMetadataOperationTracker
@@ -74,6 +73,3 @@ extern PGDLLEXPORT bool HasAnyTrackedIcebergMetadataChanges(void);
 extern PGDLLEXPORT bool IsIcebergTableCreatedInCurrentTransaction(Oid relation);
 extern PGDLLEXPORT void BindRelationToXactRestCatalog(Oid relationId);
 extern PGDLLEXPORT void RegisterRestCatalogXactCaptureCallback(void);
-extern PGDLLEXPORT void IcebergMetadataSubXactCallback(SubXactEvent event,
-													   SubTransactionId mySubid,
-													   SubTransactionId parentSubid, void *arg);
