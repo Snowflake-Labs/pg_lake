@@ -33,10 +33,11 @@ import time
 #   * the statements inside a function body are one statement to the pin, so
 #     READ COMMITTED holds one version of the catalog across them.
 #
-# The tests that race a rewriting thread against a running query are the only
-# way to cover two reads inside one statement.  The rest rewrite catalog.json
-# between statements, where each isolation level has exactly one right answer
-# and no timing is involved.
+# A statement that reads catalog.json once cannot mix two versions of it, so
+# the tests count the reads rather than racing a rewriting thread against a
+# query and hoping the timing lands.  The fetch reports itself at DEBUG1, and
+# _run_counting_catalog_reads counts those reports.  One test still races, the
+# view one, to show the result a reader gets is right end to end.
 
 
 # The catalog export worker rewrites catalog.json whenever the set of pg_lake
@@ -161,6 +162,26 @@ def _reader_catalog_versions(
     return reader_key, body_early, body_late
 
 
+# The fetch of catalog.json reports itself at DEBUG1, and nothing else in the
+# backend says that line, so counting it answers how many versions of the
+# catalog a statement could have read.
+CATALOG_READ_MESSAGE = "read external catalog document"
+
+
+def _run_counting_catalog_reads(pg_conn, query):
+    run_command("SET client_min_messages TO DEBUG1", pg_conn)
+    pg_conn.notices.clear()
+
+    rows = run_query(query, pg_conn)
+
+    catalog_reads = len(
+        [line for line in pg_conn.notices if CATALOG_READ_MESSAGE in str(line)]
+    )
+    run_command("RESET client_min_messages", pg_conn)
+
+    return rows, catalog_reads
+
+
 def _reset_schema(pg_conn, schema):
     run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", pg_conn)
     run_command(f"CREATE SCHEMA {schema}", pg_conn)
@@ -254,7 +275,10 @@ def _two_catalog_versions(
     return key, body_early, body_late
 
 
-# Two references to the same table in one query must report the same count.
+# Two references to the same table in one statement resolve the catalog once,
+# which is what makes them one snapshot.  The second read then shows the count
+# following the catalog, so the first one did not report a single read by
+# reading nothing.
 def test_double_reference_sees_one_snapshot(
     pg_conn,
     s3,
@@ -266,89 +290,38 @@ def test_double_reference_sees_one_snapshot(
     schema = "test_osc_double_scan"
     _reset_schema(pg_conn, schema)
 
-    _create_uncompacted_writable_table(pg_conn, f"{schema}.wrt_tbl", "a INT")
-
-    early_rows, extra_rows = 24, 12
-    _insert_in_separate_commits(
-        pg_conn, f"{schema}.wrt_tbl", [f"({n})" for n in range(early_rows)]
-    )
-    wait_until_object_store_writable_table_pushed(pg_conn, schema, "wrt_tbl")
-    early_location = _current_metadata_location(pg_conn, schema, "wrt_tbl")
-
-    _insert_in_separate_commits(
-        pg_conn,
-        f"{schema}.wrt_tbl",
-        [f"({n})" for n in range(early_rows, early_rows + extra_rows)],
-    )
-    wait_until_object_store_writable_table_pushed(pg_conn, schema, "wrt_tbl")
-    late_location = _current_metadata_location(pg_conn, schema, "wrt_tbl")
-    assert early_location != late_location
-
-    key, body_early, body_late = _reader_catalog_versions(
+    early_rows, extra_rows = 5, 4
+    key, body_early, body_late = _two_catalog_versions(
         pg_conn,
         s3,
+        schema,
+        ["read_tbl"],
+        early_rows,
+        extra_rows,
         reader_catalog_prefix,
-        {"wrt_tbl": early_location},
-        {"wrt_tbl": late_location},
     )
-
-    run_command(
-        f"CREATE TABLE {schema}.read_tbl(a INT) USING iceberg "
-        f"WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl')",
-        pg_conn,
-    )
-    pg_conn.commit()
-
-    # Precondition: both snapshots are independently readable and differ, so a
-    # count mismatch below really does mean two snapshots in one query.
-    single_query = f"SELECT count(*) FROM {schema}.read_tbl"
-    for body, expected in (
-        (body_early, early_rows),
-        (body_late, early_rows + extra_rows),
-    ):
-        _put_catalog(s3, key, body)
-        observed = run_query(single_query, pg_conn)[0][0]
-        pg_conn.commit()
-        assert observed == expected, f"expected {expected} rows, got {observed}"
 
     doubled_query = (
         f"SELECT (SELECT count(*) FROM {schema}.read_tbl) AS first_reference, "
         f"       (SELECT count(*) FROM {schema}.read_tbl) AS second_reference"
     )
 
-    flipper = CatalogFlipper(s3, key, body_early, body_late)
-    flipper.start()
-    mismatches = []
-    attempts = 0
-    try:
-        for attempts in range(1, 201):
-            rows = run_query(doubled_query, pg_conn, raise_error=False)
-            if isinstance(rows, str):
-                pg_conn.rollback()
-                continue
-            pg_conn.commit()
-            first_reference, second_reference = rows[0][0], rows[0][1]
-            if first_reference != second_reference:
-                mismatches.append((attempts, first_reference, second_reference))
-                break
-    finally:
-        flipper.stop()
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
 
-    print(
-        f"\ndouble-reference count check: {attempts} queries, "
-        f"{flipper.flips} catalog.json rewrites, {len(mismatches)} mismatches"
-    )
-    for attempt, first_reference, second_reference in mismatches:
-        print(
-            f"  query #{attempt}: first_reference={first_reference} "
-            f"second_reference={second_reference}"
-        )
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, doubled_query)
+    assert tuple(rows[0]) == (early_rows, early_rows)
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
 
-    assert not mismatches, (
-        "two references to one read-only object_store table in a single query "
-        "returned different row counts, so each resolved its own Iceberg "
-        f"snapshot: {mismatches}"
-    )
+    _put_catalog(s3, key, body_late)
+
+    # the next statement of this READ COMMITTED transaction is entitled to the
+    # rewrite, and reads the document once for both of its references again
+    late_rows = early_rows + extra_rows
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, doubled_query)
+    assert tuple(rows[0]) == (late_rows, late_rows)
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
+    pg_conn.commit()
 
 
 # The same defect through a view, where the two references are not obviously
@@ -448,12 +421,26 @@ def test_view_referencing_one_table_twice(
         assert observed == expected, f"expected {expected}, got {observed}"
         expected_results.append(expected)
 
+    # The view names the table twice and the statement reads the catalog once,
+    # which is the whole reason the rows below can only come from one version.
+    _put_catalog(s3, key, body_late)
+    pg_conn.commit()
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, view_query)
+    assert [tuple(row) for row in rows] == [(1, 102)]
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
+    pg_conn.commit()
+
+    # One test still races a rewriting thread against the query, to show that
+    # what a reader gets out of the view is right and not only that the reads
+    # behind it were counted right.  A build that holds nothing reads this
+    # view's catalog 12 times per statement and returns rows of two versions
+    # by the fourth query, so a short run is enough to catch a regression.
     flipper = CatalogFlipper(s3, key, body_early, body_late)
     flipper.start()
     wrong_results = []
     attempts = 0
     try:
-        for attempts in range(1, 201):
+        for attempts in range(1, 26):
             rows = run_query(view_query, pg_conn, raise_error=False)
             if isinstance(rows, str):
                 pg_conn.rollback()
@@ -481,7 +468,8 @@ def test_view_referencing_one_table_twice(
 
 
 # Two tables of one catalog read in one statement must come from one version
-# of that catalog, the same way two references to one table must.
+# of that catalog, the same way two references to one table must, and they do
+# because the statement reads the document that names both of them once.
 def test_two_tables_see_one_catalog_version(
     pg_conn,
     s3,
@@ -493,7 +481,7 @@ def test_two_tables_see_one_catalog_version(
     schema = "test_osc_two_tables"
     _reset_schema(pg_conn, schema)
 
-    early_rows, extra_rows = 18, 12
+    early_rows, extra_rows = 5, 4
     key, body_early, body_late = _two_catalog_versions(
         pg_conn,
         s3,
@@ -502,7 +490,6 @@ def test_two_tables_see_one_catalog_version(
         early_rows,
         extra_rows,
         reader_catalog_prefix,
-        wide_window=True,
     )
 
     paired_query = (
@@ -510,51 +497,21 @@ def test_two_tables_see_one_catalog_version(
         f"       (SELECT count(*) FROM {schema}.read_two) AS second_table"
     )
 
-    # Precondition: both versions are readable on their own, and inside each
-    # one the two tables agree, so a disagreement below means the query read
-    # two versions.
-    for body, expected in (
-        (body_early, early_rows),
-        (body_late, early_rows + extra_rows),
-    ):
-        _put_catalog(s3, key, body)
-        rows = run_query(paired_query, pg_conn)
-        pg_conn.commit()
-        assert tuple(rows[0]) == (expected, expected)
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
 
-    flipper = CatalogFlipper(s3, key, body_early, body_late)
-    flipper.start()
-    mismatches = []
-    attempts = 0
-    try:
-        for attempts in range(1, 201):
-            rows = run_query(paired_query, pg_conn, raise_error=False)
-            if isinstance(rows, str):
-                pg_conn.rollback()
-                continue
-            pg_conn.commit()
-            first_table, second_table = rows[0][0], rows[0][1]
-            if first_table != second_table:
-                mismatches.append((attempts, first_table, second_table))
-                break
-    finally:
-        flipper.stop()
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, paired_query)
+    assert tuple(rows[0]) == (early_rows, early_rows)
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
 
-    print(
-        f"\ntwo-table count check: {attempts} queries, {flipper.flips} "
-        f"catalog.json rewrites, {len(mismatches)} mismatches"
-    )
-    for attempt, first_table, second_table in mismatches:
-        print(
-            f"  query #{attempt}: first_table={first_table} "
-            f"second_table={second_table}"
-        )
+    _put_catalog(s3, key, body_late)
 
-    assert not mismatches, (
-        "two tables of one object_store catalog read in a single query "
-        "returned row counts from different versions of that catalog: "
-        f"{mismatches}"
-    )
+    # both tables move to the rewritten version together in the next statement
+    late_rows = early_rows + extra_rows
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, paired_query)
+    assert tuple(rows[0]) == (late_rows, late_rows)
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
+    pg_conn.commit()
 
 
 # READ COMMITTED resolves the catalog per statement, so a statement sees a
@@ -659,8 +616,19 @@ def test_transaction_snapshot_pins_catalog(
 
 # The version a transaction is reading with belongs to the transaction, not to
 # the subtransaction that happened to resolve it, so a savepoint rollback
-# leaves it in place.
+# leaves it in place.  READ COMMITTED holds nothing across statements to begin
+# with, and a savepoint rollback must not turn that into holding something.
+@pytest.mark.parametrize(
+    "isolation_level,rows_after_rollback",
+    [
+        ("READ COMMITTED", 9),
+        ("REPEATABLE READ", 5),
+        ("SERIALIZABLE", 5),
+    ],
+)
 def test_savepoint_rollback_keeps_pinned_catalog(
+    isolation_level,
+    rows_after_rollback,
     pg_conn,
     s3,
     extension,
@@ -679,7 +647,13 @@ def test_savepoint_rollback_keeps_pinned_catalog(
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
 
-    run_command("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", pg_conn)
+    # the driver has already opened the transaction, so this is the way to set
+    # its isolation level; assert it took, or a level would be tested twice
+    run_command(f"SET TRANSACTION ISOLATION LEVEL {isolation_level}", pg_conn)
+    assert (
+        run_query("SHOW transaction_isolation", pg_conn)[0][0]
+        == isolation_level.lower()
+    )
 
     run_command("SAVEPOINT resolve_here", pg_conn)
     assert run_query(count_query, pg_conn)[0][0] == 5
@@ -687,7 +661,7 @@ def test_savepoint_rollback_keeps_pinned_catalog(
 
     _put_catalog(s3, key, body_late)
 
-    assert run_query(count_query, pg_conn)[0][0] == 5
+    assert run_query(count_query, pg_conn)[0][0] == rows_after_rollback
 
     # the same through a subtransaction that aborts on an error rather than
     # one that is rolled back cleanly
@@ -695,7 +669,7 @@ def test_savepoint_rollback_keeps_pinned_catalog(
     run_query("SELECT 1 / 0", pg_conn, raise_error=False)
     run_command("ROLLBACK TO SAVEPOINT fail_here", pg_conn)
 
-    assert run_query(count_query, pg_conn)[0][0] == 5
+    assert run_query(count_query, pg_conn)[0][0] == rows_after_rollback
     pg_conn.commit()
 
     assert run_query(count_query, pg_conn)[0][0] == 9

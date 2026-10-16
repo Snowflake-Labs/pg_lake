@@ -577,6 +577,10 @@ GetExternalObjectStoreCatalogContent(const char *catalogPath)
 
 	catalogContent = GetJsonFromURINoCache(catalogPath);
 
+	/* which version of the catalog a reader got is otherwise unanswerable */
+	ereport(DEBUG1,
+			(errmsg("read external catalog document \"%s\"", catalogPath)));
+
 	CacheExternalCatalogDocument(catalogPath, catalogContent);
 
 	return catalogContent;
