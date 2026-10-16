@@ -27,7 +27,7 @@ def assert_common_output(
 ):
     print(stderr)
     assert (
-        f"pgduck_server is listening on unix_socket_directory: {unix_socket_directory} with port {port}, max_clients allowed {max_clients}"
+        f"pgduck_server is listening on unix_socket_directory: {unix_socket_directory} with port {port}, max_clients requested {max_clients}"
         in stderr
     )
     assert f"DuckDB is using database file path: {duckdb_database_file_path}" in stderr
