@@ -238,8 +238,8 @@ CacheExternalMetadataLocation(Oid relationId, const char *metadataLocation)
 	PrepareExternalCatalogCache();
 
 	/*
-	 * Only reached after the lookup above found nothing for this relation,
-	 * so there is nothing to replace here.
+	 * Only reached after the lookup above found nothing for this relation, so
+	 * there is nothing to replace here.
 	 */
 	MemoryContext previousContext =
 		MemoryContextSwitchTo(ExternalCatalogCacheContext);
@@ -312,8 +312,8 @@ CacheExternalCatalogDocument(const char *documentPath, const char *documentConte
 	PrepareExternalCatalogCache();
 
 	/*
-	 * Only reached after the lookup above found no version of this
-	 * document, so there is nothing to replace here.
+	 * Only reached after the lookup above found no version of this document,
+	 * so there is nothing to replace here.
 	 */
 	MemoryContext previousContext =
 		MemoryContextSwitchTo(ExternalCatalogCacheContext);
