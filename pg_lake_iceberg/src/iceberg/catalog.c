@@ -467,17 +467,7 @@ ResolveIcebergExternalMetadataLocation(Oid relationId,
 	if (icebergCatalogType == REST_CATALOG_READ_WRITE)
 		return GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-	char	   *cachedLocation = GetCachedExternalMetadataLocation(relationId);
-
-	if (cachedLocation != NULL)
-		return cachedLocation;
-
-	char	   *currentMetadataPath =
-		GetMetadataLocationForRestCatalogForIcebergTable(relationId);
-
-	CacheExternalMetadataLocation(relationId, currentMetadataPath);
-
-	return currentMetadataPath;
+	return GetRestCatalogMetadataLocationOncePerRead(relationId);
 }
 
 

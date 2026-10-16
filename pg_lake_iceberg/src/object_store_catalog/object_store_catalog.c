@@ -59,7 +59,6 @@ static bool CatalogNeedsExport(void);
 static void PushMetadataLocationToObjectStoreCatalog(void);
 static void TrackInvalidateCatalogExport(Datum argument, Oid relationId);
 static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName);
-static char *GetExternalObjectStoreCatalogContent(const char *catalogPath);
 static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
 static bool CheckIfExternalObjectStoreCatalogExists(const char *catalogName);
 static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogNamespace, char **catalogTableName);
@@ -497,7 +496,8 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	const char *catalogPath =
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
-	char	   *catalogContent = GetExternalObjectStoreCatalogContent(catalogPath);
+	char	   *catalogContent =
+		GetObjectStoreCatalogDocumentOncePerRead(catalogPath);
 
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
 	StringInfo	getMetadataLocation = makeStringInfo();
@@ -555,36 +555,6 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	return metadataLocationStrInfo->data;
 }
 
-
-
-/*
- * GetExternalObjectStoreCatalogContent returns the document that lists the
- * tables of the given catalog.
- *
- * The document sits at a fixed path and whoever owns the catalog replaces
- * it in place, so it is read without the file cache in the way. It is then
- * held for as long as the reader is entitled to one version of the
- * catalog, which is what makes every table a statement resolves from this
- * catalog come from the same version of it. See external_catalog_cache.c.
- */
-static char *
-GetExternalObjectStoreCatalogContent(const char *catalogPath)
-{
-	char	   *catalogContent = GetCachedExternalCatalogDocument(catalogPath);
-
-	if (catalogContent != NULL)
-		return catalogContent;
-
-	catalogContent = GetJsonFromURINoCache(catalogPath);
-
-	/* which version of the catalog a reader got is otherwise unanswerable */
-	ereport(DEBUG1,
-			(errmsg("read external catalog document \"%s\"", catalogPath)));
-
-	CacheExternalCatalogDocument(catalogPath, catalogContent);
-
-	return catalogContent;
-}
 
 
 /*

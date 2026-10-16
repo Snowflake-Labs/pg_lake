@@ -90,6 +90,8 @@
 /* foreach_ptr() on the versions of Postgres that do not have it yet */
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/iceberg/external_catalog_cache.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/util/s3_reader_utils.h"
 
 
 /* a metadata location resolved from an external catalog */
@@ -137,6 +139,12 @@ static List *CatalogDocumentCache = NIL;
  */
 static TimestampTz CacheFilledInCommand = 0;
 
+static char *GetCachedExternalMetadataLocation(Oid relationId);
+static void CacheExternalMetadataLocation(Oid relationId,
+										  const char *metadataLocation);
+static char *GetCachedExternalCatalogDocument(const char *documentPath);
+static void CacheExternalCatalogDocument(const char *documentPath,
+										 const char *documentContent);
 static void PrepareExternalCatalogCache(void);
 static ExternalCatalogCacheUse DecideExternalCatalogCacheUse(void);
 static void CreateExternalCatalogCache(void);
@@ -145,11 +153,67 @@ static void ForgetExternalCatalogCache(void *arg);
 
 
 /*
+ * GetRestCatalogMetadataLocationOncePerRead returns where the given
+ * relation's table is in its REST catalog, asking the catalog on the first
+ * read that needs it and answering the rest of that read with what it
+ * answered then.
+ *
+ * GetMetadataLocationForRestCatalogForIcebergTable is the resolver that
+ * asks every time, which is what a caller acting on the table as the
+ * catalog has it now wants.
+ */
+char *
+GetRestCatalogMetadataLocationOncePerRead(Oid relationId)
+{
+	char	   *cachedLocation = GetCachedExternalMetadataLocation(relationId);
+
+	if (cachedLocation != NULL)
+		return cachedLocation;
+
+	char	   *metadataLocation =
+		GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+
+	CacheExternalMetadataLocation(relationId, metadataLocation);
+
+	return metadataLocation;
+}
+
+
+/*
+ * GetObjectStoreCatalogDocumentOncePerRead returns the document that lists
+ * the tables of the catalog at the given path, reading it on the first
+ * read that needs it and answering the rest of that read with the version
+ * it read then.
+ *
+ * The document sits at a fixed path and whoever owns the catalog replaces
+ * it in place, so it is read with the file cache out of the way.
+ */
+char *
+GetObjectStoreCatalogDocumentOncePerRead(const char *documentPath)
+{
+	char	   *cachedDocument = GetCachedExternalCatalogDocument(documentPath);
+
+	if (cachedDocument != NULL)
+		return cachedDocument;
+
+	char	   *documentContent = GetJsonFromURINoCache(documentPath);
+
+	/* which version of the catalog a reader got is otherwise unanswerable */
+	ereport(DEBUG1,
+			(errmsg("read external catalog document \"%s\"", documentPath)));
+
+	CacheExternalCatalogDocument(documentPath, documentContent);
+
+	return documentContent;
+}
+
+
+/*
  * GetCachedExternalMetadataLocation returns the metadata location this
  * transaction resolved for the given relation and is still entitled to, or
  * NULL if the caller has to ask the catalog.
  */
-char *
+static char *
 GetCachedExternalMetadataLocation(Oid relationId)
 {
 	PrepareExternalCatalogCache();
@@ -168,14 +232,14 @@ GetCachedExternalMetadataLocation(Oid relationId)
  * CacheExternalMetadataLocation records a metadata location resolved from
  * an external catalog.
  */
-void
+static void
 CacheExternalMetadataLocation(Oid relationId, const char *metadataLocation)
 {
 	PrepareExternalCatalogCache();
 
 	/*
-	 * A caller asks the catalog only after the cache told it that it holds no
-	 * answer for this relation, so there is nothing to replace here.
+	 * Only reached after the lookup above found nothing for this relation,
+	 * so there is nothing to replace here.
 	 */
 	MemoryContext previousContext =
 		MemoryContextSwitchTo(ExternalCatalogCacheContext);
@@ -192,12 +256,12 @@ CacheExternalMetadataLocation(Oid relationId, const char *metadataLocation)
 
 
 /*
- * ForgetCachedExternalMetadataLocation drops what the given relation
+ * ForgetRestCatalogMetadataLocation drops what the given relation
  * resolved, because what it resolves has changed under the cache rather
  * than the reader becoming entitled to newer catalog state.
  */
 void
-ForgetCachedExternalMetadataLocation(Oid relationId)
+ForgetRestCatalogMetadataLocation(Oid relationId)
 {
 	ListCell   *locationCell = NULL;
 
@@ -224,7 +288,7 @@ ForgetCachedExternalMetadataLocation(Oid relationId)
  * document at the given path if this transaction already read a version of
  * it that it is still entitled to, and NULL otherwise.
  */
-char *
+static char *
 GetCachedExternalCatalogDocument(const char *documentPath)
 {
 	PrepareExternalCatalogCache();
@@ -242,14 +306,14 @@ GetCachedExternalCatalogDocument(const char *documentPath)
 /*
  * CacheExternalCatalogDocument records the contents of a catalog document.
  */
-void
+static void
 CacheExternalCatalogDocument(const char *documentPath, const char *documentContent)
 {
 	PrepareExternalCatalogCache();
 
 	/*
-	 * A caller reads the catalog only after the cache told it that it holds
-	 * no version of this document, so there is nothing to replace here.
+	 * Only reached after the lookup above found no version of this
+	 * document, so there is nothing to replace here.
 	 */
 	MemoryContext previousContext =
 		MemoryContextSwitchTo(ExternalCatalogCacheContext);

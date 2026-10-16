@@ -281,7 +281,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 			 * drop, because it is looked up in the catalog document by its
 			 * current options every time.
 			 */
-			ForgetCachedExternalMetadataLocation(relationId);
+			ForgetRestCatalogMetadataLocation(relationId);
 
 			return false;
 		}
