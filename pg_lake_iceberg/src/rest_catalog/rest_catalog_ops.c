@@ -2311,8 +2311,9 @@ GetRestCatalogNamespace(Oid relationId)
  * Returns the catalog name to use for REST API calls.
  *
  * Writable tables use the catalog_name stored in their options at CREATE
- * TABLE, which is only set when it differs from the database name (see
- * ResolveWritableRestCatalogName); tables without it use the current
+ * TABLE: a prefix the user gave (or pg_dump replayed) is stored as given,
+ * and a resolved one only when it differs from the database name (see
+ * ResolveWritableRestCatalogName).  Tables without it use the current
  * database name, as they always have.  The value is fixed at CREATE and
  * cannot be changed with ALTER, so a later ALTER SERVER ... catalog_name
  * cannot silently re-route an existing table.

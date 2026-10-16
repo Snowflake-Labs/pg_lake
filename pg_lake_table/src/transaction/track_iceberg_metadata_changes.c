@@ -720,10 +720,11 @@ EnsureXactBoundToRestCatalog(Oid relationId)
 
 	/*
 	 * Tables on one server can still carry different prefixes: the prefix is
-	 * fixed per table at CREATE TABLE, from the server's catalog_name or from
-	 * /v1/config, and either can change between two CREATEs.  All changes in
-	 * a transaction go to one transactions/commit URL, so refuse the mix
-	 * here, before anything is sent.
+	 * fixed per table at CREATE TABLE, from the table's own catalog_name, the
+	 * server's catalog_name or /v1/config, and the server-side sources can
+	 * change between two CREATEs.  All changes in a transaction go to one
+	 * transactions/commit URL, so refuse the mix here, before anything is
+	 * sent.
 	 */
 	if (strcmp(PgLakeXactRestCatalog->catalogName, relationCatalogName) != 0)
 		ereport(ERROR,
