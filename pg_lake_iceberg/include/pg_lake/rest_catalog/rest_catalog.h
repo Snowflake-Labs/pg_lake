@@ -146,6 +146,8 @@ typedef struct RestCatalogOptions
 	char	   *scope;
 	char	   *locationPrefix;
 	char	   *catalogName;	/* REST API catalog prefix; defaults to dbname */
+	char	   *warehouse;		/* sent as ?warehouse= on GET /v1/config, or
+								 * NULL to send no query string */
 	int			authType;
 	bool		enableVendedCredentials;
 	bool		isBuiltin;		/* the extension-owned built-in server, whose

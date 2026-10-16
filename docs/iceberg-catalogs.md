@@ -195,6 +195,7 @@ CREATE SERVER polaris TYPE 'rest'
 | `rest_endpoint` | server | Base URL of the REST catalog API. |
 | `location_prefix` | server | Storage location for tables pg_lake creates in this catalog. pg_lake adds the database, schema and table name to it. |
 | `catalog_name` | server | Catalog (warehouse) to attach existing tables from. Without it, pg_lake uses the prefix the catalog advertises, or the database name. A server with `catalog_name` can only be used to attach tables, see [below](#create-tables-in-an-external-catalog). |
+| `warehouse` | server | Warehouse to name when pg_lake asks the catalog for its prefix (`GET /v1/config?warehouse=...`). Polaris and Lakekeeper need it to advertise a prefix: use the catalog name on Polaris and the warehouse name on Lakekeeper, which returns the warehouse ID. Only affects attaching existing tables, and `catalog_name` still wins if set. |
 | `oauth_endpoint` | server | OAuth2 token endpoint URL, if the catalog does not serve it at `<rest_endpoint>/v1/oauth/tokens`. |
 | `enable_vended_credentials` | server | Ask the catalog for temporary storage credentials instead of using pgduck_server's own. |
 | `scope` | server or user mapping | OAuth2 scope. Default `PRINCIPAL_ROLE:ALL`. The user mapping wins if both set it. |

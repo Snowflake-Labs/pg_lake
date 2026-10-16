@@ -112,6 +112,9 @@ static const IcebergCatalogOptionDesc iceberg_catalog_option_descs[] = {
 	{"catalog_name", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, catalogName),
 		CATALOG_OPT_NONEMPTY,
 	CATALOG_OPT_CTX_SERVER},
+	{"warehouse", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, warehouse),
+		CATALOG_OPT_NONEMPTY,
+	CATALOG_OPT_CTX_SERVER},
 	{"client_id", CATALOG_OPT_STRING, offsetof(RestCatalogOptions, clientId),
 		CATALOG_OPT_NONEMPTY,
 	CATALOG_OPT_CTX_USER_MAPPING},
@@ -274,7 +277,7 @@ ApplyCatalogOptionValue(RestCatalogOptions * opts,
  *   - ForeignServerRelationId:  CREATE SERVER / ALTER SERVER OPTIONS.
  *     Anything non-credential: rest_endpoint, rest_auth_type,
  *     oauth_endpoint, scope, enable_vended_credentials, location_prefix,
- *     catalog_name.
+ *     catalog_name, warehouse.
  *
  *   - UserMappingRelationId:    CREATE USER MAPPING / ALTER USER MAPPING
  *     OPTIONS.  Per-user credentials: client_id, client_secret, and
