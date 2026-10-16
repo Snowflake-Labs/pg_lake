@@ -24,13 +24,16 @@
  * long as it is entitled to that version of the catalog. See
  * external_catalog_cache.c for the rules.
  *
- * A catalog that answers for one table per request is held per request,
- * under a key that stands for the table that was asked about. A catalog
- * that publishes its tables as one document is held as that document,
- * under the path the document was read from.
+ * A catalog that answers for one table per request is held per relation
+ * that asked. A catalog that publishes its tables as one document is held
+ * as that document, under the path the document was read from.
+ *
+ * ForgetCachedExternalMetadataLocation drops what a relation resolved,
+ * for the one command that makes it point at another table.
  */
-extern char *GetCachedExternalMetadataLocation(const char *requestKey);
-extern void CacheExternalMetadataLocation(const char *requestKey,
-										  const char *metadataLocation);
-extern char *GetCachedExternalCatalogDocument(const char *documentPath);
-extern void CacheExternalCatalogDocument(const char *documentPath, const char *documentContent);
+extern PGDLLEXPORT char *GetCachedExternalMetadataLocation(Oid relationId);
+extern PGDLLEXPORT void CacheExternalMetadataLocation(Oid relationId,
+													  const char *metadataLocation);
+extern PGDLLEXPORT void ForgetCachedExternalMetadataLocation(Oid relationId);
+extern PGDLLEXPORT char *GetCachedExternalCatalogDocument(const char *documentPath);
+extern PGDLLEXPORT void CacheExternalCatalogDocument(const char *documentPath, const char *documentContent);

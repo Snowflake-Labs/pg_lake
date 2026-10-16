@@ -692,6 +692,19 @@ def test_register_existing_table_renames(
     nuke_rest_catalog(rest_catalog, catalog_namespace_name)
 
 
+# How many times the catalog was asked about a table of this namespace since
+# the notices were last cleared, read off the traffic trace.
+def _count_catalog_fetches(conn, catalog_namespace_name):
+    return len(
+        [
+            line
+            for line in conn.notices
+            if "making GET request to URL" in str(line)
+            and catalog_namespace_name in str(line)
+        ]
+    )
+
+
 def test_metadata_fetch(
     pg_conn,
     superuser_conn,
@@ -742,16 +755,22 @@ def test_metadata_fetch(
             superuser_conn,
         )
 
-    fetch_cnt = 0
-    for line in superuser_conn.notices:
-        print(line)
-        if "making GET request to URL" in str(
-            line
-        ) and f"{catalog_namespace_name}" in str(line):
-            fetch_cnt += 1
-
     # we executed 3 statements
-    assert fetch_cnt == stmt_cnt
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == stmt_cnt
+    superuser_conn.commit()
+
+    # a statement that names the table twice resolves it once, so its two
+    # references read one version of the table however the catalog moves
+    superuser_conn.notices.clear()
+    res = run_query(
+        f"""
+            SELECT (SELECT count(*) FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg") AS first_reference,
+                   (SELECT count(*) FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg") AS second_reference
+             """,
+        superuser_conn,
+    )
+    assert tuple(res[0]) == (5, 5)
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
     superuser_conn.commit()
 
     # now, the same test with REPEATABLE READ and SERIALIZABLE
@@ -780,18 +799,37 @@ def test_metadata_fetch(
                 superuser_conn,
             )
 
-        fetch_cnt = 0
-        for line in superuser_conn.notices:
-            print(line)
-            if "making GET request to URL" in str(
-                line
-            ) and f"{catalog_namespace_name}" in str(line):
-                fetch_cnt += 1
-
         # we executed 3 statements but only fetch once given
         # the isolation levels
-        assert fetch_cnt == 1
+        assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
         superuser_conn.commit()
+
+    # Repointing the table at another table of the catalog changes what the
+    # catalog has to be asked about, so the read after the ALTER asks again
+    # even at an isolation level that otherwise reuses the earlier answer.
+    # Both tables hold the same rows, so the traffic is the observable here.
+    read_query = f"""SELECT * FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg" """
+
+    superuser_conn.notices.clear()
+    run_command("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", superuser_conn)
+    assert len(run_query(read_query, superuser_conn)) == 5
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
+
+    renamed_table_name = f"{catalog_table_name}_repointed"
+    rename_rest_catalog_table(
+        pg_conn, catalog_namespace_name, catalog_table_name, renamed_table_name
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""ALTER FOREIGN TABLE "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg" OPTIONS (SET catalog_table_name '{renamed_table_name}') """,
+        superuser_conn,
+    )
+
+    superuser_conn.notices.clear()
+    assert len(run_query(read_query, superuser_conn)) == 5
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
+    superuser_conn.commit()
 
     run_command("reset pg_lake_iceberg.http_client_trace_traffic", superuser_conn)
     superuser_conn.commit()

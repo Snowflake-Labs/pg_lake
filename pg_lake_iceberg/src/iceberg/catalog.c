@@ -43,7 +43,6 @@ static char *GetIcebergExternalMetadataLocation(Oid relationId);
 static char *GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate);
 static char *ResolveIcebergExternalMetadataLocation(Oid relationId,
 													IcebergCatalogType icebergCatalogType);
-static char *RestCatalogRequestKey(Oid relationId);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
 static char *GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate, bool errorIfNotFound);
 static void ErrorIfSameTableExistsInExternalCatalog(Oid relationId);
@@ -443,11 +442,11 @@ GetIcebergExternalMetadataLocation(Oid relationId)
  * location of a table in an external catalog.
  *
  * A read-only REST catalog table is resolved through its catalog one table
- * at a time, so the answer is held for as long as the reader is entitled to
- * it. An object store catalog publishes all of its tables as a single
- * document, and holding that document is what keeps the tables of one
- * catalog at one version of it, so there is nothing left to hold per table
- * here. See external_catalog_cache.c.
+ * at a time, so the answer is held per relation for as long as the reader
+ * is entitled to it. An object store catalog publishes all of its tables as
+ * a single document, and holding that document is what keeps the tables of
+ * one catalog at one version of it, so there is nothing left to hold per
+ * table here. See external_catalog_cache.c.
  *
  * A writable REST catalog table is an internal table whose scans read our
  * own file inventory under the transaction snapshot and never this
@@ -468,8 +467,7 @@ ResolveIcebergExternalMetadataLocation(Oid relationId,
 	if (icebergCatalogType == REST_CATALOG_READ_WRITE)
 		return GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-	char	   *requestKey = RestCatalogRequestKey(relationId);
-	char	   *cachedLocation = GetCachedExternalMetadataLocation(requestKey);
+	char	   *cachedLocation = GetCachedExternalMetadataLocation(relationId);
 
 	if (cachedLocation != NULL)
 		return cachedLocation;
@@ -477,35 +475,9 @@ ResolveIcebergExternalMetadataLocation(Oid relationId,
 	char	   *currentMetadataPath =
 		GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-	CacheExternalMetadataLocation(requestKey, currentMetadataPath);
+	CacheExternalMetadataLocation(relationId, currentMetadataPath);
 
 	return currentMetadataPath;
-}
-
-
-/*
- * RestCatalogRequestKey returns a key standing for the table a REST catalog
- * request asks about, which is what the answer belongs to. The relation that
- * asks is the wrong key: ALTER FOREIGN TABLE can point a read-only table at
- * another table of the same catalog, and two relations can be pointed at one
- * table, which they then read one version of.
- *
- * The parts are length prefixed because an identifier may contain the
- * separator, and two different tables must never produce one key.
- */
-static char *
-RestCatalogRequestKey(Oid relationId)
-{
-	ForeignTable *foreignTable = GetForeignTable(relationId);
-	char	   *catalogName = GetRestCatalogName(relationId);
-	char	   *namespaceName = GetRestCatalogNamespace(relationId);
-	char	   *tableName = GetRestCatalogTableName(relationId);
-
-	return psprintf("%u %zu:%s %zu:%s %zu:%s",
-					foreignTable->serverid,
-					strlen(catalogName), catalogName,
-					strlen(namespaceName), namespaceName,
-					strlen(tableName), tableName);
 }
 
 

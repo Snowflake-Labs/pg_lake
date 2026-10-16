@@ -54,6 +54,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
+#include "pg_lake/iceberg/external_catalog_cache.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/fdw/partition_transform.h"
@@ -272,6 +273,15 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 			List	   *allowedOptions = list_make1("catalog_table_name");
 
 			ErrorIfUnsupportedTableOptionChange(alterStmt, allowedOptions);
+
+			/*
+			 * This table is about to stand for another table of its catalog,
+			 * so what it resolved earlier in this transaction is not an
+			 * answer about it any more. An object_store table needs no such
+			 * drop, because it is looked up in the catalog document by its
+			 * current options every time.
+			 */
+			ForgetCachedExternalMetadataLocation(relationId);
 
 			return false;
 		}

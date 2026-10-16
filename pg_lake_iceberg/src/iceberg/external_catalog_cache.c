@@ -44,12 +44,12 @@
  * stay still differs with how the catalog publishes:
  *
  * - a REST catalog answers for one table per request, so the location it
- *   answered with is held per request, keyed by the table that was asked
- *   about rather than by the relation that asked. ALTER FOREIGN TABLE can
- *   point a read-only table at another table of the same catalog, and two
- *   relations can be pointed at one table, so the relation is the wrong
- *   thing to remember an answer by. Two tables of such a catalog are two
- *   requests and never were a single state to begin with.
+ *   answered with is held per relation that asked. Two tables of such a
+ *   catalog are two requests and never were a single state to begin with,
+ *   so there is nothing to hold them together with. ALTER FOREIGN TABLE
+ *   can point a read-only table at another table of the same catalog,
+ *   which is the one command that changes the answer for a relation while
+ *   the cache holds it, and it drops what the relation resolved.
  * - an object store catalog publishes all of its tables as one document
  *   at a fixed path, so that document is held instead. Holding it is what
  *   makes two tables a command resolves from one such catalog come from
@@ -95,7 +95,7 @@
 /* a metadata location resolved from an external catalog */
 typedef struct CachedMetadataLocation
 {
-	char	   *requestKey;
+	Oid			relationId;
 	char	   *metadataLocation;
 }			CachedMetadataLocation;
 
@@ -146,17 +146,17 @@ static void ForgetExternalCatalogCache(void *arg);
 
 /*
  * GetCachedExternalMetadataLocation returns the metadata location this
- * transaction resolved for the table the given request key stands for and
- * is still entitled to, or NULL if the caller has to ask the catalog.
+ * transaction resolved for the given relation and is still entitled to, or
+ * NULL if the caller has to ask the catalog.
  */
 char *
-GetCachedExternalMetadataLocation(const char *requestKey)
+GetCachedExternalMetadataLocation(Oid relationId)
 {
 	PrepareExternalCatalogCache();
 
 	foreach_ptr(CachedMetadataLocation, cachedLocation, MetadataLocationCache)
 	{
-		if (strcmp(cachedLocation->requestKey, requestKey) == 0)
+		if (cachedLocation->relationId == relationId)
 			return cachedLocation->metadataLocation;
 	}
 
@@ -169,25 +169,53 @@ GetCachedExternalMetadataLocation(const char *requestKey)
  * an external catalog.
  */
 void
-CacheExternalMetadataLocation(const char *requestKey, const char *metadataLocation)
+CacheExternalMetadataLocation(Oid relationId, const char *metadataLocation)
 {
 	PrepareExternalCatalogCache();
 
 	/*
 	 * A caller asks the catalog only after the cache told it that it holds no
-	 * answer for this request, so there is nothing to replace here.
+	 * answer for this relation, so there is nothing to replace here.
 	 */
 	MemoryContext previousContext =
 		MemoryContextSwitchTo(ExternalCatalogCacheContext);
 
 	CachedMetadataLocation *cachedLocation = palloc0(sizeof(CachedMetadataLocation));
 
-	cachedLocation->requestKey = pstrdup(requestKey);
+	cachedLocation->relationId = relationId;
 	cachedLocation->metadataLocation = pstrdup(metadataLocation);
 
 	MetadataLocationCache = lappend(MetadataLocationCache, cachedLocation);
 
 	MemoryContextSwitchTo(previousContext);
+}
+
+
+/*
+ * ForgetCachedExternalMetadataLocation drops what the given relation
+ * resolved, because what it resolves has changed under the cache rather
+ * than the reader becoming entitled to newer catalog state.
+ */
+void
+ForgetCachedExternalMetadataLocation(Oid relationId)
+{
+	ListCell   *locationCell = NULL;
+
+	/* nothing was resolved in this transaction yet */
+	if (ExternalCatalogCacheContext == NULL)
+		return;
+
+	foreach(locationCell, MetadataLocationCache)
+	{
+		CachedMetadataLocation *cachedLocation = lfirst(locationCell);
+
+		if (cachedLocation->relationId == relationId)
+		{
+			MetadataLocationCache =
+				foreach_delete_current(MetadataLocationCache, locationCell);
+			return;
+		}
+	}
 }
 
 
