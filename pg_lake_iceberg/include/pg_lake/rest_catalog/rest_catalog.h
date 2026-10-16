@@ -371,6 +371,11 @@ void		ApplyUserMappingOptionsList(RestCatalogOptions * opts, List *options, Oid 
 List	   *LookupUserMappingOptionsByOid(Oid umOid, Oid *serverOidOut);
 bool		RestCatalogAuthProviderIsRegistered(void);
 char	   *GetRestCatalogAuthorization(RestCatalogOptions * opts, bool forceRefreshToken);
+void		AssignRestCatalogClientId(const char *newval, void *extra);
+void		AssignRestCatalogClientSecret(const char *newval, void *extra);
+void		AssignRestCatalogOauthHostPath(const char *newval, void *extra);
+void		AssignRestCatalogScope(const char *newval, void *extra);
+void		AssignRestCatalogAuthType(int newval, void *extra);
 List	   *GetHeadersWithAuth(RestCatalogOptions * opts);
 char	   *JsonbGetStringByPath(const char *jsonb_text, int nkeys,...);
 char	   *JsonbGetOptionalStringByPath(const char *jsonb_text, int nkeys,...);

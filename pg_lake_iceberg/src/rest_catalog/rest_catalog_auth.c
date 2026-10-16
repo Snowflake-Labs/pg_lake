@@ -127,6 +127,62 @@ InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
 
 
 /*
+ * Assign hooks for the GUCs the built-in pg_lake_rest_catalog draws its
+ * credentials from.  Changing one of them does not go through the syscache,
+ * so without these a token minted from the previous credentials would be
+ * served until it expires (#418).
+ *
+ * Assign hooks run at postmaster start and on every SIGHUP, so they must not
+ * throw, and they flush only when the value actually changes; otherwise every
+ * reload would empty the cache.  At assign time the GUC variable still holds
+ * the old value.  rest_catalog_host is not hooked: it names the catalog, not
+ * the OAuth endpoint, so changing it does not invalidate an issued token.
+ */
+static void
+InvalidateRestTokenCacheIfChanged(const char *oldval, const char *newval)
+{
+	/* both NULL, or the same string: nothing to do */
+	if (oldval == newval)
+		return;
+	if (oldval != NULL && newval != NULL && strcmp(oldval, newval) == 0)
+		return;
+
+	InvalidateRestTokenCache((Datum) 0, 0, 0);
+}
+
+void
+AssignRestCatalogClientId(const char *newval, void *extra)
+{
+	InvalidateRestTokenCacheIfChanged(RestCatalogClientId, newval);
+}
+
+void
+AssignRestCatalogClientSecret(const char *newval, void *extra)
+{
+	InvalidateRestTokenCacheIfChanged(RestCatalogClientSecret, newval);
+}
+
+void
+AssignRestCatalogOauthHostPath(const char *newval, void *extra)
+{
+	InvalidateRestTokenCacheIfChanged(RestCatalogOauthHostPath, newval);
+}
+
+void
+AssignRestCatalogScope(const char *newval, void *extra)
+{
+	InvalidateRestTokenCacheIfChanged(RestCatalogScope, newval);
+}
+
+void
+AssignRestCatalogAuthType(int newval, void *extra)
+{
+	if (newval != RestCatalogAuthType)
+		InvalidateRestTokenCache((Datum) 0, 0, 0);
+}
+
+
+/*
  * Initialize the per-catalog token cache hash table if needed.
  */
 static void
