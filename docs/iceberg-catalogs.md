@@ -331,7 +331,8 @@ A nondefault prefix is stored in the table's options. Explicit prefixes are alwa
 preserved, including when replaying `pg_dump` DDL, and do not follow a database rename.
 Tables without a stored prefix continue to use the database name. Writable tables do not
 accept `catalog_namespace` or `catalog_table_name` overrides and cannot be renamed or
-moved to another schema. One transaction may modify only one REST server and prefix.
+moved to another schema. One transaction may modify only one REST server and prefix;
+rolling back a savepoint discards its pending catalog work and restores the prior binding.
 
 pg_lake creates the namespace if it does not exist. Storage paths still use the PostgreSQL
 database name, not the REST prefix. The catalog must accept these paths under the server's

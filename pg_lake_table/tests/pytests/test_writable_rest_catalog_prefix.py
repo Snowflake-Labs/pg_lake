@@ -19,6 +19,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
+import psycopg2
 from utils_pytest import *
 
 
@@ -367,6 +368,125 @@ def test_mixed_prefix_create_rejected_before_staging(
     assert "different REST catalog prefixes" in str(err), err
     assert mock.requests[sent_before:] == []
     superuser_conn.rollback()
+
+
+def test_savepoint_rollback_restores_prefix_and_requests(
+    installcheck, superuser_conn, writable_schema, mock_catalog
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog()
+    writable_schema.append("wp_savepoint")
+    _create_server(superuser_conn, "wp_savepoint", mock.endpoint, "first")
+    run_command("SAVEPOINT before_first", superuser_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA}.rolled_back (a int) USING iceberg "
+        "WITH (catalog='wp_savepoint')",
+        superuser_conn,
+    )
+    run_command("ROLLBACK TO SAVEPOINT before_first", superuser_conn)
+    sent_before = len(mock.requests)
+    run_command(
+        f"CREATE TABLE {SCHEMA}.kept (a int) USING iceberg "
+        "WITH (catalog='wp_savepoint', catalog_name='second')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    assert all("/first/" not in path for _, path in mock.requests[sent_before:])
+    assert _table_option(superuser_conn, "kept", "catalog_name") == "second"
+
+
+def test_released_savepoint_preserves_parent_binding(
+    installcheck, superuser_conn, writable_schema, mock_catalog
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog()
+    writable_schema.append("wp_release")
+    _create_server(superuser_conn, "wp_release", mock.endpoint, "first")
+    run_command("SAVEPOINT parent", superuser_conn)
+    run_command("SAVEPOINT child", superuser_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA}.t (a int) USING iceberg WITH (catalog='wp_release')",
+        superuser_conn,
+    )
+    run_command("RELEASE SAVEPOINT child", superuser_conn)
+    run_command("SAVEPOINT conflicting", superuser_conn)
+    err = run_command(
+        f"CREATE TABLE {SCHEMA}.bad (a int) USING iceberg "
+        "WITH (catalog='wp_release', catalog_name='second')",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert "different REST catalog prefixes" in str(err), err
+    run_command("ROLLBACK TO SAVEPOINT conflicting", superuser_conn)
+    run_command("ROLLBACK TO SAVEPOINT parent", superuser_conn)
+    sent_before = len(mock.requests)
+    run_command(
+        f"CREATE TABLE {SCHEMA}.kept (a int) USING iceberg "
+        "WITH (catalog='wp_release', catalog_name='second')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    assert all("/first/" not in path for _, path in mock.requests[sent_before:])
+
+
+def test_savepoint_rollback_preserves_parent_create(
+    installcheck, superuser_conn, writable_schema, mock_catalog
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog()
+    writable_schema.append("wp_parent")
+    _create_server(superuser_conn, "wp_parent", mock.endpoint, "first")
+    run_command(
+        f"CREATE TABLE {SCHEMA}.kept (a int) USING iceberg WITH (catalog='wp_parent')",
+        superuser_conn,
+    )
+    run_command("SAVEPOINT child", superuser_conn)
+    run_command(f"DROP TABLE {SCHEMA}.kept", superuser_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA}.discarded (a int) USING iceberg WITH (catalog='wp_parent')",
+        superuser_conn,
+    )
+    run_command("ROLLBACK TO child", superuser_conn)
+    sent_before = len(mock.requests)
+    superuser_conn.commit()
+    requests = mock.requests[sent_before:]
+    assert ("POST", f"/v1/first/namespaces/{SCHEMA}/tables/kept") in requests
+    assert not any(
+        method == "DELETE" or "discarded" in path for method, path in requests
+    )
+
+
+def test_first_write_inside_fresh_session_savepoint(
+    installcheck, superuser_conn, writable_schema, mock_catalog
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog()
+    writable_schema.append("wp_fresh")
+    _create_server(superuser_conn, "wp_fresh", mock.endpoint, "first")
+    conn = psycopg2.connect(superuser_conn.dsn)
+    try:
+        run_command("SAVEPOINT outer_savepoint", conn)
+        run_command("SAVEPOINT inner_savepoint", conn)
+        run_command(
+            f"CREATE TABLE {SCHEMA}.discarded (a int) USING iceberg WITH (catalog='wp_fresh')",
+            conn,
+        )
+        run_command("RELEASE inner_savepoint", conn)
+        run_command("ROLLBACK TO outer_savepoint", conn)
+        sent_before = len(mock.requests)
+        run_command(
+            f"CREATE TABLE {SCHEMA}.kept (a int) USING iceberg "
+            "WITH (catalog='wp_fresh', catalog_name='second')",
+            conn,
+        )
+        conn.commit()
+        assert all("/first/" not in path for _, path in mock.requests[sent_before:])
+    finally:
+        conn.close()
 
 
 def test_dumped_prefix_can_be_replayed_after_server_change(

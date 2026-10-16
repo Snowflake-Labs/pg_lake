@@ -2148,6 +2148,30 @@ def test_writable_table_on_server_with_catalog_name(
     )
     assert stored == []
 
+    # Child RELEASE keeps work provisional until its parent is committed.
+    # Verify rollback through a REST attachment, not just the local table.
+    run_command(f"INSERT INTO {SCHEMA_NAME}.server_catname VALUES (2)", pg_conn)
+    run_command("SAVEPOINT parent", pg_conn)
+    run_command(f"UPDATE {SCHEMA_NAME}.server_catname SET id=99 WHERE id=1", pg_conn)
+    run_command(
+        f"ALTER TABLE {SCHEMA_NAME}.server_catname ADD COLUMN discarded int", pg_conn
+    )
+    run_command("SAVEPOINT child", pg_conn)
+    run_command(f"DELETE FROM {SCHEMA_NAME}.server_catname WHERE id=2", pg_conn)
+    run_command("RELEASE child", pg_conn)
+    run_command("ROLLBACK TO parent", pg_conn)
+    pg_conn.commit()
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.rest_check () USING iceberg "
+        f"WITH (catalog='{SERVER_NAME}', read_only=true, "
+        f"catalog_namespace='{SCHEMA_NAME}', catalog_table_name='server_catname')",
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert run_query(
+        f"SELECT * FROM {SCHEMA_NAME}.rest_check ORDER BY id", pg_conn
+    ) == [[1], [2]]
+
     # Clean up so we do not leak the schema to a later test in the same group.
     run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", pg_conn)
     pg_conn.commit()
