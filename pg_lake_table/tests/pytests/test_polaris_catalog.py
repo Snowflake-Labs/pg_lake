@@ -114,12 +114,14 @@ def test_create_namespace(
     assert "writable rest catalog iceberg tables do not" in str(res)
     pg_conn.rollback()
 
+    # A writable table may pick its catalog at CREATE (#690), so this gets
+    # past option validation and fails only because Polaris has no "none".
     res = run_command(
         f"""CREATE TABLE "{namespace}".tbl_err(a int) USING iceberg WITH (catalog='rest', catalog_name='none')""",
         pg_conn,
         raise_error=False,
     )
-    assert "writable rest catalog iceberg tables do not" in str(res)
+    assert 'catalog "none" does not exist in the rest catalog server' in str(res)
     pg_conn.rollback()
 
     run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)

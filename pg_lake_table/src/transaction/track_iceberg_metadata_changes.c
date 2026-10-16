@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 #include "utils/hsearch.h"
+#include "utils/lsyscache.h"
 #include "access/xact.h"
 #include "common/int.h"
 #include "utils/memutils.h"
@@ -144,9 +145,13 @@ typedef struct PgLakeXactRestCatalogContext
 	HTAB	   *requestsHash;
 	MemoryContext commitContext;
 	RestCatalogOptions *catalogOpts;
+	char	   *catalogName;	/* REST prefix every table in this transaction
+								 * commits under, or NULL before the first
+								 * table binds */
 }			PgLakeXactRestCatalogContext;
 
 static PgLakeXactRestCatalogContext * PgLakeXactRestCatalog = NULL;
+
 
 
 /*
@@ -159,6 +164,12 @@ TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes)
 {
 	if (ShouldSkipMetadataChangeToIceberg(metadataOperationTypes))
 		return;
+
+	/*
+	 * Include DDL paths that otherwise defer their REST request to
+	 * pre-commit.
+	 */
+	BindRelationToXactRestCatalog(relationId);
 
 	/*
 	 * We might also defer acquiring locks to precommit hook but let's keep
@@ -380,9 +391,10 @@ PostAllRestCatalogRequests(void)
 
 		/*
 		 * EnsureXactBoundToRestCatalog() already guarantees every entry
-		 * belongs to the same REST catalog server.  Capture the catalog name
-		 * from the first valid entry and Assert the invariant holds for all
-		 * subsequent ones.
+		 * belongs to the same REST catalog server and catalog prefix, since
+		 * the whole batch goes to a single transactions/commit URL.  Capture
+		 * the catalog name from the first valid entry; the Assert documents
+		 * the invariant that the statement-time check enforces.
 		 */
 		if (catalogName == NULL)
 			catalogName = requestPerTable->catalogName;
@@ -464,7 +476,8 @@ PostAllRestCatalogRequests(void)
 														  url, batchRequestBody->data,
 														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
-		if (httpResult.status != 204)
+		/* Polaris and Nessie answer 204, Lakekeeper 200 */
+		if (httpResult.status != 200 && httpResult.status != 204)
 		{
 			ReportHTTPError(httpResult, WARNING);
 		}
@@ -669,6 +682,8 @@ EnsureXactBoundToRestCatalog(Oid relationId)
 
 		PgLakeXactRestCatalog->catalogOpts =
 			CopyRestCatalogOptions(TopTransactionContext, resolvedOpts);
+		PgLakeXactRestCatalog->catalogName =
+			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
 		return;
 	}
 
@@ -688,6 +703,38 @@ EnsureXactBoundToRestCatalog(Oid relationId)
 						   PgLakeXactRestCatalog->catalogOpts->catalog,
 						   catalog)));
 	}
+
+	/*
+	 * The transaction may have been bound without a relation (a same-txn DROP
+	 * USER MAPPING captures credentials first); take the prefix from the
+	 * first relation that arrives.
+	 */
+	char	   *relationCatalogName = GetRestCatalogName(relationId);
+
+	if (PgLakeXactRestCatalog->catalogName == NULL)
+	{
+		PgLakeXactRestCatalog->catalogName =
+			MemoryContextStrdup(TopTransactionContext, relationCatalogName);
+		return;
+	}
+
+	/*
+	 * Tables on one server can still carry different prefixes: the prefix is
+	 * fixed per table at CREATE TABLE, from the table's own catalog_name, the
+	 * server's catalog_name or /v1/config, and the server-side sources can
+	 * change between two CREATEs.  All changes in a transaction go to one
+	 * transactions/commit URL, so refuse the mix here, before anything is
+	 * sent.
+	 */
+	if (strcmp(PgLakeXactRestCatalog->catalogName, relationCatalogName) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot modify tables from different REST catalog "
+						"prefixes in the same transaction"),
+				 errdetail("This transaction already targets catalog prefix \"%s\", "
+						   "but table \"%s\" uses \"%s\".",
+						   PgLakeXactRestCatalog->catalogName,
+						   get_rel_name(relationId), relationCatalogName)));
 }
 
 
