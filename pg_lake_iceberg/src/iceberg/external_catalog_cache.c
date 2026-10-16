@@ -18,44 +18,45 @@
 /*
  * external_catalog_cache.c
  *
- * A table in an external catalog keeps its current metadata location
- * outside Postgres, so a reference to such a table has to ask the catalog
- * where the table is right now. Asking twice within one read exposes the
- * reader to whatever the catalog did in between: a query that references
- * the same table twice can read two versions of it, and two tables of one
- * catalog can be read as of two different points in time. Neither is a
- * state those tables ever had together. That is the problem this module
- * exists for. Fewer requests to the catalog are a side effect and not a
- * reason to hold anything.
+ * A table pg_lake does not own keeps its current metadata location outside
+ * Postgres, so a reference to such a table has to ask the catalog where the
+ * table is right now. Asking twice within one read exposes the reader to
+ * whatever the catalog did in between: a query that references the same
+ * table twice can read two versions of it, and two tables of one catalog can
+ * be read as of two different points in time. Neither is a state those
+ * tables ever had together. That is the problem this module exists for.
+ * Fewer requests to the catalog are a side effect and not a reason to hold
+ * anything.
  *
- * What a reader resolved is held for as long as that reader is entitled to
- * the same catalog state. Three rules decide that, and
- * DecideExternalCatalogCacheUse() is the one place that applies them:
+ * Tables pg_lake owns never get here: their files are listed in our own
+ * catalogs, which the transaction snapshot already holds still.
+ *
+ * What a reader asked is held for as long as that reader is entitled to the
+ * same catalog state. Three rules decide that, and
+ * PrepareExternalCatalogCache() is the one place that applies them:
  *
  * 1. within one command, every isolation level reuses what the command
- *    already resolved, so one command reads one version of a table,
+ *    already asked, so one command reads one version of a table,
  * 2. a later command of a REPEATABLE READ or SERIALIZABLE transaction
  *    reuses it too, because those levels read one state of the database
  *    for the whole transaction,
- * 3. a later command of a READ COMMITTED transaction resolves again,
- *    because it is entitled to the latest committed state.
+ * 3. a later command of a READ COMMITTED transaction asks again, because it
+ *    is entitled to the latest committed state.
  *
- * Two kinds of state are held, one per catalog shape, because what has to
- * stay still differs with how the catalog publishes:
+ * What is held follows how the catalog publishes:
  *
- * - a REST catalog answers for one table per request, so the location it
- *   answered with is held per relation that asked. Two tables of such a
- *   catalog are two requests and never were a single state to begin with,
- *   so there is nothing to hold them together with. ALTER FOREIGN TABLE
- *   can point a read-only table at another table of the same catalog,
- *   which is the one command that changes the answer for a relation while
- *   the cache holds it, and it drops what the relation resolved.
- * - an object store catalog publishes all of its tables as one document
- *   at a fixed path, so that document is held instead. Holding it is what
- *   makes two tables a command resolves from one such catalog come from
- *   the same version of it. A per relation cache cannot do that, because
- *   each relation is resolved exactly once per command and the two
- *   resolutions would still read the document twice.
+ * - a REST catalog answers for one table per request, so its answer is held
+ *   under the table it was asked about rather than under the relation that
+ *   asked. A relation that ALTER FOREIGN TABLE points at another table then
+ *   asks about that table, and two relations naming one table read one
+ *   version of it. Two tables of such a catalog are two requests and never
+ *   were a single state to begin with, so there is nothing to hold them
+ *   together with.
+ * - an object store catalog publishes all of its tables as one document at
+ *   a fixed path, so that document is held instead. Holding it is what
+ *   makes two tables a command resolves from one such catalog come from the
+ *   same version of it. Holding a location per table cannot do that,
+ *   because each table would still read the document once.
  *
  * Three limits are deliberate, and the tests lock them:
  *
@@ -71,52 +72,36 @@
  *   therefore holds one version of a table across those, which is longer
  *   than the isolation level requires. Holding longer cannot tear a read,
  *   and that is the direction to err in.
- * - attaching a table resolves it through the held document too, so
- *   CREATE TABLE ... read_only for a table published since that document
- *   was read fails with no table found, inside a transaction or function
- *   body that already read the catalog. It is the same version the reads
- *   of that transaction come from. The listing function asks the catalog
- *   every time and does show the table.
+ * - attaching an object_store table reads its catalog as it stands, the
+ *   way the listing function does. A table published since a transaction
+ *   or function body first read that catalog can therefore be attached
+ *   there, but reading it waits for a command entitled to newer state,
+ *   because the reads answer from the document already held, which does
+ *   not list the table yet.
  */
 
 #include "postgres.h"
 
 #include "access/xact.h"
 #include "nodes/pg_list.h"
+#include "utils/lsyscache.h"
 #include "utils/memutils.h"
-#include "utils/snapmgr.h"
-#include "utils/timestamp.h"
 
 /* foreach_ptr() on the versions of Postgres that do not have it yet */
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/iceberg/external_catalog_cache.h"
+#include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/s3_reader_utils.h"
 
 
-/* a metadata location resolved from an external catalog */
-typedef struct CachedMetadataLocation
+/* what an external catalog answered, under the question it answered */
+typedef struct CachedAnswer
 {
-	Oid			relationId;
-	char	   *metadataLocation;
-}			CachedMetadataLocation;
-
-/* the contents of a document that lists the tables of a catalog */
-typedef struct CachedCatalogDocument
-{
-	char	   *documentPath;
-	char	   *documentContent;
-}			CachedCatalogDocument;
-
-/* what the current caller may do with the state the cache holds */
-typedef enum ExternalCatalogCacheUse
-{
-	/* the caller is entitled to the state the cache holds */
-	EXTERNAL_CATALOG_CACHE_REUSE,
-
-	/* the caller is entitled to newer state, so the cache starts over */
-	EXTERNAL_CATALOG_CACHE_REFRESH,
-}			ExternalCatalogCacheUse;
+	char	   *question;
+	char	   *answer;
+}			CachedAnswer;
 
 
 /*
@@ -125,103 +110,159 @@ typedef enum ExternalCatalogCacheUse
  */
 static MemoryContext ExternalCatalogCacheContext = NULL;
 
-/* list of CachedMetadataLocation, for catalogs answering per table */
-static List *MetadataLocationCache = NIL;
+/* metadata locations, under the REST catalog table each was asked about */
+static List *RestCatalogLocations = NIL;
 
-/* list of CachedCatalogDocument, for catalogs publishing one document */
-static List *CatalogDocumentCache = NIL;
+/* catalog documents, under the path each was read from */
+static List *CatalogDocuments = NIL;
 
 /*
- * The command whose resolutions the cache holds, as its statement start
+ * The command whose answers the cache holds, as its statement start
  * timestamp. Under an isolation level that uses a transaction snapshot,
- * this is the command that resolved them first and later commands of the
- * transaction keep reading them.
+ * this is the command that asked first and later commands of the
+ * transaction keep reading its answers.
  */
 static TimestampTz CacheFilledInCommand = 0;
 
-static char *GetCachedExternalMetadataLocation(Oid relationId);
-static void CacheExternalMetadataLocation(Oid relationId,
-										  const char *metadataLocation);
-static char *GetCachedExternalCatalogDocument(const char *documentPath);
-static void CacheExternalCatalogDocument(const char *documentPath,
-										 const char *documentContent);
+static char *ResolveRestCatalogTable(Oid relationId);
+static char *ResolveObjectStoreCatalogTable(Oid relationId);
+static char *RestCatalogRequestKey(Oid relationId);
+static char *GetCachedAnswer(List *answers, const char *question);
+static List *CacheAnswer(List *answers, const char *question,
+						 const char *answer);
 static void PrepareExternalCatalogCache(void);
-static ExternalCatalogCacheUse DecideExternalCatalogCacheUse(void);
-static void CreateExternalCatalogCache(void);
-static void DiscardExternalCatalogCache(void);
 static void ForgetExternalCatalogCache(void *arg);
 
 
 /*
- * GetRestCatalogMetadataLocationOncePerRead returns where the given
- * relation's table is in its REST catalog, asking the catalog on the first
- * read that needs it and answering the rest of that read with what it
- * answered then.
- *
- * GetMetadataLocationForRestCatalogForIcebergTable is the resolver that
- * asks every time, which is what a caller acting on the table as the
- * catalog has it now wants.
+ * ResolveIcebergExternalMetadataLocation returns the metadata location of a
+ * table pg_lake does not own, as the current read is entitled to see it.
  */
 char *
-GetRestCatalogMetadataLocationOncePerRead(Oid relationId)
+ResolveIcebergExternalMetadataLocation(Oid relationId)
 {
-	char	   *cachedLocation = GetCachedExternalMetadataLocation(relationId);
+	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
+	if (icebergCatalogType == REST_CATALOG_READ_ONLY)
+		return ResolveRestCatalogTable(relationId);
+
+	if (icebergCatalogType == OBJECT_STORE_READ_ONLY)
+		return ResolveObjectStoreCatalogTable(relationId);
+
+	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
+
+	if (icebergCatalogType == NONE_CATALOG &&
+		tableProperties.tableType == PG_LAKE_TABLE_TYPE &&
+		tableProperties.format == DATA_FORMAT_ICEBERG)
+	{
+		/*
+		 * The location is a table option, and the lock a reader holds on the
+		 * relation already keeps that still.
+		 */
+		return GetForeignTablePath(relationId);
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("unsupported iceberg external table type for relation %s",
+					get_rel_name(relationId))));
+}
+
+
+/*
+ * ResolveRestCatalogTable returns where the REST catalog of a read-only
+ * table says that table is, asking the catalog only if the current read has
+ * not asked it about that table yet.
+ */
+static char *
+ResolveRestCatalogTable(Oid relationId)
+{
+	char	   *requestKey = RestCatalogRequestKey(relationId);
+
+	PrepareExternalCatalogCache();
+
+	char	   *cachedLocation = GetCachedAnswer(RestCatalogLocations, requestKey);
+
+	/* the cache is reset under READ COMMITTED while a caller may hold this */
 	if (cachedLocation != NULL)
-		return cachedLocation;
+		return pstrdup(cachedLocation);
 
 	char	   *metadataLocation =
 		GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-	CacheExternalMetadataLocation(relationId, metadataLocation);
+	RestCatalogLocations =
+		CacheAnswer(RestCatalogLocations, requestKey, metadataLocation);
 
 	return metadataLocation;
 }
 
 
 /*
- * GetObjectStoreCatalogDocumentOncePerRead returns the document that lists
- * the tables of the catalog at the given path, reading it on the first
- * read that needs it and answering the rest of that read with the version
- * it read then.
- *
- * The document sits at a fixed path and whoever owns the catalog replaces
- * it in place, so it is read with the file cache out of the way.
+ * ResolveObjectStoreCatalogTable returns where the catalog document of a
+ * read-only object_store table says that table is, reading the document only
+ * if the current read has not read it yet.
  */
-char *
-GetObjectStoreCatalogDocumentOncePerRead(const char *documentPath)
+static char *
+ResolveObjectStoreCatalogTable(Oid relationId)
 {
-	char	   *cachedDocument = GetCachedExternalCatalogDocument(documentPath);
+	char	   *documentPath =
+		GetExternalObjectStoreCatalogFilePathForTable(relationId);
 
-	if (cachedDocument != NULL)
-		return cachedDocument;
+	PrepareExternalCatalogCache();
 
-	char	   *documentContent = GetJsonFromURINoCache(documentPath);
+	char	   *document = GetCachedAnswer(CatalogDocuments, documentPath);
 
-	/* which version of the catalog a reader got is otherwise unanswerable */
-	ereport(DEBUG1,
-			(errmsg("read external catalog document \"%s\"", documentPath)));
+	if (document == NULL)
+	{
+		/* catalog.json is a fixed path that may change out of band */
+		document = GetJsonFromURINoCache(documentPath);
 
-	CacheExternalCatalogDocument(documentPath, documentContent);
+		/* which version of the catalog a reader got is otherwise unanswerable */
+		ereport(DEBUG1,
+				(errmsg("read external catalog document \"%s\"", documentPath)));
 
-	return documentContent;
+		CatalogDocuments = CacheAnswer(CatalogDocuments, documentPath, document);
+	}
+
+	return GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId,
+																	 document);
 }
 
 
 /*
- * GetCachedExternalMetadataLocation returns the metadata location this
- * transaction resolved for the given relation and is still entitled to, or
- * NULL if the caller has to ask the catalog.
+ * RestCatalogRequestKey returns a key for the table a REST catalog request
+ * asks about, rather than for the relation asking, which ALTER FOREIGN TABLE
+ * can point at another table. The server is the one the catalog option
+ * names, because every Iceberg table has the same foreign server, and the
+ * names are length prefixed because an identifier may contain the separator.
  */
 static char *
-GetCachedExternalMetadataLocation(Oid relationId)
+RestCatalogRequestKey(Oid relationId)
 {
-	PrepareExternalCatalogCache();
+	Oid			catalogServerId = GetRestCatalogServerIdForRelation(relationId);
+	char	   *catalogName = GetRestCatalogName(relationId);
+	char	   *namespaceName = GetRestCatalogNamespace(relationId);
+	char	   *tableName = GetRestCatalogTableName(relationId);
 
-	foreach_ptr(CachedMetadataLocation, cachedLocation, MetadataLocationCache)
+	return psprintf("%u %zu:%s %zu:%s %zu:%s",
+					catalogServerId,
+					strlen(catalogName), catalogName,
+					strlen(namespaceName), namespaceName,
+					strlen(tableName), tableName);
+}
+
+
+/*
+ * GetCachedAnswer returns what an external catalog answered to the given
+ * question, or NULL if the cache holds no answer to it.
+ */
+static char *
+GetCachedAnswer(List *answers, const char *question)
+{
+	foreach_ptr(CachedAnswer, cachedAnswer, answers)
 	{
-		if (cachedLocation->relationId == relationId)
-			return cachedLocation->metadataLocation;
+		if (strcmp(cachedAnswer->question, question) == 0)
+			return cachedAnswer->answer;
 	}
 
 	return NULL;
@@ -229,215 +270,91 @@ GetCachedExternalMetadataLocation(Oid relationId)
 
 
 /*
- * CacheExternalMetadataLocation records a metadata location resolved from
- * an external catalog.
+ * CacheAnswer adds what an external catalog answered to a question the
+ * cache held no answer to, and returns the list it was added to.
  */
-static void
-CacheExternalMetadataLocation(Oid relationId, const char *metadataLocation)
+static List *
+CacheAnswer(List *answers, const char *question, const char *answer)
 {
-	PrepareExternalCatalogCache();
-
-	/*
-	 * Only reached after the lookup above found nothing for this relation, so
-	 * there is nothing to replace here.
-	 */
 	MemoryContext previousContext =
 		MemoryContextSwitchTo(ExternalCatalogCacheContext);
 
-	CachedMetadataLocation *cachedLocation = palloc0(sizeof(CachedMetadataLocation));
+	CachedAnswer *cachedAnswer = palloc0(sizeof(CachedAnswer));
 
-	cachedLocation->relationId = relationId;
-	cachedLocation->metadataLocation = pstrdup(metadataLocation);
+	cachedAnswer->question = pstrdup(question);
+	cachedAnswer->answer = pstrdup(answer);
 
-	MetadataLocationCache = lappend(MetadataLocationCache, cachedLocation);
-
-	MemoryContextSwitchTo(previousContext);
-}
-
-
-/*
- * ForgetRestCatalogMetadataLocation drops what the given relation
- * resolved, because what it resolves has changed under the cache rather
- * than the reader becoming entitled to newer catalog state.
- */
-void
-ForgetRestCatalogMetadataLocation(Oid relationId)
-{
-	ListCell   *locationCell = NULL;
-
-	/* nothing was resolved in this transaction yet */
-	if (ExternalCatalogCacheContext == NULL)
-		return;
-
-	foreach(locationCell, MetadataLocationCache)
-	{
-		CachedMetadataLocation *cachedLocation = lfirst(locationCell);
-
-		if (cachedLocation->relationId == relationId)
-		{
-			MetadataLocationCache =
-				foreach_delete_current(MetadataLocationCache, locationCell);
-			return;
-		}
-	}
-}
-
-
-/*
- * GetCachedExternalCatalogDocument returns the contents of the catalog
- * document at the given path if this transaction already read a version of
- * it that it is still entitled to, and NULL otherwise.
- */
-static char *
-GetCachedExternalCatalogDocument(const char *documentPath)
-{
-	PrepareExternalCatalogCache();
-
-	foreach_ptr(CachedCatalogDocument, cachedDocument, CatalogDocumentCache)
-	{
-		if (strcmp(cachedDocument->documentPath, documentPath) == 0)
-			return cachedDocument->documentContent;
-	}
-
-	return NULL;
-}
-
-
-/*
- * CacheExternalCatalogDocument records the contents of a catalog document.
- */
-static void
-CacheExternalCatalogDocument(const char *documentPath, const char *documentContent)
-{
-	PrepareExternalCatalogCache();
-
-	/*
-	 * Only reached after the lookup above found no version of this document,
-	 * so there is nothing to replace here.
-	 */
-	MemoryContext previousContext =
-		MemoryContextSwitchTo(ExternalCatalogCacheContext);
-
-	CachedCatalogDocument *cachedDocument = palloc0(sizeof(CachedCatalogDocument));
-
-	cachedDocument->documentPath = pstrdup(documentPath);
-	cachedDocument->documentContent = pstrdup(documentContent);
-
-	CatalogDocumentCache = lappend(CatalogDocumentCache, cachedDocument);
+	answers = lappend(answers, cachedAnswer);
 
 	MemoryContextSwitchTo(previousContext);
+
+	return answers;
 }
 
 
 /*
  * PrepareExternalCatalogCache makes sure the cache exists and holds only
- * state the current caller is entitled to read.
+ * answers the current command is entitled to.
  */
 static void
 PrepareExternalCatalogCache(void)
 {
 	Assert(IsTransactionState());
 
+	TimestampTz currentCommand = GetCurrentStatementStartTimestamp();
+
 	if (ExternalCatalogCacheContext == NULL)
 	{
-		CreateExternalCatalogCache();
+		/*
+		 * The cache belongs to the transaction rather than to the current
+		 * subtransaction, because a location a subtransaction resolved is
+		 * still the version of the table the transaction is reading after
+		 * that subtransaction rolls back.
+		 */
+		ExternalCatalogCacheContext =
+			AllocSetContextCreate(TopTransactionContext,
+								  "pg_lake external catalog cache",
+								  ALLOCSET_SMALL_SIZES);
+
+		/*
+		 * Every way out of a transaction resets or deletes
+		 * TopTransactionContext, so one reset callback covers commit, abort
+		 * and PREPARE TRANSACTION alike. An end-of-transaction callback would
+		 * have to enumerate those events and would miss the ones it did not
+		 * list.
+		 */
+		MemoryContextCallback *forgetCallback =
+			MemoryContextAlloc(TopTransactionContext,
+							   sizeof(MemoryContextCallback));
+
+		forgetCallback->func = ForgetExternalCatalogCache;
+		forgetCallback->arg = NULL;
+
+		MemoryContextRegisterResetCallback(TopTransactionContext, forgetCallback);
+	}
+	else if (CacheFilledInCommand == currentCommand ||
+			 IsolationUsesXactSnapshot())
+	{
+		/*
+		 * One command reads one version of a table at every isolation level,
+		 * and REPEATABLE READ and SERIALIZABLE read one state of the database
+		 * for the whole transaction.
+		 */
 		return;
 	}
-
-	if (DecideExternalCatalogCacheUse() == EXTERNAL_CATALOG_CACHE_REFRESH)
-		DiscardExternalCatalogCache();
-}
-
-
-/*
- * DecideExternalCatalogCacheUse decides whether the current caller reads
- * the catalog state the cache holds or newer state than that.
- */
-static ExternalCatalogCacheUse
-DecideExternalCatalogCacheUse(void)
-{
-	bool		sameCommand =
-		CacheFilledInCommand == GetCurrentStatementStartTimestamp();
-
-	if (sameCommand)
+	else
 	{
 		/*
-		 * The command that filled the cache is the command asking now. One
-		 * command reads one version of a table, at every isolation level.
+		 * A later command of a READ COMMITTED transaction is entitled to the
+		 * latest committed state rather than to what an earlier command of
+		 * the same transaction read.
 		 */
-		return EXTERNAL_CATALOG_CACHE_REUSE;
+		MemoryContextReset(ExternalCatalogCacheContext);
 	}
 
-	if (IsolationUsesXactSnapshot())
-	{
-		/*
-		 * A later command of a REPEATABLE READ or SERIALIZABLE transaction.
-		 * Those levels read one state of the database for the whole
-		 * transaction, so it reads what the earlier command resolved.
-		 */
-		return EXTERNAL_CATALOG_CACHE_REUSE;
-	}
-
-	/*
-	 * A later command of a READ COMMITTED transaction, which is entitled to
-	 * the latest committed state rather than to the state an earlier command
-	 * of the same transaction read.
-	 */
-	return EXTERNAL_CATALOG_CACHE_REFRESH;
-}
-
-
-/*
- * CreateExternalCatalogCache sets up the cache for the transaction that is
- * about to resolve its first external catalog reference.
- */
-static void
-CreateExternalCatalogCache(void)
-{
-	/*
-	 * The cache belongs to the transaction rather than to the current
-	 * subtransaction, because a location a subtransaction resolved is still
-	 * the version of the table the transaction is reading after that
-	 * subtransaction rolls back.
-	 */
-	ExternalCatalogCacheContext =
-		AllocSetContextCreate(TopTransactionContext,
-							  "pg_lake external catalog cache",
-							  ALLOCSET_SMALL_SIZES);
-
-	/*
-	 * Every way out of a transaction resets or deletes TopTransactionContext,
-	 * so one reset callback covers commit, abort and PREPARE TRANSACTION
-	 * alike. An end-of-transaction callback would have to enumerate those
-	 * events and would miss the ones it did not list.
-	 */
-	MemoryContextCallback *forgetCallback =
-		MemoryContextAlloc(TopTransactionContext,
-						   sizeof(MemoryContextCallback));
-
-	forgetCallback->func = ForgetExternalCatalogCache;
-	forgetCallback->arg = NULL;
-
-	MemoryContextRegisterResetCallback(TopTransactionContext, forgetCallback);
-
-	MetadataLocationCache = NIL;
-	CatalogDocumentCache = NIL;
-	CacheFilledInCommand = GetCurrentStatementStartTimestamp();
-}
-
-
-/*
- * DiscardExternalCatalogCache drops what earlier commands of this
- * transaction resolved and hands the cache to the current command.
- */
-static void
-DiscardExternalCatalogCache(void)
-{
-	MemoryContextReset(ExternalCatalogCacheContext);
-
-	MetadataLocationCache = NIL;
-	CatalogDocumentCache = NIL;
-	CacheFilledInCommand = GetCurrentStatementStartTimestamp();
+	RestCatalogLocations = NIL;
+	CatalogDocuments = NIL;
+	CacheFilledInCommand = currentCommand;
 }
 
 
@@ -453,7 +370,7 @@ ForgetExternalCatalogCache(void *arg)
 	 * callbacks, so the cache context is already gone by now.
 	 */
 	ExternalCatalogCacheContext = NULL;
-	MetadataLocationCache = NIL;
-	CatalogDocumentCache = NIL;
+	RestCatalogLocations = NIL;
+	CatalogDocuments = NIL;
 	CacheFilledInCommand = 0;
 }

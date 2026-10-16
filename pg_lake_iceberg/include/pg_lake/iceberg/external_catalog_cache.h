@@ -19,22 +19,4 @@
 
 #include "postgres.h"
 
-/*
- * Resolves a table in an external catalog once per read, and answers from
- * what this transaction already resolved for as long as it is entitled to
- * that version of the catalog. See external_catalog_cache.c for the rules
- * and for why they are worth having.
- *
- * Each function both asks the catalog and remembers the answer, so a
- * caller cannot read one and record the other. Which answer is held, and
- * what it is held under, follows how the catalog publishes: a REST catalog
- * answers for one table per request, so its answer is held per relation
- * that asked; an object store catalog publishes its tables as one
- * document, so that document is held under the path it was read from.
- *
- * ForgetRestCatalogMetadataLocation drops what a relation resolved, for
- * the one command that makes that relation point at another table.
- */
-extern PGDLLEXPORT char *GetRestCatalogMetadataLocationOncePerRead(Oid relationId);
-extern PGDLLEXPORT void ForgetRestCatalogMetadataLocation(Oid relationId);
-extern PGDLLEXPORT char *GetObjectStoreCatalogDocumentOncePerRead(const char *documentPath);
+extern PGDLLEXPORT char *ResolveIcebergExternalMetadataLocation(Oid relationId);

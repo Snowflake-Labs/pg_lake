@@ -14,7 +14,6 @@
 
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/iceberg/catalog.h"
-#include "pg_lake/iceberg/external_catalog_cache.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/copy/copy_format.h"
@@ -62,6 +61,7 @@ static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName);
 static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
 static bool CheckIfExternalObjectStoreCatalogExists(const char *catalogName);
 static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogNamespace, char **catalogTableName);
+static char *GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent, const char *catalogNamespace, const char *catalogTableName);
 static void FormatCurrentTimestampUTC(char *buf, size_t bufsize);
 static bool IsBlankCatalogField(const char *value);
 
@@ -94,12 +94,7 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 		GetInternalObjectStoreCatalogFilePath(catalogName) :
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
-	/*
-	 * catalog.json is a fixed path that may change out of band; read fresh.
-	 * This one reports what the catalog holds now rather than what the reader
-	 * is entitled to read, so it does not go through the per statement cache
-	 * the table resolution path uses.
-	 */
+	/* catalog.json is a fixed path that may change out of band; read fresh. */
 	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
 
 	StringInfo	getObjectStoreTables = makeStringInfo();
@@ -344,12 +339,29 @@ GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **
 
 
 /*
-* GetMetadataLocationFromExternalObjectStoreCatalogForTable returns the metadata location
-* for the given relationId by looking up the object store catalog using the catalog
-* information from the foreign table options.
+* GetExternalObjectStoreCatalogFilePathForTable returns the path of the
+* catalog file that lists the given read-only object store catalog table.
 */
 char *
-GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId)
+GetExternalObjectStoreCatalogFilePathForTable(Oid relationId)
+{
+	char	   *catalogName = NULL;
+	char	   *catalogNamespace = NULL;
+	char	   *catalogTableName = NULL;
+
+	GetObjectStoreCatalogInfoFromCatalog(relationId, &catalogName, &catalogNamespace, &catalogTableName);
+
+	return GetExternalObjectStoreCatalogFilePath(catalogName);
+}
+
+
+/*
+* GetMetadataLocationFromExternalObjectStoreCatalogForTable returns the metadata location
+* for the given relationId by looking it up in the given contents of its object store
+* catalog, using the catalog information from the foreign table options.
+*/
+char *
+GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId, const char *catalogContent)
 {
 	char	   *catalogName = NULL;
 	char	   *catalogNamespace = NULL;
@@ -360,7 +372,7 @@ GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId)
 	/* otherwise we should have thrown an error */
 	Assert(catalogName != NULL && catalogNamespace != NULL && catalogTableName != NULL);
 
-	return GetTableMetadataLocationFromExternalObjectStoreCatalog(catalogName, catalogNamespace, catalogTableName);
+	return GetTableMetadataLocationFromObjectStoreCatalogContent(catalogContent, catalogNamespace, catalogTableName);
 }
 
 
@@ -496,9 +508,21 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	const char *catalogPath =
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
-	char	   *catalogContent =
-		GetObjectStoreCatalogDocumentOncePerRead(catalogPath);
+	/* catalog.json is a fixed path that may change out of band; read fresh. */
+	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
 
+	return GetTableMetadataLocationFromObjectStoreCatalogContent(catalogContent, catalogNamespace, catalogTableName);
+}
+
+
+/*
+* GetTableMetadataLocationFromObjectStoreCatalogContent returns the metadata location
+* for the table with the given catalog namespace and catalog table name by looking it
+* up in the given contents of an object store catalog file.
+*/
+static char *
+GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent, const char *catalogNamespace, const char *catalogTableName)
+{
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
 	StringInfo	getMetadataLocation = makeStringInfo();
 

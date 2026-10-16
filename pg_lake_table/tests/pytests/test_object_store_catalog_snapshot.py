@@ -25,13 +25,16 @@ import time
 #   * whatever a transaction pinned is released when that transaction ends,
 #     by commit, by abort, or by PREPARE TRANSACTION.
 #
-# Two limits the implementation accepts, stated here as behaviour rather than
+# Three limits the implementation accepts, stated here as behaviour rather than
 # wished away:
 #
 #   * the version is pinned when a transaction first reads an external table,
 #     not when it took its snapshot;
 #   * the statements inside a function body are one statement to the pin, so
-#     READ COMMITTED holds one version of the catalog across them.
+#     READ COMMITTED holds one version of the catalog across them;
+#   * attaching a table reads the catalog as it stands, so a table published
+#     since a transaction pinned the catalog can be attached in it, but not
+#     read until the pin is released.
 #
 # A statement that reads catalog.json once cannot mix two versions of it, so
 # the tests count the reads rather than racing a rewriting thread against a
@@ -859,4 +862,76 @@ def test_function_body_holds_one_catalog_version(
     # the next statement of the same transaction is a command of its own and
     # is entitled to the rewrite
     assert run_query(f"SELECT count(*) FROM {schema}.read_tbl", pg_conn)[0][0] == 9
+    pg_conn.commit()
+
+
+# Attaching a table reads its catalog as it stands, the way listing it does, so
+# a REPEATABLE READ transaction that has pinned the catalog can still attach a
+# table published since.  The reads of that transaction keep the version it
+# pinned, which does not list the new table yet, so reading the table waits
+# for the next transaction.
+def test_attach_reads_catalog_as_it_stands(
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_attach"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+
+    # a table that only the later version of the reader's catalog publishes
+    _create_uncompacted_writable_table(pg_conn, f"{schema}.attach_src", "a INT")
+    run_command(
+        f"INSERT INTO {schema}.attach_src SELECT generate_series(1, 3)", pg_conn
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, "attach_src")
+
+    worker_key = _catalog_key(pg_conn, WORKER_CATALOG_PREFIX)
+    worker_document = json.loads(
+        s3.get_object(Bucket=TEST_BUCKET, Key=worker_key)["Body"].read()
+    )
+    late_document = json.loads(body_late)
+    late_document["tables"] += [
+        entry
+        for entry in worker_document["tables"]
+        if entry["namespace"] == schema and entry["table-name"] == "attach_src"
+    ]
+    body_late = json.dumps(late_document).encode("utf-8")
+
+    count_read = f"SELECT count(*) FROM {schema}.read_tbl"
+    count_attached = f"SELECT count(*) FROM {schema}.attached_tbl"
+
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    run_command("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", pg_conn)
+    assert run_query(count_read, pg_conn)[0][0] == 5
+
+    _put_catalog(s3, key, body_late)
+
+    run_command(
+        f"CREATE TABLE {schema}.attached_tbl(a INT) USING iceberg "
+        f"WITH (catalog='object_store', read_only=True, "
+        f"catalog_table_name='attach_src')",
+        pg_conn,
+    )
+
+    # attaching did not move the version this transaction reads
+    assert run_query(count_read, pg_conn)[0][0] == 5
+
+    # and that version does not list the attached table
+    run_command("SAVEPOINT read_attached", pg_conn)
+    error = run_query(count_attached, pg_conn, raise_error=False)
+    assert "no table found" in str(error)
+    run_command("ROLLBACK TO SAVEPOINT read_attached", pg_conn)
+    pg_conn.commit()
+
+    assert run_query(count_attached, pg_conn)[0][0] == 3
+    assert run_query(count_read, pg_conn)[0][0] == 9
     pg_conn.commit()
