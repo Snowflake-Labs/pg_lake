@@ -124,6 +124,78 @@ def test_scalar_temporal_error(
         pg_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "col_type,value,expected_clamped",
+    [
+        (
+            "timestamp",
+            "294276-12-31 23:59:59",
+            "9999-12-31 23:59:59.999999",
+        ),
+        (
+            "timestamptz",
+            "294276-12-31 23:59:59+00",
+            "9999-12-31 23:59:59.999999+00",
+        ),
+    ],
+)
+def test_postgres_range_timestamp_write_policy(
+    pg_conn,
+    extension,
+    s3,
+    with_default_location,
+    col_type,
+    value,
+    expected_clamped,
+):
+    """Apply the target Iceberg policy before serializing PostgreSQL timestamps.
+
+    PostgreSQL accepts timestamps beyond DuckDB's finite range.  Heap-to-Iceberg
+    writes stay in PostgreSQL until the target slot is normalized, so the target
+    table's out_of_range_values policy must decide whether the value is clamped
+    or rejected before it can reach DuckDB.
+    """
+    schema = f"test_pg_range_{col_type}"
+
+    run_command(f"CREATE SCHEMA {schema};", pg_conn)
+    run_command(f"SET search_path TO {schema};", pg_conn)
+    run_command("SET TIME ZONE 'UTC';", pg_conn)
+
+    try:
+        run_command(
+            f"""
+            CREATE TABLE source (col {col_type});
+            INSERT INTO source VALUES ('{value}'::{col_type});
+            CREATE TABLE target_clamp (col {col_type}) USING iceberg
+                WITH (out_of_range_values = 'clamp');
+            CREATE TABLE target_error (col {col_type}) USING iceberg
+                WITH (out_of_range_values = 'error');
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        clamp_query = "INSERT INTO target_clamp SELECT * FROM source;"
+        assert_query_not_pushdownable(clamp_query, pg_conn)
+        run_command(clamp_query, pg_conn)
+        pg_conn.commit()
+
+        result = run_query("SELECT col::text FROM target_clamp;", pg_conn)
+        assert result[0][0] == expected_clamped
+
+        error_query = "INSERT INTO target_error SELECT * FROM source;"
+        assert_query_not_pushdownable(error_query, pg_conn)
+        err = run_command(error_query, pg_conn, raise_error=False)
+        assert f"{col_type} out of range" in str(err)
+        pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command("RESET TIME ZONE;", pg_conn)
+        run_command("RESET search_path;", pg_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE;", pg_conn)
+        pg_conn.commit()
+
+
 # =====================================================================
 # Non-pushdown path: scalar numeric NaN (INSERT VALUES)
 # =====================================================================
