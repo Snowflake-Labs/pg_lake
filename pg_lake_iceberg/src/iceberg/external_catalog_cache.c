@@ -33,7 +33,7 @@
  *
  * What a reader asked is held for as long as that reader is entitled to the
  * same catalog state. Three rules decide that, and
- * PrepareExternalCatalogCache() is the one place that applies them:
+ * CurrentCommandMayReadNewerState() is the one place that applies them:
  *
  * 1. within one command, every isolation level reuses what the command
  *    already asked, so one command reads one version of a table,
@@ -105,8 +105,9 @@ typedef struct CachedAnswer
 
 
 /*
- * Everything the cache holds lives in a context of its own, so starting
- * over is one reset away and nothing outlives the transaction.
+ * Everything the cache holds lives in a context of its own under
+ * TopTransactionContext, so dropping the cache is one delete away and nothing
+ * it holds outlives the transaction.
  */
 static MemoryContext ExternalCatalogCacheContext = NULL;
 
@@ -131,6 +132,8 @@ static char *GetCachedAnswer(List *answers, const char *question);
 static List *CacheAnswer(List *answers, const char *question,
 						 const char *answer);
 static void PrepareExternalCatalogCache(void);
+static bool CurrentCommandMayReadNewerState(void);
+static void CreateExternalCatalogCache(void);
 static void ForgetExternalCatalogCache(void *arg);
 
 
@@ -183,7 +186,7 @@ ResolveRestCatalogTable(Oid relationId)
 
 	char	   *cachedLocation = GetCachedAnswer(RestCatalogLocations, requestKey);
 
-	/* the cache is reset under READ COMMITTED while a caller may hold this */
+	/* a later READ COMMITTED command frees what this points into */
 	if (cachedLocation != NULL)
 		return pstrdup(cachedLocation);
 
@@ -301,74 +304,82 @@ PrepareExternalCatalogCache(void)
 {
 	Assert(IsTransactionState());
 
-	TimestampTz currentCommand = GetCurrentStatementStartTimestamp();
+	/* deleting the context runs ForgetExternalCatalogCache */
+	if (ExternalCatalogCacheContext != NULL && CurrentCommandMayReadNewerState())
+		MemoryContextDelete(ExternalCatalogCacheContext);
 
 	if (ExternalCatalogCacheContext == NULL)
-	{
-		/*
-		 * The cache belongs to the transaction rather than to the current
-		 * subtransaction, because a location a subtransaction resolved is
-		 * still the version of the table the transaction is reading after
-		 * that subtransaction rolls back.
-		 */
-		ExternalCatalogCacheContext =
-			AllocSetContextCreate(TopTransactionContext,
-								  "pg_lake external catalog cache",
-								  ALLOCSET_SMALL_SIZES);
-
-		/*
-		 * Every way out of a transaction resets or deletes
-		 * TopTransactionContext, so one reset callback covers commit, abort
-		 * and PREPARE TRANSACTION alike. An end-of-transaction callback would
-		 * have to enumerate those events and would miss the ones it did not
-		 * list.
-		 */
-		MemoryContextCallback *forgetCallback =
-			MemoryContextAlloc(TopTransactionContext,
-							   sizeof(MemoryContextCallback));
-
-		forgetCallback->func = ForgetExternalCatalogCache;
-		forgetCallback->arg = NULL;
-
-		MemoryContextRegisterResetCallback(TopTransactionContext, forgetCallback);
-	}
-	else if (CacheFilledInCommand == currentCommand ||
-			 IsolationUsesXactSnapshot())
-	{
-		/*
-		 * One command reads one version of a table at every isolation level,
-		 * and REPEATABLE READ and SERIALIZABLE read one state of the database
-		 * for the whole transaction.
-		 */
-		return;
-	}
-	else
-	{
-		/*
-		 * A later command of a READ COMMITTED transaction is entitled to the
-		 * latest committed state rather than to what an earlier command of
-		 * the same transaction read.
-		 */
-		MemoryContextReset(ExternalCatalogCacheContext);
-	}
-
-	RestCatalogLocations = NIL;
-	CatalogDocuments = NIL;
-	CacheFilledInCommand = currentCommand;
+		CreateExternalCatalogCache();
 }
 
 
 /*
- * ForgetExternalCatalogCache drops the cache along with the transaction
- * that filled it.
+ * CurrentCommandMayReadNewerState returns whether the current command is
+ * entitled to newer catalog state than the answers the cache holds.
+ */
+static bool
+CurrentCommandMayReadNewerState(void)
+{
+	/*
+	 * REPEATABLE READ and SERIALIZABLE read one state of the database for the
+	 * whole transaction, so all of its commands read what the cache holds.
+	 */
+	if (IsolationUsesXactSnapshot())
+		return false;
+
+	/*
+	 * READ COMMITTED reads the latest committed state as of the start of each
+	 * command, so the command that filled the cache keeps reading what it
+	 * holds, and a later command may read newer state.
+	 */
+	return CacheFilledInCommand != GetCurrentStatementStartTimestamp();
+}
+
+
+/*
+ * CreateExternalCatalogCache starts an empty cache for the current command.
+ */
+static void
+CreateExternalCatalogCache(void)
+{
+	/*
+	 * The cache belongs to the transaction rather than to the current
+	 * subtransaction, because a location a subtransaction resolved is still
+	 * the version of the table the transaction is reading after that
+	 * subtransaction rolls back.
+	 */
+	MemoryContext cacheContext =
+		AllocSetContextCreate(TopTransactionContext,
+							  "pg_lake external catalog cache",
+							  ALLOCSET_SMALL_SIZES);
+
+	/*
+	 * The cache only ever goes by this context being deleted, either for a
+	 * later READ COMMITTED command or along with TopTransactionContext, which
+	 * commit, abort and PREPARE TRANSACTION all reset or delete. So a reset
+	 * callback on the context is the one place that forgets the cache.
+	 */
+	MemoryContextCallback *forgetCallback =
+		MemoryContextAlloc(cacheContext, sizeof(MemoryContextCallback));
+
+	forgetCallback->func = ForgetExternalCatalogCache;
+	forgetCallback->arg = NULL;
+
+	MemoryContextRegisterResetCallback(cacheContext, forgetCallback);
+
+	/* published only once the callback that forgets it is in place */
+	ExternalCatalogCacheContext = cacheContext;
+	CacheFilledInCommand = GetCurrentStatementStartTimestamp();
+}
+
+
+/*
+ * ForgetExternalCatalogCache drops what pointed into the cache, as its
+ * context is deleted.
  */
 static void
 ForgetExternalCatalogCache(void *arg)
 {
-	/*
-	 * TopTransactionContext deletes its children before it runs its reset
-	 * callbacks, so the cache context is already gone by now.
-	 */
 	ExternalCatalogCacheContext = NULL;
 	RestCatalogLocations = NIL;
 	CatalogDocuments = NIL;
