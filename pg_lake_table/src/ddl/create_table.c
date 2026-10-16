@@ -77,6 +77,7 @@
 #include "pg_lake/pgduck/region.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/type.h"
+#include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/query/execute.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
@@ -1236,6 +1237,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 	ddlOps = lappend(ddlOps, createDDLOp);
 
+	ErrorIfInvalidBloomFilterColumnOptions(relationId, createStmt->options);
+
 	/* make sure partition_by option is well formed */
 	List	   *parsedTransforms = ParseIcebergTablePartitionBy(relationId);
 
@@ -1271,6 +1274,68 @@ EnsureSupportedIcebergTableColumnDefinitions(List *columnDefList)
 #endif
 	ErrorIfTableContainsUnsupportedTypes(columnDefList);
 	ErrorIfWritableTableWithReservedColumnName(columnDefList, PG_LAKE_ICEBERG_TABLE_TYPE);
+}
+
+
+/*
+ * ErrorIfInvalidBloomFilterColumnOptions errors if a
+ * write.parquet.bloom-filter-enabled.column.<column> option names a column
+ * that does not exist or whose Parquet type cannot have a bloom filter.
+ * Intervals are written as structs.
+ */
+void
+ErrorIfInvalidBloomFilterColumnOptions(Oid relationId, List *options)
+{
+	ListCell   *optionCell = NULL;
+
+	foreach(optionCell, options)
+	{
+		DefElem    *option = lfirst(optionCell);
+		const char *columnName = GetBloomFilterOptionColumnName(option->defname);
+
+		if (columnName == NULL || option->defaction == DEFELEM_DROP)
+			continue;
+
+		AttrNumber	attrNumber = get_attnum(relationId, columnName);
+
+		if (attrNumber <= 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_COLUMN),
+					 errmsg("column \"%s\" in option \"%s\" does not exist",
+							columnName, option->defname)));
+
+		Oid			typeId;
+		int32		typmod;
+		Oid			collationId;
+
+		get_atttypetypmodcoll(relationId, attrNumber, &typeId, &typmod, &collationId);
+
+		Oid			baseTypeId = getBaseTypeAndTypmod(typeId, &typmod);
+		bool		supported = baseTypeId != BOOLOID &&
+			baseTypeId != INTERVALOID &&
+			!type_is_array(baseTypeId) &&
+			get_typtype(baseTypeId) != TYPTYPE_COMPOSITE;
+
+		if (supported && baseTypeId == NUMERICOID)
+		{
+			int			precision = 0;
+			int			scale = 0;
+
+			GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(typmod, &precision, &scale);
+
+			/* wider decimals are written as fixed-length byte arrays */
+			supported = precision <= 18;
+		}
+
+		if (!supported)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("column \"%s\" of type %s does not support Parquet bloom filters",
+							columnName, format_type_be(typeId)),
+					 errhint("Bloom filters are supported for primitive types other than "
+							 "boolean and interval, and for numeric with a precision of "
+							 "at most 18.")));
+	}
 }
 
 
