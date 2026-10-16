@@ -43,8 +43,12 @@
  * Two kinds of state are held, one per catalog shape, because what has to
  * stay still differs with how the catalog publishes:
  *
- * - a REST catalog answers for one table per request, so the metadata
- *   location is held per relation. Two tables of such a catalog are two
+ * - a REST catalog answers for one table per request, so the location it
+ *   answered with is held per request, keyed by the table that was asked
+ *   about rather than by the relation that asked. ALTER FOREIGN TABLE can
+ *   point a read-only table at another table of the same catalog, and two
+ *   relations can be pointed at one table, so the relation is the wrong
+ *   thing to remember an answer by. Two tables of such a catalog are two
  *   requests and never were a single state to begin with.
  * - an object store catalog publishes all of its tables as one document
  *   at a fixed path, so that document is held instead. Holding it is what
@@ -53,7 +57,7 @@
  *   each relation is resolved exactly once per command and the two
  *   resolutions would still read the document twice.
  *
- * Two limits are deliberate, and the tests lock them:
+ * Three limits are deliberate, and the tests lock them:
  *
  * - the state is pinned when a table is first resolved, not when the
  *   transaction took its snapshot. A REPEATABLE READ transaction that
@@ -67,13 +71,18 @@
  *   therefore holds one version of a table across those, which is longer
  *   than the isolation level requires. Holding longer cannot tear a read,
  *   and that is the direction to err in.
+ * - attaching a table resolves it through the held document too, so
+ *   CREATE TABLE ... read_only for a table published since that document
+ *   was read fails with no table found, inside a transaction or function
+ *   body that already read the catalog. It is the same version the reads
+ *   of that transaction come from. The listing function asks the catalog
+ *   every time and does show the table.
  */
 
 #include "postgres.h"
 
 #include "access/xact.h"
 #include "nodes/pg_list.h"
-#include "utils/hsearch.h"
 #include "utils/memutils.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
@@ -86,7 +95,7 @@
 /* a metadata location resolved from an external catalog */
 typedef struct CachedMetadataLocation
 {
-	Oid			relationId;
+	char	   *requestKey;
 	char	   *metadataLocation;
 }			CachedMetadataLocation;
 
@@ -114,8 +123,8 @@ typedef enum ExternalCatalogCacheUse
  */
 static MemoryContext ExternalCatalogCacheContext = NULL;
 
-/* relationId to CachedMetadataLocation, for catalogs answering per table */
-static HTAB *MetadataLocationCache = NULL;
+/* list of CachedMetadataLocation, for catalogs answering per table */
+static List *MetadataLocationCache = NIL;
 
 /* list of CachedCatalogDocument, for catalogs publishing one document */
 static List *CatalogDocumentCache = NIL;
@@ -137,26 +146,21 @@ static void ForgetExternalCatalogCache(void *arg);
 
 /*
  * GetCachedExternalMetadataLocation returns the metadata location this
- * transaction resolved for the given relation and is still entitled to, or
- * NULL if the caller has to resolve it from the catalog.
+ * transaction resolved for the table the given request key stands for and
+ * is still entitled to, or NULL if the caller has to ask the catalog.
  */
 char *
-GetCachedExternalMetadataLocation(Oid relationId)
+GetCachedExternalMetadataLocation(const char *requestKey)
 {
 	PrepareExternalCatalogCache();
 
-	if (MetadataLocationCache == NULL)
-		return NULL;
+	foreach_ptr(CachedMetadataLocation, cachedLocation, MetadataLocationCache)
+	{
+		if (strcmp(cachedLocation->requestKey, requestKey) == 0)
+			return cachedLocation->metadataLocation;
+	}
 
-	bool		found = false;
-	CachedMetadataLocation *cachedLocation =
-		(CachedMetadataLocation *) hash_search(MetadataLocationCache,
-											   &relationId, HASH_FIND, &found);
-
-	if (!found)
-		return NULL;
-
-	return cachedLocation->metadataLocation;
+	return NULL;
 }
 
 
@@ -165,32 +169,25 @@ GetCachedExternalMetadataLocation(Oid relationId)
  * an external catalog.
  */
 void
-CacheExternalMetadataLocation(Oid relationId, const char *metadataLocation)
+CacheExternalMetadataLocation(const char *requestKey, const char *metadataLocation)
 {
 	PrepareExternalCatalogCache();
 
-	if (MetadataLocationCache == NULL)
-	{
-		HASHCTL		info;
+	/*
+	 * A caller asks the catalog only after the cache told it that it holds no
+	 * answer for this request, so there is nothing to replace here.
+	 */
+	MemoryContext previousContext =
+		MemoryContextSwitchTo(ExternalCatalogCacheContext);
 
-		MemSet(&info, 0, sizeof(info));
-		info.keysize = sizeof(Oid);
-		info.entrysize = sizeof(CachedMetadataLocation);
-		info.hcxt = ExternalCatalogCacheContext;
+	CachedMetadataLocation *cachedLocation = palloc0(sizeof(CachedMetadataLocation));
 
-		MetadataLocationCache =
-			hash_create("pg_lake external catalog metadata locations", 32,
-						&info, HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
-	}
+	cachedLocation->requestKey = pstrdup(requestKey);
+	cachedLocation->metadataLocation = pstrdup(metadataLocation);
 
-	bool		found = false;
-	CachedMetadataLocation *cachedLocation =
-		(CachedMetadataLocation *) hash_search(MetadataLocationCache,
-											   &relationId, HASH_ENTER, &found);
+	MetadataLocationCache = lappend(MetadataLocationCache, cachedLocation);
 
-	cachedLocation->relationId = relationId;
-	cachedLocation->metadataLocation =
-		MemoryContextStrdup(ExternalCatalogCacheContext, metadataLocation);
+	MemoryContextSwitchTo(previousContext);
 }
 
 
@@ -331,7 +328,7 @@ CreateExternalCatalogCache(void)
 
 	MemoryContextRegisterResetCallback(TopTransactionContext, forgetCallback);
 
-	MetadataLocationCache = NULL;
+	MetadataLocationCache = NIL;
 	CatalogDocumentCache = NIL;
 	CacheFilledInCommand = GetCurrentStatementStartTimestamp();
 }
@@ -346,7 +343,7 @@ DiscardExternalCatalogCache(void)
 {
 	MemoryContextReset(ExternalCatalogCacheContext);
 
-	MetadataLocationCache = NULL;
+	MetadataLocationCache = NIL;
 	CatalogDocumentCache = NIL;
 	CacheFilledInCommand = GetCurrentStatementStartTimestamp();
 }
@@ -364,7 +361,7 @@ ForgetExternalCatalogCache(void *arg)
 	 * callbacks, so the cache context is already gone by now.
 	 */
 	ExternalCatalogCacheContext = NULL;
-	MetadataLocationCache = NULL;
+	MetadataLocationCache = NIL;
 	CatalogDocumentCache = NIL;
 	CacheFilledInCommand = 0;
 }

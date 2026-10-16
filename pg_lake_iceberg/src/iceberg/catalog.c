@@ -43,6 +43,7 @@ static char *GetIcebergExternalMetadataLocation(Oid relationId);
 static char *GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate);
 static char *ResolveIcebergExternalMetadataLocation(Oid relationId,
 													IcebergCatalogType icebergCatalogType);
+static char *RestCatalogRequestKey(Oid relationId);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
 static char *GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate, bool errorIfNotFound);
 static void ErrorIfSameTableExistsInExternalCatalog(Oid relationId);
@@ -340,14 +341,6 @@ GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
 			LockIcebergPgLakeCatalogForUpdate(relationId);
 		}
 
-		/*
-		 * forUpdate has done its work above, by taking the row lock that
-		 * serializes writers. It does not change how the external catalog is
-		 * resolved: the path that publishes a new location for a writable
-		 * REST catalog table reads that catalog directly, through
-		 * GetWritableRestCatalogTableMetadata(), and the callers that arrive
-		 * here are reading.
-		 */
 		return GetIcebergExternalMetadataLocation(relationId);
 	}
 	else
@@ -449,12 +442,18 @@ GetIcebergExternalMetadataLocation(Oid relationId)
  * ResolveIcebergExternalMetadataLocation returns the current metadata
  * location of a table in an external catalog.
  *
- * A REST catalog is asked for one table at a time, so the location it
- * answered with is held per relation and reused for as long as the reader
- * is entitled to it. An object store catalog publishes all of its tables
- * as a single document, and holding that document is what keeps the tables
- * of one catalog at one version of it, so there is nothing left to hold
- * per relation here. See external_catalog_cache.c.
+ * A read-only REST catalog table is resolved through its catalog one table
+ * at a time, so the answer is held for as long as the reader is entitled to
+ * it. An object store catalog publishes all of its tables as a single
+ * document, and holding that document is what keeps the tables of one
+ * catalog at one version of it, so there is nothing left to hold per table
+ * here. See external_catalog_cache.c.
+ *
+ * A writable REST catalog table is an internal table whose scans read our
+ * own file inventory under the transaction snapshot and never this
+ * location. What asks for it is dropping the table, vacuuming it and
+ * registering its field ids, and those act on the table as the catalog has
+ * it now, so they ask every time.
  */
 static char *
 ResolveIcebergExternalMetadataLocation(Oid relationId,
@@ -466,7 +465,11 @@ ResolveIcebergExternalMetadataLocation(Oid relationId,
 	Assert(icebergCatalogType == REST_CATALOG_READ_ONLY ||
 		   icebergCatalogType == REST_CATALOG_READ_WRITE);
 
-	char	   *cachedLocation = GetCachedExternalMetadataLocation(relationId);
+	if (icebergCatalogType == REST_CATALOG_READ_WRITE)
+		return GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+
+	char	   *requestKey = RestCatalogRequestKey(relationId);
+	char	   *cachedLocation = GetCachedExternalMetadataLocation(requestKey);
 
 	if (cachedLocation != NULL)
 		return cachedLocation;
@@ -474,9 +477,35 @@ ResolveIcebergExternalMetadataLocation(Oid relationId,
 	char	   *currentMetadataPath =
 		GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-	CacheExternalMetadataLocation(relationId, currentMetadataPath);
+	CacheExternalMetadataLocation(requestKey, currentMetadataPath);
 
 	return currentMetadataPath;
+}
+
+
+/*
+ * RestCatalogRequestKey returns a key standing for the table a REST catalog
+ * request asks about, which is what the answer belongs to. The relation that
+ * asks is the wrong key: ALTER FOREIGN TABLE can point a read-only table at
+ * another table of the same catalog, and two relations can be pointed at one
+ * table, which they then read one version of.
+ *
+ * The parts are length prefixed because an identifier may contain the
+ * separator, and two different tables must never produce one key.
+ */
+static char *
+RestCatalogRequestKey(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *catalogName = GetRestCatalogName(relationId);
+	char	   *namespaceName = GetRestCatalogNamespace(relationId);
+	char	   *tableName = GetRestCatalogTableName(relationId);
+
+	return psprintf("%u %zu:%s %zu:%s %zu:%s",
+					foreignTable->serverid,
+					strlen(catalogName), catalogName,
+					strlen(namespaceName), namespaceName,
+					strlen(tableName), tableName);
 }
 
 

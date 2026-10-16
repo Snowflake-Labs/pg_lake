@@ -1,6 +1,7 @@
 from utils_pytest import *
 import json
 import threading
+import time
 
 # What a reader of an external Iceberg catalog is entitled to see.
 #
@@ -23,6 +24,14 @@ import threading
 #     the first time in a later statement;
 #   * whatever a transaction pinned is released when that transaction ends,
 #     by commit, by abort, or by PREPARE TRANSACTION.
+#
+# Two limits the implementation accepts, stated here as behaviour rather than
+# wished away:
+#
+#   * the version is pinned when a transaction first reads an external table,
+#     not when it took its snapshot;
+#   * the statements inside a function body are one statement to the pin, so
+#     READ COMMITTED holds one version of the catalog across them.
 #
 # The tests that race a rewriting thread against a running query are the only
 # way to cover two reads inside one statement.  The rest rewrite catalog.json
@@ -753,3 +762,127 @@ def test_transaction_end_releases_pinned_catalog(
         pg_conn.autocommit = True
         run_command(f"COMMIT PREPARED '{prepared_name}'", pg_conn)
         pg_conn.autocommit = False
+
+
+# The version a transaction reads with is pinned when it first reads an
+# external table, not when it took its snapshot.  A REPEATABLE READ
+# transaction that takes its snapshot elsewhere, lets the catalog move, and
+# only then reads the table gets the newer version, where a heap table holds
+# the older one.  Resolving every external table at BEGIN is the wrong price
+# for closing that gap, so this is the behaviour and the test says so.
+def test_first_read_pins_catalog_not_the_snapshot(
+    pg_conn,
+    s3,
+    superuser_conn,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_first_read"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+
+    count_query = f"SELECT count(*) FROM {schema}.read_tbl"
+    heap_count_query = f"SELECT count(*) FROM {schema}.heap_tbl"
+
+    # a heap table another session can change, for the contrast at the end
+    run_command(f"CREATE TABLE {schema}.heap_tbl(a INT)", pg_conn)
+    run_command(f"INSERT INTO {schema}.heap_tbl SELECT generate_series(1, 5)", pg_conn)
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    run_command("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", pg_conn)
+
+    # the transaction snapshot is taken by this read, which has nothing to do
+    # with the external catalog
+    assert run_query(heap_count_query, pg_conn)[0][0] == 5
+
+    run_command(
+        f"INSERT INTO {schema}.heap_tbl SELECT generate_series(6, 9)", superuser_conn
+    )
+    superuser_conn.commit()
+    _put_catalog(s3, key, body_late)
+
+    # the heap table stays at the version the snapshot covers
+    assert run_query(heap_count_query, pg_conn)[0][0] == 5
+
+    # the external table does not, because it is resolved now and the catalog
+    # has moved since the snapshot was taken
+    assert run_query(count_query, pg_conn)[0][0] == 9
+
+    # from that first read on the transaction does hold its version, which is
+    # what test_transaction_snapshot_pins_catalog covers
+    _put_catalog(s3, key, body_early)
+    assert run_query(count_query, pg_conn)[0][0] == 9
+    pg_conn.commit()
+
+
+# Commands are told apart by their statement start timestamp, which does not
+# advance for the statements inside a function body, so READ COMMITTED holds
+# one version of the catalog across them.  A loop polling an external table
+# for new commits from inside a function never sees one, where the same loop
+# over a heap table does.  Holding longer cannot tear a read, so this is the
+# direction to err in, and the test states the behaviour.
+def test_function_body_holds_one_catalog_version(
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_function_body"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+
+    run_command(
+        f"CREATE FUNCTION {schema}.read_twice(sleep_seconds float8, "
+        f"OUT first_read bigint, OUT second_read bigint) "
+        f"LANGUAGE plpgsql AS $$ BEGIN "
+        f"  SELECT count(*) INTO first_read FROM {schema}.read_tbl; "
+        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  SELECT count(*) INTO second_read FROM {schema}.read_tbl; "
+        f"END; $$",
+        pg_conn,
+    )
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    assert run_query("SHOW transaction_isolation", pg_conn)[0][0] == "read committed"
+
+    rewritten_at = []
+
+    def rewrite_catalog():
+        _put_catalog(s3, key, body_late)
+        rewritten_at.append(time.monotonic())
+
+    sleep_seconds = 4.0
+    rewrite_timer = threading.Timer(1.0, rewrite_catalog)
+    rewrite_timer.start()
+    try:
+        rows = run_query(
+            f"SELECT first_read, second_read "
+            f"FROM {schema}.read_twice({sleep_seconds})",
+            pg_conn,
+        )
+    finally:
+        rewrite_timer.join(timeout=30)
+    returned_at = time.monotonic()
+
+    # the rewrite landed long before the second read in the function body, so
+    # the two reads agreeing below is the pin and not a race the test lost
+    assert rewritten_at, "the rewriting thread did not run"
+    assert returned_at - rewritten_at[0] > sleep_seconds / 2
+
+    assert rows[0][0] == 5
+    assert rows[0][1] == 5
+
+    # the next statement of the same transaction is a command of its own and
+    # is entitled to the rewrite
+    assert run_query(f"SELECT count(*) FROM {schema}.read_tbl", pg_conn)[0][0] == 9
+    pg_conn.commit()

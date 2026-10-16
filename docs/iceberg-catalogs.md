@@ -257,6 +257,12 @@ uppercase letters, and names set later with `ALTER`, are used as given.
 An attached table always reads the catalog's current version, so queries see new commits from
 other engines without any changes in PostgreSQL. Dropping it only removes it from PostgreSQL.
 
+Each statement reads one version of the catalog, and the next statement of the same transaction
+reads the version that stands by then. `REPEATABLE READ` and `SERIALIZABLE` hold a transaction to
+the version its first read of an attached table used. The statements inside a function body count
+as one statement here, so a loop that waits for a new commit on an attached table has to run its
+reads in separate transactions.
+
 To attach many tables from one catalog, set `catalog_name` on the server and mirror the
 namespaces as schemas. The other catalog options then follow from the names you use:
 
