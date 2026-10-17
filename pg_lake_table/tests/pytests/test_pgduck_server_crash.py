@@ -243,7 +243,9 @@ def _cache_worker_pid(superuser_conn):
     return rows[0]["pid"] if rows else None
 
 
-def test_cache_worker_survives_pgduck_down(superuser_conn, extension, pgduck_server):
+def test_cache_worker_survives_pgduck_down(
+    s3, superuser_conn, extension, pgduck_server
+):
     """The cache worker keeps running while pgduck_server is unreachable.
 
     It used to throw "could not start query engine" and exit, so the
@@ -271,10 +273,26 @@ def test_cache_worker_survives_pgduck_down(superuser_conn, extension, pgduck_ser
         _restart_pgduck_server()
         restarted = True
 
-        run_command("SELECT pg_reload_conf()", superuser_conn)
+        # the same worker should reconnect and cache a newly accessed file
+        url = f"s3://{TEST_BUCKET}/test_cache_worker_survives_pgduck_down/data.parquet"
+        cached_path = Path(
+            f"{server_params.PGDUCK_CACHE_DIR}/s3/{TEST_BUCKET}/test_cache_worker_survives_pgduck_down/pgl-cache.data.parquet"
+        )
+        run_command(
+            f"""
+            COPY (SELECT * FROM generate_series(1,100)) TO '{url}';
+            CREATE FOREIGN TABLE test_cache_after_restart () SERVER pg_lake OPTIONS (path '{url}');
+            SELECT pg_reload_conf();
+        """,
+            superuser_conn,
+        )
         superuser_conn.commit()
-        time.sleep(2)
 
+        deadline = time.time() + 10
+        while not cached_path.exists() and time.time() < deadline:
+            time.sleep(0.05)
+
+        assert cached_path.exists(), "cache worker did not cache after reconnect"
         assert _cache_worker_pid(superuser_conn) == worker_pid
     finally:
         if not restarted:
@@ -282,3 +300,9 @@ def test_cache_worker_survives_pgduck_down(superuser_conn, extension, pgduck_ser
                 _restart_pgduck_server()
             except Exception:
                 pass
+
+        superuser_conn.rollback()
+        run_command(
+            "DROP FOREIGN TABLE IF EXISTS test_cache_after_restart", superuser_conn
+        )
+        superuser_conn.commit()
