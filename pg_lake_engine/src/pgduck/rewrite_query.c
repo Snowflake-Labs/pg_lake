@@ -36,6 +36,7 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/pgduck/serialize.h"
+#include "pg_lake/pgduck/shippable_builtin_functions.h"
 #include "pg_lake/pgduck/to_char.h"
 #include "pg_lake/util/operator_utils.h"
 #include "nodes/makefuncs.h"
@@ -203,6 +204,7 @@ static Node *RewriteOpExprArrayAppend(Node *node, void *context);
 static Node *RewriteFuncExprRemoveArgs(Node *node, void *context);
 
 static Node *RewriteAggregateExpression(Aggref *node, void *context);
+static Node *RewriteStringAggNullDelimiter(Node *node, void *context);
 
 static Node *RewriteOperatorExpression(OpExpr *node, void *context);
 static Node *FindCompatibleFunctionWithName(OpExpr *opExpr, char *funcname);
@@ -469,6 +471,9 @@ static AggregateRewriteRuleByName PostgisAggregateRewriteRulesByName[] =
 
 static AggregateRewriteRuleByName BuiltinAggregateRewriteRulesByName[] =
 {
+	{
+		"pg_catalog", "string_agg", RewriteStringAggNullDelimiter
+	},
 };
 
 
@@ -2137,6 +2142,29 @@ RewriteAggregateExpression(Aggref *aggExpr, void *context)
 		/* rewrite the function expression */
 		node = rule->rewriteFunction(node, context);
 	}
+	return node;
+}
+
+
+/*
+ * RewriteStringAggNullDelimiter replaces a NULL constant delimiter of
+ * string_agg(text, text) with ''.  PostgreSQL treats a NULL delimiter as no
+ * separator, whereas DuckDB returns NULL.
+ */
+static Node *
+RewriteStringAggNullDelimiter(Node *node, void *context)
+{
+	Aggref	   *aggref = castNode(Aggref, node);
+
+	if (!IsStringAggNullConstDelimiter(aggref))
+		return node;
+
+	TargetEntry *delimEntry = (TargetEntry *) list_nth(aggref->args, 1);
+	Const	   *emptyConst = MakeStringConst("");
+
+	emptyConst->constcollid = exprCollation((Node *) delimEntry->expr);
+	delimEntry->expr = (Expr *) emptyConst;
+
 	return node;
 }
 
