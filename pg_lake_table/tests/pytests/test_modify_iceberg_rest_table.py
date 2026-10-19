@@ -2252,8 +2252,17 @@ def test_drop_table_inside_rolled_back_savepoint_preserves_rest_table(
     run_command(f"INSERT INTO {SCHEMA_NAME}.drop_sv VALUES (2)", pg_conn)
     pg_conn.commit()
 
-    # The table must still exist in the REST catalog.  Attach read-only and
-    # verify both rows survived.
+    # The table must still exist in the REST catalog: on main the queued
+    # drop is still sent at commit and this GET returns 404.
+    url = (
+        f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
+        f"/api/catalog/v1/{server_params.PG_DATABASE}"
+        f"/namespaces/{SCHEMA_NAME}/tables/drop_sv"
+    )
+    resp = polaris_session.get(url, timeout=5)
+    assert resp.status_code == 200, resp.text
+
+    # Attach read-only and verify both rows survived.
     run_command(
         f"CREATE TABLE {SCHEMA_NAME}.drop_sv_check () USING iceberg "
         f"WITH (catalog='{SERVER_NAME}', read_only=true, "
