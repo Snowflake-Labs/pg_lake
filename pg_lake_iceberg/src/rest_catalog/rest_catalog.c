@@ -138,6 +138,22 @@ FetchRestCatalogConfigPrefix(RestCatalogOptions * opts)
 
 
 /*
+ * RestCatalogPrefixPath returns the {prefix} path segment that follows "/v1"
+ * in the REST_CATALOG_* URL templates: "/" followed by the URL-encoded
+ * catalogName, or an empty string for a TYPE 'iceberg-rest' server, whose
+ * catalog serves the spec's routes without a prefix (/v1/namespaces).
+ */
+char *
+RestCatalogPrefixPath(const RestCatalogOptions * opts, const char *catalogName)
+{
+	if (opts->omitCatalogPrefix)
+		return pstrdup("");
+
+	return psprintf("/%s", URLEncodePrefix(catalogName));
+}
+
+
+/*
  * ApplyGUCDefaults populates opts with the current GUC values.
  * All string fields are pstrdup'd so the struct is self-contained.
  *
@@ -536,6 +552,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	copy->locationPrefix = src->locationPrefix ? pstrdup(src->locationPrefix) : NULL;
 	copy->catalogName = src->catalogName ? pstrdup(src->catalogName) : NULL;
 	copy->warehouse = src->warehouse ? pstrdup(src->warehouse) : NULL;
+	copy->omitCatalogPrefix = src->omitCatalogPrefix;
 	copy->authType = src->authType;
 	copy->enableVendedCredentials = src->enableVendedCredentials;
 	copy->isBuiltin = src->isBuiltin;
