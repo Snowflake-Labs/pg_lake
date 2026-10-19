@@ -64,7 +64,7 @@
 #include "pg_lake/util/url_encode.h"
 
 
-static void CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
+static char *CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 static bool RestCatalogExists(RestCatalogOptions * opts, const char *catalogName);
 static bool RestNamespaceExists(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 static char *UppercaseIdentifierCandidate(const char *name);
@@ -390,8 +390,11 @@ RestCatalogExists(RestCatalogOptions * opts, const char *catalogName)
 * an error is raised. This  is used to ensure that the same
 * namespace is not registered multiple times as we define
 * allowed locations as part of the namespace.
+*
+* Returns the namespace's "location" property when the catalog reports one,
+* else NULL.
 */
-void
+char *
 RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
 {
 	/*
@@ -433,8 +436,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 				/*
 				 * Does not exists, we'll create it.
 				 */
-				CreateNamespaceOnRestCatalog(opts, catalogName, namespaceName);
-				break;
+				return CreateNamespaceOnRestCatalog(opts, catalogName, namespaceName);
 			}
 
 			/* namespace already exists */
@@ -472,7 +474,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 					}
 				}
 
-				break;
+				return serverAllowedLocation;
 			}
 
 		default:
@@ -489,6 +491,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 			}
 
 	}
+	return NULL;
 }
 
 
@@ -2244,9 +2247,10 @@ IcebergProvideStorageCredentials(Oid relationId)
 
 /*
 * CreateNamespaceOnRestCatalog creates a namespace on the rest catalog. On any failure,
-* an error is raised.
+* an error is raised. Returns the created namespace's "location" property
+* when the response includes one, else NULL.
 */
-static void
+static char *
 CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
 {
 	/* POST create */
@@ -2281,6 +2285,10 @@ CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName,
 	{
 		ReportHTTPError(httpResult, ERROR);
 	}
+
+	if (httpResult.body == NULL || *httpResult.body == '\0')
+		return NULL;
+	return JsonbGetOptionalStringByPath(httpResult.body, 2, "properties", "location");
 }
 
 

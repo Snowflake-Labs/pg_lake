@@ -40,10 +40,12 @@ class _MockCatalog:
         stage_status=200,
         stage_body=None,
         honor_location=False,
+        namespace_location=None,
     ):
         self.stage_status = stage_status
         self.stage_body = stage_body
         self.honor_location = honor_location
+        self.namespace_location = namespace_location
         self.config_status = config_status
         self.config_body = config_body or {
             "error": {"message": "Please specify a warehouse", "code": 400}
@@ -83,8 +85,11 @@ class _MockCatalog:
                     return self._reply(200, {"namespaces": []})
                 m = re.search(r"/namespaces/([^/]+)$", path)
                 if self.command == "GET" and m:
+                    properties = {}
+                    if mock.namespace_location is not None:
+                        properties["location"] = mock.namespace_location
                     return self._reply(
-                        200, {"namespace": [m.group(1)], "properties": {}}
+                        200, {"namespace": [m.group(1)], "properties": properties}
                     )
                 if self.command == "POST" and "/tables" in path:
                     if path.endswith("/tables"):
@@ -706,3 +711,53 @@ def test_stage_requests_pg_lake_location(
     )
     updates = {update["action"]: update for update in final["updates"]}
     assert updates["set-location"]["location"] == location
+
+
+@pytest.mark.parametrize(
+    "namespace_location, under",
+    [
+        (f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}/{SCHEMA}", True),
+        (f"s3://{TEST_BUCKET}/catalog-root/{SCHEMA}/", False),
+    ],
+    ids=["path-under-namespace", "path-outside-namespace"],
+)
+def test_requested_location_stays_under_namespace_location(
+    installcheck,
+    superuser_conn,
+    writable_schema,
+    mock_catalog,
+    namespace_location,
+    under,
+):
+    """
+    A catalog may only accept tables under the namespace's location (Polaris
+    names it after the raw schema name, so an encoded schema in pg_lake's
+    path falls outside it).  When pg_lake's path is not under the reported
+    namespace location, the same unique tail is requested under it instead.
+    """
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog(honor_location=True, namespace_location=namespace_location)
+    writable_schema.append("wp_nsloc")
+    _create_server(superuser_conn, "wp_nsloc", mock.endpoint, "first")
+    superuser_conn.commit()
+    run_command(
+        f"CREATE TABLE {SCHEMA}.nsloc (id int) USING iceberg WITH (catalog='wp_nsloc')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    relid = run_query(f"SELECT '{SCHEMA}.nsloc'::regclass::oid", superuser_conn)[0][0]
+    tail = f"{server_params.PG_DATABASE}/{SCHEMA}/nsloc/{relid}"
+    expected = (
+        f"s3://{TEST_BUCKET}/{tail}"
+        if under
+        else f"{namespace_location.rstrip('/')}/{tail}"
+    )
+    stage = next(
+        body
+        for (_, path), body in zip(mock.requests, mock.bodies)
+        if path.endswith("/tables")
+    )
+    assert stage["location"] == expected
+    assert _table_option(superuser_conn, "nsloc", "location") == expected

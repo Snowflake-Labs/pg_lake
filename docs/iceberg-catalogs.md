@@ -339,10 +339,13 @@ pg_lake creates the namespace if it does not exist, then stages table creation w
 schema. When `location_prefix` (or `pg_lake_iceberg.default_location_prefix`) is set,
 the staging request asks for pg_lake's usual location, the prefix followed by the
 database, schema and table name and the table OID. The OID keeps a re-created table
-off a dropped table's files. The catalog must return a table UUID and storage location,
+off a dropped table's files. If the namespace reports a `location` and that path is not
+under it (Polaris names namespace locations after the raw schema name, so a schema name
+that needs URL-encoding falls outside), the same database/schema/table/OID tail is
+requested under the namespace location instead. The catalog must return a table UUID and storage location,
 and pg_lake uses the returned location for both data and metadata. Polaris and
 Lakekeeper keep the requested location; Nessie assigns its own; a catalog that rejects
-the location (for example, Lakekeeper when it is outside the warehouse) fails the
+the location fails the
 `CREATE TABLE`. Without a prefix, the catalog chooses the location. A `location`
 included in replayed DDL is not requested; the table gets a new location instead, and
 this does not attach or restore data from the old one. Existing tables retain their

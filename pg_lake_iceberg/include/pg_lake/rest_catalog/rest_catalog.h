@@ -399,7 +399,7 @@ List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 										const char *objectKey,
 										const char *elementStringKey);
 
-extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
+extern PGDLLEXPORT char *RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 typedef struct RestCatalogStagedTable
 {
 	char	   *uuid;

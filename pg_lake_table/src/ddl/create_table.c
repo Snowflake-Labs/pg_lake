@@ -99,6 +99,7 @@ static void ErrorIfCreateForeignTableOnIcebergCatalog(CreateForeignTableStmt *cr
 static void RecordIcebergCatalogServerDependency(Oid relationId, List *options);
 static char *ResolveWritableRestCatalogName(RestCatalogOptions * opts);
 static void SetIcebergTableLocationOption(Oid relationId, char *location);
+static bool LocationIsUnder(const char *location, const char *parent);
 static void ErrorIfWritableTableWithReservedColumnName(List *columnDefList, PgLakeTableType tableType);
 static void ErrorIfInvalidFilenameColumn(List *columnDefList);
 static bool IsConflictingColumnNameForReadParquet(const char *columnName);
@@ -1196,6 +1197,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		ErrorIfNotInManagedStorageRegion(location);
 	}
 
+	char	   *namespaceLocation = NULL;
 
 	if (hasRestCatalogOption)
 	{
@@ -1231,8 +1233,9 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		if (writableCatalogName == NULL)
 			writableCatalogName = get_database_name(MyDatabaseId);
 
-		RegisterNamespaceToRestCatalog(opts, writableCatalogName,
-									   get_namespace_name(namespaceId));
+		namespaceLocation =
+			RegisterNamespaceToRestCatalog(opts, writableCatalogName,
+										   get_namespace_name(namespaceId));
 	}
 
 	bool		hasRowIds = GetBoolOption(createStmt->options, "row_ids", false);
@@ -1299,12 +1302,32 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		char	   *requestedLocation = NULL;
 
 		if (locationOption == NULL && defaultLocationPrefix != NULL)
+		{
 			requestedLocation =
 				psprintf("%s/%s/%s/%s/%u", defaultLocationPrefix,
 						 URLEncodePath(get_database_name(MyDatabaseId)),
 						 URLEncodePath(createStmt->base.relation->schemaname),
 						 URLEncodePath(createStmt->base.relation->relname),
 						 relationId);
+
+			/*
+			 * Catalogs may only accept a table under the namespace location:
+			 * Polaris names it after the raw schema name while the path above
+			 * encodes it, and a location_prefix can sit outside the catalog's
+			 * storage. Then request the same unique tail under the namespace
+			 * location instead. Lakekeeper reports its warehouse root here,
+			 * so the tail keeps the database and schema.
+			 */
+			if (namespaceLocation != NULL &&
+				!LocationIsUnder(requestedLocation, namespaceLocation))
+				requestedLocation =
+					psprintf("%s/%s/%s/%s/%u",
+							 StripTrailingSlash(namespaceLocation, false),
+							 URLEncodePath(get_database_name(MyDatabaseId)),
+							 URLEncodePath(createStmt->base.relation->schemaname),
+							 URLEncodePath(createStmt->base.relation->relname),
+							 relationId);
+		}
 
 		RestCatalogStagedTable staged =
 			StartStageRestCatalogIcebergTableCreate(relationId,
@@ -1814,6 +1837,23 @@ SetIcebergTableLocationOptionFromDefaultPrefix(Oid relationId,
 	SetIcebergTableLocationOption(relationId, location->data);
 	return location->data;
 }
+
+/*
+ * LocationIsUnder reports whether location is parent itself or a path below
+ * it, ignoring a trailing slash on parent.
+ */
+static bool
+LocationIsUnder(const char *location, const char *parent)
+{
+	size_t		parentLength = strlen(parent);
+
+	while (parentLength > 0 && parent[parentLength - 1] == '/')
+		parentLength--;
+
+	return strncmp(location, parent, parentLength) == 0 &&
+		(location[parentLength] == '\0' || location[parentLength] == '/');
+}
+
 
 static void
 SetIcebergTableLocationOption(Oid relationId, char *location)
