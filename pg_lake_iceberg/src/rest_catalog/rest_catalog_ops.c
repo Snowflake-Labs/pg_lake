@@ -205,7 +205,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFil
 
 	char	   *postUrl =
 		psprintf(REST_CATALOG_TABLES, opts->baseUri,
-				 URLEncodePrefix(catalogName), URLEncodePath(namespaceName));
+				 RestCatalogPrefixPath(opts, catalogName), URLEncodePath(namespaceName));
 	List	   *headers = PostHeadersWithAuth(opts);
 
 	if (opts->enableVendedCredentials)
@@ -394,7 +394,7 @@ RestCatalogExists(RestCatalogOptions * opts, const char *catalogName)
 {
 	char	   *catalogUrl =
 		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
-				 URLEncodePrefix(catalogName));
+				 RestCatalogPrefixPath(opts, catalogName));
 	HttpResult	catalogResult =
 		SendRequestToRestCatalog(opts, REST_CATALOG_OP_LIST_NAMESPACES, HTTP_GET, catalogUrl, NULL,
 								 GetHeadersWithAuth(opts));
@@ -429,7 +429,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 	 */
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
-				 opts->baseUri, URLEncodePrefix(catalogName),
+				 opts->baseUri, RestCatalogPrefixPath(opts, catalogName),
 				 URLEncodePath(namespaceName));
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_GET_NAMESPACE, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
@@ -532,7 +532,7 @@ RestNamespaceExists(RestCatalogOptions * opts, const char *catalogName, const ch
 {
 	char	   *getUrl =
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
-				 opts->baseUri, URLEncodePrefix(catalogName),
+				 opts->baseUri, RestCatalogPrefixPath(opts, catalogName),
 				 URLEncodePath(namespaceName));
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_GET_NAMESPACE, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
@@ -926,7 +926,7 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 {
 	char	   *getUrl =
 		psprintf(REST_CATALOG_TABLE,
-				 opts->baseUri, URLEncodePrefix(restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
+				 opts->baseUri, RestCatalogPrefixPath(opts, restCatalogName), URLEncodePath(namespaceName), URLEncodePath(relationName));
 
 	List	   *headers = GetHeadersWithAuth(opts);
 
@@ -2436,7 +2436,7 @@ CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName,
 
 	char	   *postUrl =
 		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
-				 URLEncodePrefix(catalogName));
+				 RestCatalogPrefixPath(opts, catalogName));
 
 	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_CREATE_NAMESPACE, HTTP_POST, postUrl, body.data,
 													  PostHeadersWithAuth(opts));
