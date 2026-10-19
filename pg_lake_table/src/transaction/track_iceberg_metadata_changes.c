@@ -197,61 +197,134 @@ CopyMetadataHash(HTAB *source, Size entrySize, bool restRequests)
 }
 
 /*
+ * Free a REST context version that is no longer reachable.  The lists were
+ * list_copy'd per version, but their request elements are shared, so only the
+ * cells are freed.  commitContext is shared between versions unless the
+ * context was first created inside the subtransaction being discarded.
+ */
+static void
+FreeRestCatalogContextVersion(PgLakeXactRestCatalogContext * restCatalog,
+							  bool ownsCommitContext)
+{
+	if (restCatalog == NULL)
+		return;
+
+	if (restCatalog->requestsHash != NULL)
+	{
+		HASH_SEQ_STATUS scan;
+		RestCatalogRequestPerTable *request;
+
+		hash_seq_init(&scan, restCatalog->requestsHash);
+		while ((request = hash_seq_search(&scan)) != NULL)
+			list_free(request->tableModifyRequests);
+		hash_destroy(restCatalog->requestsHash);
+	}
+	if (ownsCommitContext && restCatalog->commitContext != NULL)
+		MemoryContextDelete(restCatalog->commitContext);
+	pfree(restCatalog);
+}
+
+/*
+ * Before the first change inside a subtransaction, remember the parent's
+ * state and continue on private copies, so ROLLBACK TO SAVEPOINT can restore
+ * it.  Copying lazily keeps savepoints that never record Iceberg work (most
+ * PL/pgSQL EXCEPTION blocks, internal subtransactions) free of any cost.
+ */
+static void
+PrepareIcebergStateForWrite(void)
+{
+	if (!IsSubTransaction())
+		return;
+
+	SubTransactionId currentSubid = GetCurrentSubTransactionId();
+
+	if (IcebergSubXactStates != NULL &&
+		IcebergSubXactStates->subid == currentSubid)
+		return;
+
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+	IcebergSubXactState *state = palloc(sizeof(IcebergSubXactState));
+	HTAB	   *trackedCopy =
+		CopyMetadataHash(TrackedIcebergMetadataOperationsHash,
+						 sizeof(TableMetadataOperationTracker), false);
+	PgLakeXactRestCatalogContext *restCopy = NULL;
+
+	if (PgLakeXactRestCatalog != NULL)
+	{
+		restCopy = palloc(sizeof(PgLakeXactRestCatalogContext));
+		*restCopy = *PgLakeXactRestCatalog;
+		restCopy->requestsHash = CopyMetadataHash(restCopy->requestsHash,
+												  sizeof(RestCatalogRequestPerTable), true);
+	}
+	MemoryContextSwitchTo(oldContext);
+
+	/*
+	 * Publish only once both copies exist: an error above leaves the live
+	 * state untouched and no saved state for the abort callback to act on.
+	 */
+	state->subid = currentSubid;
+	state->trackedOperations = TrackedIcebergMetadataOperationsHash;
+	state->restCatalog = PgLakeXactRestCatalog;
+	state->previous = IcebergSubXactStates;
+	IcebergSubXactStates = state;
+
+	TrackedIcebergMetadataOperationsHash = trackedCopy;
+	if (restCopy != NULL)
+		PgLakeXactRestCatalog = restCopy;
+}
+
+/*
  * Preserve both the binding and the work that owns it across savepoints.
  * Clearing only the prefix would let rolled-back tracker entries rebind the
- * transaction at pre-commit. Aborting restores pointers without allocating or
- * looking up catalogs; releasing retains the child's state for its parent.
+ * transaction at pre-commit.  Only subtransactions that recorded work have a
+ * saved state (see PrepareIcebergStateForWrite); the version that ends up
+ * unreachable is freed either way.
  */
 void
 IcebergMetadataSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 							   SubTransactionId parentSubid, void *arg)
 {
-	if (event == SUBXACT_EVENT_START_SUB)
+	if (event != SUBXACT_EVENT_ABORT_SUB && event != SUBXACT_EVENT_COMMIT_SUB)
+		return;
+
+	IcebergSubXactState *state = IcebergSubXactStates;
+
+	/* nothing was recorded in this subtransaction */
+	if (state == NULL || state->subid != mySubid)
+		return;
+
+	if (event == SUBXACT_EVENT_ABORT_SUB)
 	{
-		MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
-		IcebergSubXactState *state = palloc(sizeof(IcebergSubXactState));
+		/* drop the child's copies and go back to the parent's state */
+		if (TrackedIcebergMetadataOperationsHash != NULL)
+			hash_destroy(TrackedIcebergMetadataOperationsHash);
+		FreeRestCatalogContextVersion(PgLakeXactRestCatalog,
+									  state->restCatalog == NULL);
 
-		state->subid = mySubid;
-		state->trackedOperations = TrackedIcebergMetadataOperationsHash;
-		state->restCatalog = PgLakeXactRestCatalog;
-		state->previous = IcebergSubXactStates;
-		IcebergSubXactStates = state;
-
-		TrackedIcebergMetadataOperationsHash = CopyMetadataHash(
-																TrackedIcebergMetadataOperationsHash, sizeof(TableMetadataOperationTracker), false);
-		if (PgLakeXactRestCatalog != NULL)
-		{
-			PgLakeXactRestCatalogContext *copy = palloc(sizeof(PgLakeXactRestCatalogContext));
-
-			*copy = *PgLakeXactRestCatalog;
-			copy->requestsHash = CopyMetadataHash(copy->requestsHash,
-												  sizeof(RestCatalogRequestPerTable), true);
-			PgLakeXactRestCatalog = copy;
-		}
-		MemoryContextSwitchTo(oldContext);
+		TrackedIcebergMetadataOperationsHash = state->trackedOperations;
+		PgLakeXactRestCatalog = state->restCatalog;
 	}
-	else if (event == SUBXACT_EVENT_ABORT_SUB || event == SUBXACT_EVENT_COMMIT_SUB)
+	else if (parentSubid != TopSubTransactionId &&
+			 (state->previous == NULL || state->previous->subid != parentSubid))
 	{
-		IcebergSubXactState *state = IcebergSubXactStates;
-
-		/* No START callback ran if first loaded inside this savepoint. */
-		if (state == NULL || state->subid != mySubid)
-		{
-			if (event == SUBXACT_EVENT_ABORT_SUB)
-			{
-				TrackedIcebergMetadataOperationsHash = NULL;
-				PgLakeXactRestCatalog = NULL;
-			}
-			return;
-		}
-		if (event == SUBXACT_EVENT_ABORT_SUB)
-		{
-			TrackedIcebergMetadataOperationsHash = state->trackedOperations;
-			PgLakeXactRestCatalog = state->restCatalog;
-		}
-		IcebergSubXactStates = state->previous;
-		pfree(state);
+		/*
+		 * The parent recorded nothing itself, so this snapshot is also the
+		 * parent's pre-savepoint state: hand it over, or rolling back the
+		 * parent later could not undo the work released into it.
+		 */
+		state->subid = parentSubid;
+		return;
 	}
+	else
+	{
+		/* the parent keeps the child's versions; the old ones are dead */
+		if (state->trackedOperations != NULL)
+			hash_destroy(state->trackedOperations);
+		FreeRestCatalogContextVersion(state->restCatalog, false);
+	}
+
+	IcebergSubXactStates = state->previous;
+	pfree(state);
 }
 
 
@@ -622,6 +695,7 @@ IdentifierJson(const char *namespaceFlat, const char *tableName)
 static void
 RecordIcebergMetadataOperation(Oid relationId, TableMetadataOperationType operationType)
 {
+	PrepareIcebergStateForWrite();
 	InitTableMetadataTrackerHashIfNeeded();
 
 	bool		isFound = false;
@@ -855,6 +929,7 @@ EnsureXactBoundToRestCatalog(Oid relationId)
 static void
 CaptureRestCatalogCredsForUserMappingDrop(Oid umOid)
 {
+	PrepareIcebergStateForWrite();
 	InitRestCatalogRequestsHashIfNeeded();
 
 	if (PgLakeXactRestCatalog->catalogOpts != NULL)
@@ -913,6 +988,7 @@ BindRelationToXactRestCatalog(Oid relationId)
 		GetIcebergCatalogType(relationId) != REST_CATALOG_READ_WRITE)
 		return;
 
+	PrepareIcebergStateForWrite();
 	InitRestCatalogRequestsHashIfNeeded();
 	EnsureXactBoundToRestCatalog(relationId);
 }
@@ -925,6 +1001,7 @@ void
 RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
 							 const char *body)
 {
+	PrepareIcebergStateForWrite();
 	InitRestCatalogRequestsHashIfNeeded();
 
 	bool		isFound = false;

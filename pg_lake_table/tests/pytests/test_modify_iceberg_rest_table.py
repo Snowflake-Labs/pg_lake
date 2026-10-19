@@ -2281,6 +2281,116 @@ def test_drop_table_inside_rolled_back_savepoint_preserves_rest_table(
     superuser_conn.commit()
 
 
+def backend_memory_bytes(conn):
+    return run_query(
+        "SELECT sum(total_bytes)::bigint FROM pg_backend_memory_contexts", conn
+    )[0][0]
+
+
+def test_savepoint_loops_do_not_grow_memory(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+):
+    """
+    Savepoint state is copied only when a subtransaction records Iceberg
+    work, and the version that becomes unreachable is freed.  A PL/pgSQL
+    EXCEPTION block opens a subtransaction per iteration, so a leak grows
+    with the loop count: before the fix, about 9 KB per idle savepoint once
+    a table was tracked, and 1 MB per rolled-back write that first created
+    the transaction's REST context.
+    """
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+
+    SERVER_NAME = "rest_savepoint_memory"
+    SCHEMA_NAME = TABLE_NAMESPACE
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:{server_params.POLARIS_PORT}/api/catalog',
+                     catalog_name '{server_params.PG_DATABASE}',
+                     location_prefix 's3://{TEST_BUCKET}');
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{creds["credentials"]["clientId"]}',
+                     client_secret '{creds["credentials"]["clientSecret"]}');
+        GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+    run_command(f"CREATE SCHEMA {SCHEMA_NAME}", pg_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.sv_mem (id bigint) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # Touch the table so the transaction tracks it, then run savepoints
+    # that record nothing: they must not copy anything.  Measured on the
+    # superuser connection, which may read pg_backend_memory_contexts.
+    conn = superuser_conn
+    run_command(f"INSERT INTO {SCHEMA_NAME}.sv_mem VALUES (0)", conn)
+    before = backend_memory_bytes(conn)
+    run_command(
+        """
+        DO $$
+        BEGIN
+            FOR i IN 1..20000 LOOP
+                BEGIN
+                    PERFORM 1;
+                EXCEPTION WHEN others THEN NULL;
+                END;
+            END LOOP;
+        END $$
+        """,
+        conn,
+    )
+    growth = backend_memory_bytes(conn) - before
+    assert growth < 4 * 1024 * 1024, f"grew {growth} bytes over 20000 savepoints"
+    conn.commit()
+
+    # In a fresh transaction, each iteration's write creates the REST
+    # request context (with its 1 MB commit context) inside the savepoint;
+    # rolling back must free it rather than keep it until commit.
+    before = backend_memory_bytes(conn)
+    run_command(
+        f"""
+        DO $$
+        BEGIN
+            FOR i IN 1..50 LOOP
+                BEGIN
+                    INSERT INTO {SCHEMA_NAME}.sv_mem VALUES (i);
+                    RAISE EXCEPTION 'undo';
+                EXCEPTION WHEN others THEN NULL;
+                END;
+            END LOOP;
+        END $$
+        """,
+        conn,
+    )
+    growth = backend_memory_bytes(conn) - before
+    assert growth < 4 * 1024 * 1024, f"grew {growth} bytes over 50 rolled-back writes"
+    conn.commit()
+
+    assert run_query(f"SELECT id FROM {SCHEMA_NAME}.sv_mem", pg_conn) == [[0]]
+
+    run_command(f"DROP SCHEMA {SCHEMA_NAME} CASCADE", pg_conn)
+    pg_conn.commit()
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
 def test_alter_server_add_catalog_name_does_not_reroute_writable_table(
     installcheck,
     superuser_conn,
