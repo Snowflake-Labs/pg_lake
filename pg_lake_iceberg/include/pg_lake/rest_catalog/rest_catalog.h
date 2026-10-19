@@ -402,7 +402,7 @@ typedef struct RestCatalogStagedTable
 	char	   *location;
 }			RestCatalogStagedTable;
 
-extern PGDLLEXPORT RestCatalogStagedTable StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema);
+extern PGDLLEXPORT RestCatalogStagedTable StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema, const char *requestedLocation);
 extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs, const char *stagedUuid);
 extern PGDLLEXPORT RestCatalogLoadTableResult ResolveReadOnlyRestCatalogTable(RestCatalogOptions * opts, char **catalogName,
 																			  char **namespaceName, char **tableName);

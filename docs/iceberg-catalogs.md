@@ -193,7 +193,7 @@ CREATE SERVER polaris TYPE 'rest'
 | Option | Where | Description |
 |:--|:--|:--|
 | `rest_endpoint` | server | Base URL of the REST catalog API. |
-| `location_prefix` | server | Legacy client storage prefix. New writable REST tables use the location assigned by the catalog instead. |
+| `location_prefix` | server | Storage location pg_lake requests for new writable tables in this catalog. pg_lake adds the database, schema, table name and table OID to it; the catalog may assign a different location. |
 | `catalog_name` | server | Catalog (warehouse) that tables use. Without it, pg_lake uses the prefix the catalog advertises, or the database name. A table created by pg_lake keeps the catalog it was created in, even if this option changes later, see [below](#create-tables-in-an-external-catalog). |
 | `oauth_endpoint` | server | OAuth2 token endpoint URL, if the catalog does not serve it at `<rest_endpoint>/v1/oauth/tokens`. |
 | `enable_vended_credentials` | server | Ask the catalog for temporary storage credentials instead of using pgduck_server's own. |
@@ -334,11 +334,17 @@ accept `catalog_namespace` or `catalog_table_name` overrides and cannot be renam
 moved to another schema. One transaction may modify only one REST server and prefix.
 
 pg_lake creates the namespace if it does not exist, then stages table creation with its
-schema. The catalog must return a table UUID and storage location. pg_lake uses that
-location for both data and metadata, rather than constructing a path from the database
-name or `location_prefix`. A `location` included in replayed DDL is replaced by the new
-catalog-assigned location; this does not attach or restore data from the old location.
-Existing tables retain their storage locations.
+schema. When `location_prefix` (or `pg_lake_iceberg.default_location_prefix`) is set,
+the staging request asks for pg_lake's usual location, the prefix followed by the
+database, schema and table name and the table OID. The OID keeps a re-created table
+off a dropped table's files. The catalog must return a table UUID and storage location,
+and pg_lake uses the returned location for both data and metadata. Polaris and
+Lakekeeper keep the requested location; Nessie assigns its own; a catalog that rejects
+the location (for example, Lakekeeper when it is outside the warehouse) fails the
+`CREATE TABLE`. Without a prefix, the catalog chooses the location. A `location`
+included in replayed DDL is not requested; the table gets a new location instead, and
+this does not attach or restore data from the old one. Existing tables retain their
+storage locations.
 
 Storage access must be configured directly or supplied through catalog-vended credentials.
 pg_lake obtains staged credentials before storage checks and CTAS writes. The chosen
