@@ -31,6 +31,7 @@
 #include "utils/lsyscache.h"
 #include "utils/acl.h"
 
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -244,6 +245,21 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 				 errdetail("Expected previous_metadata_location \"%s\" but found \"%s\".",
 						   prevMetadataLocation,
 						   currentMetadataLocation ? currentMetadataLocation : "(null)")));
+
+	/*
+	 * The new metadata is read with the extension's credentials during the
+	 * sync, so it must be inside the table's own metadata directory.
+	 */
+	const char *metadataDirectory = strstr(currentMetadataLocation, "/metadata/");
+
+	if (!IsSupportedURL(metadataLocation) ||
+		metadataDirectory == NULL ||
+		strncmp(metadataLocation, currentMetadataLocation,
+				metadataDirectory - currentMetadataLocation + strlen("/metadata/")) != 0 ||
+		strstr(metadataLocation, "/../") != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("metadata_location must be in the table's metadata directory")));
 
 	/*
 	 * Update the internal catalog with the new metadata location. If
