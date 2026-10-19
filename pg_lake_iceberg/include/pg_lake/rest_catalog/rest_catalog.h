@@ -146,6 +146,8 @@ typedef struct RestCatalogOptions
 	char	   *scope;
 	char	   *locationPrefix;
 	char	   *catalogName;	/* REST API catalog prefix; defaults to dbname */
+	bool		omitCatalogPrefix;	/* TYPE 'iceberg-rest': leave the
+									 * {prefix} segment out of REST URLs */
 	int			authType;
 	bool		enableVendedCredentials;
 	bool		isBuiltin;		/* the extension-owned built-in server, whose
@@ -159,16 +161,19 @@ typedef struct RestCatalogOptions
  * (e.g. "/api/catalog" for Polaris, "/catalog" for Lakekeeper).  Everything
  * from "/v1/" onward is the Iceberg REST catalog spec.  See
  * ResolveRestCatalogBaseUri for how the base URI is normalized.
+ *
+ * The "%s" right after "/v1" is the optional {prefix} path segment, as
+ * returned by RestCatalogPrefixPath: either "/<url-encoded prefix>" or "".
  */
 #define REST_CATALOG_AUTH_TOKEN_PATH "%s/v1/oauth/tokens"
 
-#define REST_CATALOG_NAMESPACE_NAME "%s/v1/%s/namespaces/%s"
-#define REST_CATALOG_NAMESPACE "%s/v1/%s/namespaces"
+#define REST_CATALOG_NAMESPACE_NAME "%s/v1%s/namespaces/%s"
+#define REST_CATALOG_NAMESPACE "%s/v1%s/namespaces"
 
-#define REST_CATALOG_TABLE "%s/v1/%s/namespaces/%s/tables/%s"
-#define REST_CATALOG_TABLES "%s/v1/%s/namespaces/%s/tables"
+#define REST_CATALOG_TABLE "%s/v1%s/namespaces/%s/tables/%s"
+#define REST_CATALOG_TABLES "%s/v1%s/namespaces/%s/tables"
 
-#define REST_CATALOG_TRANSACTION_COMMIT "%s/v1/%s/transactions/commit"
+#define REST_CATALOG_TRANSACTION_COMMIT "%s/v1%s/transactions/commit"
 
 /*
  * Catalog configuration endpoint (Iceberg REST spec §2.2).  No catalog-name
@@ -225,6 +230,8 @@ extern PGDLLEXPORT char *ResolveRestCatalogBaseUri(const char *endpoint);
  * get_database_name() on NULL.
  */
 extern PGDLLEXPORT char *FetchRestCatalogConfigPrefix(RestCatalogOptions * opts);
+extern PGDLLEXPORT char *RestCatalogPrefixPath(const RestCatalogOptions * opts,
+											   const char *catalogName);
 
 /*
  * Build options directly from a specific user mapping OID, bypassing

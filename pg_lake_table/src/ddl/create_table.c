@@ -880,8 +880,11 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 				RestCatalogOptions *opts =
 					ResolveRestCatalogOptions(catalogOptionValue);
 
-				catalogName = opts->catalogName ? pstrdup(opts->catalogName)
-					: FetchRestCatalogConfigPrefix(opts);
+				if (opts->catalogName != NULL)
+					catalogName = pstrdup(opts->catalogName);
+				else if (!opts->omitCatalogPrefix)
+					catalogName = FetchRestCatalogConfigPrefix(opts);
+
 				if (catalogName == NULL)
 					catalogName = get_database_name(MyDatabaseId);
 			}

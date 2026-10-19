@@ -38,6 +38,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/catalog_type.h"
 #include "pg_lake/util/string_utils.h"
+#include "pg_lake/util/url_encode.h"
 
 
 /* determined by GUC */
@@ -110,6 +111,22 @@ FetchRestCatalogConfigPrefix(RestCatalogOptions * opts)
 		prefix = JsonbGetStringByPath(hr.body, 2, "defaults", "prefix");
 
 	return prefix;
+}
+
+
+/*
+ * RestCatalogPrefixPath returns the {prefix} path segment that follows "/v1"
+ * in the REST_CATALOG_* URL templates: "/" followed by the URL-encoded
+ * catalogName, or an empty string for a TYPE 'iceberg-rest' server, whose
+ * catalog serves the spec's routes without a prefix (/v1/namespaces).
+ */
+char *
+RestCatalogPrefixPath(const RestCatalogOptions * opts, const char *catalogName)
+{
+	if (opts->omitCatalogPrefix)
+		return pstrdup("");
+
+	return psprintf("/%s", URLEncodePrefix(catalogName));
 }
 
 
@@ -511,6 +528,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	copy->scope = src->scope ? pstrdup(src->scope) : NULL;
 	copy->locationPrefix = src->locationPrefix ? pstrdup(src->locationPrefix) : NULL;
 	copy->catalogName = src->catalogName ? pstrdup(src->catalogName) : NULL;
+	copy->omitCatalogPrefix = src->omitCatalogPrefix;
 	copy->authType = src->authType;
 	copy->enableVendedCredentials = src->enableVendedCredentials;
 	copy->isBuiltin = src->isBuiltin;

@@ -70,10 +70,9 @@ typedef struct RestCatalogRequestPerTable
 	char	   *catalogTableName;
 
 	/*
-	 * We do URL-encoding of the catalog, namespace and table names to
-	 * construct the identifiers used in REST API calls.
+	 * We do URL-encoding of the namespace and table names to construct the
+	 * identifiers used in REST API calls.
 	 */
-	char	   *urlEncodedCatalogName;
 	char	   *urlEncodedCatalogNamespace;
 	char	   *urlEncodedCatalogTableName;
 
@@ -459,7 +458,8 @@ PostAllRestCatalogRequests(void)
 
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT,
 								   PgLakeXactRestCatalog->catalogOpts->baseUri,
-								   URLEncodePrefix(catalogName));
+								   RestCatalogPrefixPath(PgLakeXactRestCatalog->catalogOpts,
+														 catalogName));
 		HttpResult	httpResult = SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
 														  url, batchRequestBody->data,
 														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
@@ -801,8 +801,6 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		requestPerTable->catalogTableName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogTableName(relationId));
 
-		requestPerTable->urlEncodedCatalogName =
-			MemoryContextStrdup(TopTransactionContext, URLEncodePrefix(GetRestCatalogName(relationId)));
 		requestPerTable->urlEncodedCatalogNamespace =
 			MemoryContextStrdup(TopTransactionContext, URLEncodePath(GetRestCatalogNamespace(relationId)));
 		requestPerTable->urlEncodedCatalogTableName =
@@ -811,7 +809,8 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		requestPerTable->tableRestUrl =
 			MemoryContextStrdup(TopTransactionContext, psprintf(REST_CATALOG_TABLE,
 																PgLakeXactRestCatalog->catalogOpts->baseUri,
-																requestPerTable->urlEncodedCatalogName,
+																RestCatalogPrefixPath(PgLakeXactRestCatalog->catalogOpts,
+																					  requestPerTable->catalogName),
 																requestPerTable->urlEncodedCatalogNamespace,
 																requestPerTable->urlEncodedCatalogTableName));
 

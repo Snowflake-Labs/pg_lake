@@ -3094,3 +3094,151 @@ def test_table_catalog_name_overrides_server(
     superuser_conn.rollback()
     run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
     superuser_conn.commit()
+
+
+def test_iceberg_rest_server_routes_without_prefix(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    set_polaris_gucs,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """A TYPE 'iceberg-rest' server sends namespace and table requests to
+    /v1/namespaces/... without a {prefix} segment, the way catalogs such as
+    apache/iceberg-rest-fixture route them.
+
+    The mock catalog answers only prefix-less routes and relays the real
+    Polaris metadata-location, as in test_catalog_name_auto_detected_from_v1_config.
+    """
+    if installcheck:
+        return
+
+    SCHEMA = "no_prefix_schema"
+    TABLE = "no_prefix_tbl"
+    RO_TABLE = "no_prefix_ro_tbl"
+    SERVER_NAME = "no_prefix_server"
+
+    run_command(f"CREATE SCHEMA IF NOT EXISTS {SCHEMA}", pg_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA}.{TABLE} (id bigint, v text) USING iceberg WITH (catalog='rest')",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {SCHEMA}.{TABLE} SELECT i, i::text FROM generate_series(1,5) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    endpoint = (
+        f"http://{server_params.POLARIS_HOSTNAME}"
+        f":{server_params.POLARIS_PORT}/api/catalog"
+    )
+    load_url = (
+        f"{endpoint}/v1/{server_params.PG_DATABASE}"
+        f"/namespaces/{SCHEMA}/tables/{TABLE}"
+    )
+    polaris_token = get_polaris_access_token()
+    resp = requests.get(load_url, headers={"Authorization": f"Bearer {polaris_token}"})
+    assert resp.status_code == 200, f"Polaris loadTable failed: {resp.text}"
+    real_metadata_location = resp.json()["metadata-location"]
+
+    received_paths = []
+
+    def _make_no_prefix_handler(metadata_location):
+        class _Handler(BaseHTTPRequestHandler):
+            def log_message(self, fmt, *args):
+                pass
+
+            def _json(self, status, body):
+                encoded = json.dumps(body).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(encoded)
+
+            def _handle(self):
+                received_paths.append(self.path)
+
+                if not self.path.startswith("/v1/namespaces/"):
+                    self._json(404, {"error": f"unexpected path: {self.path}"})
+                    return
+
+                if "/tables" not in self.path:
+                    ns = self.path.split("/namespaces/", 1)[1].split("?")[0].rstrip("/")
+                    self._json(200, {"namespace": [ns], "properties": {}})
+                    return
+
+                self._json(200, {"metadata-location": metadata_location})
+
+            def do_GET(self):
+                self._handle()
+
+            def do_POST(self):
+                self._handle()
+
+        return _Handler
+
+    port = _cfg_disc_free_port()
+    httpd = _HTTPServer(
+        ("127.0.0.1", port), _make_no_prefix_handler(real_metadata_location)
+    )
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        run_command(
+            f"""
+            CREATE SERVER {SERVER_NAME} TYPE 'iceberg-rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (
+                    rest_endpoint 'http://127.0.0.1:{port}',
+                    rest_auth_type 'none',
+                    location_prefix 's3://{TEST_BUCKET}/'
+                )
+            """,
+            superuser_conn,
+        )
+        run_command(
+            f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        run_command(
+            f"""
+            CREATE TABLE {SCHEMA}.{RO_TABLE} ()
+                USING iceberg
+                WITH (
+                    catalog='{SERVER_NAME}',
+                    read_only='true',
+                    catalog_namespace='{SCHEMA}',
+                    catalog_table_name='{TABLE}'
+                )
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        results = run_query(f"SELECT count(*) FROM {SCHEMA}.{RO_TABLE}", pg_conn)
+        assert results[0][0] == 5
+
+        assert received_paths, "mock catalog received no requests"
+        assert all(
+            p.startswith("/v1/namespaces/") for p in received_paths
+        ), f"requests carried a catalog prefix: {received_paths}"
+
+        pg_conn.rollback()
+
+    finally:
+        httpd.shutdown()
+        thread.join(timeout=5)
+
+        run_command(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE", pg_conn)
+        pg_conn.commit()
+
+        run_command(f"DROP SERVER IF EXISTS {SERVER_NAME} CASCADE", superuser_conn)
+        superuser_conn.commit()
