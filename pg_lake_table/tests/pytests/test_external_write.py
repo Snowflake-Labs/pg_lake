@@ -302,6 +302,51 @@ def test_external_write_optimistic_concurrency_failure(
     pg_conn.rollback()
 
 
+def test_external_write_metadata_location_outside_table_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_access,
+):
+    """
+    A metadata_location outside the table's own metadata directory is
+    rejected, even when previous_metadata_location is correct.
+    """
+    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_outside"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    current = run_query(
+        f"""SELECT metadata_location FROM iceberg_tables
+            WHERE table_name = '{TABLE_NAME}_outside'""",
+        pg_conn,
+    )[0][0]
+
+    for bad_location in [
+        "s3://otherbucket/other/metadata/v2.metadata.json",
+        current.rsplit("/metadata/", 1)[0] + "/metadata/../x/v2.metadata.json",
+        "file:///etc/passwd",
+    ]:
+        error = run_command(
+            f"""
+            UPDATE iceberg_tables
+            SET metadata_location = '{bad_location}',
+                previous_metadata_location = '{current}'
+            WHERE table_name = '{TABLE_NAME}_outside'
+            """,
+            pg_conn,
+            raise_error=False,
+        )
+        assert "metadata directory" in str(error)
+        pg_conn.rollback()
+
+    pg_conn.rollback()
+
+
 def test_external_write_null_previous_metadata_location(
     s3,
     pg_conn,
