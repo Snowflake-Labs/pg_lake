@@ -1287,13 +1287,29 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	{
 		/*
 		 * Field IDs and partition definitions now exist, but CTAS has not
-		 * written data yet. Stage with the real schema and adopt the
-		 * catalog's location before storage checks or data writes. Keep the
-		 * UUID in the transaction's metadata tracker for finalization at
-		 * commit.
+		 * written data yet. Stage with the real schema, asking for pg_lake's
+		 * usual per-relation location so a re-created table never lands on a
+		 * dropped table's files: Polaris otherwise assigns a name-based path.
+		 * The catalog may honor it, pick its own (Nessie) or reject it, and
+		 * the location it returns is what the table uses from here on. An
+		 * explicit location is not requested: replayed DDL carries the old
+		 * relation's path. Keep the UUID in the transaction's metadata
+		 * tracker for finalization at commit.
 		 */
-		RestCatalogStagedTable staged = StartStageRestCatalogIcebergTableCreate(
-																				relationId, GetDataFileSchemaForTable(relationId));
+		char	   *requestedLocation = NULL;
+
+		if (locationOption == NULL && defaultLocationPrefix != NULL)
+			requestedLocation =
+				psprintf("%s/%s/%s/%s/%u", defaultLocationPrefix,
+						 URLEncodePath(get_database_name(MyDatabaseId)),
+						 URLEncodePath(createStmt->base.relation->schemaname),
+						 URLEncodePath(createStmt->base.relation->relname),
+						 relationId);
+
+		RestCatalogStagedTable staged =
+			StartStageRestCatalogIcebergTableCreate(relationId,
+													GetDataFileSchemaForTable(relationId),
+													requestedLocation);
 
 		SetIcebergTableLocationOption(relationId, staged.location);
 		RecordRestCatalogStagedTable(relationId, staged.uuid);

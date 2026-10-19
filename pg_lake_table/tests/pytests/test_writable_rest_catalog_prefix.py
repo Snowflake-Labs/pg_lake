@@ -34,10 +34,16 @@ class _MockCatalog:
     """Just enough of the Iceberg REST API for a writable CREATE/DROP TABLE."""
 
     def __init__(
-        self, config_status=400, config_body=None, stage_status=200, stage_body=None
+        self,
+        config_status=400,
+        config_body=None,
+        stage_status=200,
+        stage_body=None,
+        honor_location=False,
     ):
         self.stage_status = stage_status
         self.stage_body = stage_body
+        self.honor_location = honor_location
         self.config_status = config_status
         self.config_body = config_body or {
             "error": {"message": "Please specify a warehouse", "code": 400}
@@ -85,12 +91,17 @@ class _MockCatalog:
                         assert mock.bodies[-1]["stage-create"] is True
                         if mock.stage_body is not None:
                             return self._reply(mock.stage_status, mock.stage_body)
+                        requested = mock.bodies[-1].get("location")
                         return self._reply(
                             200,
                             {
                                 "metadata": {
                                     "table-uuid": str(uuid.uuid4()),
-                                    "location": f"s3://{TEST_BUCKET}/staged-prefix/{uuid.uuid4()}",
+                                    "location": (
+                                        requested
+                                        if mock.honor_location and requested
+                                        else f"s3://{TEST_BUCKET}/staged-prefix/{uuid.uuid4()}"
+                                    ),
                                 }
                             },
                         )
@@ -650,3 +661,48 @@ def test_catalog_location_uuid_and_schema_used_for_create(
     assert updates["assign-uuid"]["uuid"] == table_uuid
     assert updates["set-location"]["location"] == location
     assert updates["upgrade-format-version"]["format-version"] == 2
+
+
+@pytest.mark.parametrize("honor", [True, False], ids=["honored", "replaced"])
+def test_stage_requests_pg_lake_location(
+    installcheck, superuser_conn, writable_schema, mock_catalog, honor
+):
+    """
+    With a location_prefix, stage-create asks for pg_lake's per-relation
+    location, so a re-created table cannot land on a dropped table's files
+    (Polaris otherwise assigns <namespace>/<table>).  Whatever the catalog
+    returns is the table's location.
+    """
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog(honor_location=honor)
+    writable_schema.append("wp_reqloc")
+    _create_server(superuser_conn, "wp_reqloc", mock.endpoint, "first")
+    superuser_conn.commit()
+    run_command(
+        f"CREATE TABLE {SCHEMA}.reqloc (id int) USING iceberg WITH (catalog='wp_reqloc')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    relid = run_query(f"SELECT '{SCHEMA}.reqloc'::regclass::oid", superuser_conn)[0][0]
+    expected = f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}/{SCHEMA}/reqloc/{relid}"
+    stage = next(
+        body
+        for (_, path), body in zip(mock.requests, mock.bodies)
+        if path.endswith("/tables")
+    )
+    assert stage["location"] == expected
+
+    location = _table_option(superuser_conn, "reqloc", "location")
+    if honor:
+        assert location == expected
+    else:
+        assert location.startswith(f"s3://{TEST_BUCKET}/staged-prefix/")
+    final = next(
+        body
+        for (method, path), body in zip(mock.requests, mock.bodies)
+        if method == "POST" and path.endswith("/tables/reqloc")
+    )
+    updates = {update["action"]: update for update in final["updates"]}
+    assert updates["set-location"]["location"] == location

@@ -154,11 +154,15 @@ static VendedCredentialsCacheKey BuildVendedCredentialsCacheKey(Oid serverOid,
 * in the rest catalog. On any failure, an error is raised. If the table exists,
 * an error is raised as well.
 *
-* Field-ID mappings must exist before staging. The catalog chooses the table
-* location and UUID; credentials are cached before any CTAS data is written.
+* Field-ID mappings must exist before staging. requestedLocation, when not
+* NULL, is sent as the table location; the catalog may honor it (Polaris,
+* Lakekeeper), replace it with its own (Nessie) or reject it. The returned
+* location and UUID are what the table uses. Credentials are cached before
+* any CTAS data is written.
 */
 RestCatalogStagedTable
-StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema)
+StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema,
+										const char *requestedLocation)
 {
 	const char *relationName = GetRestCatalogTableName(relationId);
 
@@ -166,6 +170,12 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFil
 
 	appendStringInfoChar(body, '{');	/* start body */
 	appendJsonString(body, "name", relationName);
+
+	if (requestedLocation != NULL)
+	{
+		appendStringInfoString(body, ", ");
+		appendJsonString(body, "location", requestedLocation);
+	}
 
 	appendStringInfoString(body, ", ");
 	int			lastColumnId = 0;
