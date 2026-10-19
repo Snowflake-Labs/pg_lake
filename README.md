@@ -9,6 +9,7 @@ At a high level, `pg_lake` lets you:
 - **Export query results back to object storage** in Parquet, CSV, or JSON formats using COPY commands
 - **Read geospatial formats** supported by GDAL, such as GeoJSON and Shapefiles
 - **[Attach Snowflake tables](./docs/snowflake-tables.md)**, including hybrid tables, and read and write them in place
+- **[Call Snowflake Cortex AI functions](./docs/cortex-functions.md)** such as `AI_COMPLETE`, `AI_CLASSIFY` and `AI_EMBED` from SQL
 - **Use the built-in [map type](./pg_map/README.md)** for semi-structured or key–value data  
 - **Combine heap, Iceberg, and external Parquet/CSV/JSON** files in the same SQL queries and modifications — all with full transactional guarantees and no SQL limitations  
 - **Infer table columns and types** from external data sources such as Iceberg, Parquet, JSON, and CSV files

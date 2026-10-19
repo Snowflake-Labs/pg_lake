@@ -151,6 +151,7 @@ pg_lake (meta-extension)
 
 pg_lake_spatial (optional, depends on PostGIS)
 pg_lake_snowflake (optional, attaches Snowflake tables)
+pg_lake_cortex (optional, Cortex AI functions via pg_lake_snowflake)
 pg_lake_benchmark (optional, for benchmarking)
 ```
 
@@ -164,6 +165,7 @@ pg_lake_benchmark (optional, for benchmarking)
 - **pg_lake_copy**: COPY command extensions for importing/exporting to data lakes
 - **pg_lake**: Meta-extension that installs all required extensions via CASCADE
 - **pg_lake_snowflake**: Foreign data wrapper that attaches Snowflake tables over the Snowflake SQL API
+- **pg_lake_cortex**: SQL functions that call Snowflake Cortex AI functions through a pg_lake_snowflake server
 
 ### External components
 - **pgduck_server**: Standalone server implementing PostgreSQL wire protocol, executes queries via DuckDB

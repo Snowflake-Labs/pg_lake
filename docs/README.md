@@ -9,6 +9,7 @@ Welcome to the documentation hub. This section provides everything you need — 
 - [**File Formats Reference**](./file-formats-reference.md) 
 - [**Geospatial features**](./spatial.md) 
 - [**Snowflake Tables**](./snowflake-tables.md)  
+- [**Cortex AI Functions**](./cortex-functions.md)  
 - [**DBT Integration**](./dbt.md)  
 - [**Use Case: Log Management**](./use-case-log-management.md)  
 

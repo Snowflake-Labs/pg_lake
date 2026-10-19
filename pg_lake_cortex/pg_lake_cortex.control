@@ -1,0 +1,6 @@
+# pg_lake_cortex extension
+comment = 'Snowflake Cortex AI functions, run on a Snowflake account'
+default_version = '3.5'
+relocatable = false
+schema = pg_catalog
+requires = 'pg_lake_snowflake'
