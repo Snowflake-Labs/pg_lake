@@ -2181,6 +2181,97 @@ def test_writable_table_on_server_with_catalog_name(
     superuser_conn.commit()
 
 
+def test_drop_table_inside_rolled_back_savepoint_preserves_rest_table(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """
+    DROP TABLE inside a rolled-back savepoint must not send the delete request
+    to the REST catalog at commit.  Without savepoint rollback support, the
+    queued drop is still pushed, deleting the table from the catalog even
+    though Postgres kept it.  This is the data-loss case on main.
+    """
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+
+    SERVER_NAME = "rest_drop_savepoint"
+    SCHEMA_NAME = TABLE_NAMESPACE
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     catalog_name '{server_params.PG_DATABASE}',
+                     location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER {SERVER_NAME} TO PUBLIC",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+    run_command(f"CREATE SCHEMA {SCHEMA_NAME}", pg_conn)
+    pg_conn.commit()
+
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.drop_sv (id bigint) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(f"INSERT INTO {SCHEMA_NAME}.drop_sv VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    # DROP inside a savepoint, then roll it back and insert another row.
+    run_command("SAVEPOINT s", pg_conn)
+    run_command(f"DROP TABLE {SCHEMA_NAME}.drop_sv", pg_conn)
+    run_command("ROLLBACK TO SAVEPOINT s", pg_conn)
+    run_command(f"INSERT INTO {SCHEMA_NAME}.drop_sv VALUES (2)", pg_conn)
+    pg_conn.commit()
+
+    # The table must still exist in the REST catalog.  Attach read-only and
+    # verify both rows survived.
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.drop_sv_check () USING iceberg "
+        f"WITH (catalog='{SERVER_NAME}', read_only=true, "
+        f"catalog_namespace='{SCHEMA_NAME}', catalog_table_name='drop_sv')",
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert run_query(
+        f"SELECT * FROM {SCHEMA_NAME}.drop_sv_check ORDER BY id", pg_conn
+    ) == [[1], [2]]
+
+    run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", pg_conn)
+    pg_conn.commit()
+    superuser_conn.rollback()
+    run_command(f"DROP SERVER {SERVER_NAME} CASCADE", superuser_conn)
+    superuser_conn.commit()
+
+
 def test_alter_server_add_catalog_name_does_not_reroute_writable_table(
     installcheck,
     superuser_conn,
