@@ -3012,6 +3012,20 @@ WaitForBaseWorkerExit(int32 workerId, pid_t workerPid)
 
 
 /*
+ * Rows in extension_base.workers whose worker_id is at or beyond the sequence.
+ * Empty when the table is empty or the next nextval() cannot reuse an id.
+ * Used once without a lock, and again under ShareUpdateExclusiveLock.
+ */
+#define WORKER_ID_SEQUENCE_BEHIND \
+	"from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq s " \
+	"cross join (select pg_catalog.max(worker_id) as max_worker_id " \
+	"from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers) w " \
+	"where w.max_worker_id is not null " \
+	"and (s.last_value operator(pg_catalog.<) pg_catalog.int8(w.max_worker_id) " \
+	"or (s.last_value operator(pg_catalog.=) pg_catalog.int8(w.max_worker_id) " \
+	"and not s.is_called))"
+
+/*
  * InsertBaseWorkerRegistration inserts an entry into pg_extension_base.workers.
  *
  * We run as the extension owner to allow non-superusers who have been granted
@@ -3024,28 +3038,15 @@ InsertBaseWorkerRegistration(char *workerName, Oid extensionId, Oid entryPointFu
 
 	/*
 	 * A physical fork can restore the workers table ahead of its sequence.
-	 * Advance the sequence only when the next nextval() could reuse an
-	 * existing worker_id. A sequence already ahead of the table is left
-	 * alone, so a healthy sequence is not rewound and a healthy registration
-	 * does not write an extra sequence WAL record.
-	 *
-	 * ShareUpdateExclusiveLock serializes that repair, but it conflicts with
-	 * itself. Taking it on every registration deadlocks with DROP EXTENSION:
-	 * drop holds the database starter lock, a registration takes this lock
-	 * and then waits for the starter, and a later registration in the
-	 * dropping transaction waits for this lock. Worker ids come only from
-	 * this sequence and registrations only move it forward, so skip the lock
-	 * when the unlocked read shows the sequence is already ahead. Lock and
-	 * re-check only when it is behind.
+	 * ShareUpdateExclusiveLock conflicts with itself, so taking it on every
+	 * registration deadlocks with DROP EXTENSION: drop holds the database
+	 * starter lock, a registration takes this lock and then waits for the
+	 * starter, and a later registration in the dropping transaction waits for
+	 * this lock. Worker ids come only from this sequence and registrations
+	 * only move it forward, so a sequence that is already ahead needs no lock
+	 * and no setval. Lock and re-check only when it is behind.
 	 */
-	int			checkStatus = SPI_execute("select 1 "
-										  "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq s "
-										  "cross join (select pg_catalog.max(worker_id) as max_worker_id "
-										  "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers) w "
-										  "where w.max_worker_id is not null "
-										  "and (s.last_value operator(pg_catalog.<) pg_catalog.int8(w.max_worker_id) "
-										  "or (s.last_value operator(pg_catalog.=) pg_catalog.int8(w.max_worker_id) "
-										  "and not s.is_called))",
+	int			checkStatus = SPI_execute("select 1 " WORKER_ID_SEQUENCE_BEHIND,
 										  true, 1);
 
 	if (checkStatus != SPI_OK_SELECT)
@@ -3063,13 +3064,7 @@ InsertBaseWorkerRegistration(char *workerName, Oid extensionId, Oid entryPointFu
 		int			sequenceStatus = SPI_execute("select pg_catalog.setval("
 												 "'" PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq'::pg_catalog.regclass, "
 												 "pg_catalog.int8(w.max_worker_id), true) "
-												 "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq s "
-												 "cross join (select pg_catalog.max(worker_id) as max_worker_id "
-												 "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers) w "
-												 "where w.max_worker_id is not null "
-												 "and (s.last_value operator(pg_catalog.<) pg_catalog.int8(w.max_worker_id) "
-												 "or (s.last_value operator(pg_catalog.=) pg_catalog.int8(w.max_worker_id) "
-												 "and not s.is_called))",
+												 WORKER_ID_SEQUENCE_BEHIND,
 												 false, 0);
 
 		if (sequenceStatus != SPI_OK_SELECT)
@@ -3118,6 +3113,8 @@ InsertBaseWorkerRegistration(char *workerName, Oid extensionId, Oid entryPointFu
 
 	return workerId;
 }
+
+#undef WORKER_ID_SEQUENCE_BEHIND
 
 
 /*
