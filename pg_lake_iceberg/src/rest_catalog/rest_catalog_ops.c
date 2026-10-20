@@ -295,6 +295,14 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	AppendIcebergTableSchemaForRestCatalog(body, newSchema, schemaCount);
 	appendStringInfoChar(body, '}');	/* close updates element */
 
+	/*
+	 * Make the schema just added current. A catalog that keeps the staged
+	 * metadata (Lakekeeper) has already renumbered the staged schema's field
+	 * IDs; without this, that copy stays current and nested field IDs no
+	 * longer match the data files pg_lake writes.
+	 */
+	appendStringInfoString(body, ",{\"action\":\"set-current-schema\",\"schema-id\":-1}");
+
 	appendStringInfoChar(body, ',');
 	appendStringInfoChar(body, '{');	/* start add-sort-order */
 	appendJsonString(body, "action", "add-sort-order");

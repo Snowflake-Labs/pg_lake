@@ -349,12 +349,13 @@ the location fails the
 `CREATE TABLE`. Without a prefix, the catalog chooses the location. An explicit
 `location` option, including one in replayed DDL, is requested as given; if the
 catalog assigns a different location, pg_lake reports it with a NOTICE and uses the
-catalog's. As for other Iceberg tables, the requested location must be empty, so
+catalog's. As for other Iceberg tables, the chosen location must be empty, so
 replaying DDL whose old location still holds files fails. Existing tables retain their
 storage locations.
 
-Storage access must be configured directly or supplied through catalog-vended credentials.
-pg_lake obtains staged credentials before storage checks and CTAS writes. The chosen
+Storage access for writable tables must be configured directly in pgduck_server: pg_lake
+does not use catalog-vended credentials for writable REST tables, because their files
+(including queued deletions) outlive any vended credential. The chosen
 location must be empty and satisfy the configured managed-storage-region restriction.
 New writable tables request Iceberg format version 2 and uncompressed metadata JSON,
 which the current metadata-file reader requires. The catalog must support staged creation

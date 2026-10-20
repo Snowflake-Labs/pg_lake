@@ -380,7 +380,8 @@ RecordRestCatalogStagedTable(Oid relationId, const char *uuid)
 	TableMetadataOperationTracker *tracker =
 		hash_search(TrackedIcebergMetadataOperationsHash, &relationId, HASH_FIND, NULL);
 
-	Assert(tracker != NULL && tracker->relationCreated);
+	if (tracker == NULL || !tracker->relationCreated)
+		elog(ERROR, "no tracked CREATE TABLE for relation %u", relationId);
 	tracker->stagedTableUuid = MemoryContextStrdup(TopTransactionContext, uuid);
 }
 

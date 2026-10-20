@@ -1352,7 +1352,6 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		SetIcebergTableLocationOption(relationId, staged.location);
 		RecordRestCatalogStagedTable(relationId, staged.uuid);
 		RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, "");
-		EnsureStorageCredentialsForRelation(relationId);
 		ErrorIfNotInManagedStorageRegion(staged.location);
 		ErrorIfLocationIsNotEmpty(staged.location);
 	}

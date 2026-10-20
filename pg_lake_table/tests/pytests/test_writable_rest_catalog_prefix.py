@@ -672,6 +672,11 @@ def test_catalog_location_uuid_and_schema_used_for_create(
     assert updates["assign-uuid"]["uuid"] == table_uuid
     assert updates["set-location"]["location"] == location
     assert updates["upgrade-format-version"]["format-version"] == 2
+    # Lakekeeper keeps the staged schema with its own field IDs; the schema
+    # pg_lake adds must become current.
+    assert updates["set-current-schema"]["schema-id"] == -1
+    actions = [update["action"] for update in final["updates"]]
+    assert actions.index("set-current-schema") == actions.index("add-schema") + 1
 
 
 @pytest.mark.parametrize("honor", [True, False], ids=["honored", "replaced"])
