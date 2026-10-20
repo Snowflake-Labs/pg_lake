@@ -18,6 +18,8 @@ Scenarios covered:
 """
 
 from decimal import Decimal
+import threading
+import time
 
 import pytest
 from utils_pytest import *
@@ -1210,6 +1212,75 @@ def test_partitioned_table_column_grant(pg_tables, pgduck_conn):
         assert result_rows == [(9999, 1, 9999)]
     finally:
         perform_query_on_cursor("RESET pg_pages_per_task", pgduck_conn)
+
+
+def test_partitioned_table_drop_while_scan_waits_for_lock(pg_tables, pgduck_conn):
+    """A partition dropped while the scan waits for its lock is not in the scan."""
+    conn = open_pg_conn()
+    conn.autocommit = True
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS scanner_lock_race_tbl CASCADE")
+    cur.execute(
+        "CREATE TABLE scanner_lock_race_tbl (id int, val text) PARTITION BY RANGE (id)"
+    )
+    cur.execute(
+        "CREATE TABLE scanner_lock_race_direct PARTITION OF scanner_lock_race_tbl FOR VALUES FROM (1) TO (5000)"
+    )
+    cur.execute(
+        "CREATE TABLE scanner_lock_race_sub PARTITION OF scanner_lock_race_tbl "
+        "FOR VALUES FROM (5000) TO (10000) PARTITION BY RANGE (id)"
+    )
+    cur.execute(
+        "CREATE TABLE scanner_lock_race_leaf PARTITION OF scanner_lock_race_sub FOR VALUES FROM (5000) TO (10000)"
+    )
+    cur.execute(
+        "INSERT INTO scanner_lock_race_tbl "
+        "SELECT generator_index, 'text_' || generator_index FROM generate_series(1, 9999) generator_index"
+    )
+    cur.execute("ANALYZE scanner_lock_race_tbl")
+
+    # Bind only reads the root and the leaves, so the scan first touches the middle
+    # table when it locks the tree, and holding it pauses the scan there.
+    locker = open_pg_conn()
+    locker_cur = locker.cursor()
+    locker_cur.execute("LOCK TABLE ONLY scanner_lock_race_sub IN ACCESS EXCLUSIVE MODE")
+
+    scan_query = _scan("scanner_lock_race_tbl")
+    perform_query_on_cursor("SET pg_pages_per_task = 5", pgduck_conn)
+    scan_result = []
+    scan_thread = threading.Thread(
+        target=lambda: scan_result.append(
+            perform_query_on_cursor(
+                f"SELECT count(*), min(id), max(id) FROM {scan_query}", pgduck_conn
+            )
+        )
+    )
+    scan_thread.start()
+    try:
+        deadline = time.time() + 30
+        waiting = 0
+        while waiting == 0 and time.time() < deadline:
+            time.sleep(0.1)
+            cur.execute(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE wait_event_type = 'Lock' AND query LIKE '%scanner_lock_race_tbl%'"
+            )
+            waiting = cur.fetchone()[0]
+        assert waiting == 1
+
+        locker_cur.execute("DROP TABLE scanner_lock_race_leaf")
+        locker.commit()
+        scan_thread.join(timeout=60)
+
+        assert scan_result == [[(4999, 1, 4999)]]
+    finally:
+        locker.rollback()
+        locker.close()
+        scan_thread.join(timeout=60)
+        perform_query_on_cursor("RESET pg_pages_per_task", pgduck_conn)
+        cur.execute("DROP TABLE IF EXISTS scanner_lock_race_tbl CASCADE")
+        cur.close()
+        conn.close()
 
 
 def test_partitioned_table_row_level_security(pg_tables, pgduck_conn):
