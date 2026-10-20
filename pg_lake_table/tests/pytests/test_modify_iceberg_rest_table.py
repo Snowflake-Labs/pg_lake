@@ -2299,9 +2299,11 @@ def test_savepoint_loops_do_not_grow_memory(
     Savepoint state is copied only when a subtransaction records Iceberg
     work, and the version that becomes unreachable is freed.  A PL/pgSQL
     EXCEPTION block opens a subtransaction per iteration, so a leak grows
-    with the loop count: before the fix, about 9 KB per idle savepoint once
-    a table was tracked, and 1 MB per rolled-back write that first created
-    the transaction's REST context.
+    with the loop count.  This guards the savepoint support itself: an
+    earlier revision copied state on every savepoint and never freed it,
+    about 9 KB per idle savepoint once a table was tracked and 1 MB per
+    rolled-back write that first created the transaction's REST context.
+    main does not copy at all, so this test passes there too.
     """
     if installcheck:
         pytest.skip("Requires an isolated test cluster")

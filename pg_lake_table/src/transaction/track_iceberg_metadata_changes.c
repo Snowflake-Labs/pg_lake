@@ -1123,6 +1123,14 @@ GetEffectiveMaxSnapshotAgeInSecs(Oid relationId)
 static void
 ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 {
+	/*
+	 * The loop below updates tracker flags and records REST requests while
+	 * scanning the hash. Inside a subtransaction (VACUUM runs this in one),
+	 * take the savepoint copy first, so the scan and those writes stay on one
+	 * version instead of the first request swapping it mid-scan.
+	 */
+	PrepareIcebergStateForWrite();
+
 	HTAB	   *trackedRelations = GetTrackedIcebergMetadataOperations();
 
 	if (trackedRelations == NULL)
