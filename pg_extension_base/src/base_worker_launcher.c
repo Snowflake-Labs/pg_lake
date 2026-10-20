@@ -3046,40 +3046,56 @@ InsertBaseWorkerRegistration(char *workerName, Oid extensionId, Oid entryPointFu
 
 	/*
 	 * A physical fork can restore the workers table ahead of its sequence.
-	 * ShareUpdateExclusiveLock serializes registrations against each other.
-	 * It does not conflict with the RowExclusiveLock taken by DROP EXTENSION,
-	 * which locks the database starter first and would deadlock on
-	 * ExclusiveLock.
-	 *
 	 * Advance the sequence only when the next nextval() could reuse an
 	 * existing worker_id. A sequence already ahead of the table is left
 	 * alone, so a healthy sequence is not rewound and a healthy registration
 	 * does not write an extra sequence WAL record.
+	 *
+	 * ShareUpdateExclusiveLock serializes that repair, but it conflicts with
+	 * itself. Taking it on every registration deadlocks with DROP EXTENSION:
+	 * drop holds the database starter lock, a registration takes this lock
+	 * and then waits for the starter, and a later registration in the
+	 * dropping transaction waits for this lock. Worker ids come only from
+	 * this sequence and registrations only move it forward, so skip the lock
+	 * when the unlocked read shows the sequence is already ahead. Lock and
+	 * re-check only when it is behind.
 	 */
-	int			lockStatus = SPI_execute("lock table " PG_EXTENSION_BASE_SCHEMA_NAME ".workers "
-										 "in share update exclusive mode",
-										 false, 0);
+	int			checkStatus = SPI_execute("select 1 "
+										  "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq s "
+										  "cross join (select pg_catalog.max(worker_id) as max_worker_id "
+										  "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers) w "
+										  "where w.max_worker_id is not null "
+										  "and (s.last_value operator(pg_catalog.<) pg_catalog.int8(w.max_worker_id) "
+										  "or (s.last_value operator(pg_catalog.=) pg_catalog.int8(w.max_worker_id) "
+										  "and not s.is_called))",
+										  true, 1);
 
-	if (lockStatus != SPI_OK_UTILITY)
+	if (checkStatus != SPI_OK_SELECT)
+		ereport(ERROR, (errmsg("could not check base worker id sequence")));
+
+	if (SPI_processed > 0)
 	{
-		ereport(ERROR, (errmsg("could not lock base worker registrations")));
-	}
-
-	int			sequenceStatus = SPI_execute("select pg_catalog.setval("
-											 "'" PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq'::pg_catalog.regclass, "
-											 "pg_catalog.int8(w.max_worker_id), true) "
-											 "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq s "
-											 "cross join (select pg_catalog.max(worker_id) as max_worker_id "
-											 "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers) w "
-											 "where w.max_worker_id is not null "
-											 "and (s.last_value operator(pg_catalog.<) pg_catalog.int8(w.max_worker_id) "
-											 "or (s.last_value operator(pg_catalog.=) pg_catalog.int8(w.max_worker_id) "
-											 "and not s.is_called))",
+		int			lockStatus = SPI_execute("lock table " PG_EXTENSION_BASE_SCHEMA_NAME ".workers "
+											 "in share update exclusive mode",
 											 false, 0);
 
-	if (sequenceStatus != SPI_OK_SELECT)
-	{
-		ereport(ERROR, (errmsg("could not repair base worker id sequence")));
+		if (lockStatus != SPI_OK_UTILITY)
+			ereport(ERROR, (errmsg("could not lock base worker registrations")));
+
+		int			sequenceStatus = SPI_execute("select pg_catalog.setval("
+												 "'" PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq'::pg_catalog.regclass, "
+												 "pg_catalog.int8(w.max_worker_id), true) "
+												 "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq s "
+												 "cross join (select pg_catalog.max(worker_id) as max_worker_id "
+												 "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers) w "
+												 "where w.max_worker_id is not null "
+												 "and (s.last_value operator(pg_catalog.<) pg_catalog.int8(w.max_worker_id) "
+												 "or (s.last_value operator(pg_catalog.=) pg_catalog.int8(w.max_worker_id) "
+												 "and not s.is_called))",
+												 false, 0);
+
+		if (sequenceStatus != SPI_OK_SELECT)
+			ereport(ERROR, (errmsg("could not repair base worker id sequence")));
 	}
 
 	char	   *extensionName = get_extension_name(extensionId);
