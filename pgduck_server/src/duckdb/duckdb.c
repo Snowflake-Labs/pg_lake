@@ -62,10 +62,14 @@
 #define COMPLETION_TAG_BUFSIZE  (64)
 
 /*
- * Start a new transmit message after the previous one reaches 1MB
- * to do batching, but also prevent large allocations.
+ * Start a new transmit message after the previous one reaches 64kB.
+ *
+ * The client only processes a message once it has received all of it, and
+ * we block on writing a message that does not fit into the socket buffer,
+ * so a message size well below the socket buffer size lets us serialize the
+ * next message while the client processes the previous one.
  */
-#define TRANSMIT_MESSAGE_SIZE_THRESHOLD (1024*1024)
+#define TRANSMIT_MESSAGE_SIZE_THRESHOLD (64*1024)
 
 /* format options */
 #define TRANSMIT_NULL_STRING "\\N"
