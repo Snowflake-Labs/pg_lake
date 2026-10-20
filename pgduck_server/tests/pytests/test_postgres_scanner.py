@@ -401,8 +401,12 @@ def pg_tables(postgres):
     # the reader can read the parent but not its partitions
     cur.execute(f"GRANT SELECT ON scanner_large_partitioned_tbl TO {SPLIT_READER_ROLE}")
     cur.execute(f"DROP ROLE IF EXISTS {COLUMN_READER_ROLE}")
-    cur.execute(f"CREATE ROLE {COLUMN_READER_ROLE} LOGIN PASSWORD '{COLUMN_READER_ROLE}'")
-    cur.execute(f"GRANT SELECT (id) ON scanner_large_partitioned_tbl TO {COLUMN_READER_ROLE}")
+    cur.execute(
+        f"CREATE ROLE {COLUMN_READER_ROLE} LOGIN PASSWORD '{COLUMN_READER_ROLE}'"
+    )
+    cur.execute(
+        f"GRANT SELECT (id) ON scanner_large_partitioned_tbl TO {COLUMN_READER_ROLE}"
+    )
 
     cur.close()
     conn.close()
