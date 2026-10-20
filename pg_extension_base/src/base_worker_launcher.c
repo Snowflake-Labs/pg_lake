@@ -3022,6 +3022,44 @@ InsertBaseWorkerRegistration(char *workerName, Oid extensionId, Oid entryPointFu
 {
 	SPI_START_EXTENSION_OWNER(PgExtensionBase);
 
+	/*
+	 * A physical fork can restore the workers table ahead of its sequence.
+	 * ShareUpdateExclusiveLock serializes registrations against each other.
+	 * It does not conflict with the RowExclusiveLock taken by DROP EXTENSION,
+	 * which locks the database starter first and would deadlock on
+	 * ExclusiveLock.
+	 *
+	 * Advance the sequence only when the next nextval() could reuse an
+	 * existing worker_id. A sequence already ahead of the table is left
+	 * alone, so a healthy sequence is not rewound and a healthy registration
+	 * does not write an extra sequence WAL record.
+	 */
+	int			lockStatus = SPI_execute("lock table " PG_EXTENSION_BASE_SCHEMA_NAME ".workers "
+										 "in share update exclusive mode",
+										 false, 0);
+
+	if (lockStatus != SPI_OK_UTILITY)
+	{
+		ereport(ERROR, (errmsg("could not lock base worker registrations")));
+	}
+
+	int			sequenceStatus = SPI_execute("select pg_catalog.setval("
+											 "'" PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq'::pg_catalog.regclass, "
+											 "pg_catalog.int8(w.max_worker_id), true) "
+											 "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers_worker_id_seq s "
+											 "cross join (select pg_catalog.max(worker_id) as max_worker_id "
+											 "from " PG_EXTENSION_BASE_SCHEMA_NAME ".workers) w "
+											 "where w.max_worker_id is not null "
+											 "and (s.last_value operator(pg_catalog.<) pg_catalog.int8(w.max_worker_id) "
+											 "or (s.last_value operator(pg_catalog.=) pg_catalog.int8(w.max_worker_id) "
+											 "and not s.is_called))",
+											 false, 0);
+
+	if (sequenceStatus != SPI_OK_SELECT)
+	{
+		ereport(ERROR, (errmsg("could not repair base worker id sequence")));
+	}
+
 	char	   *extensionName = get_extension_name(extensionId);
 
 	int			argCount = 3;
