@@ -1290,18 +1290,25 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	{
 		/*
 		 * Field IDs and partition definitions now exist, but CTAS has not
-		 * written data yet. Stage with the real schema, asking for pg_lake's
-		 * usual per-relation location so a re-created table never lands on a
-		 * dropped table's files: Polaris otherwise assigns a name-based path.
-		 * The catalog may honor it, pick its own (Nessie) or reject it, and
-		 * the location it returns is what the table uses from here on. An
-		 * explicit location is not requested: replayed DDL carries the old
-		 * relation's path. Keep the UUID in the transaction's metadata
-		 * tracker for finalization at commit.
+		 * written data yet. Stage with the real schema and a requested
+		 * location: the user's location option as given, as on other tables,
+		 * or else pg_lake's usual per-relation location, so a re-created
+		 * table never lands on a dropped table's files (Polaris otherwise
+		 * assigns a name-based path). The catalog may honor it, pick its own
+		 * (Nessie) or reject it, and the location it returns is what the
+		 * table uses from here on. Keep the UUID in the transaction's
+		 * metadata tracker for finalization at commit.
 		 */
 		char	   *requestedLocation = NULL;
 
-		if (locationOption == NULL && defaultLocationPrefix != NULL)
+		if (locationOption != NULL)
+		{
+			/* GetWritableTableLocation cleans up the separator */
+			char	   *queryArguments = "";
+
+			requestedLocation = GetWritableTableLocation(relationId, &queryArguments);
+		}
+		else if (defaultLocationPrefix != NULL)
 		{
 			requestedLocation =
 				psprintf("%s/%s/%s/%s/%u", defaultLocationPrefix,
@@ -1333,6 +1340,14 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			StartStageRestCatalogIcebergTableCreate(relationId,
 													GetDataFileSchemaForTable(relationId),
 													requestedLocation);
+
+		if (locationOption != NULL &&
+			strcmp(StripTrailingSlash(staged.location, false),
+				   StripTrailingSlash(requestedLocation, false)) != 0)
+			ereport(NOTICE,
+					(errmsg("REST catalog assigned location \"%s\" instead of the requested \"%s\"",
+							staged.location, requestedLocation),
+					 errdetail("The table uses the location assigned by the catalog.")));
 
 		SetIcebergTableLocationOption(relationId, staged.location);
 		RecordRestCatalogStagedTable(relationId, staged.uuid);

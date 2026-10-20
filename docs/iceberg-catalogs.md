@@ -346,9 +346,11 @@ requested under the namespace location instead. The catalog must return a table 
 and pg_lake uses the returned location for both data and metadata. Polaris and
 Lakekeeper keep the requested location; Nessie assigns its own; a catalog that rejects
 the location fails the
-`CREATE TABLE`. Without a prefix, the catalog chooses the location. A `location`
-included in replayed DDL is not requested; the table gets a new location instead, and
-this does not attach or restore data from the old one. Existing tables retain their
+`CREATE TABLE`. Without a prefix, the catalog chooses the location. An explicit
+`location` option, including one in replayed DDL, is requested as given; if the
+catalog assigns a different location, pg_lake reports it with a NOTICE and uses the
+catalog's. As for other Iceberg tables, the requested location must be empty, so
+replaying DDL whose old location still holds files fails. Existing tables retain their
 storage locations.
 
 Storage access must be configured directly or supplied through catalog-vended credentials.

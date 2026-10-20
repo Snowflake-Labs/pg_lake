@@ -273,7 +273,10 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	appendStringInfoChar(body, '[');	/* start updates array */
 	appendStringInfoChar(body, '{');	/* start updates element */
 
-	Assert(stagedUuid != NULL);
+	if (stagedUuid == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("no staged REST catalog table UUID for relation %u", relationId)));
 	appendJsonString(body, "action", "assign-uuid");
 	appendStringInfoChar(body, ',');
 	appendJsonString(body, "uuid", stagedUuid);

@@ -641,10 +641,16 @@ def test_catalog_location_uuid_and_schema_used_for_create(
     _create_server(superuser_conn, "wp_stage", mock.endpoint, "first")
     run_command("ALTER SERVER wp_stage OPTIONS (DROP location_prefix)", superuser_conn)
     superuser_conn.commit()
+    requested = f"s3://{TEST_BUCKET}/client-location"
     run_command(
         f"CREATE TABLE {SCHEMA}.staged (id int, labels text[]) USING iceberg "
-        f"WITH (catalog='wp_stage', location='s3://{TEST_BUCKET}/ignored-client-location')",
+        f"WITH (catalog='wp_stage', location='{requested}')",
         superuser_conn,
+    )
+    # The mock assigns its own location, so the user is told.
+    assert any(
+        "instead of the requested" in notice and requested in notice
+        for notice in superuser_conn.notices
     )
     superuser_conn.commit()
     assert _table_option(superuser_conn, "staged", "location") == location
@@ -654,7 +660,7 @@ def test_catalog_location_uuid_and_schema_used_for_create(
         if path.endswith("/tables")
     )
     assert stage["stage-create"] is True
-    assert "location" not in stage
+    assert stage["location"] == requested
     assert [field["name"] for field in stage["schema"]["fields"]] == ["id", "labels"]
     assert stage["schema"]["fields"][1]["type"]["type"] == "list"
     final = next(
@@ -761,3 +767,32 @@ def test_requested_location_stays_under_namespace_location(
     )
     assert stage["location"] == expected
     assert _table_option(superuser_conn, "nsloc", "location") == expected
+
+
+def test_explicit_location_is_requested_and_kept(
+    installcheck, superuser_conn, writable_schema, mock_catalog
+):
+    """An explicit location is requested as given, as on main; a catalog that
+    honors it keeps it, with no NOTICE."""
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog(honor_location=True)
+    writable_schema.append("wp_explicit")
+    _create_server(superuser_conn, "wp_explicit", mock.endpoint, "first")
+    superuser_conn.commit()
+    requested = f"s3://{TEST_BUCKET}/explicit/{uuid.uuid4()}"
+    del superuser_conn.notices[:]
+    run_command(
+        f"CREATE TABLE {SCHEMA}.explicit (id int) USING iceberg "
+        f"WITH (catalog='wp_explicit', location='{requested}/')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    assert not any("instead of the requested" in n for n in superuser_conn.notices)
+    stage = next(
+        body
+        for (_, path), body in zip(mock.requests, mock.bodies)
+        if path.endswith("/tables")
+    )
+    assert stage["location"] == requested
+    assert _table_option(superuser_conn, "explicit", "location") == requested
