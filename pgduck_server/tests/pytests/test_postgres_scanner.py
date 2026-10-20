@@ -38,16 +38,17 @@ def _scan(table, schema="public"):
 
 
 SPLIT_READER_ROLE = "scanner_split_reader"
+COLUMN_READER_ROLE = "scanner_column_reader"
 
 
-def _scan_as_split_reader(table, schema="public"):
+def _scan_as_split_reader(table, schema="public", role=SPLIT_READER_ROLE):
     """Scan as a role without superuser, so grants and row level security apply."""
     connstr = (
         f"host={server_params.PG_HOST} "
         f"port={server_params.PG_PORT} "
         f"dbname={server_params.PG_DATABASE} "
-        f"user={SPLIT_READER_ROLE} "
-        f"password={SPLIT_READER_ROLE}"
+        f"user={role} "
+        f"password={role}"
     )
     return f"postgres_scan('{connstr}', '{schema}', '{table}')"
 
@@ -399,6 +400,9 @@ def pg_tables(postgres):
     )
     # the reader can read the parent but not its partitions
     cur.execute(f"GRANT SELECT ON scanner_large_partitioned_tbl TO {SPLIT_READER_ROLE}")
+    cur.execute(f"DROP ROLE IF EXISTS {COLUMN_READER_ROLE}")
+    cur.execute(f"CREATE ROLE {COLUMN_READER_ROLE} LOGIN PASSWORD '{COLUMN_READER_ROLE}'")
+    cur.execute(f"GRANT SELECT (id) ON scanner_large_partitioned_tbl TO {COLUMN_READER_ROLE}")
 
     cur.close()
     conn.close()
@@ -441,6 +445,7 @@ def pg_tables(postgres):
     cur.execute("DROP TABLE IF EXISTS scanner_large_partitioned_tbl CASCADE")
     cur.execute("DROP TABLE IF EXISTS scanner_rls_partitioned_tbl CASCADE")
     cur.execute(f"DROP ROLE IF EXISTS {SPLIT_READER_ROLE}")
+    cur.execute(f"DROP ROLE IF EXISTS {COLUMN_READER_ROLE}")
     cur.close()
     conn.close()
 
@@ -1180,6 +1185,22 @@ def test_partitioned_table_parent_grant_only(pg_tables, pgduck_conn):
     try:
         result_rows = perform_query_on_cursor(
             f"SELECT count(*), min(id), max(id) FROM {scan_query}",
+            pgduck_conn,
+        )
+        assert result_rows == [(9999, 1, 9999)]
+    finally:
+        perform_query_on_cursor("RESET pg_pages_per_task", pgduck_conn)
+
+
+def test_partitioned_table_column_grant(pg_tables, pgduck_conn):
+    """A role granted SELECT on one column of the parent can scan that column."""
+    scan_query = _scan_as_split_reader(
+        "scanner_large_partitioned_tbl", role=COLUMN_READER_ROLE
+    )
+    perform_query_on_cursor("SET pg_pages_per_task = 5", pgduck_conn)
+    try:
+        result_rows = perform_query_on_cursor(
+            f"SELECT count(*), min(id), max(id) FROM (SELECT id FROM {scan_query})",
             pgduck_conn,
         )
         assert result_rows == [(9999, 1, 9999)]

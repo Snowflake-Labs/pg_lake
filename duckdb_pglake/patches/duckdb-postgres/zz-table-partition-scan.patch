@@ -68,7 +68,7 @@ index 2b4157b..934e2ea 100644
  protected:
  	void LoadEntries(ClientContext &context, PostgresTransaction &transaction) override;
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index b8b92b2..e57ea9c 100644
+index b8b92b2..070d01f 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
 @@ -47,6 +47,15 @@ struct PostgresGlobalState : public GlobalTableFunctionState {
@@ -158,7 +158,7 @@ index b8b92b2..e57ea9c 100644
  	} else {
  		query = StringUtil::Format(R"(SELECT %s FROM %s.%s %s%s)", col_names,
  		                           KeywordHelper::WriteQuoted(bind_data->schema_name, '"'),
-@@ -400,6 +428,87 @@ static void PostgresScanConnect(ClientContext &context, PostgresConnection &conn
+@@ -400,6 +428,101 @@ static void PostgresScanConnect(ClientContext &context, PostgresConnection &conn
  	}
  }
  
@@ -212,9 +212,23 @@ index b8b92b2..e57ea9c 100644
 +			}
 +		}
 +	}
-+	auto query = PostgresTableSet::GetScanMembersQuery(bind_data.schema_name, bind_data.table_name, filter_columns,
-+	                                                   bind_data.version.major_v >= 10);
-+	auto result = gstate.GetConnection().Query(context, query);
++  auto &con = gstate.GetConnection();
++  auto parent_name = KeywordHelper::WriteQuoted(bind_data.schema_name, '"') + "." +
++                     KeywordHelper::WriteQuoted(bind_data.table_name, '"');
++  auto privilege = con.Query(
++      context, "SELECT has_table_privilege(" + KeywordHelper::WriteQuoted(parent_name, '\'') + ", 'SELECT')");
++  if (!privilege->GetBool(0, 0)) {
++    // with only column grants, ctid quals fail: query the parent once
++    gstate.max_threads = 1;
++    return;
++  }
++  if (bind_data.use_transaction) {
++    // locks the members too, so DROP or TRUNCATE of a member waits for the scan
++    con.Execute(context, "LOCK TABLE " + parent_name + " IN ACCESS SHARE MODE");
++  }
++  auto query = PostgresTableSet::GetScanMembersQuery(bind_data.schema_name, bind_data.table_name, filter_columns,
++                                                     bind_data.version.major_v >= 10);
++  auto result = con.Query(context, query);
 +	if (result->Count() == 0) {
 +		// a partitioned table without partitions (or a table dropped since bind): let the parent query decide
 +		gstate.max_threads = 1;
@@ -246,7 +260,7 @@ index b8b92b2..e57ea9c 100644
  static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContext &context,
                                                                      TableFunctionInitInput &input) {
  	auto &bind_data = input.bind_data->Cast<PostgresBindData>();
-@@ -421,6 +530,10 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
+@@ -421,6 +544,10 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
  		}
  		result->SetConnection(std::move(con));
  	}
@@ -257,7 +271,7 @@ index b8b92b2..e57ea9c 100644
  	if (bind_data.requires_materialization) {
  		// if requires_materialization is enabled we scan and materialize the table in its entirety up-front
  		vector<LogicalType> types;
-@@ -448,6 +561,11 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
+@@ -448,6 +575,11 @@ static unique_ptr<GlobalTableFunctionState> PostgresInitGlobalState(ClientContex
  	} else {
  		// we create a transaction here, and get the snapshot id to enable transaction-safe parallelism
  		PostgresGetSnapshot(context, bind_data.version, bind_data, *result);
@@ -269,7 +283,7 @@ index b8b92b2..e57ea9c 100644
  	}
  	return std::move(result);
  }
-@@ -459,14 +577,46 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
+@@ -459,14 +591,46 @@ static bool PostgresParallelStateNext(ClientContext &context, const FunctionData
  
  	lock_guard<mutex> parallel_lock(gstate.lock);
  	lstate.batch_idx = gstate.batch_idx++;
@@ -319,7 +333,7 @@ index b8b92b2..e57ea9c 100644
  		gstate.page_idx = page_max;
  		return true;
  	}
-@@ -529,8 +679,8 @@ static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context,
+@@ -529,8 +693,8 @@ static unique_ptr<LocalTableFunctionState> GetLocalState(ClientContext &context,
  		local_state->no_connection = true;
  		return std::move(local_state);
  	}
@@ -330,7 +344,7 @@ index b8b92b2..e57ea9c 100644
  		lock_guard<mutex> parallel_lock(gstate.lock);
  		gstate.page_idx = POSTGRES_TID_MAX;
  	} else if (!PostgresParallelStateNext(context, input.bind_data.get(), *local_state, gstate)) {
-@@ -642,7 +792,18 @@ double PostgresScanProgress(ClientContext &context, const FunctionData *bind_dat
+@@ -642,7 +806,18 @@ double PostgresScanProgress(ClientContext &context, const FunctionData *bind_dat
  	auto &gstate = global_state->Cast<PostgresGlobalState>();
  
  	lock_guard<mutex> parallel_lock(gstate.lock);
