@@ -773,6 +773,35 @@ def test_metadata_fetch(
     assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
     superuser_conn.commit()
 
+    # a volatile function takes a new snapshot for every query it runs, so
+    # each call asks the catalog again, while the queries of a STABLE function
+    # read with the snapshot of the query that calls it and share its answer
+    for volatility, expected_fetches in [("VOLATILE", 3), ("STABLE", 1)]:
+        run_command(
+            f"""
+                CREATE OR REPLACE FUNCTION "{catalog_namespace_name}_pg".row_count()
+                RETURNS bigint {volatility} LANGUAGE plpgsql AS $$ BEGIN
+                    RETURN (SELECT count(*) FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg");
+                END; $$
+                 """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        superuser_conn.notices.clear()
+        res = run_query(
+            f"""
+                SELECT "{catalog_namespace_name}_pg".row_count() FROM generate_series(1, 3)
+                 """,
+            superuser_conn,
+        )
+        assert [row[0] for row in res] == [5, 5, 5]
+        assert (
+            _count_catalog_fetches(superuser_conn, catalog_namespace_name)
+            == expected_fetches
+        ), volatility
+        superuser_conn.commit()
+
     # now, the same test with REPEATABLE READ and SERIALIZABLE
     tx_mode = ["REPEATABLE READ", "SERIALIZABLE"]
     for isolation_level in tx_mode:
