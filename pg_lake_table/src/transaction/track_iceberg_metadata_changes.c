@@ -50,6 +50,8 @@
 #include "pg_extension_base/spi_helpers.h"
 #include "executor/spi.h"
 #include "commands/defrem.h"
+#include "nodes/makefuncs.h"
+#include "catalog/namespace.h"
 #include "foreign/foreign.h"
 #include "utils/builtins.h"
 
@@ -1474,13 +1476,11 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 							  List *allTransforms)
 {
 	/*
-	 * A transaction that did not remove data files or TRUNCATE can build its
-	 * commit operations from the per-tx tracking tables (added file ids and,
-	 * once remove tracking lands, removed file paths) instead of diffing the
-	 * full catalog against the last pushed metadata.
+	 * A transaction that did not TRUNCATE can build its commit operations
+	 * from the per-tx tracking tables instead of diffing the full catalog
+	 * against the last pushed metadata.
 	 */
 	if (EnableCatalogCommitFastPath &&
-		!opTracker->relationDataFileRemoveSeen &&
 		!opTracker->relationDataFilesRemoveAllSeen)
 		return GetTrackedDataFileMetadataOperations(opTracker, allTransforms);
 
@@ -1588,7 +1588,6 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 
 	List	   *metadataOperations = NIL;
 
-	/* create operations for added files */
 	ListCell   *addedFileCell = NULL;
 
 	foreach(addedFileCell, addedFiles)
@@ -1599,7 +1598,6 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 									 CopyAddDataFileOperation(addedFile));
 	}
 
-	/* create operations for removed files */
 	ListCell   *removedFileCell = NULL;
 
 	foreach(removedFileCell, removedFilePaths)
@@ -1632,10 +1630,8 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
  *
  * Added files come from the tx_data_file_ids temp table (populated by the bulk
  * add path). Removed files come from the tx_removed_file_paths temp table
- * (populated by RemoveDataFileFromTable). Transient files (added and removed
- * in the same transaction) are excluded: added files are filtered by a JOIN to
- * the catalog (removed rows are gone), and removed paths are filtered by
- * excluding any path that also appears in tx_data_file_ids.
+ * (populated by RemoveDataFileFromTable). A file added and removed in the same
+ * transaction is in neither, since its removal deletes its tracked id.
  */
 static List *
 GetTrackedDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
@@ -1679,39 +1675,42 @@ GetTrackedDataFileMetadataOperations(const TableMetadataOperationTracker * opTra
 	DeleteInProgressAddedFiles(opTracker->relationId, addedFiles);
 
 	/*
-	 * Read removed file paths from the tracking temp table, excluding any
-	 * path that was also added in this transaction (transient files that were
-	 * written and then rewritten/deleted within the same tx).
+	 * RemoveDataFileFromTable creates the removal table before writing to it,
+	 * so if it does not exist (or went away with a rolled-back savepoint)
+	 * nothing was removed.
 	 */
 	List	   *removedFilePaths = NIL;
+	RangeVar   *removedFilesTable = makeRangeVar("pg_temp",
+												 "pg_lake_tx_removed_file_paths", -1);
 
-	if (opTracker->relationDataFileRemoveSeen)
+	if (opTracker->relationDataFileRemoveSeen &&
+		OidIsValid(RangeVarGetRelid(removedFilesTable, NoLock, true)))
 	{
-		CreateTxRemovedFilePathsTempTableIfNotExists();
-		CreateTxDataFileIdsTempTableIfNotExists();
-
 		char	   *removeQuery =
-			"SELECT r.path FROM " TX_REMOVED_FILE_PATHS_TABLE_NAME " r "
-			"WHERE NOT EXISTS ("
-			"  SELECT 1 FROM " TX_DATA_FILES_TABLE_NAME " a "
-			"  WHERE a.path OPERATOR(pg_catalog.=) r.path"
-			")";
+			"select path from " TX_REMOVED_FILE_PATHS_TABLE_NAME " "
+			"where table_name OPERATOR(pg_catalog.=) $1";
+
+		DECLARE_SPI_ARGS(1);
+		SPI_ARG_VALUE(1, OIDOID, opTracker->relationId, false);
 
 		SPI_START_EXTENSION_OWNER(PgLakeTable);
 
 		bool		readOnly = true;
 
-		SPI_execute(removeQuery, readOnly, 0);
+		SPI_EXECUTE(removeQuery, readOnly);
+
+		/* SPI_END frees SPI's context, so build the list in ours */
+		MemoryContext spiContext = MemoryContextSwitchTo(catalogContext);
 
 		for (uint64 rowIndex = 0; rowIndex < SPI_processed; rowIndex++)
 		{
 			bool		isNull = false;
-			Datum		pathDatum = GET_SPI_DATUM(rowIndex, 1, &isNull);
 
-			Assert(!isNull);
 			removedFilePaths = lappend(removedFilePaths,
-									   TextDatumGetCString(pathDatum));
+									   GET_SPI_VALUE(TEXTOID, rowIndex, 1, &isNull));
 		}
+
+		MemoryContextSwitchTo(spiContext);
 
 		SPI_END();
 	}
@@ -1793,7 +1792,6 @@ AssertTrackedOperationsMatchDiff(const TableMetadataOperationTracker * opTracker
 
 	FindChangedFilesSinceMetadata(opTracker, currentFilesMap, &addedFiles, &removedFilePaths);
 
-	/* count adds and removes in the tracked operations */
 	int			trackedAdds = 0;
 	int			trackedRemoves = 0;
 	HTAB	   *trackedAddPaths = CreateFilesHash();

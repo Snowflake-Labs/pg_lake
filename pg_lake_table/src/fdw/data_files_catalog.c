@@ -85,7 +85,6 @@ static void AddNewRowIdMapping(Oid relationId, const char *path, List *rowIdRang
 static int64 GetFileIdForPath(Oid relatoinId, const char *path);
 static void UpdateDeletedRowCount(Oid relationId, const char *path, int64 deletedRowCount);
 static void RemoveDataFileFromTable(Oid relationId, const char *path);
-static void TrackRemovedPaths(Datum *pathDatums, int count);
 static void RemoveAllDataFilesFromCatalog(Oid relationId);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
@@ -1180,10 +1179,10 @@ RemoveDataFileFromTable(Oid relationId, const char *path)
 	 * mappings. We return these deletion files to the caller as metadata
 	 * operation.
 	 *
-	 * The outer DELETE returns the paths of cascaded deletion-file removals.
-	 * Together with $2 (the data file path), these are all the paths the
-	 * catalog-based commit fast path needs to emit DATA_FILE_REMOVE
-	 * operations without reading the last pushed metadata.
+	 * The same statement records the removals for the catalog-based commit
+	 * fast path: a removed file this transaction added is dropped from the
+	 * added-file tracking table, any other removed file is recorded in the
+	 * removed-file tracking table.
 	 *
 	 * Note: We do have an ON CASCADE DELETE foreign key from
 	 * deletion_file_map to files, so step 1 would happen automatically in
@@ -1205,20 +1204,43 @@ RemoveDataFileFromTable(Oid relationId, const char *path)
 		" where table_name OPERATOR(pg_catalog.=) $1"
 		" and path OPERATOR(pg_catalog.=) $2"
 		" returning path, id"
-		") "
+		"), "
 	/* delete affected deletion files that have no other mappings */
-		"delete from " DATA_FILES_TABLE_QUALIFIED " "
-		"using (select distinct path as deletion_file_path from deletion_files) maps "
-		"where table_name OPERATOR(pg_catalog.=) $1 "
-		"and path = deletion_file_path "
+		"removed_deletion_files as ("
+		" delete from " DATA_FILES_TABLE_QUALIFIED
+		" using (select distinct path as deletion_file_path from deletion_files) maps"
+		" where table_name OPERATOR(pg_catalog.=) $1"
+		" and path = deletion_file_path"
 
 	/* check for mappings that DO NOT point to the data file path */
-		"and not exists ("
-		" select 1 from " DELETION_FILE_MAP_TABLE
-		" where table_name OPERATOR(pg_catalog.=) $1"
-		" and deleted_from OPERATOR(pg_catalog.<>) $2"
-		" and path OPERATOR(pg_catalog.=) deletion_file_path"
+		" and not exists ("
+		"  select 1 from " DELETION_FILE_MAP_TABLE
+		"  where table_name OPERATOR(pg_catalog.=) $1"
+		"  and deleted_from OPERATOR(pg_catalog.<>) $2"
+		"  and path OPERATOR(pg_catalog.=) deletion_file_path"
+		" )"
+		" returning path, id"
+		"), "
+		"removed as ("
+		" select path, id from files"
+		" union all"
+		" select path, id from removed_deletion_files"
+		"), "
+	/* files added in this transaction cancel out */
+		"untracked_adds as ("
+		" delete from " TX_DATA_FILES_TABLE_NAME " a"
+		" using removed r"
+		" where a.id OPERATOR(pg_catalog.=) r.id"
+		" returning a.id"
+		") "
+		"insert into " TX_REMOVED_FILE_PATHS_TABLE_NAME " (table_name, path) "
+		"select $1, r.path from removed r "
+		"where not exists ("
+		" select 1 from untracked_adds u where u.id OPERATOR(pg_catalog.=) r.id"
 		")";
+
+	CreateTxDataFileIdsTempTableIfNotExists();
+	CreateTxRemovedFilePathsTempTableIfNotExists();
 
 	DECLARE_SPI_ARGS(2);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
@@ -1233,26 +1255,6 @@ RemoveDataFileFromTable(Oid relationId, const char *path)
 
 	SPI_END();
 
-	/* TODO: track removed paths in a follow-up */
-}
-
-
-static void
-TrackRemovedPaths(Datum *pathDatums, int count)
-{
-	ArrayType  *pathArray = MakeArrayFromDatums(pathDatums, NULL,
-												count, TEXTOID);
-
-	char	   *insertQuery =
-		"INSERT INTO " TX_REMOVED_FILE_PATHS_TABLE_NAME " (path) "
-		"SELECT path FROM pg_catalog.unnest($1) AS t(path)";
-
-	DECLARE_SPI_ARGS(1);
-	SPI_ARG_VALUE(1, TEXTARRAYOID, pathArray, false);
-
-	SPI_START_EXTENSION_OWNER(PgLakeTable);
-	SPI_EXECUTE(insertQuery, /* readOnly = */ false);
-	SPI_END();
 }
 
 

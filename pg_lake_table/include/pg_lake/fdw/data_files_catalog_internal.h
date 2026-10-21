@@ -35,14 +35,16 @@
  * automatically scoped to a single top-level transaction.
  *
  * TX_DATA_FILES_TABLE_NAME: populated unconditionally by the bulk add path
- * with the (id, path) of every data or position-delete file the transaction
- * added. Read by GetTableDataFilesHashFromCatalog's newFilesOnly predicate
+ * with the id of every data or position-delete file the transaction added. Read by GetTableDataFilesHashFromCatalog's newFilesOnly predicate
  * (data_files_catalog.c) and by the catalog-based commit path
  * (track_iceberg_metadata_changes.c); written by data_files_catalog_batch.c.
  *
  * TX_REMOVED_FILE_PATHS_TABLE_NAME: populated by RemoveDataFileFromTable
- * with the path of every file the transaction removed (including cascaded
- * deletion-file removals). Read by the catalog-based commit path.
+ * with the (table_name, path) of every file the transaction removed that it
+ * did not also add, including cascaded deletion-file removals. Removing a
+ * file this transaction added deletes its id from TX_DATA_FILES_TABLE_NAME
+ * instead, so transient files cancel out. Read by the catalog-based commit
+ * path.
  *
  * Both are session temp tables that live in pg_temp. We schema-qualify so
  * the reference is unambiguous under SPI_START_EXTENSION_OWNER's locked-down

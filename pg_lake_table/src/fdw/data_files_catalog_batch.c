@@ -87,7 +87,7 @@ static void ExecInsertDataFilePartitionValues(Oid relationId,
 											  ArrayType *valueArray);
 static bool AddOpHasPartitionValues(TableMetadataOperation * operation);
 static void BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId);
-static void ExecInsertTrackedFileIds(ArrayType *fileIdArray, ArrayType *filePathArray);
+static void ExecInsertTrackedFileIds(ArrayType *fileIdArray);
 static void SuppressNoticeAndCreateTempTable(const char *query);
 #ifdef USE_ASSERT_CHECKING
 static void AssertAllOpsAreType(List *ops, TableMetadataOperationType type);
@@ -614,7 +614,7 @@ BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 {
 	int			fileCount = list_length(addOps);
 	Datum	   *fileIdDatums = palloc(sizeof(Datum) * fileCount);
-	Datum	   *filePathDatums = palloc(sizeof(Datum) * fileCount);
+
 	int			trackedFileCount = 0;
 	ListCell   *operationCell = NULL;
 
@@ -626,9 +626,7 @@ BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 			PathHashSearch(pathToFileId, operation->path, HASH_FIND, NULL);
 
 		Assert(entry != NULL);
-		fileIdDatums[trackedFileCount] = Int64GetDatum(entry->fileId);
-		filePathDatums[trackedFileCount] = CStringGetTextDatum(operation->path);
-		trackedFileCount++;
+		fileIdDatums[trackedFileCount++] = Int64GetDatum(entry->fileId);
 	}
 
 	Assert(trackedFileCount == fileCount);
@@ -637,27 +635,22 @@ BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 
 	ArrayType  *fileIdArray = MakeArrayFromDatums(fileIdDatums, NULL,
 												  trackedFileCount, INT8OID);
-	ArrayType  *filePathArray = MakeArrayFromDatums(filePathDatums, NULL,
-													trackedFileCount, TEXTOID);
 
-	ExecInsertTrackedFileIds(fileIdArray, filePathArray);
+
+	ExecInsertTrackedFileIds(fileIdArray);
 }
 
 
 /* INSERT into the tx-scoped temp table via unnest. */
 static void
-ExecInsertTrackedFileIds(ArrayType *fileIdArray, ArrayType *filePathArray)
+ExecInsertTrackedFileIds(ArrayType *fileIdArray)
 {
 	char	   *query =
-		"INSERT INTO " TX_DATA_FILES_TABLE_NAME " (id, path) "
-		"SELECT * FROM ROWS FROM ("
-		"pg_catalog.unnest($1::bigint[]), "
-		"pg_catalog.unnest($2::text[])"
-		") AS t(id, path)";
+		"INSERT INTO " TX_DATA_FILES_TABLE_NAME " (id) "
+		"SELECT id FROM pg_catalog.unnest($1) AS t(id)";
 
-	DECLARE_SPI_ARGS(2);
+	DECLARE_SPI_ARGS(1);
 	SPI_ARG_VALUE(1, INT8ARRAYOID, fileIdArray, false);
-	SPI_ARG_VALUE(2, TEXTARRAYOID, filePathArray, false);
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 	SPI_EXECUTE(query, /* readOnly = */ false);
@@ -684,7 +677,7 @@ CreateTxDataFileIdsTempTableIfNotExists(void)
 {
 	const char *query =
 		"CREATE TEMPORARY TABLE IF NOT EXISTS " TX_DATA_FILES_TABLE_NAME " "
-		"(id bigint PRIMARY KEY, path text NOT NULL DEFAULT '') "
+		"(id bigint PRIMARY KEY) "
 		"USING heap ON COMMIT DELETE ROWS";
 
 	SuppressNoticeAndCreateTempTable(query);
@@ -695,7 +688,8 @@ CreateTxRemovedFilePathsTempTableIfNotExists(void)
 {
 	const char *query =
 		"create temporary table if not exists " TX_REMOVED_FILE_PATHS_TABLE_NAME " "
-		"(path text not null) USING heap ON COMMIT DELETE ROWS;";
+		"(table_name oid not null, path text not null) "
+		"USING heap ON COMMIT DELETE ROWS;";
 
 	SuppressNoticeAndCreateTempTable(query);
 }

@@ -197,10 +197,8 @@ _PG_init(void)
 
 	DefineCustomBoolVariable("pg_lake_table.enable_catalog_commit_fast_path",
 							 "Builds pre-commit Iceberg metadata operations from the "
-							 "per-tx tracking tables (added file ids, removed file "
-							 "paths) instead of diffing every file of the table "
-							 "against the last pushed metadata. Only falls back to "
-							 "the diff for TRUNCATE. Disable to always run the diff.",
+							 "per-tx tracked file changes instead of diffing every "
+							 "file of the table against the last pushed metadata.",
 							 NULL,
 							 &EnableCatalogCommitFastPath,
 							 true,
