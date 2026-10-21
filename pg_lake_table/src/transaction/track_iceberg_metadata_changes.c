@@ -1695,7 +1695,8 @@ GetTrackedDataFileMetadataOperations(const TableMetadataOperationTracker * opTra
 
 		SPI_START_EXTENSION_OWNER(PgLakeTable);
 
-		bool		readOnly = true;
+		/* not read-only, so we get a snapshot that sees this command's writes */
+		bool		readOnly = false;
 
 		SPI_EXECUTE(removeQuery, readOnly);
 
