@@ -288,7 +288,7 @@ def test_cache_worker_survives_pgduck_down(
         )
         superuser_conn.commit()
 
-        deadline = time.time() + 10
+        deadline = time.time() + 25
         while not cached_path.exists() and time.time() < deadline:
             time.sleep(0.05)
 

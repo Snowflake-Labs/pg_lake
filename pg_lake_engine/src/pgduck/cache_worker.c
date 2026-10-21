@@ -47,7 +47,7 @@
 #define QUERY_ENGINE_STARTUP_GRACE_MS (60000)
 
 /* how often to retry while the query engine is unreachable */
-#define QUERY_ENGINE_RETRY_INTERVAL_MS (1000)
+#define QUERY_ENGINE_RETRY_INTERVAL_MS (10000)
 
 
 typedef enum ManageCacheResult
