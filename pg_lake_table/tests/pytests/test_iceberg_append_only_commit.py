@@ -1,11 +1,10 @@
 """
-Tests for the commit path of a transaction that only added data files.
+Tests for the catalog-based commit path.
 
-A transaction that removed nothing does not need the diff against the last
-pushed metadata: the files it added are the ones the catalog recorded for it.
-These tests check that such a commit really does skip the diff, that a
-transaction which removed something still runs it, and that the files of every
-write shape end up in the metadata either way.
+A transaction that did not TRUNCATE does not need the diff against the last
+pushed metadata: the files it added and removed are the ones the catalog
+recorded for it. These tests check that such a commit really does skip the
+diff, and that the files of every write shape end up in the metadata.
 """
 
 import pytest
@@ -92,7 +91,7 @@ def assert_iceberg_metadata_matches_storage(pg_conn, s3, table_namespace, table_
       flush_deletion_queue runs
 
     Skipping either leaves a file in storage that pg_lake has already
-    written off, which reads as a bug in the append-only path but is not
+    written off, which reads as a bug in the catalog commit path but is not
     one: it is the same lag any multi-commit test hits.
     """
 
@@ -139,15 +138,13 @@ def test_append_only_commit_skips_the_diff(
     )
 
 
-def test_commit_with_a_delete_runs_the_diff(
+def test_commit_with_a_delete_skips_the_diff(
     s3,
     pg_conn,
     extension,
     create_iceberg_table,
     create_injection_extension,
 ):
-    """Control for the test above: a commit that removed a file still diffs."""
-
     # injection points only supported with 17+
     if get_pg_version_num(pg_conn) < 170000:
         return
@@ -158,33 +155,61 @@ def test_commit_with_a_delete_runs_the_diff(
     run_command(
         f"INSERT INTO {qualified_name} SELECT i FROM generate_series(1,10)i", pg_conn
     )
+    run_command(
+        f"INSERT INTO {qualified_name} SELECT i FROM generate_series(11,20)i", pg_conn
+    )
     pg_conn.commit()
 
     error_on_data_file_diff(pg_conn)
 
-    # deletes every row, so the data file is removed rather than kept with a
-    # delete file next to it, whichever way the planner would go on a subset
-    run_command(f"DELETE FROM {qualified_name}", pg_conn)
+    # deletes every row of one file, so the data file is removed rather than
+    # kept with a delete file next to it
+    run_command(f"DELETE FROM {qualified_name} WHERE id <= 10", pg_conn)
 
-    error = run_command("COMMIT;", pg_conn, raise_error=False)
-    assert error is not None
-    assert DIFF_INJECTION_POINT in error
+    assert run_command("COMMIT;", pg_conn, raise_error=False) is None
+    detach_data_file_diff_injection(pg_conn)
 
-    run_command(
-        f"SELECT public.injection_points_detach('{DIFF_INJECTION_POINT}');",
-        pg_conn,
-    )
-    pg_conn.commit()
-
-    # the failed commit left the table as it was, and the delete works now
     assert run_query(f"SELECT count(*) FROM {qualified_name}", pg_conn)[0][0] == 10
-
-    run_command(f"DELETE FROM {qualified_name}", pg_conn)
-    pg_conn.commit()
-
-    assert run_query(f"SELECT count(*) FROM {qualified_name}", pg_conn)[0][0] == 0
     assert_iceberg_metadata_matches_storage(
         pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
+    )
+
+
+def test_deletes_on_two_tables_in_one_transaction(
+    s3,
+    pg_conn,
+    extension,
+    create_iceberg_table,
+):
+    """Each table's commit only removes that table's files."""
+
+    table_name = create_iceberg_table
+    first_table = f"{TEST_TABLE_NAMESPACE}.{table_name}"
+    second_table = f"{TEST_TABLE_NAMESPACE}.{table_name}_second"
+
+    run_command(
+        f"""
+      CREATE TABLE {second_table} (id int) USING pg_lake_iceberg;
+      ALTER FOREIGN TABLE {second_table} OPTIONS (ADD autovacuum_enabled 'false');
+        """,
+        pg_conn,
+    )
+    for qualified_name in [first_table, second_table]:
+        run_command(f"INSERT INTO {qualified_name} VALUES (1)", pg_conn)
+        run_command(f"INSERT INTO {qualified_name} VALUES (2)", pg_conn)
+    pg_conn.commit()
+
+    run_command(f"DELETE FROM {first_table} WHERE id = 1", pg_conn)
+    run_command(f"DELETE FROM {second_table} WHERE id = 2", pg_conn)
+    pg_conn.commit()
+
+    assert run_query(f"SELECT id FROM {first_table}", pg_conn) == [[2]]
+    assert run_query(f"SELECT id FROM {second_table}", pg_conn) == [[1]]
+    assert_iceberg_metadata_matches_storage(
+        pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
+    )
+    assert_iceberg_metadata_matches_storage(
+        pg_conn, s3, TEST_TABLE_NAMESPACE, f"{table_name}_second"
     )
 
 
@@ -197,7 +222,7 @@ def test_merge_on_read_delete_takes_the_append_only_path(
 ):
     """A delete that stays under copy_on_write_threshold is merge-on-read: it
     adds a position-delete file and removes no data file, so it still takes
-    the append-only path. The added set has to include that delete file, not
+    the catalog commit path. The added set has to include that delete file, not
     just plain data files, or the row it marks stays visible.
     """
 
@@ -274,6 +299,14 @@ def test_every_write_shape_lands_in_metadata(
     run_command(f"INSERT INTO {qualified_name} VALUES (999)", pg_conn)
     run_command("ROLLBACK TO SAVEPOINT s1", pg_conn)
     run_command(f"INSERT INTO {qualified_name} VALUES (104)", pg_conn)
+    pg_conn.commit()
+    assert_iceberg_metadata_matches_storage(
+        pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
+    )
+
+    # a file added and removed in the same transaction is in neither set
+    run_command(f"INSERT INTO {qualified_name} VALUES (105)", pg_conn)
+    run_command(f"DELETE FROM {qualified_name} WHERE id = 105", pg_conn)
     pg_conn.commit()
     assert_iceberg_metadata_matches_storage(
         pg_conn, s3, TEST_TABLE_NAMESPACE, table_name

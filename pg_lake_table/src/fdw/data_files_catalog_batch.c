@@ -88,7 +88,7 @@ static void ExecInsertDataFilePartitionValues(Oid relationId,
 static bool AddOpHasPartitionValues(TableMetadataOperation * operation);
 static void BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId);
 static void ExecInsertTrackedFileIds(ArrayType *fileIdArray);
-static void CreateTxDataFileIdsTempTableIfNotExists(void);
+static void SuppressNoticeAndCreateTempTable(const char *query);
 #ifdef USE_ASSERT_CHECKING
 static void AssertAllOpsAreType(List *ops, TableMetadataOperationType type);
 #endif
@@ -614,6 +614,7 @@ BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 {
 	int			fileCount = list_length(addOps);
 	Datum	   *fileIdDatums = palloc(sizeof(Datum) * fileCount);
+
 	int			trackedFileCount = 0;
 	ListCell   *operationCell = NULL;
 
@@ -634,6 +635,7 @@ BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 
 	ArrayType  *fileIdArray = MakeArrayFromDatums(fileIdDatums, NULL,
 												  trackedFileCount, INT8OID);
+
 
 	ExecInsertTrackedFileIds(fileIdArray);
 }
@@ -657,26 +659,44 @@ ExecInsertTrackedFileIds(ArrayType *fileIdArray)
 
 
 /*
- * Lazily create the per-tx tracker temp table; rows are auto-dropped at COMMIT.
+ * Lazily create per-tx tracker temp tables; rows are auto-dropped at COMMIT.
  *
  * PostgreSQL forbids CREATE TEMP TABLE under SECURITY_RESTRICTED_OPERATION,
  * so we use the SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS variant which
  * omits the restricted-op flag.  The search_path lockdown stays in effect;
  * the DDL is a fixed string with no caller-supplied input.
  *
- * This runs once per session and every write after that hits the IF NOT
+ * Each runs once per session and every write after that hits the IF NOT
  * EXISTS no-op, which would otherwise put a "relation ... already exists,
  * skipping" NOTICE in front of every ordinary INSERT. Drop the message down
  * to WARNING for this one statement, the same way EnsureExtensionIsUpdated
  * quiets ALTER EXTENSION's own notice.
  */
-static void
+void
 CreateTxDataFileIdsTempTableIfNotExists(void)
 {
 	const char *query =
-		"create temporary table if not exists " TX_DATA_FILES_TABLE_NAME " "
-		"(id bigint primary key) USING heap ON COMMIT DELETE ROWS;";
+		"CREATE TEMPORARY TABLE IF NOT EXISTS " TX_DATA_FILES_TABLE_NAME " "
+		"(id bigint PRIMARY KEY) "
+		"USING heap ON COMMIT DELETE ROWS";
 
+	SuppressNoticeAndCreateTempTable(query);
+}
+
+void
+CreateTxRemovedFilePathsTempTableIfNotExists(void)
+{
+	const char *query =
+		"create temporary table if not exists " TX_REMOVED_FILE_PATHS_TABLE_NAME " "
+		"(table_name oid not null, path text not null) "
+		"USING heap ON COMMIT DELETE ROWS;";
+
+	SuppressNoticeAndCreateTempTable(query);
+}
+
+static void
+SuppressNoticeAndCreateTempTable(const char *query)
+{
 	SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS(PgLakeTable);
 
 	if (client_min_messages == NOTICE)

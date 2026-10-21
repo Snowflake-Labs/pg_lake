@@ -195,14 +195,12 @@ _PG_init(void)
 							NULL,
 							NULL);
 
-	DefineCustomBoolVariable("pg_lake_table.enable_append_only_commit_fast_path",
-							 "Builds pre-commit Iceberg metadata operations for a "
-							 "transaction that added data files and removed none "
-							 "directly from the catalog's per-tx tracked file ids, "
-							 "instead of diffing every file of the table against the "
-							 "last pushed metadata. Disable to always run the diff.",
+	DefineCustomBoolVariable("pg_lake_table.enable_catalog_commit_fast_path",
+							 "Builds pre-commit Iceberg metadata operations from the "
+							 "per-tx tracked file changes instead of diffing every "
+							 "file of the table against the last pushed metadata.",
 							 NULL,
-							 &EnableAppendOnlyCommitFastPath,
+							 &EnableCatalogCommitFastPath,
 							 true,
 							 PGC_SUSET,
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
