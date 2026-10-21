@@ -18,7 +18,7 @@
 #pragma once
 
 #include "duckdb.hpp"
-#include "s3fs.hpp"
+#include "s3/s3fs.hpp"
 #include "duckdb/main/client_context.hpp"
 
 namespace duckdb {

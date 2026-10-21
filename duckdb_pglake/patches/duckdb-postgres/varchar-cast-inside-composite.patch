@@ -24,10 +24,11 @@ An array of composites cannot be expressed this way -- the cast would have to be
 applied per element -- and that case now throws.  It used to fall through and
 scan the column untouched, which handed the binary form of the leaf to the
 varchar reader and returned junk, so an error is what it should have been.
-
+diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
+index 24428a2..2b0d6e2 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -236,6 +236,44 @@
+@@ -193,6 +193,43 @@ static bool ContainsCastToVarchar(const PostgresType &type) {
  	return false;
  }
  
@@ -37,9 +38,8 @@ varchar reader and returned junk, so an error is what it should have been.
 +// are cast.  The CASE keeps a NULL composite NULL: ROW() over the fields of a NULL
 +// composite yields a row of NULLs, and a composite whose fields are all NULL is not
 +// itself NULL, so the text cast is what tells the two apart.
-+static string BuildVarcharCastProjection(const string &expr, const LogicalType &type,
-+                                         const PostgresType &postgres_type, const string &table_name,
-+                                         const string &column_name) {
++static string BuildVarcharCastProjection(const string &expr, const LogicalType &type, const PostgresType &postgres_type,
++                                         const string &table_name, const string &column_name) {
 +	if (postgres_type.info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
 +		return expr + "::VARCHAR";
 +	}
@@ -62,7 +62,7 @@ varchar reader and returned junk, so an error is what it should have been.
 +		if (c > 0) {
 +			row_args += ", ";
 +		}
-+		auto child_expr = "(" + expr + ")." + KeywordHelper::WriteQuoted(children[c].first, '"');
++		auto child_expr = "(" + expr + ")." + KeywordHelper::WriteQuoted(children[c].first.GetIdentifierName(), '"');
 +		row_args += BuildVarcharCastProjection(child_expr, children[c].second, postgres_type.children[c], table_name,
 +		                                       column_name);
 +	}
@@ -72,7 +72,7 @@ varchar reader and returned junk, so an error is what it should have been.
  static void PostgresInitInternal(ClientContext &context, const PostgresBindData *bind_data_p,
                                   PostgresLocalState &lstate, idx_t task_min, idx_t task_max) {
  	D_ASSERT(bind_data_p);
-@@ -273,13 +311,23 @@
+@@ -230,13 +267,23 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
  				}
  				if (bind_data->postgres_types[column_id].children[0].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
  					col_names += "::VARCHAR[]";
@@ -91,9 +91,9 @@ varchar reader and returned junk, so an error is what it should have been.
 -					                              "composite column \"%s\" (type %s)",
 -					                              bind_data->table_name, bind_data->names[column_id],
 -					                              bind_data->types[column_id].ToString());
-+					auto projection = BuildVarcharCastProjection(
-+					    quoted_name, bind_data->types[column_id], bind_data->postgres_types[column_id],
-+					    bind_data->table_name, bind_data->names[column_id]);
++					auto projection = BuildVarcharCastProjection(quoted_name, bind_data->types[column_id],
++					                                             bind_data->postgres_types[column_id],
++					                                             bind_data->table_name, bind_data->names[column_id]);
 +					// replace the plain column name appended above
 +					col_names.resize(col_names.size() - quoted_name.size());
 +					col_names += projection;

@@ -20,10 +20,11 @@ comes from composite-type-resolution.patch, which is applied before this one.
 
 Note: the coordinate-wise struct/list representation is no longer reachable
 through the scanner; a caller that wants coordinates has to parse the text.
-
+diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
+index 7124d01..adf6059 100644
 --- a/src/postgres_utils.cpp
 +++ b/src/postgres_utils.cpp
-@@ -284,30 +284,17 @@
+@@ -374,30 +374,17 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
  		return LogicalType::INTERVAL;
  	} else if (pgtypename == "uuid") {
  		return LogicalType::UUID;

@@ -24,8 +24,8 @@
 #include "duckdb/common/types/blob.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httpfs.hpp"
-#include "s3fs.hpp"
+#include "http/httpfs.hpp"
+#include "s3/s3fs.hpp"
 #include "httplib.hpp"
 
 #include "pg_lake/fs/httpfs_extended.hpp"

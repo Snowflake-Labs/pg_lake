@@ -20,8 +20,8 @@
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
-#include "httpfs.hpp"
-#include "s3fs.hpp"
+#include "http/httpfs.hpp"
+#include "s3/s3fs.hpp"
 
 #include "pg_lake/fs/pg_lake_s3fs.hpp"
 
