@@ -39,6 +39,7 @@
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/string_utils.h"
 #include "libpq/libpq-be.h"
 #include "utils/builtins.h"
@@ -709,7 +710,13 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	{
 		DefElem    *def = (DefElem *) lfirst(cell);
 
-		if (!is_valid_option_pg_lake_iceberg(def->defname, catalog))
+		if (catalog == ForeignTableRelationId &&
+			GetBloomFilterOptionColumnName(def->defname) != NULL)
+		{
+			/* the column is checked once the relation exists */
+			(void) defGetBoolean(def);
+		}
+		else if (!is_valid_option_pg_lake_iceberg(def->defname, catalog))
 		{
 			/*
 			 * Unknown option specified, complain about it. Provide a hint
