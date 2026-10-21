@@ -40,17 +40,17 @@
 #include <curl/curl.h>
 
 /* 20 seconds */
-#define CONNECT_TIMEOUT_MS  20000
+#define CONNECT_TIMEOUT_MS  20000L
 
 /* 180 seconds */
-#define TOTAL_TIMEOUT_MS   180000
+#define TOTAL_TIMEOUT_MS   180000L
 
 /*
  * Cap redirect follows. Without CURLOPT_MAXREDIRS libcurl follows an
  * unbounded chain, so a looping or attacker-controlled redirect target
  * can hold the request open until the total timeout.
  */
-#define MAX_REDIRECTS 5
+#define MAX_REDIRECTS 5L
 
 
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
