@@ -19,6 +19,8 @@
 #include "fmgr.h"
 #include "funcapi.h"
 
+#include "pg_lake/copy/copy_format.h"
+#include "pg_lake/permissions/roles.h"
 #include "pg_lake/pgduck/cache_control.h"
 #include "nodes/execnodes.h"
 #include "nodes/pg_list.h"
@@ -32,12 +34,18 @@ PG_FUNCTION_INFO_V1(pg_lake_list_files_in_cache);
 
 /*
  * pg_lake_add_file_to_cache adds a single file to the cache.
+ *
+ * The cache is shared by all users, so the URL goes through the same checks
+ * as any other read. Otherwise a parameter like ?s3_endpoint= could fetch
+ * content from another host and store it under the plain s3:// URL.
  */
 Datum
 pg_lake_add_file_to_cache(PG_FUNCTION_ARGS)
 {
-	char	   *url = text_to_cstring(PG_GETARG_TEXT_P(0));
+	char	   *url = ResolveStageURL(text_to_cstring(PG_GETARG_TEXT_P(0)));
 	bool		refresh = PG_GETARG_BOOL(1);
+
+	CheckURLReadAccess(url);
 
 	int64		fileSize = AddFileToCache(url, refresh);
 
@@ -51,7 +59,9 @@ pg_lake_add_file_to_cache(PG_FUNCTION_ARGS)
 Datum
 pg_lake_remove_file_from_cache(PG_FUNCTION_ARGS)
 {
-	char	   *url = text_to_cstring(PG_GETARG_TEXT_P(0));
+	char	   *url = ResolveStageURL(text_to_cstring(PG_GETARG_TEXT_P(0)));
+
+	CheckURLReadAccess(url);
 
 	bool		isRemoved = RemoveFileFromCache(url);
 
