@@ -31,8 +31,10 @@
 
 #include "c.h"
 
+#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -219,6 +221,48 @@ verify_database_file_safe(const char *databaseFilePath)
 }
 
 /*
+ * set_ca_cert_file makes the extensions that open TLS connections verify
+ * them against caCertFile. httpfs, which serves http(s), s3 and gcs, takes
+ * it as a setting. The Azure extension only applies a CA file with its curl
+ * transport, which then reads it from CURL_CA_INFO.
+ */
+static DuckDBStatus
+set_ca_cert_file(const char *caCertFile)
+{
+	char		setCommand[1024];
+	const char *prefix = "SET GLOBAL ca_cert_file TO '";
+	size_t		length = strlen(prefix);
+
+	/* worst case every character is a doubled quote, plus closing quote */
+	if (length + 2 * strlen(caCertFile) + 2 > sizeof(setCommand))
+	{
+		PGDUCK_SERVER_ERROR("ca_cert_file value is too long");
+		return DUCKDB_INITIALIZATION_ERROR;
+	}
+
+	memcpy(setCommand, prefix, length);
+
+	for (const char *c = caCertFile; *c != '\0'; c++)
+	{
+		if (*c == '\'')
+			setCommand[length++] = '\'';
+		setCommand[length++] = *c;
+	}
+
+	setCommand[length++] = '\'';
+	setCommand[length] = '\0';
+
+	if (run_command_on_duckdb(setCommand) == DuckDBError)
+		return DUCKDB_INITIALIZATION_ERROR;
+
+	if (run_command_on_duckdb("SET GLOBAL azure_transport_option_type TO 'curl'") == DuckDBError)
+		return DUCKDB_INITIALIZATION_ERROR;
+
+	return DUCKDB_SUCCESS;
+}
+
+
+/*
  * duckdb_global_init initializes the DuckDB database, which can be used
  * by different threads simulteously.
  */
@@ -229,11 +273,23 @@ duckdb_global_init(char *databaseFilePath,
 				   bool allowExtensionInstall,
 				   char *memoryLimit,
 				   int64_t cacheOnWriteMaxSize,
-				   char *initFilePath)
+				   char *initFilePath,
+				   char *caCertFile)
 {
 	if (IsDuckDBInitialized)
 	{
 		return DUCKDB_SUCCESS;
+	}
+
+	/*
+	 * The Azure SDK's curl transport and the AWS extension's STS client read
+	 * their CA file from the environment rather than from a DuckDB setting.
+	 * The AWS extension reads it when it is loaded, so set it first.
+	 */
+	if (caCertFile != NULL && setenv("CURL_CA_INFO", caCertFile, 1) != 0)
+	{
+		PGDUCK_SERVER_ERROR("could not set CURL_CA_INFO: %s", strerror(errno));
+		return DUCKDB_INITIALIZATION_ERROR;
 	}
 
 	duckdb_config duckConfig;
@@ -491,6 +547,12 @@ duckdb_global_init(char *databaseFilePath,
 		}
 
 		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
+	if (caCertFile != NULL)
+	{
+		if (set_ca_cert_file(caCertFile) != DUCKDB_SUCCESS)
 			return DUCKDB_INITIALIZATION_ERROR;
 	}
 

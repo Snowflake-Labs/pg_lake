@@ -71,7 +71,8 @@ main(int argc, char *argv[])
 												   !options.no_extension_install,
 												   options.memory_limit,
 												   options.cache_on_write_max_size,
-												   options.init_file_path);
+												   options.init_file_path,
+												   options.ca_cert_file);
 
 	if (duckDbStatus != DUCKDB_SUCCESS)
 	{
