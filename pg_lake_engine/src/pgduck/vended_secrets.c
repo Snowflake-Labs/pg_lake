@@ -306,43 +306,32 @@ BuildCreateS3SecretSQL(const char *secretName,
  * PushNamedS3Secret resolves the S3 connection settings and creates the
  * vended secret under the given name.
  *
- * The catalog is the authority on where its own storage lives, so its
- * values are taken as given.  Each setting is resolved on its own,
- * though: a catalog that states an endpoint but not an addressing style
- * is the ordinary case for an S3-compatible store, and dropping the
- * URL_STYLE that the existing secret carries leaves DuckDB addressing
- * the bucket as a subdomain of a host that has no such name.
+ * Where the request goes -- the endpoint, and whether it uses SSL -- is
+ * always taken from the secret that already serves the prefix, never
+ * from the catalog.  Secrets live in one DuckDB instance shared by every
+ * database and role, and a vended secret wins over the static one by
+ * having a more specific scope, so an endpoint the catalog chose would
+ * move every session's requests under that scope, not just the ones for
+ * this catalog's table.  On AWS nothing is lost: the region-aware file
+ * system finds the right endpoint from the bucket.  A store elsewhere is
+ * reached by a static secret pointing at it, as without vending.
  *
- * Inheriting cannot redirect the credentials: an endpoint the catalog
- * stated is never overwritten, and SSL is already pinned by that
- * endpoint's scheme, so the fallback only fills in what nobody has
- * stated.  The query itself is skipped entirely when there is nothing
- * left to fill in.
+ * The addressing style is the catalog's to state, since it cannot send
+ * a request anywhere else, and is inherited when the catalog omits it.
  */
 static void
 PushNamedS3Secret(PGDuckConnection * conn,
 				  const char *secretName,
 				  const VendedSecret * secret)
 {
-	const char *endpoint = secret->endpoint;
-	const char *urlStyle = secret->urlStyle;
-	const char *useSsl = secret->useSsl;
-
-	if (endpoint == NULL || urlStyle == NULL || useSsl == NULL)
-	{
-		S3InheritedSettings inherited =
-			LookupInheritedS3Settings(conn, secret->scope);
-
-		if (endpoint == NULL)
-			endpoint = inherited.endpoint;
-		if (urlStyle == NULL)
-			urlStyle = inherited.urlStyle;
-		if (useSsl == NULL)
-			useSsl = inherited.useSsl;
-	}
+	S3InheritedSettings inherited =
+		LookupInheritedS3Settings(conn, secret->scope);
+	const char *urlStyle = secret->urlStyle != NULL ?
+		secret->urlStyle : inherited.urlStyle;
 
 	char	   *sql = BuildCreateS3SecretSQL(secretName, secret,
-											 endpoint, urlStyle, useSsl);
+											 inherited.endpoint, urlStyle,
+											 inherited.useSsl);
 
 	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, sql);
 
