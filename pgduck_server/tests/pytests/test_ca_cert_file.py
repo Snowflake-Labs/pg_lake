@@ -145,7 +145,7 @@ def https_url(tls_material):
 def _start_server(ca_cert_file):
     server = PgDuckServer(
         port=CA_TEST_PORT,
-        extra_args=["--no_extension_install", "--ca_cert_file", str(ca_cert_file)],
+        extra_args=["--ca_cert_file", str(ca_cert_file)],
     )
     # a cold start maps a large libduckdb, so allow more than the default
     assert is_server_listening(server.socket_path, timeout=60)
