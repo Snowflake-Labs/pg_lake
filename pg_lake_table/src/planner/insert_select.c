@@ -477,8 +477,8 @@ TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod)
 	 * at CREATE TABLE time (see
 	 * MaybeConvertUnsupportedNumericColumnsToDouble), so on Iceberg tables
 	 * they only reach here nested in a composite type or a map, where we keep
-	 * the declared type and store a double.  On other pg_lake tables they stay
-	 * numeric at any level.
+	 * the declared type and store a double.  On other pg_lake tables they
+	 * stay numeric at any level.
 	 */
 	if (typeId == NUMERICOID && IsUnsupportedNumericForIceberg(typeId, typmod))
 	{
