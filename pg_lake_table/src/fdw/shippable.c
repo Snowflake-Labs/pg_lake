@@ -46,6 +46,7 @@
 #include "nodes/nodeFuncs.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
@@ -115,6 +116,7 @@ static void LoadShippablePgduckOperators(const PGDuckShippableOperator * operato
 static bool IsShippableStructType(Oid objectId);
 static char *GetObjectDescription(Oid classId, Oid objectId);
 static bool ArraySubscriptMayBeNegative(SubscriptingRef *sbsref);
+static bool IsDeniedBuiltinFunction(Oid functionId);
 
 /*
  * Initialize the backend-lifespan cache of shippability decisions.
@@ -683,8 +685,38 @@ is_shippable(Oid objectId, Oid classId, Node *expr)
 	if (EnableStrictPushdown)
 		return false;
 
+	/* never ship built-ins that would read pgduck_server state */
+	if (classId == ProcedureRelationId && IsDeniedBuiltinFunction(objectId))
+		return false;
+
 	/* Built-in objects are presumed shippable in non-strict mode */
 	return is_builtin(objectId);
+}
+
+
+/*
+ * IsDeniedBuiltinFunction returns whether a built-in function must not be
+ * shipped even in non-strict mode, because DuckDB has a function of the same
+ * name that reads or changes process-wide query engine state (settings that
+ * may include credentials, database and schema names, etc).
+ */
+static bool
+IsDeniedBuiltinFunction(Oid functionId)
+{
+	switch (functionId)
+	{
+		case F_CURRENT_SETTING_TEXT:
+		case F_CURRENT_SETTING_TEXT_BOOL:
+		case F_SET_CONFIG:
+		case F_CURRENT_DATABASE:
+		case F_CURRENT_SCHEMA:
+		case F_CURRENT_SCHEMAS:
+		case F_CURRENT_QUERY:
+		case F_VERSION:
+			return true;
+		default:
+			return false;
+	}
 }
 
 
