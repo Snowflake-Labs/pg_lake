@@ -45,5 +45,6 @@ typedef struct
 
 
 extern PGDLLEXPORT const PGDuckShippableFunction *GetShippableBuiltinFunctions(int *sizePointer);
+extern PGDLLEXPORT bool IsStringAggNullConstDelimiter(Aggref *aggref);
 
 #endif							/* PG_LAKE_SUPPORTED_FUNCTIONS_H */

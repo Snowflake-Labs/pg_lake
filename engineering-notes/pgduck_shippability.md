@@ -19,6 +19,7 @@ These are PostgreSQL features that cannot be directly translated or executed in 
 - The absence of the certain data type in DuckDB makes aggregates `min()` and `max()` non-shippable. The same restriction for `min`/`max` aggregates applies for the types for `oid`, `tid`, `pg_lsn`, `money`, `inet`, and `xid8`
 - Subscripts on map types (`m[i]`) are not pushed down: in PostgreSQL `m[i]` is the i-th (key, val) pair, while in DuckDB it is the value for key `i`. Key lookups through `map_type.extract()` or `->` are still pushed down.
 - Subscripts with more than one index (`a[i][j]`) are not pushed down: PostgreSQL reads them as one subscript of a multidimensional array, while DuckDB applies `[j]` to the element `a[i]` (a key lookup, a struct field or a character, depending on the element type).
+- Array subscripts and slice bounds are only pushed down when they are non-negative constants, NULL or omitted (`a[2]`, `a[0:2]`, `a[:2]`): DuckDB counts negative indexes from the end, while PostgreSQL treats them as out of range. Subscripts that use a column, a parameter or another expression (`a[id]`, `a[$1]`) are not pushed down either, since they may be negative.
 
 #### Functions
 - regexp_replace is only pushed down when using regexp_replace(text,text,text) or regexp_replace(text,text,text,text), other forms are not available.

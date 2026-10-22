@@ -21,8 +21,8 @@
  * Features
  *   • Never throws error (caller calls it at post-commit hook)
  *   • Only allows http / https protocols
- *   • 1s connect timeout, 5s total timeout (change the constants below if needed)
- *   • Follows up to 5 redirects
+ *   • 20s connect timeout, 180s total timeout (change the constants below if needed)
+ *   • Follows up to MAX_REDIRECTS redirects
  *   • Cancels cleanly on any failure, including Ctrl-C or statement_timeout fires
  */
 #include "postgres.h"
@@ -40,10 +40,17 @@
 #include <curl/curl.h>
 
 /* 20 seconds */
-#define CONNECT_TIMEOUT_MS  20000
+#define CONNECT_TIMEOUT_MS  20000L
 
 /* 180 seconds */
-#define TOTAL_TIMEOUT_MS   180000
+#define TOTAL_TIMEOUT_MS   180000L
+
+/*
+ * Cap redirect follows. Without CURLOPT_MAXREDIRS libcurl follows an
+ * unbounded chain, so a looping or attacker-controlled redirect target
+ * can hold the request open until the total timeout.
+ */
+#define MAX_REDIRECTS 5L
 
 
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
@@ -218,6 +225,7 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 	CURL_SETOPT(curl, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
 #endif
 	CURL_SETOPT(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	CURL_SETOPT(curl, CURLOPT_MAXREDIRS, MAX_REDIRECTS);
 	CURL_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, CONNECT_TIMEOUT_MS);
 	CURL_SETOPT(curl, CURLOPT_TIMEOUT_MS, TOTAL_TIMEOUT_MS);
 

@@ -114,6 +114,7 @@ static void LoadShippableSpatialOperators(void);
 static void LoadShippablePgduckOperators(const PGDuckShippableOperator * operators, int operatorCount);
 static bool IsShippableStructType(Oid objectId);
 static char *GetObjectDescription(Oid classId, Oid objectId);
+static bool ArraySubscriptMayBeNegative(SubscriptingRef *sbsref);
 
 /*
  * Initialize the backend-lifespan cache of shippability decisions.
@@ -782,13 +783,20 @@ is_non_shippable_udt_context(Node *node)
 	 * the one-dimensional arrays we store.  DuckDB applies [j] to the element
 	 * a[i] instead: a key lookup for an array of maps, a field for an array
 	 * of composites and a character for text[].
+	 *
+	 * Array indexes that may be negative are not shippable either, see
+	 * ArraySubscriptMayBeNegative().
 	 */
 	if (nodeType == T_SubscriptingRef)
 	{
 		SubscriptingRef *sbsref = (SubscriptingRef *) node;
 
-		return list_length(sbsref->refupperindexpr) > 1 ||
-			IsMapTypeOid(exprType((Node *) sbsref->refexpr));
+		if (list_length(sbsref->refupperindexpr) > 1 ||
+			IsMapTypeOid(exprType((Node *) sbsref->refexpr)))
+			return true;
+
+		return type_is_array(sbsref->refcontainertype) &&
+			ArraySubscriptMayBeNegative(sbsref);
 	}
 
 	/*
@@ -815,4 +823,45 @@ is_non_shippable_udt_context(Node *node)
 	 */
 
 	return (typeId >= FirstNormalObjectId && !IsGeometryTypeId(typeId));
+}
+
+
+/*
+ * ArraySubscriptMayBeNegative returns whether an index or slice bound of an
+ * array subscript is not known to be non-negative.  DuckDB counts negative
+ * list indexes from the end, while Postgres treats them as out of range, so
+ * only non-negative constants, NULL and omitted slice bounds are shippable.
+ */
+static bool
+ArraySubscriptMayBeNegative(SubscriptingRef *sbsref)
+{
+	List	   *indexLists[] = {sbsref->refupperindexpr, sbsref->reflowerindexpr};
+
+	for (int i = 0; i < lengthof(indexLists); i++)
+	{
+		ListCell   *indexCell;
+
+		foreach(indexCell, indexLists[i])
+		{
+			Node	   *index = lfirst(indexCell);
+
+			/* omitted slice bound, as in a[:2] */
+			if (index == NULL)
+				continue;
+
+			if (!IsA(index, Const))
+				return true;
+
+			Const	   *constIndex = (Const *) index;
+
+			if (constIndex->constisnull)
+				continue;
+
+			if (constIndex->consttype != INT4OID ||
+				DatumGetInt32(constIndex->constvalue) < 0)
+				return true;
+		}
+	}
+
+	return false;
 }

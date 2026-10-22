@@ -58,6 +58,7 @@ pgduck_server is configured on its command line:
 | `--no_extension_install` | off | Do not install DuckDB extensions at start-up; use this when they are preinstalled. |
 | `--continue_on_oom` | off | Keep running after an out-of-memory error. |
 | `--pidfile <path>` | none | Write the process ID to this file. |
+| `--ca_cert_file <path>` | `/etc/pki/ca-trust/extracted/openssl/ca-bundle.trust.crt` if present, otherwise DuckDB's default | CA certificates used to verify TLS connections to object storage and other HTTPS endpoints. Pass an empty string to use DuckDB's default locations. |
 | `--debug`, `--verbose` | off | More logging; `--debug` includes full query text. |
 
 pgduck_server only listens on a Unix socket, so it must run on the same machine as PostgreSQL,

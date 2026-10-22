@@ -31,6 +31,7 @@
 #include "optimizer/optimizer.h"
 #include "nodes/nodeFuncs.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/regproc.h"
 #include "utils/syscache.h"
@@ -633,9 +634,11 @@ IsArrayLengthShippable(Node *node)
  *     ("Separator argument to StringAgg must be a constant"), whereas
  *     PostgreSQL evaluates it per row.
  *
- * We therefore only ship calls whose delimiter is a non-NULL constant.  With
- * that guarantee, every other behavior (NULL/empty values, ORDER BY, DISTINCT,
- * FILTER) is identical between the two engines.
+ * We therefore only ship calls whose delimiter is a non-NULL constant, or a
+ * NULL constant, which the query rewrite replaces with '' (see
+ * IsStringAggNullConstDelimiter()).  With that guarantee, every other behavior
+ * (NULL/empty values, ORDER BY, DISTINCT, FILTER) is identical between the two
+ * engines.
  *
  * Note that aggregates reach this callback as an Aggref (not a FuncExpr), so we
  * cannot reuse GetConstArg().  The arguments are TargetEntry nodes and the
@@ -651,14 +654,43 @@ IsStringAggShippable(Node *node)
 	if (list_length(aggref->args) < 2)
 		return false;
 
+	/* a NULL constant is rewritten to '' before it reaches DuckDB */
+	if (IsStringAggNullConstDelimiter(aggref))
+		return true;
+
 	TargetEntry *delimEntry = (TargetEntry *) list_nth(aggref->args, 1);
 	Node	   *delimNode = eval_const_expressions(NULL, (Node *) delimEntry->expr);
 
 	if (!IsA(delimNode, Const))
 		return false;
 
-	/* a NULL delimiter yields NULL in DuckDB but concatenation in PostgreSQL */
+	/*
+	 * Any other delimiter that folds to NULL would yield NULL in DuckDB but
+	 * concatenation in PostgreSQL, so keep it local.
+	 */
 	return !((Const *) delimNode)->constisnull;
+}
+
+
+/*
+ * IsStringAggNullConstDelimiter returns whether the delimiter of a
+ * string_agg(text, text) call is a NULL constant, as in string_agg(v, NULL).
+ * Such a delimiter means no separator in PostgreSQL, and the query rewrite
+ * replaces it with '' for DuckDB.  Only a literal NULL constant counts: the
+ * rewrite cannot fold the delimiter, since by then its function calls may
+ * already have been rewritten for DuckDB.
+ */
+bool
+IsStringAggNullConstDelimiter(Aggref *aggref)
+{
+	if (aggref->aggfnoid != F_STRING_AGG_TEXT_TEXT ||
+		list_length(aggref->args) < 2)
+		return false;
+
+	TargetEntry *delimEntry = (TargetEntry *) list_nth(aggref->args, 1);
+
+	return IsA(delimEntry->expr, Const) &&
+		((Const *) delimEntry->expr)->constisnull;
 }
 
 

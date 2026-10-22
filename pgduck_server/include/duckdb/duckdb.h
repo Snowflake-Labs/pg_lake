@@ -70,7 +70,8 @@ extern DuckDBStatus duckdb_global_init(char *databaseFilePath,
 									   bool allowExtensionInstall,
 									   char *memoryLimit,
 									   int64_t cacheOnWriteMaxSize,
-									   char *initFile);
+									   char *initFile,
+									   char *caCertFile);
 extern DuckDBStatus duckdb_session_init(DuckDBSession * duckSession,
 										struct PGSession *clientSession);
 extern DuckDBStatus duckdb_session_run_command(DuckDBSession * duckSession, const char *queryString,
