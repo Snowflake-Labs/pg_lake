@@ -29,9 +29,17 @@
 
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/resource.h>
 
 #include "pgserver/client_threadpool.h"
 #include "utils/pgduck_log_utils.h"
+
+/*
+ * Threads the process needs for itself (the accept loop, DuckDB's scheduler,
+ * etc.) plus slack for the user's other processes.  Reserved out of
+ * RLIMIT_NPROC before we derive how many client threads we can admit.
+ */
+#define THREAD_RLIMIT_HEADROOM 64
 
 
 /*
@@ -97,6 +105,47 @@ static int	ThreadPoolAvailableIndexStart = 0;
 
 
 /*
+ * clamp_clients_to_rlimit lowers a requested client cap so that it stays
+ * within what the OS will actually let us create.
+ *
+ * reserve_slot() admits at most MaxAllowedClients live entries, and every
+ * live entry -- a client or the cancel session that momentarily replaces it
+ * -- runs on its own OS thread.  So MaxAllowedClients, not the 2x slot array,
+ * is the real live-thread ceiling and the value we must keep within
+ * RLIMIT_NPROC; otherwise pthread_create() starts failing with EAGAIN and
+ * admission control never engages.  We reserve headroom for the process's own
+ * threads and the user's other processes, then clamp to what remains.
+ *
+ * This is best effort: RLIMIT_NPROC is counted across the whole real user id,
+ * and a cgroup pids.max limit is invisible here, so the accept-loop
+ * backpressure in pgserver_run() remains the backstop when the true limit is
+ * lower than we can see.  Returns the request unchanged when the limit is
+ * unknown or unlimited.
+ */
+static int
+clamp_clients_to_rlimit(int requestedMaxClients)
+{
+	struct rlimit rlim;
+
+	if (getrlimit(RLIMIT_NPROC, &rlim) != 0 || rlim.rlim_cur == RLIM_INFINITY)
+		return requestedMaxClients;
+
+	rlim_t		reserved = Max(rlim.rlim_cur / 5, THREAD_RLIMIT_HEADROOM);
+
+	/* limit is smaller than our headroom; leave it to the backpressure path */
+	if (reserved >= rlim.rlim_cur)
+		return requestedMaxClients;
+
+	rlim_t		available = rlim.rlim_cur - reserved;
+
+	if (available >= (rlim_t) requestedMaxClients)
+		return requestedMaxClients;
+
+	/* available < requestedMaxClients, so it fits in an int */
+	return (int) available;
+}
+
+/*
  * pgclient_threadpool_init allocates memory for the client thread pool based on the
  * maximum allowed clients.
  * The allocated memory is initialized to zero using pg_malloc0.
@@ -105,13 +154,18 @@ void
 pgclient_threadpool_init(int maxAllowedClients)
 {
 	/*
-	 * We multiply by 2 because we might need to cancel a client (e.g.,
-	 * thread) and cancellations require a slot in the thread pool.
-	 *
-	 * We could perhaps use some smaller number, for now let's keep it simple.
+	 * The live-thread ceiling is MaxAllowedClients (see reserve_slot), so
+	 * that is what we clamp to the host thread limit.  MaxThreads is just the
+	 * slot array, sized 2x so a cancellation can always find a free slot
+	 * alongside the client it targets.
 	 */
-	MaxAllowedClients = maxAllowedClients;
-	MaxThreads = maxAllowedClients * 2;
+	MaxAllowedClients = Max(clamp_clients_to_rlimit(maxAllowedClients), 1);
+	MaxThreads = MaxAllowedClients * 2;
+
+	if (MaxAllowedClients < maxAllowedClients)
+		PGDUCK_SERVER_LOG("max_clients lowered from %d to %d to stay within the "
+						  "host thread limit (RLIMIT_NPROC)",
+						  maxAllowedClients, MaxAllowedClients);
 
 	/* pg_malloc0 exists the program in case cannot allocate */
 	ClientThreadPool = (PgClientThreadState *) pg_malloc0(sizeof(PgClientThreadState) * MaxThreads);
