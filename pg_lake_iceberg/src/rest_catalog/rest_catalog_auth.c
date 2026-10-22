@@ -40,6 +40,7 @@
 #include "utils/timestamp.h"
 
 #include "pg_lake/http/http_client.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/url_encode.h"
 
@@ -362,6 +363,9 @@ RestCatalogAuthProviderIsRegistered(void)
  * rest_endpoint, so consulting the provider there would hand that role a
  * token minted for the deployment.  User-created servers authenticate with
  * their own user mapping credentials instead.
+ *
+ * A failure from either source is logged as auth_failed before it
+ * propagates.
  */
 static void
 FetchRestCatalogAuthorization(RestCatalogOptions * opts,
@@ -381,19 +385,31 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts,
 			.forceRefresh = forceRefresh,
 		};
 		RestCatalogAuthMaterial material = {0};
+		bool		claimed = false;
 
-		if (provider(&request, &material))
+		PG_TRY();
 		{
-			if (material.authorization == NULL || *material.authorization == '\0')
+			claimed = provider(&request, &material);
+
+			if (claimed && (material.authorization == NULL || *material.authorization == '\0'))
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 errmsg("REST catalog credential provider returned an empty authorization")));
 
-			if (material.expiresIn < 0)
+			if (claimed && material.expiresIn < 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 errmsg("REST catalog credential provider returned a negative lifetime")));
+		}
+		PG_CATCH();
+		{
+			LogCatalogAuthFailure(opts, "provider", geterrcode());
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
+		if (claimed)
+		{
 			*authorization = material.authorization;
 			*expiresIn = material.expiresIn;
 			return;
@@ -402,7 +418,16 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts,
 
 	char	   *accessToken = NULL;
 
-	FetchOAuth2AccessToken(opts, &accessToken, expiresIn);
+	PG_TRY();
+	{
+		FetchOAuth2AccessToken(opts, &accessToken, expiresIn);
+	}
+	PG_CATCH();
+	{
+		LogCatalogAuthFailure(opts, "oauth2", geterrcode());
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	*authorization = psprintf("Bearer %s", accessToken);
 }

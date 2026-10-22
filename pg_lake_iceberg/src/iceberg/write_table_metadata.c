@@ -22,6 +22,7 @@
 #include "miscadmin.h"
 
 #include "pg_lake/iceberg/api/table_metadata.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_reader.h"
 #include "pg_lake/json/json_utils.h"
@@ -64,12 +65,17 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 	 * including the catalog that produced it.
 	 */
 	if (metadata->format_version != 2)
+	{
+		LogCatalogEvent("unsupported_feature", "feature=write_format_version format_version=%d",
+						metadata->format_version);
+
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot write iceberg metadata in format version %d",
 						metadata->format_version),
 				 errdetail("pg_lake writes iceberg format version 2."),
 				 errhint("Attach the table read-only to query it.")));
+	}
 
 	appendStringInfoString(command, "{");
 

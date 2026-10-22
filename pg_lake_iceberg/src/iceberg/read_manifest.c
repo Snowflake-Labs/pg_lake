@@ -29,6 +29,7 @@
 #include "utils/wait_event.h"
 
 #include "pg_lake/iceberg/manifest_spec.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/avro/avro_reader.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/permissions/roles.h"
@@ -320,6 +321,9 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 	if (dataFile->content == ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES &&
 		dataFile->file_format != NULL &&
 		pg_strcasecmp(dataFile->file_format, "PUFFIN") == 0)
+	{
+		LogCatalogEvent("unsupported_feature", "feature=deletion_vectors");
+
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("pg_lake_iceberg: deletion vectors are not supported"),
@@ -327,6 +331,7 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 						   dataFile->file_path),
 				 errhint("Deletion vectors are an Iceberg v3 feature; rewrite "
 						 "the table with positional delete files to read it.")));
+	}
 
 	AvroGetRecordField(record, "partition", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadPartitionFromAvro, &dataFile->partition, context);
 	AvroGetInt64Field(record, "record_count", AVRO_FIELD_REQUIRED, &dataFile->record_count);

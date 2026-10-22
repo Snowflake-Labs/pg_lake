@@ -42,6 +42,7 @@ typedef struct
 	char	   *headers;		/* raw response headers  */
 	size_t		headersLength;	/* length of response headers */
 	const char *errorMsg;		/* error message */
+	int			curlCode;		/* CURLcode when status is 0 */
 }			HttpResult;
 
 extern bool HttpClientTraceTraffic;

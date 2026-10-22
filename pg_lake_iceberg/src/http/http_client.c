@@ -365,6 +365,7 @@ CurlReturnError(CURL *curl, struct curl_slist *headerList,
 	HttpResult	errorRes = {0};
 
 	errorRes.errorMsg = errorMsg;
+	errorRes.curlCode = curlCode;
 
 	return errorRes;
 }

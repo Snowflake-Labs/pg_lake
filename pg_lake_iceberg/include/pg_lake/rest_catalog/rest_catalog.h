@@ -40,6 +40,25 @@ extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
 
+/*
+ * What a request to a REST catalog is for, as reported in catalog activity
+ * logs (see catalog_log.h).
+ */
+typedef enum RestCatalogOp
+{
+	REST_CATALOG_OP_CONFIG,
+	REST_CATALOG_OP_TOKEN,
+	REST_CATALOG_OP_LIST_NAMESPACES,
+	REST_CATALOG_OP_GET_NAMESPACE,
+	REST_CATALOG_OP_CREATE_NAMESPACE,
+	REST_CATALOG_OP_LOAD_TABLE,
+	REST_CATALOG_OP_CREATE_TABLE,
+	REST_CATALOG_OP_PUBLISH_CREATE_TABLE,
+	REST_CATALOG_OP_PUBLISH_DROP_TABLE,
+	REST_CATALOG_OP_PUBLISH_COMMIT,
+	REST_CATALOG_OP_COUNT
+}			RestCatalogOp;
+
 
 /*
  * Temporary storage credentials received from an Iceberg REST catalog
@@ -429,8 +448,9 @@ extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
 extern PGDLLEXPORT List *PostHeadersWithAuth(RestCatalogOptions * opts);
 extern PGDLLEXPORT List *DeleteHeadersWithAuth(RestCatalogOptions * opts);
-extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method,
-													   const char *url, const char *body, List *headers);
+extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(RestCatalogOptions * opts, RestCatalogOp op,
+													   HttpMethod method, const char *url,
+													   const char *body, List *headers);
 extern PGDLLEXPORT HttpResult SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
 																 const char *body, List *headers);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId);

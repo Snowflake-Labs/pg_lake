@@ -52,6 +52,7 @@
 #include "utils/timestamp.h"
 
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_utils.h"
@@ -204,7 +205,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 		headers = lappend(headers, vendedCreds);
 	}
 
-	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body->data,
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_CREATE_TABLE, HTTP_POST, postUrl, body->data,
 													  headers);
 
 	if (httpResult.status != 200)
@@ -358,7 +359,7 @@ RestCatalogExists(RestCatalogOptions * opts, const char *catalogName)
 		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
 				 URLEncodePrefix(catalogName));
 	HttpResult	catalogResult =
-		SendRequestToRestCatalog(opts, HTTP_GET, catalogUrl, NULL,
+		SendRequestToRestCatalog(opts, REST_CATALOG_OP_LIST_NAMESPACES, HTTP_GET, catalogUrl, NULL,
 								 GetHeadersWithAuth(opts));
 
 	if (catalogResult.status == 200)
@@ -389,7 +390,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 opts->baseUri, URLEncodePrefix(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_GET_NAMESPACE, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
 
 	switch (httpResult.status)
@@ -490,7 +491,7 @@ RestNamespaceExists(RestCatalogOptions * opts, const char *catalogName, const ch
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 opts->baseUri, URLEncodePrefix(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_GET_NAMESPACE, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
 
 	if (httpResult.status == 200)
@@ -896,7 +897,7 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 		headers = lappend(headers,
 						  pstrdup("X-Iceberg-Access-Delegation: vended-credentials"));
 
-	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL, headers);
+	HttpResult	hr = SendRequestToRestCatalog(opts, REST_CATALOG_OP_LOAD_TABLE, HTTP_GET, getUrl, NULL, headers);
 
 	if (hr.status == 404 && missingOk)
 		return false;
@@ -1308,8 +1309,13 @@ AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 	{
 		char	   *reportKey = psprintf("endpoint/%u/%s/%s", serverOid,
 										 accountName, endpoint);
+		bool		firstReport = FirstVendedReport(reportKey);
 
-		ereport(FirstVendedReport(reportKey) ? WARNING : DEBUG2,
+		if (firstReport)
+			LogCatalogEvent("vended_credentials",
+							"reason=endpoint_not_allowed storage=adls");
+
+		ereport(firstReport ? WARNING : DEBUG2,
 				(errmsg("ignoring the endpoint the catalog vended for Azure "
 						"storage account \"%s\"", accountName),
 				 errdetail("\"%s\" does not name a host under "
@@ -1550,6 +1556,19 @@ static const VendedStorage UnknownStorage = {
 static const VendedStorage *const KnownVendedStorage[] = {
 	&S3Storage, &AzureStorage, &GcsStorage
 };
+
+/* names a kind of storage in catalog activity logs */
+static const char *
+VendedStorageLogName(const VendedStorage * storage)
+{
+	if (storage == &S3Storage)
+		return "s3";
+	if (storage == &AzureStorage)
+		return "adls";
+	if (storage == &GcsStorage)
+		return "gcs";
+	return "unknown";
+}
 
 static const struct
 {
@@ -1889,8 +1908,14 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts,
 															  relationName);
 		char	   *reportKey = psprintf("unusable/%u/%u/%s", opts->serverOid,
 										 opts->userMappingOid, identity);
+		bool		firstReport = FirstVendedReport(reportKey);
 
-		ereport(FirstVendedReport(reportKey) ? WARNING : DEBUG2,
+		if (firstReport)
+			LogCatalogEvent("vended_credentials",
+							"catalog=%s reason=unusable storage=%s",
+							RestCatalogLogLabel(opts), VendedStorageLogName(unusable));
+
+		ereport(firstReport ? WARNING : DEBUG2,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("ignoring vended credentials for %s", unusable->name),
 				 errdetail("%s  This table falls back to the credentials "
@@ -1901,8 +1926,20 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts,
 						 "table's storage location.")));
 	}
 	else if (credentials == NIL)
+	{
+		char	   *identity = BuildVendedCredentialsIdentity(restCatalogName,
+															  namespaceName,
+															  relationName);
+		char	   *reportKey = psprintf("none/%u/%u/%s", opts->serverOid,
+										 opts->userMappingOid, identity);
+
+		if (FirstVendedReport(reportKey))
+			LogCatalogEvent("vended_credentials", "catalog=%s reason=none_returned",
+							RestCatalogLogLabel(opts));
+
 		elog(DEBUG2, "REST catalog loadTable response did not contain "
 			 "usable vended credentials");
+	}
 
 	return credentials;
 }
@@ -2224,7 +2261,7 @@ CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName,
 		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
 				 URLEncodePrefix(catalogName));
 
-	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body.data,
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_CREATE_NAMESPACE, HTTP_POST, postUrl, body.data,
 													  PostHeadersWithAuth(opts));
 
 	if (httpResult.status != 200)

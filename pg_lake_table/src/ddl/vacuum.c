@@ -44,6 +44,7 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/iceberg/operations/vacuum.h"
 #include "pg_lake/parsetree/options.h"
@@ -209,6 +210,15 @@ pg_lake_iceberg_vacuum(PG_FUNCTION_ARGS)
 			START_TRANSACTION();
 			{
 				PgLakeIcebergRemoveFilesForTables(outOfTransactionMemoryContext);
+			}
+			END_TRANSACTION_NO_THROW(WARNING);
+		}
+
+		if (IcebergTableInventoryIsDue())
+		{
+			START_TRANSACTION();
+			{
+				LogIcebergTableInventory();
 			}
 			END_TRANSACTION_NO_THROW(WARNING);
 		}
