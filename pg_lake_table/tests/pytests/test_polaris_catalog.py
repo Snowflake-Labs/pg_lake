@@ -775,10 +775,9 @@ def test_metadata_fetch(
     assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
     superuser_conn.commit()
 
-    # a volatile function takes a new snapshot for every query it runs, so
-    # each call asks the catalog again, while the queries of a STABLE function
-    # read with the snapshot of the query that calls it and share its answer
-    for volatility, expected_fetches in [("VOLATILE", 3), ("STABLE", 1)]:
+    # a function reads with the statement that calls it, whatever its
+    # volatility, so three calls in one statement ask the catalog once
+    for volatility in ["VOLATILE", "STABLE"]:
         run_command(
             f"""
                 CREATE OR REPLACE FUNCTION "{catalog_namespace_name}_pg".row_count()
@@ -799,8 +798,7 @@ def test_metadata_fetch(
         )
         assert [row[0] for row in res] == [5, 5, 5]
         assert (
-            _count_catalog_fetches(superuser_conn, catalog_namespace_name)
-            == expected_fetches
+            _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
         ), volatility
         superuser_conn.commit()
 
@@ -835,10 +833,12 @@ def test_metadata_fetch(
         assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
         superuser_conn.commit()
 
-    # Repointing the table at another table of the catalog changes what the
-    # catalog has to be asked about, so the read after the ALTER asks again
-    # even at an isolation level that otherwise reuses the earlier answer.
-    # Both tables hold the same rows, so the traffic is the observable here.
+    # A read holds the catalog's answer under the relation that asked, so a
+    # relation repointed at another table inside a REPEATABLE READ
+    # transaction keeps reading the table that transaction read, and the next
+    # transaction asks about the table it points at now.  Renaming moves no
+    # files, so both reads return the same rows, and the traffic is the
+    # observable here.
     read_query = f"""SELECT * FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg" """
 
     superuser_conn.notices.clear()
@@ -856,6 +856,11 @@ def test_metadata_fetch(
         f"""ALTER FOREIGN TABLE "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg" OPTIONS (SET catalog_table_name '{renamed_table_name}') """,
         superuser_conn,
     )
+
+    superuser_conn.notices.clear()
+    assert len(run_query(read_query, superuser_conn)) == 5
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 0
+    superuser_conn.commit()
 
     superuser_conn.notices.clear()
     assert len(run_query(read_query, superuser_conn)) == 5

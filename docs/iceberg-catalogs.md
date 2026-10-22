@@ -258,12 +258,13 @@ uppercase letters, and names set later with `ALTER`, are used as given.
 An attached table always reads the catalog's current version, so queries see new commits from
 other engines without any changes in PostgreSQL. Dropping it only removes it from PostgreSQL.
 
-Reading the catalog follows the snapshot rules of a regular table. One query reads one version of
-the catalog. Under `READ COMMITTED`, every query that gets a new snapshot reads the version that
-stands by then, including each statement and each query of a volatile function, a `DO` block, a
-procedure or a trigger, while the queries of a `STABLE` function read the version of the query
-that calls it. `REPEATABLE READ` and `SERIALIZABLE` hold a transaction to the version its first
-read of an attached table used.
+A statement reads one version of the catalog: every reference to a table, every table of one
+`object_store` catalog, and every query the statement runs in functions, `DO` blocks, procedures
+and triggers reads the same version. Under `READ COMMITTED`, the next statement reads the version
+that stands by then, and a cursor reads the version that stood when it was opened. A procedure
+that commits reads the catalog anew after each commit, so a procedure that polls an attached table
+for new commits should commit between polls. `REPEATABLE READ` and `SERIALIZABLE` hold a
+transaction to the version its first read of an attached table used.
 
 To attach many tables from one catalog, set `catalog_name` on the server and mirror the
 namespaces as schemas. The other catalog options then follow from the names you use:

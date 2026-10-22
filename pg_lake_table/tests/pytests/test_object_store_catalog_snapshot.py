@@ -1,5 +1,6 @@
 from utils_pytest import *
 import json
+import psycopg
 import threading
 import time
 
@@ -13,31 +14,39 @@ import time
 # from two different points in time.  Neither is a state those tables ever had
 # together.
 #
-# The rules these tests pin down are the ones Postgres applies to a heap table,
-# because a reader reads the catalog with the snapshot it reads everything
-# else with:
+# The rules these tests pin down:
 #
-#   * one query reads one version of the catalog, whatever its isolation level
-#     and however many tables and references it has;
-#   * READ COMMITTED reads the catalog as it stands whenever Postgres gives a
-#     query a new snapshot, which is every statement, every statement of a
-#     multi-statement message, and every query of a volatile function, a DO
-#     block, a procedure or a trigger;
-#   * the queries of a STABLE function read with their caller's snapshot, so
-#     they read the version their caller reads, however many times it calls
-#     them;
+#   * one statement reads one version of the catalog, whatever its isolation
+#     level and however many tables and references it has, including every
+#     query it runs in functions of any volatility, DO blocks, procedures,
+#     triggers and rule actions, and across the Bind and Execute messages that
+#     start and run it with the extended protocol;
+#   * READ COMMITTED reads the catalog as it stands in each new statement,
+#     including each statement of a multi-statement message, and a cursor
+#     reads the version that stood when it was opened;
 #   * REPEATABLE READ and SERIALIZABLE hold the whole transaction to the
 #     version it started reading with, including for a table it touches for
 #     the first time in a later statement, and including inside functions;
-#   * whatever a transaction pinned is released when that transaction ends,
+#   * a subtransaction that aborts, by an error or by a rollback, leaves the
+#     version its statement or transaction reads in place, and so do the
+#     cache invalidations other sessions send;
+#   * whatever a statement or a transaction holds is released when it ends,
 #     by commit, by abort, or by PREPARE TRANSACTION, including what a cursor
-#     still reads with.
+#     still reads with, and a procedure that commits reads anew after the
+#     commit.
 #
-# Two limits the implementation accepts, stated here as behaviour rather than
+# The limits the implementation accepts, stated here as behaviour rather than
 # wished away:
 #
 #   * the version is pinned when a transaction first reads an external table,
 #     not when it took its snapshot;
+#   * a statement holds its version across the queries its functions, DO
+#     blocks, procedures and triggers run, where a heap table read in the same
+#     place moves under READ COMMITTED, so a loop polling an external table
+#     inside one statement sees the catalog move only once a procedure
+#     commits;
+#   * a cursor, including the one a PL/pgSQL FOR loop over a query opens,
+#     reads the catalog as it stands when it opens;
 #   * attaching a table reads the catalog as it stands, so a table published
 #     since a REPEATABLE READ transaction pinned the catalog can be attached in
 #     it, but not read until the pin is released.
@@ -243,17 +252,6 @@ def _seen(pg_conn, schema):
     rows = run_query(f"SELECT label, n FROM {schema}.seen", pg_conn)
     run_command(f"TRUNCATE {schema}.seen", pg_conn)
     return {row[0]: row[1] for row in rows}
-
-
-# Postgres warns about a snapshot something forgot to let go of when the
-# transaction ends.  Only warnings count, because the reader prefix puts the
-# word in the path of every catalog read the DEBUG1 counting reports.
-def _snapshot_warnings(pg_conn):
-    return [
-        line
-        for line in pg_conn.notices
-        if str(line).startswith("WARNING") and "snapshot" in str(line).lower()
-    ]
 
 
 def _reset_schema(pg_conn, schema):
@@ -868,13 +866,15 @@ def test_first_read_pins_catalog_not_the_snapshot(
     pg_conn.commit()
 
 
-# A volatile function takes a new snapshot for every query it runs under READ
-# COMMITTED, so a heap table it reads can show rows committed after the query
-# that called it took its own snapshot.  An external table read in the same
-# place has to show a catalog rewritten after that point too, here a set
-# returning function joined against the table it reads, as well as a function
-# called once per row of its caller.
-def test_volatile_function_reads_with_a_snapshot_of_its_own(
+# A function reads with the statement that calls it, whatever its volatility,
+# so its queries read the version the rest of the statement reads, however
+# many times the statement calls it and however long it runs.  A heap table a
+# volatile function reads under READ COMMITTED would move in between, so for
+# a volatile function this holds the catalog longer than a heap table, which
+# can read an older version than the statement could, and never two at once.
+@pytest.mark.parametrize("volatility", ["VOLATILE", "STABLE"])
+def test_functions_read_their_statements_version(
+    volatility,
     pg_conn,
     s3,
     extension,
@@ -882,7 +882,7 @@ def test_volatile_function_reads_with_a_snapshot_of_its_own(
     adjust_object_store_settings,
     reader_catalog_prefix,
 ):
-    schema = "test_osc_volatile_function"
+    schema = f"test_osc_{volatility.lower()}_function"
     _reset_schema(pg_conn, schema)
     key, body_early, body_late = _two_catalog_versions(
         pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
@@ -890,16 +890,19 @@ def test_volatile_function_reads_with_a_snapshot_of_its_own(
 
     run_command(
         f"CREATE FUNCTION {schema}.rows_after(sleep_seconds float8) "
-        f"RETURNS TABLE (n bigint) VOLATILE LANGUAGE plpgsql AS $$ BEGIN "
+        f"RETURNS TABLE (n bigint) {volatility} LANGUAGE plpgsql AS $$ BEGIN "
         f"  PERFORM pg_sleep(sleep_seconds); "
         f"  RETURN QUERY SELECT count(*) FROM {schema}.read_tbl; "
         f"END; $$",
         pg_conn,
     )
     run_command(
-        f"CREATE FUNCTION {schema}.row_count() RETURNS bigint VOLATILE "
-        f"LANGUAGE plpgsql AS $$ BEGIN "
-        f"  RETURN (SELECT count(*) FROM {schema}.read_tbl); "
+        f"CREATE FUNCTION {schema}.row_count_then_sleep(sleep_seconds float8) "
+        f"RETURNS bigint {volatility} LANGUAGE plpgsql AS $$ "
+        f"DECLARE n bigint; BEGIN "
+        f"  SELECT count(*) INTO n FROM {schema}.read_tbl; "
+        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  RETURN n; "
         f"END; $$",
         pg_conn,
     )
@@ -913,87 +916,14 @@ def test_volatile_function_reads_with_a_snapshot_of_its_own(
         f"FROM {schema}.read_tbl CROSS JOIN {schema}.rows_after(%s) f"
     )
 
-    # the outer scan and the query inside the function are two snapshots
-    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, join_query % 0)
-    assert tuple(rows[0]) == (5, 5)
-    assert catalog_reads == 2, f"expected two catalog reads, got {catalog_reads}"
-    pg_conn.commit()
-
-    # the outer scan read the catalog before the rewrite, the function after it
-    sleep_seconds = 3.0
-    rows = _rewrite_one_second_into(
-        s3,
-        key,
-        body_late,
-        sleep_seconds,
-        lambda: run_query(join_query % sleep_seconds, pg_conn),
-    )
-    assert tuple(rows[0]) == (5, 9)
-    pg_conn.commit()
-
-    # one snapshot per call of a function called once per row
-    _put_catalog(s3, key, body_early)
-    pg_conn.commit()
-    rows, catalog_reads = _run_counting_catalog_reads(
-        pg_conn,
-        f"SELECT g, {schema}.row_count() FROM generate_series(1, 3) g",
-    )
-    assert [row[1] for row in rows] == [5, 5, 5]
-    assert catalog_reads == 3, f"expected three catalog reads, got {catalog_reads}"
-    pg_conn.commit()
-
-
-# The queries of a STABLE function run with their caller's snapshot, so a heap
-# table reads the same in every call however long the caller runs, and the
-# function reads what the caller reads.  An external table has to do the same,
-# including when the caller does not read that table itself, so that nothing
-# but the function's own short queries ever read under the caller's snapshot.
-def test_stable_function_reads_with_its_callers_snapshot(
-    pg_conn,
-    s3,
-    extension,
-    with_default_location,
-    adjust_object_store_settings,
-    reader_catalog_prefix,
-):
-    schema = "test_osc_stable_function"
-    _reset_schema(pg_conn, schema)
-    key, body_early, body_late = _two_catalog_versions(
-        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
-    )
-
-    run_command(
-        f"CREATE FUNCTION {schema}.rows_after(sleep_seconds float8) "
-        f"RETURNS TABLE (n bigint) STABLE LANGUAGE plpgsql AS $$ BEGIN "
-        f"  PERFORM pg_sleep(sleep_seconds); "
-        f"  RETURN QUERY SELECT count(*) FROM {schema}.read_tbl; "
-        f"END; $$",
-        pg_conn,
-    )
-    run_command(
-        f"CREATE FUNCTION {schema}.row_count_then_sleep(sleep_seconds float8) "
-        f"RETURNS bigint STABLE LANGUAGE plpgsql AS $$ "
-        f"DECLARE n bigint; BEGIN "
-        f"  SELECT count(*) INTO n FROM {schema}.read_tbl; "
-        f"  PERFORM pg_sleep(sleep_seconds); "
-        f"  RETURN n; "
-        f"END; $$",
-        pg_conn,
-    )
-    _put_catalog(s3, key, body_early)
-    pg_conn.commit()
-
-    join_query = (
-        f"SELECT count(*), max(f.n) "
-        f"FROM {schema}.read_tbl CROSS JOIN {schema}.rows_after(%s) f"
-    )
-
-    # the function reads with the outer scan's snapshot, so one read for both
+    # the outer scan and the query inside the function share one read
     rows, catalog_reads = _run_counting_catalog_reads(pg_conn, join_query % 0)
     assert tuple(rows[0]) == (5, 5)
     assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
     pg_conn.commit()
 
+    # the function reads after the rewrite and still gets the statement's
+    # version
     sleep_seconds = 3.0
     rows = _rewrite_one_second_into(
         s3,
@@ -1030,17 +960,19 @@ def test_stable_function_reads_with_its_callers_snapshot(
     assert rows[0][0] == [5, 5, 5]
     pg_conn.commit()
 
-    # the next statement takes a snapshot of its own
+    # the next statement reads the catalog as it stands
     rows = run_query(calls_query % 0, pg_conn)
     assert rows[0][0] == [9, 9, 9]
     pg_conn.commit()
 
 
-# A DO block, a procedure and a trigger function run their queries the way a
-# volatile function does, each under a new snapshot in READ COMMITTED, so a
-# polling loop in any of them sees the catalog move, as it would see a heap
-# table move.
-def test_do_block_procedure_and_trigger_read_with_snapshots_of_their_own(
+# A DO block, a procedure, a trigger function and a SQL function run their
+# queries inside the statement that runs them, so they read the statement's
+# version even when the catalog moves between two of their reads, where each
+# of those queries would read a heap table under a new snapshot.  A procedure
+# that commits in between reads anew after the commit, which
+# test_open_cursor_read_goes_with_the_transaction covers.
+def test_do_block_procedure_trigger_and_sql_function_read_their_statements_version(
     pg_conn,
     s3,
     extension,
@@ -1055,11 +987,11 @@ def test_do_block_procedure_and_trigger_read_with_snapshots_of_their_own(
     )
     _create_seen_table(pg_conn, schema)
 
-    def read_twice(sleep_seconds):
+    def read_twice(sleep_seconds, sleep_command="PERFORM"):
         return (
             f"INSERT INTO {schema}.seen "
             f"  SELECT 'first', count(*) FROM {schema}.read_tbl; "
-            f"PERFORM pg_sleep({sleep_seconds}); "
+            f"{sleep_command} pg_sleep({sleep_seconds}); "
             f"INSERT INTO {schema}.seen "
             f"  SELECT 'second', count(*) FROM {schema}.read_tbl; "
         )
@@ -1082,6 +1014,14 @@ def test_do_block_procedure_and_trigger_read_with_snapshots_of_their_own(
         f"FOR EACH ROW EXECUTE FUNCTION {schema}.read_twice_on_insert('3')",
         pg_conn,
     )
+
+    # each statement of a SQL function body is a query of its own as well
+    run_command(
+        f"CREATE FUNCTION {schema}.read_twice_in_sql(sleep_seconds float8) "
+        f"RETURNS void LANGUAGE sql AS $$ "
+        f"  {read_twice('sleep_seconds', sleep_command='SELECT')} $$",
+        pg_conn,
+    )
     pg_conn.commit()
 
     sleep_seconds = 3.0
@@ -1089,6 +1029,7 @@ def test_do_block_procedure_and_trigger_read_with_snapshots_of_their_own(
         "DO block": f"DO $$ BEGIN {read_twice(sleep_seconds)} END; $$",
         "procedure": f"CALL {schema}.read_twice({sleep_seconds})",
         "trigger": f"INSERT INTO {schema}.fire VALUES ({sleep_seconds})",
+        "SQL function": f"SELECT {schema}.read_twice_in_sql({sleep_seconds})",
     }
 
     for kind, statement in statements.items():
@@ -1098,20 +1039,24 @@ def test_do_block_procedure_and_trigger_read_with_snapshots_of_their_own(
         _rewrite_one_second_into(
             s3, key, body_late, sleep_seconds, lambda: run_command(statement, pg_conn)
         )
-        assert _seen(pg_conn, schema) == {"first": 5, "second": 9}, kind
+        assert _seen(pg_conn, schema) == {"first": 5, "second": 5}, kind
         pg_conn.commit()
 
-    # and two reads a moment apart are two catalog reads, no timing needed
+        # the next statement reads the rewrite
+        assert run_query(f"SELECT count(*) FROM {schema}.read_tbl", pg_conn)[0][0] == 9
+        pg_conn.commit()
+
+    # and two reads a moment apart are one catalog read, no timing needed
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
     catalog_reads = _count_catalog_reads(
         pg_conn, f"DO $$ BEGIN {read_twice(0)} END; $$"
     )
-    assert catalog_reads == 2, f"expected two catalog reads, got {catalog_reads}"
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
     pg_conn.rollback()
 
 
-# Every statement of a message that carries several takes a snapshot of its
+# Every statement of a message that carries several runs in a portal of its
 # own, although they share one statement start timestamp, so each of them
 # reads the catalog as it stands.
 def test_each_statement_of_a_message_reads_with_its_own_snapshot(
@@ -1243,13 +1188,13 @@ def test_cursor_reads_the_version_it_was_declared_with(
     pg_conn.commit()
 
 
-# A read keeps the snapshot it reads with for as long as anything else does,
-# which for a cursor is past the statement that declared it, so a transaction
-# can end with that snapshot still held.  Every way of ending it has to let go
-# of the snapshot, or Postgres reports it as leaked, and the next transaction
-# has to read the catalog as it stands.  A procedure that commits between two
-# reads ends a transaction in the middle of a statement.
-def test_held_snapshot_goes_with_the_transaction(
+# A cursor reads for as long as it is open, which can be past the statement
+# that declared it, so a transaction can end with a cursor's read still
+# there.  Every way of ending the transaction ends that read too, and the next
+# transaction reads the catalog as it stands.  A procedure that commits
+# between two reads ends a transaction in the middle of a statement, and its
+# read after the commit is a read of the new transaction.
+def test_open_cursor_read_goes_with_the_transaction(
     pg_conn,
     s3,
     extension,
@@ -1257,7 +1202,7 @@ def test_held_snapshot_goes_with_the_transaction(
     adjust_object_store_settings,
     reader_catalog_prefix,
 ):
-    schema = "test_osc_held_snapshot"
+    schema = "test_osc_held_cursor"
     _reset_schema(pg_conn, schema)
     key, body_early, body_late = _two_catalog_versions(
         pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
@@ -1287,9 +1232,7 @@ def test_held_snapshot_goes_with_the_transaction(
         assert run_query("FETCH 1 FROM held_cursor", pg_conn)[0][0] == 5
         _put_catalog(s3, key, body_late)
 
-        pg_conn.notices.clear()
         end_transaction()
-        assert not _snapshot_warnings(pg_conn), pg_conn.notices
 
         assert run_query(count_query, pg_conn)[0][0] == 9
         pg_conn.commit()
@@ -1298,7 +1241,7 @@ def test_held_snapshot_goes_with_the_transaction(
     end_with_cursor_open(pg_conn.rollback)
 
     if run_query("SHOW max_prepared_transactions", pg_conn)[0][0] != "0":
-        prepared_name = "pg_lake_held_external_catalog_snapshot"
+        prepared_name = "pg_lake_held_external_catalog_cursor"
 
         def prepare():
             run_command(f"PREPARE TRANSACTION '{prepared_name}'", pg_conn)
@@ -1318,7 +1261,6 @@ def test_held_snapshot_goes_with_the_transaction(
     # commit is in a transaction of its own
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
-    pg_conn.notices.clear()
     pg_conn.autocommit = True
     try:
         sleep_seconds = 3.0
@@ -1333,14 +1275,14 @@ def test_held_snapshot_goes_with_the_transaction(
         )
     finally:
         pg_conn.autocommit = False
-    assert not _snapshot_warnings(pg_conn), pg_conn.notices
     assert _seen(pg_conn, schema) == {"before commit": 5, "after commit": 9}
     pg_conn.commit()
 
 
 # A subtransaction that aborts inside a function, as an EXCEPTION block does,
-# takes the snapshots of its queries with it while the read that held one of
-# them carries on, and the function keeps reading after it.
+# leaves the read of the statement that called the function in place, because
+# what the statement read is still what it is reading.  The function keeps
+# reading that version after the block, including after the catalog moved.
 def test_subtransaction_abort_inside_a_function(
     pg_conn,
     s3,
@@ -1355,14 +1297,16 @@ def test_subtransaction_abort_inside_a_function(
         pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
     )
     run_command(
-        f"CREATE FUNCTION {schema}.read_through_failure(OUT inside bigint, "
-        f"OUT after bigint) VOLATILE LANGUAGE plpgsql AS $$ BEGIN "
+        f"CREATE FUNCTION {schema}.read_through_failure(sleep_seconds float8, "
+        f"OUT inside bigint, OUT after bigint) "
+        f"VOLATILE LANGUAGE plpgsql AS $$ BEGIN "
         f"  BEGIN "
         f"    SELECT count(*) INTO inside FROM {schema}.read_tbl; "
         f"    PERFORM 1 / 0; "
         f"  EXCEPTION WHEN division_by_zero THEN "
         f"    NULL; "
         f"  END; "
+        f"  PERFORM pg_sleep(sleep_seconds); "
         f"  SELECT count(*) INTO after FROM {schema}.read_tbl; "
         f"END; $$",
         pg_conn,
@@ -1370,15 +1314,23 @@ def test_subtransaction_abort_inside_a_function(
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
 
-    pg_conn.notices.clear()
-    rows, catalog_reads = _run_counting_catalog_reads(
-        pg_conn, f"SELECT inside, after FROM {schema}.read_through_failure()"
+    call_query = f"SELECT inside, after FROM {schema}.read_through_failure(%s)"
+
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, call_query % 0)
+    assert tuple(rows[0]) == (5, 5)
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
+    pg_conn.commit()
+
+    sleep_seconds = 3.0
+    rows = _rewrite_one_second_into(
+        s3,
+        key,
+        body_late,
+        sleep_seconds,
+        lambda: run_query(call_query % sleep_seconds, pg_conn),
     )
     assert tuple(rows[0]) == (5, 5)
-    assert catalog_reads == 2, f"expected two catalog reads, got {catalog_reads}"
-
     pg_conn.commit()
-    assert not _snapshot_warnings(pg_conn), pg_conn.notices
 
 
 # Attaching a table reads its catalog as it stands, the way listing it does, so
@@ -1450,4 +1402,374 @@ def test_attach_reads_catalog_as_it_stands(
 
     assert run_query(count_attached, pg_conn)[0][0] == 3
     assert run_query(count_read, pg_conn)[0][0] == 9
+    pg_conn.commit()
+
+
+# A rule that adds an action to a statement makes Postgres run the action
+# right after the statement under the same snapshot, which it moves to a new
+# command in place, and it does that at the top level, in a PL/pgSQL statement
+# and in a SQL function alike.  Each place is one statement, so the action
+# reads the version the statement it was added to read.  Holding the snapshot
+# itself for a read crashed assert-enabled builds in all three.
+def test_rule_actions_read_one_version(
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_rule_actions"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+    run_command(f"CREATE TABLE {schema}.counted (n bigint)", pg_conn)
+    run_command(f"CREATE TABLE {schema}.counted_log (n bigint)", pg_conn)
+
+    # NEW in the action is the statement's SELECT, so the action reads the
+    # external table a second time
+    run_command(
+        f"CREATE RULE log_counted AS ON INSERT TO {schema}.counted "
+        f"DO ALSO INSERT INTO {schema}.counted_log VALUES (NEW.n)",
+        pg_conn,
+    )
+
+    insert_count = (
+        f"INSERT INTO {schema}.counted SELECT count(*) FROM {schema}.read_tbl"
+    )
+    run_command(
+        f"CREATE FUNCTION {schema}.insert_count() RETURNS void "
+        f"LANGUAGE sql AS $$ {insert_count} $$",
+        pg_conn,
+    )
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    assert run_query("SHOW transaction_isolation", pg_conn)[0][0] == "read committed"
+
+    statements = {
+        "top level": insert_count,
+        "PL/pgSQL": f"DO $$ BEGIN {insert_count}; END; $$",
+        "SQL function": f"SELECT {schema}.insert_count()",
+    }
+
+    for kind, statement in statements.items():
+        catalog_reads = _count_catalog_reads(pg_conn, statement)
+        assert catalog_reads == 1, f"{kind}: expected one read, got {catalog_reads}"
+
+        for table_name in ("counted", "counted_log"):
+            rows = run_query(f"SELECT n FROM {schema}.{table_name}", pg_conn)
+            assert [tuple(row) for row in rows] == [(5,)], f"{kind}: {table_name}"
+
+        run_command(f"TRUNCATE {schema}.counted, {schema}.counted_log", pg_conn)
+        pg_conn.commit()
+
+
+# With the extended protocol a statement starts in its Bind message and runs
+# in its Execute message, so the scans it starts resolve the catalog in one
+# message and the queries its functions run resolve it in the other.  Both
+# belong to the one portal the two messages share, so the statement still
+# reads one version.  A bound parameter is what makes psycopg send the
+# statement that way.
+def test_extended_protocol_reads_one_version(
+    pg_conn,
+    app_user,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_extended_protocol"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+    run_command(
+        f"CREATE FUNCTION {schema}.rows_after(sleep_seconds float8) "
+        f"RETURNS TABLE (n bigint) STABLE LANGUAGE plpgsql AS $$ BEGIN "
+        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  RETURN QUERY SELECT count(*) FROM {schema}.read_tbl; "
+        f"END; $$",
+        pg_conn,
+    )
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    join_query = (
+        f"SELECT count(*), max(f.n) "
+        f"FROM {schema}.read_tbl CROSS JOIN {schema}.rows_after(%s) f"
+    )
+
+    notices = []
+    with psycopg.connect(default_connection_string(app_user)) as conn:
+        conn.add_notice_handler(
+            lambda diagnostic: notices.append(diagnostic.message_primary)
+        )
+        conn.execute("SET client_min_messages TO DEBUG1")
+        conn.commit()
+
+        row = conn.execute(join_query, (0.0,)).fetchone()
+        assert tuple(row) == (5, 5)
+        catalog_reads = len([n for n in notices if CATALOG_READ_MESSAGE in n])
+        assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
+        conn.commit()
+
+        # the scan resolved the catalog at Bind, before the rewrite, and the
+        # function reads after it at Execute
+        sleep_seconds = 3.0
+        row = _rewrite_one_second_into(
+            s3,
+            key,
+            body_late,
+            sleep_seconds,
+            lambda: conn.execute(join_query, (sleep_seconds,)).fetchone(),
+        )
+        assert tuple(row) == (5, 5)
+        conn.commit()
+
+        assert tuple(conn.execute(join_query, (0.0,)).fetchone()) == (9, 9)
+        conn.commit()
+
+
+# A procedure that calls another one runs both inside one CALL statement, so
+# both read the statement's version until one of them commits.  The commit
+# ends the transaction, so what either procedure reads next it reads anew.
+def test_nested_procedures_read_anew_after_a_commit(
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_nested_procedures"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+    _create_seen_table(pg_conn, schema)
+
+    def record(label):
+        return (
+            f"INSERT INTO {schema}.seen "
+            f"  SELECT '{label}', count(*) FROM {schema}.read_tbl; "
+        )
+
+    run_command(
+        f"CREATE PROCEDURE {schema}.inner_read(sleep_seconds float8) "
+        f"LANGUAGE plpgsql AS $$ BEGIN "
+        f"  {record('inner before sleep')} "
+        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {record('inner after sleep')} "
+        f"  COMMIT; "
+        f"  {record('inner after commit')} "
+        f"END; $$",
+        pg_conn,
+    )
+    run_command(
+        f"CREATE PROCEDURE {schema}.outer_read(sleep_seconds float8) "
+        f"LANGUAGE plpgsql AS $$ BEGIN "
+        f"  {record('outer before')} "
+        f"  CALL {schema}.inner_read(sleep_seconds); "
+        f"  {record('outer after')} "
+        f"END; $$",
+        pg_conn,
+    )
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    # only a CALL outside a transaction block may commit
+    pg_conn.autocommit = True
+    try:
+        sleep_seconds = 3.0
+        _rewrite_one_second_into(
+            s3,
+            key,
+            body_late,
+            sleep_seconds,
+            lambda: run_command(f"CALL {schema}.outer_read({sleep_seconds})", pg_conn),
+        )
+    finally:
+        pg_conn.autocommit = False
+
+    assert _seen(pg_conn, schema) == {
+        "outer before": 5,
+        "inner before sleep": 5,
+        "inner after sleep": 5,
+        "inner after commit": 9,
+        "outer after": 9,
+    }
+    pg_conn.commit()
+
+
+# A catch block of a procedure is a subtransaction.  The block that fails and
+# the handler that catches it both read the version of their statement, the
+# failure leaves that version in place, and the procedure reads anew only
+# after it commits, under either isolation level.
+@pytest.mark.parametrize("isolation_level", ["read committed", "repeatable read"])
+def test_exception_block_in_a_procedure_keeps_the_read(
+    isolation_level,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_procedure_exception"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+    _create_seen_table(pg_conn, schema)
+
+    # what the failing block reads leaves it in a variable, because the
+    # block's own writes go with its subtransaction
+    run_command(
+        f"CREATE PROCEDURE {schema}.read_around_failure(sleep_seconds float8) "
+        f"LANGUAGE plpgsql AS $$ "
+        f"DECLARE in_block bigint; in_handler bigint; BEGIN "
+        f"  INSERT INTO {schema}.seen "
+        f"    SELECT 'before', count(*) FROM {schema}.read_tbl; "
+        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  BEGIN "
+        f"    SELECT count(*) INTO in_block FROM {schema}.read_tbl; "
+        f"    PERFORM 1 / 0; "
+        f"  EXCEPTION WHEN division_by_zero THEN "
+        f"    SELECT count(*) INTO in_handler FROM {schema}.read_tbl; "
+        f"  END; "
+        f"  INSERT INTO {schema}.seen "
+        f"    VALUES ('in block', in_block), ('in handler', in_handler); "
+        f"  INSERT INTO {schema}.seen "
+        f"    SELECT 'after block', count(*) FROM {schema}.read_tbl; "
+        f"  COMMIT; "
+        f"  INSERT INTO {schema}.seen "
+        f"    SELECT 'after commit', count(*) FROM {schema}.read_tbl; "
+        f"END; $$",
+        pg_conn,
+    )
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    pg_conn.autocommit = True
+    try:
+        run_command(
+            f"SET default_transaction_isolation TO '{isolation_level}'", pg_conn
+        )
+        sleep_seconds = 3.0
+        _rewrite_one_second_into(
+            s3,
+            key,
+            body_late,
+            sleep_seconds,
+            lambda: run_command(
+                f"CALL {schema}.read_around_failure({sleep_seconds})", pg_conn
+            ),
+        )
+    finally:
+        run_command("RESET default_transaction_isolation", pg_conn)
+        pg_conn.autocommit = False
+
+    assert _seen(pg_conn, schema) == {
+        "before": 5,
+        "in block": 5,
+        "in handler": 5,
+        "after block": 5,
+        "after commit": 9,
+    }
+    pg_conn.commit()
+
+
+# Another session changing the table sends this session cache invalidations,
+# which rebuild what Postgres caches about the table.  A read is not one of
+# those caches, so a REPEATABLE READ transaction keeps its version through
+# them and does not read the catalog again.
+def test_invalidations_keep_the_held_version(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_invalidation"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+    run_command(f"CREATE TABLE {schema}.heap_tbl (a int)", pg_conn)
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    count_query = f"SELECT count(*) FROM {schema}.read_tbl"
+
+    run_command("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", pg_conn)
+    assert run_query(count_query, pg_conn)[0][0] == 5
+
+    _put_catalog(s3, key, body_late)
+    run_command(f"GRANT SELECT ON {schema}.read_tbl TO PUBLIC", superuser_conn)
+    superuser_conn.commit()
+
+    # a lock this transaction does not hold yet makes it take the
+    # invalidations in before the table is read again
+    run_query(f"SELECT count(*) FROM {schema}.heap_tbl", pg_conn)
+
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, count_query)
+    assert rows[0][0] == 5
+    assert catalog_reads == 0, f"expected no catalog read, got {catalog_reads}"
+    pg_conn.commit()
+
+    assert run_query(count_query, pg_conn)[0][0] == 9
+    pg_conn.commit()
+
+
+# A PL/pgSQL FOR loop over a query opens a cursor, which is a portal of its
+# own, so the loop reads the catalog as it stands when it starts, while the
+# statements around the loop read the version of the statement that called
+# the function.  That is one of the limits this file's header lists.
+def test_for_loop_cursor_reads_the_catalog_as_it_opens(
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_for_loop_cursor"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+    run_command(
+        f"CREATE FUNCTION {schema}.read_around_loop(sleep_seconds float8, "
+        f"OUT before_loop bigint, OUT in_loop bigint, OUT after_loop bigint) "
+        f"LANGUAGE plpgsql AS $$ DECLARE r record; BEGIN "
+        f"  SELECT count(*) INTO before_loop FROM {schema}.read_tbl; "
+        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  FOR r IN SELECT count(*) AS n FROM {schema}.read_tbl LOOP "
+        f"    in_loop := r.n; "
+        f"  END LOOP; "
+        f"  SELECT count(*) INTO after_loop FROM {schema}.read_tbl; "
+        f"END; $$",
+        pg_conn,
+    )
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    sleep_seconds = 3.0
+    rows = _rewrite_one_second_into(
+        s3,
+        key,
+        body_late,
+        sleep_seconds,
+        lambda: run_query(
+            f"SELECT before_loop, in_loop, after_loop "
+            f"FROM {schema}.read_around_loop({sleep_seconds})",
+            pg_conn,
+        ),
+    )
+    assert tuple(rows[0]) == (5, 9, 5)
     pg_conn.commit()

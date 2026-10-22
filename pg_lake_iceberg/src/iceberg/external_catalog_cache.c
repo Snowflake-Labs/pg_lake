@@ -18,75 +18,72 @@
 /*
  * external_catalog_cache.c
  *
- * A table pg_lake does not own keeps its current metadata location outside
- * Postgres, so a reference to such a table has to ask the catalog where the
- * table is right now. Asking twice within one read exposes the reader to
- * whatever the catalog did in between: a query that references the same
- * table twice can read two versions of it, and two tables of one catalog can
- * be read as of two different points in time. Neither is a state those
- * tables ever had together. That is the problem this module exists for.
- * Fewer requests to the catalog are a side effect and not a reason to hold
- * anything.
+ * A table pg_lake does not own keeps its current metadata location in an
+ * external catalog, so reading the table starts with asking that catalog
+ * where the table is. Asking more than once while one statement runs exposes
+ * the statement to whatever the catalog did in between: two references to
+ * one table can read two versions of it, and two tables of one object store
+ * catalog can be read as of two different points in time. Neither is a state
+ * those tables ever had together.
  *
- * Tables pg_lake owns never get here: their files are listed in our own
- * catalogs, which the transaction snapshot already holds still.
+ * So the answers are held in a read, and each question is asked once per
+ * read:
  *
- * What a reader asked is held for exactly as long as Postgres would hold a
- * heap table still for it, which is as long as the snapshot it reads with:
+ * - under REPEATABLE READ and SERIALIZABLE, a read lasts for the transaction,
+ *   because those levels read one state of the database for all of it;
+ * - under READ COMMITTED, a read lasts for the portal that runs the
+ *   statement, and the next statement asks again. A portal runs every query
+ *   of its statement, including the queries of the functions, DO blocks,
+ *   procedures and triggers the statement calls, and with the extended
+ *   protocol it spans the Bind and Execute messages that start and run it.
+ *   A cursor is a portal of its own and reads for as long as it is open.
  *
- * - REPEATABLE READ and SERIALIZABLE read one snapshot for the whole
- *   transaction, so all of its queries share one read.
- * - READ COMMITTED takes a new snapshot for every statement, for every
- *   statement of a multi-statement message, and for every query a volatile
- *   function, DO block, procedure or trigger runs, while the queries of a
- *   STABLE or IMMUTABLE function run under their caller's snapshot. So a
- *   read belongs to the snapshot its query runs under, and a query under
- *   another snapshot asks again.
- *
- * Postgres gives a snapshot no identity but its address, and it reuses the
- * memory of a snapshot it frees for the next one. So a read holds its
- * snapshot, which keeps that address from being reused while the read
- * exists, and goes as soon as nothing but the read holds the snapshot.
+ * A read ends when Postgres releases the resource owner of its portal or of
+ * its transaction: when a statement is done, when a cursor closes, when the
+ * subtransaction that opened a cursor aborts, and when the transaction ends
+ * by commit, abort or PREPARE TRANSACTION. Subtransactions that abort inside
+ * a statement leave its read in place, because what the statement read is
+ * still what it is reading. Reads live under TopTransactionContext, so
+ * nothing they hold outlives the transaction either way.
  *
  * What a read holds follows how the catalog publishes:
  *
- * - a REST catalog answers for one table per request, so its answer is held
- *   under the table it was asked about rather than under the relation that
- *   asked. A relation that ALTER FOREIGN TABLE points at another table then
- *   asks about that table, and two relations naming one table read one
- *   version of it. Two tables of such a catalog are two requests and never
- *   were a single state to begin with, so there is nothing to hold them
- *   together with.
- * - an object store catalog publishes all of its tables as one document at
- *   a fixed path, so that document is held instead. Holding it is what
- *   makes two tables a read resolves from one such catalog come from the
- *   same version of it. Holding a location per table cannot do that,
- *   because each table would still read the document once.
+ * - a REST catalog answers for one table per request, so a read holds the
+ *   metadata location of each relation it asked about;
+ * - an object store catalog publishes all of its tables as one document at a
+ *   fixed path, so a read holds the document, which is what makes two tables
+ *   of one catalog come from the same version of it.
  *
- * Two limits are deliberate, and the tests lock them:
+ * The limits, which the tests lock:
  *
- * - a REPEATABLE READ or SERIALIZABLE transaction is held to the catalog
- *   version of its first read of an external table, not to the version that
- *   stood when it took its snapshot. A transaction that takes its snapshot,
- *   lets the catalog move, and only then reads the table sees the newer
- *   version, where a heap table would not. Resolving every external table at
- *   BEGIN is the wrong price for closing that gap.
+ * - a REPEATABLE READ or SERIALIZABLE transaction is held to the version of
+ *   its first read of an external table, not to the version that stood when
+ *   it took its snapshot;
+ * - under READ COMMITTED a statement holds its version longer than Postgres
+ *   holds a heap table still, which every query of a volatile function, DO
+ *   block, procedure or trigger reads under a new snapshot. A loop that polls
+ *   an external table inside one statement therefore keeps reading the
+ *   version the statement started with, until a procedure commits;
+ * - a cursor, including the one a PL/pgSQL FOR loop over a query opens, reads
+ *   the catalog as it stands when it opens, which can be newer than what the
+ *   rest of its statement reads;
+ * - a read holds a REST answer under the relation that asked, so a relation
+ *   that ALTER FOREIGN TABLE points at another table keeps reading the old
+ *   one until the read ends;
  * - attaching an object_store table reads its catalog as it stands, the way
- *   the listing function does. A table published since a REPEATABLE READ or
- *   SERIALIZABLE transaction first read that catalog can therefore be
- *   attached in that transaction, but reading it waits for the next one,
- *   because the transaction's read holds the document as it was, which does
- *   not list the table yet.
+ *   the listing function does, so a table published since a read started can
+ *   be attached, but that read cannot see it.
  */
 
 #include "postgres.h"
 
 #include "access/xact.h"
 #include "nodes/pg_list.h"
+#include "tcop/pquery.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/portal.h"
 #include "utils/resowner.h"
-#include "utils/snapmgr.h"
 
 /* foreach_ptr() on the versions of Postgres that do not have it yet */
 #include "pg_extension_base/pg_compat.h"
@@ -97,71 +94,59 @@
 #include "pg_lake/util/s3_reader_utils.h"
 
 
-/* what an external catalog answered, under the question it answered */
-typedef struct CachedAnswer
+/* where the REST catalog of a read-only table said that table is */
+typedef struct RestCatalogTableLocation
 {
-	char	   *question;
-	char	   *answer;
-}			CachedAnswer;
+	Oid			relationId;
+	char	   *metadataLocation;
+}			RestCatalogTableLocation;
 
-/*
- * What external catalogs answered the queries that run under one snapshot,
- * or under the one snapshot of a transaction that uses a transaction
- * snapshot.
- */
+/* an object store catalog document, as it was read from its path */
+typedef struct ObjectStoreCatalogDocument
+{
+	char	   *path;
+	char	   *content;
+}			ObjectStoreCatalogDocument;
+
+/* what external catalogs answered one portal or one transaction */
 typedef struct ExternalCatalogRead
 {
-	/*
-	 * The snapshot the read belongs to, held while the read exists, or
-	 * InvalidSnapshot for the read of a whole transaction.
-	 */
-	Snapshot	snapshot;
+	/* releasing this resource owner ends the read */
+	ResourceOwner owner;
 
-	/* the read and its answers live here */
+	/* the read and everything it holds live here */
 	MemoryContext context;
 
-	/* metadata locations, under the REST catalog table each was asked about */
-	List	   *restCatalogLocations;
+	/* list of RestCatalogTableLocation */
+	List	   *restCatalogTableLocations;
 
-	/* catalog documents, under the path each was read from */
-	List	   *catalogDocuments;
+	/* list of ObjectStoreCatalogDocument */
+	List	   *objectStoreCatalogDocuments;
 }			ExternalCatalogRead;
 
 
-/*
- * The reads of the current transaction live in a context of their own under
- * TopTransactionContext, so nothing they hold outlives the transaction.
- */
-static MemoryContext ExternalCatalogCacheContext = NULL;
-
-/* list of ExternalCatalogRead, in ExternalCatalogCacheContext */
+/* the reads of the current transaction, in ExternalCatalogReadsContext */
 static List *ExternalCatalogReads = NIL;
-
-#if PG_VERSION_NUM >= 170000
-/*
- * Since Postgres 17 a resource release callback may not release a resource
- * of an owner that is itself being released, which the transaction's owner is
- * at commit, so the snapshots the reads hold are registered on an owner of
- * our own.
- */
-static ResourceOwner ReadSnapshotsOwner = NULL;
-#endif
+static MemoryContext ExternalCatalogReadsContext = NULL;
 
 static char *ResolveRestCatalogTable(Oid relationId);
 static char *ResolveObjectStoreCatalogTable(Oid relationId);
-static char *RestCatalogRequestKey(Oid relationId);
-static char *GetCachedAnswer(List *answers, const char *question);
-static List *CacheAnswer(ExternalCatalogRead * read, List *answers,
-						 const char *question, const char *answer);
+static char *FindRestCatalogTableLocation(ExternalCatalogRead * read,
+										  Oid relationId);
+static void RememberRestCatalogTableLocation(ExternalCatalogRead * read,
+											 Oid relationId,
+											 const char *metadataLocation);
+static char *FindObjectStoreCatalogDocument(ExternalCatalogRead * read,
+											const char *path);
+static void RememberObjectStoreCatalogDocument(ExternalCatalogRead * read,
+											   const char *path,
+											   const char *content);
 static ExternalCatalogRead * GetCurrentExternalCatalogRead(void);
-static ExternalCatalogRead * FindOrStartExternalCatalogRead(Snapshot snapshot);
-static void CreateExternalCatalogCache(void);
-static void ReleaseExternalCatalogReads(bool transactionEnding);
-static void ReleaseUnusedExternalCatalogReads(ResourceReleasePhase phase,
-											  bool isCommit, bool isTopLevel,
-											  void *arg);
-static ResourceOwner GetReadSnapshotsOwner(void);
-static void ForgetExternalCatalogCache(void *arg);
+static ResourceOwner GetCurrentReadOwner(void);
+static ExternalCatalogRead * StartExternalCatalogRead(ResourceOwner owner);
+static void EndExternalCatalogReads(ResourceReleasePhase phase, bool isCommit,
+									bool isTopLevel, void *arg);
+static void ForgetExternalCatalogReads(void *arg);
 
 
 /*
@@ -202,33 +187,24 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 /*
  * ResolveRestCatalogTable returns where the REST catalog of a read-only
  * table says that table is, asking the catalog only if the current read has
- * not asked it about that table yet.
+ * not asked it about that relation yet.
  */
 static char *
 ResolveRestCatalogTable(Oid relationId)
 {
-	char	   *requestKey = RestCatalogRequestKey(relationId);
 	ExternalCatalogRead *read = GetCurrentExternalCatalogRead();
+	char	   *metadataLocation = FindRestCatalogTableLocation(read, relationId);
 
-	if (read != NULL)
+	if (metadataLocation == NULL)
 	{
-		char	   *cachedLocation =
-			GetCachedAnswer(read->restCatalogLocations, requestKey);
+		metadataLocation =
+			GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-		/* the read goes when its snapshot does, which a caller may outlive */
-		if (cachedLocation != NULL)
-			return pstrdup(cachedLocation);
+		RememberRestCatalogTableLocation(read, relationId, metadataLocation);
 	}
 
-	char	   *metadataLocation =
-		GetMetadataLocationForRestCatalogForIcebergTable(relationId);
-
-	if (read != NULL)
-		read->restCatalogLocations =
-			CacheAnswer(read, read->restCatalogLocations, requestKey,
-						metadataLocation);
-
-	return metadataLocation;
+	/* the read can end before whatever the caller keeps this in */
+	return pstrdup(metadataLocation);
 }
 
 
@@ -240,67 +216,39 @@ ResolveRestCatalogTable(Oid relationId)
 static char *
 ResolveObjectStoreCatalogTable(Oid relationId)
 {
-	char	   *documentPath =
-		GetExternalObjectStoreCatalogFilePathForTable(relationId);
+	char	   *path = GetExternalObjectStoreCatalogFilePathForTable(relationId);
 	ExternalCatalogRead *read = GetCurrentExternalCatalogRead();
-	char	   *document = NULL;
+	char	   *content = FindObjectStoreCatalogDocument(read, path);
 
-	if (read != NULL)
-		document = GetCachedAnswer(read->catalogDocuments, documentPath);
-
-	if (document == NULL)
+	if (content == NULL)
 	{
 		/* catalog.json is a fixed path that may change out of band */
-		document = GetJsonFromURINoCache(documentPath);
+		content = GetJsonFromURINoCache(path);
 
 		/* which version of the catalog a reader got is otherwise unanswerable */
 		ereport(DEBUG1,
-				(errmsg("read external catalog document \"%s\"", documentPath)));
+				(errmsg("read external catalog document \"%s\"", path)));
 
-		if (read != NULL)
-			read->catalogDocuments =
-				CacheAnswer(read, read->catalogDocuments, documentPath, document);
+		RememberObjectStoreCatalogDocument(read, path, content);
 	}
 
 	return GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId,
-																	 document);
+																	 content);
 }
 
 
 /*
- * RestCatalogRequestKey returns a key for the table a REST catalog request
- * asks about, rather than for the relation asking, which ALTER FOREIGN TABLE
- * can point at another table. The server is the one the catalog option
- * names, because every Iceberg table has the same foreign server, and the
- * names are length prefixed because an identifier may contain the separator.
+ * FindRestCatalogTableLocation returns the metadata location the given read
+ * got for a relation, or NULL if it has not asked about that relation.
  */
 static char *
-RestCatalogRequestKey(Oid relationId)
+FindRestCatalogTableLocation(ExternalCatalogRead * read, Oid relationId)
 {
-	Oid			catalogServerId = GetRestCatalogServerIdForRelation(relationId);
-	char	   *catalogName = GetRestCatalogName(relationId);
-	char	   *namespaceName = GetRestCatalogNamespace(relationId);
-	char	   *tableName = GetRestCatalogTableName(relationId);
-
-	return psprintf("%u %zu:%s %zu:%s %zu:%s",
-					catalogServerId,
-					strlen(catalogName), catalogName,
-					strlen(namespaceName), namespaceName,
-					strlen(tableName), tableName);
-}
-
-
-/*
- * GetCachedAnswer returns what an external catalog answered to the given
- * question, or NULL if the read holds no answer to it.
- */
-static char *
-GetCachedAnswer(List *answers, const char *question)
-{
-	foreach_ptr(CachedAnswer, cachedAnswer, answers)
+	foreach_ptr(RestCatalogTableLocation, location,
+				read->restCatalogTableLocations)
 	{
-		if (strcmp(cachedAnswer->question, question) == 0)
-			return cachedAnswer->answer;
+		if (location->relationId == relationId)
+			return location->metadataLocation;
 	}
 
 	return NULL;
@@ -308,220 +256,196 @@ GetCachedAnswer(List *answers, const char *question)
 
 
 /*
- * CacheAnswer adds what an external catalog answered to a question the
- * read held no answer to, and returns the list it was added to.
+ * RememberRestCatalogTableLocation adds the metadata location the REST
+ * catalog gave for a relation to the given read.
  */
-static List *
-CacheAnswer(ExternalCatalogRead * read, List *answers, const char *question,
-			const char *answer)
+static void
+RememberRestCatalogTableLocation(ExternalCatalogRead * read, Oid relationId,
+								 const char *metadataLocation)
 {
 	MemoryContext previousContext = MemoryContextSwitchTo(read->context);
 
-	CachedAnswer *cachedAnswer = palloc0(sizeof(CachedAnswer));
+	RestCatalogTableLocation *location = palloc(sizeof(RestCatalogTableLocation));
 
-	cachedAnswer->question = pstrdup(question);
-	cachedAnswer->answer = pstrdup(answer);
+	location->relationId = relationId;
+	location->metadataLocation = pstrdup(metadataLocation);
 
-	answers = lappend(answers, cachedAnswer);
+	read->restCatalogTableLocations =
+		lappend(read->restCatalogTableLocations, location);
 
 	MemoryContextSwitchTo(previousContext);
-
-	return answers;
 }
 
 
 /*
- * GetCurrentExternalCatalogRead returns the read the answers of the current
- * query belong to, or NULL when the query runs under no snapshot and asks the
- * catalog every time.
+ * FindObjectStoreCatalogDocument returns the content of the catalog document
+ * the given read got from a path, or NULL if it has not read that path.
+ */
+static char *
+FindObjectStoreCatalogDocument(ExternalCatalogRead * read, const char *path)
+{
+	foreach_ptr(ObjectStoreCatalogDocument, document,
+				read->objectStoreCatalogDocuments)
+	{
+		if (strcmp(document->path, path) == 0)
+			return document->content;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * RememberObjectStoreCatalogDocument adds a catalog document read from a path
+ * to the given read.
+ */
+static void
+RememberObjectStoreCatalogDocument(ExternalCatalogRead * read, const char *path,
+								   const char *content)
+{
+	MemoryContext previousContext = MemoryContextSwitchTo(read->context);
+
+	ObjectStoreCatalogDocument *document =
+		palloc(sizeof(ObjectStoreCatalogDocument));
+
+	document->path = pstrdup(path);
+	document->content = pstrdup(content);
+
+	read->objectStoreCatalogDocuments =
+		lappend(read->objectStoreCatalogDocuments, document);
+
+	MemoryContextSwitchTo(previousContext);
+}
+
+
+/*
+ * GetCurrentExternalCatalogRead returns the read the current query belongs
+ * to, starting it when the query is the first of its read to ask an external
+ * catalog anything.
  */
 static ExternalCatalogRead *
 GetCurrentExternalCatalogRead(void)
 {
 	Assert(IsTransactionState());
 
-	if (ExternalCatalogCacheContext == NULL)
-		CreateExternalCatalogCache();
+	ResourceOwner owner = GetCurrentReadOwner();
 
-	if (IsolationUsesXactSnapshot())
-		return FindOrStartExternalCatalogRead(InvalidSnapshot);
+	foreach_ptr(ExternalCatalogRead, read, ExternalCatalogReads)
+	{
+		if (read->owner == owner)
+			return read;
+	}
 
-	if (!ActiveSnapshotSet())
-		return NULL;
-
-	/* the reads of earlier queries whose snapshots nothing else holds */
-	ReleaseExternalCatalogReads(false);
-
-	return FindOrStartExternalCatalogRead(GetActiveSnapshot());
+	return StartExternalCatalogRead(owner);
 }
 
 
 /*
- * FindOrStartExternalCatalogRead returns the read that belongs to the given
- * snapshot, starting one if there is none yet.
+ * GetCurrentReadOwner returns the resource owner whose release ends the read
+ * the current query belongs to: the active portal's under READ COMMITTED,
+ * and the transaction's under REPEATABLE READ and SERIALIZABLE. A portal
+ * that has no resource owner of its own, which is what a procedure's portal
+ * is left with once the procedure commits, and a query that runs outside any
+ * portal, read for the rest of the transaction.
+ */
+static ResourceOwner
+GetCurrentReadOwner(void)
+{
+	if (!IsolationUsesXactSnapshot() &&
+		ActivePortal != NULL && ActivePortal->resowner != NULL)
+		return ActivePortal->resowner;
+
+	return TopTransactionResourceOwner;
+}
+
+
+/*
+ * StartExternalCatalogRead starts an empty read that ends when the given
+ * resource owner is released.
  */
 static ExternalCatalogRead *
-FindOrStartExternalCatalogRead(Snapshot snapshot)
+StartExternalCatalogRead(ResourceOwner owner)
 {
-	foreach_ptr(ExternalCatalogRead, read, ExternalCatalogReads)
+	static bool releaseCallbackRegistered = false;
+
+	if (!releaseCallbackRegistered)
 	{
-		if (read->snapshot == snapshot)
-			return read;
+		RegisterResourceReleaseCallback(EndExternalCatalogReads, NULL);
+		releaseCallbackRegistered = true;
+	}
+
+	if (ExternalCatalogReadsContext == NULL)
+	{
+		MemoryContext readsContext =
+			AllocSetContextCreate(TopTransactionContext,
+								  "pg_lake external catalog reads",
+								  ALLOCSET_SMALL_SIZES);
+		MemoryContextCallback *forgetCallback =
+			MemoryContextAlloc(readsContext, sizeof(MemoryContextCallback));
+
+		forgetCallback->func = ForgetExternalCatalogReads;
+		forgetCallback->arg = NULL;
+
+		MemoryContextRegisterResetCallback(readsContext, forgetCallback);
+
+		ExternalCatalogReadsContext = readsContext;
 	}
 
 	MemoryContext readContext =
-		AllocSetContextCreate(ExternalCatalogCacheContext,
+		AllocSetContextCreate(ExternalCatalogReadsContext,
 							  "pg_lake external catalog read",
 							  ALLOCSET_SMALL_SIZES);
 	ExternalCatalogRead *read =
 		MemoryContextAllocZero(readContext, sizeof(ExternalCatalogRead));
 
+	read->owner = owner;
 	read->context = readContext;
 
 	MemoryContext previousContext =
-		MemoryContextSwitchTo(ExternalCatalogCacheContext);
+		MemoryContextSwitchTo(ExternalCatalogReadsContext);
 
 	ExternalCatalogReads = lappend(ExternalCatalogReads, read);
 
 	MemoryContextSwitchTo(previousContext);
-
-	/*
-	 * Held only once the read is listed, so that every snapshot held is one
-	 * ReleaseExternalCatalogReads can find. An active snapshot is a copy
-	 * already, so registering it returns the snapshot itself.
-	 */
-	if (snapshot != InvalidSnapshot)
-		read->snapshot = RegisterSnapshotOnOwner(snapshot, GetReadSnapshotsOwner());
-
-	Assert(read->snapshot == snapshot);
 
 	return read;
 }
 
 
 /*
- * CreateExternalCatalogCache sets up the cache for a transaction that is
- * about to read its first external catalog.
+ * EndExternalCatalogReads ends the reads of a resource owner as Postgres
+ * releases that owner. resowner.c makes the owner it releases the current one
+ * while it calls back, and calls back for each phase of the release, so the
+ * first phase ends the reads and the others find nothing left to end.
  */
 static void
-CreateExternalCatalogCache(void)
-{
-	static bool releaseCallbackRegistered = false;
-
-	if (!releaseCallbackRegistered)
-	{
-		RegisterResourceReleaseCallback(ReleaseUnusedExternalCatalogReads, NULL);
-		releaseCallbackRegistered = true;
-	}
-
-	/*
-	 * The cache belongs to the transaction rather than to the current
-	 * subtransaction, because a location a subtransaction resolved is still
-	 * the version of the table the transaction is reading after that
-	 * subtransaction rolls back.
-	 */
-	MemoryContext cacheContext =
-		AllocSetContextCreate(TopTransactionContext,
-							  "pg_lake external catalog cache",
-							  ALLOCSET_SMALL_SIZES);
-
-	MemoryContextCallback *forgetCallback =
-		MemoryContextAlloc(cacheContext, sizeof(MemoryContextCallback));
-
-	forgetCallback->func = ForgetExternalCatalogCache;
-	forgetCallback->arg = NULL;
-
-	MemoryContextRegisterResetCallback(cacheContext, forgetCallback);
-
-	/* published only once the callback that forgets it is in place */
-	ExternalCatalogCacheContext = cacheContext;
-}
-
-
-/*
- * ReleaseExternalCatalogReads drops the reads whose snapshot nothing but the
- * read holds any more, or every read that holds a snapshot when the
- * transaction is ending, and lets go of their snapshots.
- */
-static void
-ReleaseExternalCatalogReads(bool transactionEnding)
+EndExternalCatalogReads(ResourceReleasePhase phase, bool isCommit,
+						bool isTopLevel, void *arg)
 {
 	ListCell   *readCell = NULL;
 
 	foreach(readCell, ExternalCatalogReads)
 	{
 		ExternalCatalogRead *read = lfirst(readCell);
-		Snapshot	snapshot = read->snapshot;
 
-		/* the read of a whole transaction goes with the transaction */
-		if (snapshot == InvalidSnapshot)
-			continue;
-
-		/* a query still runs under it, or something else still holds it */
-		if (!transactionEnding &&
-			(snapshot->active_count > 0 || snapshot->regd_count > 1))
+		if (read->owner != CurrentResourceOwner)
 			continue;
 
 		ExternalCatalogReads =
 			foreach_delete_current(ExternalCatalogReads, readCell);
 
 		MemoryContextDelete(read->context);
-		UnregisterSnapshotFromOwner(snapshot, GetReadSnapshotsOwner());
 	}
 }
 
 
 /*
- * ReleaseUnusedExternalCatalogReads runs whenever Postgres releases a
- * resource owner, which it does at the end of every statement, subtransaction
- * and transaction, including at abort and at PREPARE TRANSACTION.
+ * ForgetExternalCatalogReads forgets the reads of a transaction as its memory
+ * goes, by which time releasing its resource owners has ended every read.
  */
 static void
-ReleaseUnusedExternalCatalogReads(ResourceReleasePhase phase, bool isCommit,
-								  bool isTopLevel, void *arg)
+ForgetExternalCatalogReads(void *arg)
 {
-	/*
-	 * Snapshot references are released in a later phase, so at commit the
-	 * reads let go of theirs before Postgres reports any still held as
-	 * leaked.
-	 */
-	if (phase != RESOURCE_RELEASE_BEFORE_LOCKS)
-		return;
-
-	if (ExternalCatalogCacheContext == NULL)
-		return;
-
-	ReleaseExternalCatalogReads(isTopLevel);
-}
-
-
-/*
- * GetReadSnapshotsOwner returns the resource owner the snapshots of the reads
- * are registered on.
- */
-static ResourceOwner
-GetReadSnapshotsOwner(void)
-{
-#if PG_VERSION_NUM >= 170000
-	if (ReadSnapshotsOwner == NULL)
-		ReadSnapshotsOwner = ResourceOwnerCreate(NULL,
-												 "pg_lake external catalog reads");
-
-	return ReadSnapshotsOwner;
-#else
-	return TopTransactionResourceOwner;
-#endif
-}
-
-
-/*
- * ForgetExternalCatalogCache forgets what pointed into the cache when the
- * transaction's memory goes, by which time the release callback has let go
- * of every snapshot a read held.
- */
-static void
-ForgetExternalCatalogCache(void *arg)
-{
-	ExternalCatalogCacheContext = NULL;
 	ExternalCatalogReads = NIL;
+	ExternalCatalogReadsContext = NULL;
 }
