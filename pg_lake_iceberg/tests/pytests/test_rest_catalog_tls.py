@@ -22,12 +22,13 @@ from utils_pytest import *
 # REST catalog, including catalogs that never asked for mutual TLS.  These
 # tests pin the check that turns that into an error where the mistake is made.
 
-TLS_SETTINGS = [
+TLS_FILE_SETTINGS = [
     "pg_lake_iceberg.horizon_tls_ca_file",
     "pg_lake_iceberg.horizon_tls_cert_file",
     "pg_lake_iceberg.horizon_tls_key_file",
-    "pg_lake_iceberg.horizon_tls_ca_path",
 ]
+CA_PATH_SETTING = "pg_lake_iceberg.horizon_tls_ca_path"
+TLS_SETTINGS = TLS_FILE_SETTINGS + [CA_PATH_SETTING]
 
 
 @pytest.mark.parametrize("setting", TLS_SETTINGS)
@@ -37,10 +38,10 @@ def test_an_unreadable_tls_file_is_refused(superuser_conn, setting):
             [f"ALTER SYSTEM SET {setting} TO '/nonexistent/pg_lake_tls_test.pem'"]
         )
 
-    assert "Cannot read file" in str(excinfo.value)
+    assert "Cannot" in str(excinfo.value)
 
 
-@pytest.mark.parametrize("setting", TLS_SETTINGS)
+@pytest.mark.parametrize("setting", TLS_FILE_SETTINGS)
 def test_a_readable_tls_file_is_accepted(superuser_conn, setting, tmp_path):
     readable = tmp_path / "tls.pem"
     readable.write_text("not a certificate, but readable\n")
@@ -49,6 +50,42 @@ def test_a_readable_tls_file_is_accepted(superuser_conn, setting, tmp_path):
         run_command_outside_tx([f"ALTER SYSTEM SET {setting} TO '{readable}'"])
     finally:
         run_command_outside_tx([f"ALTER SYSTEM RESET {setting}"])
+
+
+def test_a_bundle_file_as_ca_path_is_refused(superuser_conn, tmp_path):
+    """A bundle file is the easy slip here, since horizon_tls_ca_file takes one."""
+    bundle = tmp_path / "ca-bundle.crt"
+    bundle.write_text("not a directory\n")
+
+    with pytest.raises(psycopg2.Error) as excinfo:
+        run_command_outside_tx([f"ALTER SYSTEM SET {CA_PATH_SETTING} TO '{bundle}'"])
+
+    assert "is not a directory" in str(excinfo.value)
+
+
+def test_an_unsearchable_ca_path_is_refused(superuser_conn, tmp_path):
+    directory = tmp_path / "certs"
+    directory.mkdir()
+    directory.chmod(0o600)
+
+    try:
+        with pytest.raises(psycopg2.Error) as excinfo:
+            run_command_outside_tx(
+                [f"ALTER SYSTEM SET {CA_PATH_SETTING} TO '{directory}'"]
+            )
+        assert "Cannot search directory" in str(excinfo.value)
+    finally:
+        directory.chmod(0o700)
+
+
+def test_a_searchable_ca_path_is_accepted(superuser_conn, tmp_path):
+    directory = tmp_path / "certs"
+    directory.mkdir()
+
+    try:
+        run_command_outside_tx([f"ALTER SYSTEM SET {CA_PATH_SETTING} TO '{directory}'"])
+    finally:
+        run_command_outside_tx([f"ALTER SYSTEM RESET {CA_PATH_SETTING}"])
 
 
 @pytest.mark.parametrize("setting", TLS_SETTINGS)
