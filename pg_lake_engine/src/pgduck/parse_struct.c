@@ -777,12 +777,21 @@ FindOrCreatePGCompositeType(CompositeType * type)
 			"    GROUP BY attrelid) atts "
 			"ON pg_type.typrelid = atts.attrelid AND "
 			"    atts.names = $1 AND atts.types = $2 "
-			"WHERE typnamespace :: regnamespace in "
-			"    ('pg_catalog','" STRUCT_TYPES_SCHEMA "') LIMIT 1";
+			"WHERE typnamespace = 'pg_catalog'::regnamespace OR "
+			"    (typnamespace = '" STRUCT_TYPES_SCHEMA "'::regnamespace AND "
+			"     typowner = $3) "
+			"ORDER BY typnamespace = 'pg_catalog'::regnamespace DESC LIMIT 1";
 
-		Oid			argTypes[2] = {NAMEARRAYOID, OIDARRAYOID};
-		Datum		argValues[2] = {PointerGetDatum(nameArr),
-		PointerGetDatum(oidArr)};
+		/*
+		 * Only reuse struct types owned by the current user. Any role can
+		 * create types in the struct types schema, and a column that depends
+		 * on a type owned by another role can be dropped by that role via
+		 * DROP TYPE .. CASCADE.
+		 */
+		Oid			argTypes[3] = {NAMEARRAYOID, OIDARRAYOID, OIDOID};
+		Datum		argValues[3] = {PointerGetDatum(nameArr),
+			PointerGetDatum(oidArr),
+		ObjectIdGetDatum(GetUserId())};
 
 		Oid			foundOid = InvalidOid;
 		Oid			foundArrayOid = InvalidOid;
@@ -790,7 +799,7 @@ FindOrCreatePGCompositeType(CompositeType * type)
 
 		SPI_START();
 
-		int			ret = SPI_execute_with_args(findTypeQuery, 2, argTypes,
+		int			ret = SPI_execute_with_args(findTypeQuery, 3, argTypes,
 												argValues, NULL, false, 1);
 
 		if (ret == SPI_OK_SELECT && SPI_processed >= 1)
@@ -896,6 +905,22 @@ CreatePGCompositeType(CompositeType * type)
 		coldeflist = lappend(coldeflist, newColNode);
 
 		ReleaseSysCache(tup);
+	}
+
+	/*
+	 * Type names are derived from the struct definition, so another role may
+	 * already own a type with the same name. In that case, derive a different
+	 * name that includes the current user.
+	 */
+	Oid			structNamespaceId = get_namespace_oid(STRUCT_TYPES_SCHEMA, false);
+
+	if (OidIsValid(GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+								   CStringGetDatum(type->typeName),
+								   ObjectIdGetDatum(structNamespaceId))))
+	{
+		type->typeName = psprintf("%s%u_", type->typeName, GetUserId());
+		type->isFinalized = false;
+		FinalizeCompositeTypeName(type);
 	}
 
 	typevar = makeRangeVar(STRUCT_TYPES_SCHEMA, type->typeName, -1);
