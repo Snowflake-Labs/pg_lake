@@ -232,7 +232,7 @@ _PG_init(void)
 							   "",
 							   PGC_SIGHUP,
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
-							   CheckHttpClientTlsFile, NULL, NULL);
+							   CheckHttpClientTlsDirectory, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.horizon_tls_cert_file",
 							   gettext_noop("Path to the client certificate presented to catalogs "
