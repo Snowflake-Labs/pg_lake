@@ -1804,6 +1804,38 @@ def test_pruning_for_coercions_numeric(
     pg_conn.rollback()
 
 
+@pytest.mark.parametrize("width", [10, 1000, 100000])
+def test_pruning_smallint_truncate_edge_values(
+    s3,
+    disable_data_file_pruning,
+    pg_conn,
+    extension,
+    with_default_location,
+    width,
+):
+    run_command(
+        f"""
+        CREATE SCHEMA test_pruning_smallint_truncate;
+        CREATE TABLE test_pruning_smallint_truncate.tbl (col1 smallint)
+            USING iceberg WITH (autovacuum_enabled='False', partition_by='truncate({width}, col1)');
+        INSERT INTO test_pruning_smallint_truncate.tbl VALUES (-32768), (0), (32500), (32767);
+    """,
+        pg_conn,
+    )
+
+    for value in [-32768, 0, 32500, 32767]:
+        query = f"SELECT * FROM test_pruning_smallint_truncate.tbl WHERE col1 = {value}"
+
+        assert run_query(query, pg_conn) == [[value]]
+
+        results = run_query(
+            f"EXPLAIN (analyze, verbose, format json) {query}", pg_conn
+        )
+        assert int(fetch_data_files_used(results)) == 1
+
+    pg_conn.rollback()
+
+
 # Time-types to exercise
 column_types_temporal = ["date", "timestamp"]
 
