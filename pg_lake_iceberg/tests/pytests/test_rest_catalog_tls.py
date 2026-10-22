@@ -1,7 +1,9 @@
 import datetime
 import ipaddress
+import shutil
 import socket
 import ssl
+import subprocess
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -24,6 +26,7 @@ TLS_SETTINGS = [
     "pg_lake_iceberg.horizon_tls_ca_file",
     "pg_lake_iceberg.horizon_tls_cert_file",
     "pg_lake_iceberg.horizon_tls_key_file",
+    "pg_lake_iceberg.horizon_tls_ca_path",
 ]
 
 
@@ -251,6 +254,7 @@ def _stop_using_catalog():
             "ALTER SYSTEM RESET pg_lake_iceberg.horizon_tls_ca_file",
             "ALTER SYSTEM RESET pg_lake_iceberg.horizon_tls_cert_file",
             "ALTER SYSTEM RESET pg_lake_iceberg.horizon_tls_key_file",
+            "ALTER SYSTEM RESET pg_lake_iceberg.horizon_tls_ca_path",
             "SELECT pg_reload_conf()",
         ]
     )
@@ -407,6 +411,56 @@ def test_a_half_configured_certificate_is_refused(
             _register_namespace(superuser_conn)
 
         assert handler.peer_common_names == []
+    finally:
+        superuser_conn.rollback()
+        _stop_using_catalog()
+
+
+def test_a_horizon_catalog_trusts_the_ca_path(
+    superuser_conn,
+    iceberg_extension,
+    installcheck,
+    tls_material,
+    mtls_catalog_server,
+    tmp_path,
+):
+    """
+    The edge's authority is only in the hashed directory and ca_file holds an
+    unrelated one, so the handshake completes only if ca_path is consulted.
+    """
+    if installcheck:
+        return
+
+    port, handler = mtls_catalog_server
+
+    hashed = tmp_path / "hashed"
+    hashed.mkdir()
+    shutil.copy(tls_material["ca"], hashed / "edge-ca.pem")
+    subprocess.run(["openssl", "rehash", str(hashed)], check=True)
+
+    other_cert, _ = _issue_certificate("pg-lake-other-ca", is_ca=True)
+    other_ca = _write_pem(tmp_path, "other-ca.pem", cert=other_cert)
+
+    _use_catalog(superuser_conn, port, tls_material, "horizon")
+    run_command_outside_tx(
+        [
+            f"ALTER SYSTEM SET pg_lake_iceberg.horizon_tls_ca_file TO '{other_ca}'",
+            f"ALTER SYSTEM SET pg_lake_iceberg.horizon_tls_ca_path TO '{hashed}'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+    wait_for_reloaded_settings(
+        [superuser_conn],
+        {
+            "pg_lake_iceberg.horizon_tls_ca_file": str(other_ca),
+            "pg_lake_iceberg.horizon_tls_ca_path": str(hashed),
+        },
+    )
+
+    try:
+        _register_namespace(superuser_conn)
+
+        assert set(handler.peer_common_names) == {CLIENT_COMMON_NAME}
     finally:
         superuser_conn.rollback()
         _stop_using_catalog()

@@ -88,6 +88,7 @@ static bool curlInitialized = false;
 bool		HttpClientTraceTraffic = false;
 
 char	   *HttpClientTlsCaFile = "";
+char	   *HttpClientTlsCaPath = "";
 char	   *HttpClientTlsCertFile = "";
 char	   *HttpClientTlsKeyFile = "";
 
@@ -231,6 +232,15 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 		GetHttpClientTlsMaterial() == HTTP_TLS_MATERIAL_COMPLETE)
 	{
 		CURL_SETOPT(curl, CURLOPT_CAINFO, HttpClientTlsCaFile);
+
+		/*
+		 * CAINFO replaces the system store, so a copy of the public roots in
+		 * it goes stale.  A hashed directory is read at verification time and
+		 * is consulted alongside CAINFO.
+		 */
+		if (HttpClientTlsCaPath != NULL && HttpClientTlsCaPath[0] != '\0')
+			CURL_SETOPT(curl, CURLOPT_CAPATH, HttpClientTlsCaPath);
+
 		CURL_SETOPT(curl, CURLOPT_SSLCERT, HttpClientTlsCertFile);
 		CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
 	}
