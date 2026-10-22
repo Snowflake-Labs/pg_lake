@@ -997,9 +997,13 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		else
 		{
 			/*
-			 * For other catalog types these options are not valid.
+			 * For other catalog types these options are not valid, except
+			 * that a writable REST catalog table carries the catalog prefix
+			 * CREATE TABLE resolved for it as catalog_name when it is not the
+			 * database name. CREATE also accepts explicit prefixes for
+			 * replay, but alter_table.c refuses to change them.
 			 */
-			if (catalogName)
+			if (catalogName && icebergCatalogType != REST_CATALOG_READ_WRITE)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("\"catalog_name\" option is only valid for read-only rest and object_store catalog tables")));

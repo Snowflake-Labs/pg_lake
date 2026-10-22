@@ -11,12 +11,15 @@ The test exercises:
   2. defaults.prefix is used when overrides is empty.
   3. NULL is returned when neither field is present.
   4. NULL is returned when the server returns a non-200 status.
+  5. The warehouse server option is sent, URL-encoded, as ?warehouse= on
+     /v1/config, and no query string is sent when it is unset.
 """
 
 import json
 import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -38,10 +41,12 @@ def _find_free_port():
         return s.getsockname()[1]
 
 
-def _make_handler_class(responses: dict):
+def _make_handler_class(responses: dict, requests: list):
     """
     Factory so each test run gets an isolated handler with its own state.
-    ``responses`` maps a path suffix to (status_code, body_str).
+    ``responses`` maps a path suffix to (status_code, body_str).  Suffixes
+    match the path without its query string.  Every request path, query
+    string included, is appended to ``requests``.
     """
 
     class _Handler(BaseHTTPRequestHandler):
@@ -49,6 +54,8 @@ def _make_handler_class(responses: dict):
             pass  # silence server output during tests
 
         def _handle(self):
+            requests.append(self.path)
+
             if "/oauth/tokens" in self.path:
                 body = json.dumps(
                     {
@@ -63,8 +70,9 @@ def _make_handler_class(responses: dict):
                 self.wfile.write(body.encode())
                 return
 
+            path = urlsplit(self.path).path
             for suffix, (status, body) in responses.items():
-                if self.path.endswith(suffix):
+                if path.endswith(suffix):
                     self.send_response(status)
                     self.send_header("Content-Type", "application/json")
                     self.end_headers()
@@ -83,9 +91,11 @@ def _make_handler_class(responses: dict):
     return _Handler
 
 
-def _start_mock_server(responses: dict):
+def _start_mock_server(responses: dict, requests: list = None):
+    if requests is None:
+        requests = []
     port = _find_free_port()
-    httpd = HTTPServer(("127.0.0.1", port), _make_handler_class(responses))
+    httpd = HTTPServer(("127.0.0.1", port), _make_handler_class(responses, requests))
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
     return httpd, port
@@ -117,14 +127,15 @@ def create_config_helper(superuser_conn):
     )
 
 
-def _create_server(conn, server_name, endpoint):
+def _create_server(conn, server_name, endpoint, warehouse=None):
+    warehouse_opt = f", warehouse '{warehouse}'" if warehouse is not None else ""
     run_command(
         f"""
         CREATE SERVER {server_name} TYPE 'rest'
             FOREIGN DATA WRAPPER iceberg_catalog
             OPTIONS (
                 rest_endpoint '{endpoint}',
-                location_prefix 's3://test-bucket/'
+                location_prefix 's3://test-bucket/'{warehouse_opt}
             )
         """,
         conn,
@@ -244,3 +255,95 @@ def test_non_200_returns_null(create_config_helper, superuser_conn, pg_conn, ext
     finally:
         _drop_server(superuser_conn, server_name)
         httpd.shutdown()
+
+
+def _config_requests(requests):
+    return [p for p in requests if urlsplit(p).path.endswith("/v1/config")]
+
+
+def test_no_warehouse_sends_no_query_string(
+    create_config_helper, superuser_conn, pg_conn, extension
+):
+    """Without the warehouse option, /v1/config is called with no query string."""
+    requests = []
+    config_body = json.dumps({"defaults": {"prefix": "p"}})
+    httpd, port = _start_mock_server({"/v1/config": (200, config_body)}, requests)
+    endpoint = f"http://127.0.0.1:{port}"
+    server_name = "cfg_disc_test_no_warehouse"
+
+    try:
+        _create_server(superuser_conn, server_name, endpoint)
+        assert _call_fetch(pg_conn, server_name) == "p"
+        config_calls = _config_requests(requests)
+        assert config_calls, "expected a /v1/config request"
+        assert all(urlsplit(p).query == "" for p in config_calls), config_calls
+    finally:
+        _drop_server(superuser_conn, server_name)
+        httpd.shutdown()
+
+
+def test_warehouse_sent_and_url_encoded(
+    create_config_helper, superuser_conn, pg_conn, extension
+):
+    """
+    The warehouse option is sent as ?warehouse=, URL-encoded, and a prefix
+    returned only in defaults.prefix (as Lakekeeper does) is used.
+    """
+    requests = []
+    warehouse = "s3://bucket/my wh&x=1+2%20z"
+    lakekeeper_uuid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+    config_body = json.dumps({"overrides": {}, "defaults": {"prefix": lakekeeper_uuid}})
+    httpd, port = _start_mock_server({"/v1/config": (200, config_body)}, requests)
+    endpoint = f"http://127.0.0.1:{port}"
+    server_name = "cfg_disc_test_warehouse"
+
+    try:
+        _create_server(superuser_conn, server_name, endpoint, warehouse=warehouse)
+        assert _call_fetch(pg_conn, server_name) == lakekeeper_uuid
+
+        config_calls = _config_requests(requests)
+        assert config_calls, "expected a /v1/config request"
+        query = urlsplit(config_calls[-1]).query
+        # the raw value must not leak unencoded separators into the query
+        assert "&x=1" not in query and " " not in query, query
+        assert parse_qs(query) == {"warehouse": [warehouse]}, query
+    finally:
+        _drop_server(superuser_conn, server_name)
+        httpd.shutdown()
+
+
+def test_400_without_warehouse_falls_back(
+    create_config_helper, superuser_conn, pg_conn, extension
+):
+    """
+    A catalog that rejects /v1/config with 400 when no warehouse is given
+    (Polaris, Lakekeeper) still yields NULL, so callers fall back to the
+    database name as before.
+    """
+    httpd, port = _start_mock_server(
+        {"/v1/config": (400, '{"error": {"message": "Please specify a warehouse"}}')}
+    )
+    endpoint = f"http://127.0.0.1:{port}"
+    server_name = "cfg_disc_test_400"
+
+    try:
+        _create_server(superuser_conn, server_name, endpoint)
+        assert _call_fetch(pg_conn, server_name) is None
+    finally:
+        _drop_server(superuser_conn, server_name)
+        httpd.shutdown()
+
+
+def test_empty_warehouse_rejected(superuser_conn, extension):
+    """An empty warehouse option is rejected at CREATE SERVER time."""
+    error = run_command(
+        """
+        CREATE SERVER cfg_disc_test_empty_wh TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://127.0.0.1:1', warehouse '')
+        """,
+        superuser_conn,
+        raise_error=False,
+    )
+    superuser_conn.rollback()
+    assert error is not None and "must not be empty" in str(error), error

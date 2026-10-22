@@ -98,9 +98,14 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
     collect retry_count for a failure that was never theirs and eventually be
     abandoned at VacuumFileRemoveMaxRetries.
 
-    The failing path is queued last because the walk stops there: rows are
-    claimed in the order they were queued, and the ones behind a failure are
-    left for a later pass rather than removed by this one.
+    The retry stops at the first path that fails again, so how many healthy
+    paths one pass gets through depends on where the failing one lands in the
+    claimed order -- and GetDeletionQueueRecords claims its rows without an
+    ORDER BY, so that order is whatever the plan happens to give. The healthy
+    paths are drained over two passes instead: the first pass charges the
+    failing path and stamps last_attempt_at, which holds it off for
+    vacuum_file_remove_retry_interval, so the second pass is offered only
+    healthy paths and removes whatever the first one left behind.
     """
     prefix = f"s3://{TEST_BUCKET}/{TEST_PREFIX}/isolate"
 
@@ -118,24 +123,30 @@ def test_deletion_queue_batch_isolates_failing_path(s3, superuser_conn, extensio
 
     _queue_paths(superuser_conn, good_paths + [bad_path])
 
-    _vacuum_dropped_tables()
+    try:
+        # the second pass is not offered the failing path, so between them the
+        # two reach every healthy one whichever order the first pass claimed
+        _vacuum_dropped_tables()
+        _vacuum_dropped_tables()
 
-    # the healthy files were removed and their rows are gone
-    assert _existing_files(superuser_conn, prefix) == 0
-    assert _queued_rows(superuser_conn, prefix) == []
+        # the healthy files were removed and their rows are gone
+        assert _existing_files(superuser_conn, prefix) == 0
+        assert _queued_rows(superuser_conn, prefix) == []
 
-    # the failing path is the only row left, and it is the only one charged for
-    # the failure
-    remaining = _queued_rows(superuser_conn, f"nosuchfs://{TEST_PREFIX}")
-    assert len(remaining) == 1
-    assert remaining[0][0] == bad_path
-    assert remaining[0][1] >= 1
-
-    run_command(
-        f"DELETE FROM lake_engine.deletion_queue WHERE path = '{bad_path}'",
-        superuser_conn,
-    )
-    superuser_conn.commit()
+        # the failing path is the only row left, and it is the only one charged
+        # for the failure
+        remaining = _queued_rows(superuser_conn, f"nosuchfs://{TEST_PREFIX}")
+        assert len(remaining) == 1
+        assert remaining[0][0] == bad_path
+        assert remaining[0][1] >= 1
+    finally:
+        # leaving the row behind would stop every later pass in this session at
+        # a path that can never be removed
+        run_command(
+            f"DELETE FROM lake_engine.deletion_queue WHERE path = '{bad_path}'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
 
 
 def test_unremovable_path_is_retried_on_a_clock(s3, superuser_conn, extension):

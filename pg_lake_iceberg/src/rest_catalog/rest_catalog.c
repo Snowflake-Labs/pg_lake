@@ -38,6 +38,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/catalog_type.h"
 #include "pg_lake/util/string_utils.h"
+#include "pg_lake/util/url_encode.h"
 
 
 /* determined by GUC */
@@ -86,6 +87,10 @@ ResolveRestCatalogBaseUri(const char *endpoint)
  *   Lakekeeper -- prefix is a UUID the user cannot easily predict
  *   Nessie     -- prefix is the repository name
  *
+ * Polaris and Lakekeeper reject the request with 400 unless it names a
+ * warehouse, so when the server sets the warehouse option it is sent as the
+ * spec's ?warehouse= query parameter.
+ *
  * Returns a palloc'd string, or NULL when:
  *   - the endpoint is unreachable or returns a non-200 status, or
  *   - the response carries neither overrides.prefix nor defaults.prefix.
@@ -97,6 +102,25 @@ char *
 FetchRestCatalogConfigPrefix(RestCatalogOptions * opts)
 {
 	char	   *configUrl = psprintf(REST_CATALOG_CONFIG, opts->baseUri);
+
+	if (opts->warehouse != NULL)
+	{
+		/* URLEncodePath leaves '%' alone, so escape it first */
+		StringInfoData escaped;
+
+		initStringInfo(&escaped);
+		for (const char *cursor = opts->warehouse; *cursor; cursor++)
+		{
+			if (*cursor == '%')
+				appendStringInfoString(&escaped, "%25");
+			else
+				appendStringInfoChar(&escaped, *cursor);
+		}
+
+		configUrl = psprintf("%s?warehouse=%s", configUrl,
+							 URLEncodePath(escaped.data));
+	}
+
 	List	   *headers = GetHeadersWithAuth(opts);
 	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, configUrl, NULL, headers);
 
@@ -511,6 +535,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	copy->scope = src->scope ? pstrdup(src->scope) : NULL;
 	copy->locationPrefix = src->locationPrefix ? pstrdup(src->locationPrefix) : NULL;
 	copy->catalogName = src->catalogName ? pstrdup(src->catalogName) : NULL;
+	copy->warehouse = src->warehouse ? pstrdup(src->warehouse) : NULL;
 	copy->authType = src->authType;
 	copy->enableVendedCredentials = src->enableVendedCredentials;
 	copy->isBuiltin = src->isBuiltin;

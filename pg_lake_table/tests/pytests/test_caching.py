@@ -257,7 +257,7 @@ def test_invalid_url(s3, pg_conn, extension):
     error = run_command(
         f"SELECT lake_file_cache.add('{cached_path}');", pg_conn, raise_error=False
     )
-    assert "URL cannot be cached" in error
+    assert "unsupported URL" in error
 
     pg_conn.rollback()
 
@@ -272,7 +272,7 @@ def test_invalid_url(s3, pg_conn, extension):
     error = run_command(
         f"SELECT lake_file_cache.add('{url_nocache}');", pg_conn, raise_error=False
     )
-    assert "URL cannot be cached" in error
+    assert "unsupported URL" in error
 
     pg_conn.rollback()
 
@@ -404,3 +404,22 @@ def test_pg_lake_file_cache_worker_reload(
                 run_command(f"ALTER SYSTEM RESET {setting}", config_conn)
             run_command("SELECT pg_reload_conf()", config_conn)
             wait_for_reloaded_settings([config_conn], {setting: original_value})
+
+
+def test_cache_rejects_endpoint_override(s3, pg_conn, extension):
+    # The cache key drops the query string, so an endpoint override would
+    # store another host's content under the plain s3:// URL
+    for param in ["s3_endpoint=169.254.169.254", "s3_use_ssl=false"]:
+        url = f"s3://{TEST_BUCKET}/test_cache_endpoint/data.csv?{param}"
+
+        error = run_command(
+            f"SELECT lake_file_cache.add('{url}');", pg_conn, raise_error=False
+        )
+        assert "is not permitted in cloud storage URLs" in error, error
+        pg_conn.rollback()
+
+        error = run_command(
+            f"SELECT lake_file_cache.remove('{url}');", pg_conn, raise_error=False
+        )
+        assert "is not permitted in cloud storage URLs" in error, error
+        pg_conn.rollback()

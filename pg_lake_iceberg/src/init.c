@@ -346,7 +346,7 @@ _PG_init(void)
 							 RestCatalogAuthTypeOptions,
 							 PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+							 NULL, AssignRestCatalogAuthType, NULL);
 
 	DefineCustomEnumVariable("pg_lake_iceberg.default_compatibility_mode",
 							 gettext_noop("Downstream-engine storage compatibility mode that new "
@@ -379,7 +379,7 @@ _PG_init(void)
 							   "",
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, AssignRestCatalogOauthHostPath, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_client_id",
 							   NULL,
@@ -388,7 +388,7 @@ _PG_init(void)
 							   NULL,
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, AssignRestCatalogClientId, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_client_secret",
 							   NULL,
@@ -397,7 +397,7 @@ _PG_init(void)
 							   NULL,
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, AssignRestCatalogClientSecret, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_scope",
 							   NULL,
@@ -406,7 +406,7 @@ _PG_init(void)
 							   "PRINCIPAL_ROLE:ALL",
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, AssignRestCatalogScope, NULL);
 
 	DefineCustomBoolVariable("pg_lake_iceberg.rest_catalog_enable_vended_credentials",
 							 gettext_noop("Request vended credentials from the Iceberg REST catalog."),

@@ -1667,6 +1667,71 @@ def test_object_store_catalog_periodic_rewrite(
         superuser_conn.autocommit = False
 
 
+# A failed catalog export must name itself. The periodic export runs in the
+# vacuum worker, which demotes the error to a WARNING, so the message text is
+# the only thing a log collector has to recognize it by, and the underlying
+# storage error says nothing about the catalog. Point the catalog at a bucket
+# that does not exist and check the prefix survives all the way out, with the
+# original storage error still attached.
+def test_catalog_export_failure_is_prefixed(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    missing_bucket = "pg-lake-no-such-bucket-for-catalog-export"
+
+    superuser_conn.autocommit = True
+    run_command(
+        "ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = "
+        f"'s3://{missing_bucket}'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    superuser_conn.autocommit = False
+    wait_for_reloaded_settings(
+        [superuser_conn],
+        {
+            "pg_lake_iceberg.object_store_catalog_location_prefix": f"s3://{missing_bucket}"
+        },
+    )
+
+    try:
+        err = run_command(
+            "SELECT lake_iceberg.force_push_object_store_catalog()",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.rollback()
+
+        assert err is not None, "pushing the catalog to a missing bucket succeeded"
+        assert "pg_lake_iceberg: object store catalog export failed" in str(
+            err
+        ), f"catalog export error is not recognizable in the log: {err}"
+        # the storage error itself has to survive the prefixing, otherwise the
+        # message says something failed without saying why
+        assert missing_bucket in str(
+            err
+        ), f"catalog export error lost the underlying storage error: {err}"
+    finally:
+        superuser_conn.autocommit = True
+        run_command(
+            "ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = "
+            f"'s3://{TEST_BUCKET}'",
+            superuser_conn,
+        )
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        superuser_conn.autocommit = False
+        wait_for_reloaded_settings(
+            [superuser_conn],
+            {
+                "pg_lake_iceberg.object_store_catalog_location_prefix": f"s3://{TEST_BUCKET}"
+            },
+        )
+
+
 # An Azure object that is overwritten in place must never be observable as
 # zero bytes: pg_lake rewrites catalog.json in place and never writes an empty
 # catalog, so a reader that sees 0 bytes is looking at an in-flight write. The
