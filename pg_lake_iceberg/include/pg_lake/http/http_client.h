@@ -58,6 +58,7 @@ extern bool HttpClientTraceTraffic;
  * than every request carrying them.
  */
 extern char *HttpClientTlsCaFile;
+extern char *HttpClientTlsCaPath;
 extern char *HttpClientTlsCertFile;
 extern char *HttpClientTlsKeyFile;
 
