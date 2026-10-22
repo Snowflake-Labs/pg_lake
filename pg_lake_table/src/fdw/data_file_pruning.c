@@ -848,7 +848,8 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 
 		if (pg_add_s32_overflow(partitionValue, truncateLen, &upperBound))
 		{
-			upperBound = INT32_MAX;
+			/* also holds values near INT32_MIN whose truncation wrapped */
+			return NULL;
 		}
 
 		Datum		lowerBoundDatum = Int32GetDatum(partitionValue);
@@ -866,7 +867,8 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 
 		if (pg_add_s64_overflow(partitionValue, truncateLen, &upperBound))
 		{
-			upperBound = INT64_MAX;
+			/* also holds values near INT64_MIN whose truncation wrapped */
+			return NULL;
 		}
 
 		Datum		lowerBoundDatum = Int64GetDatum(partitionValue);
