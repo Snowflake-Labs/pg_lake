@@ -26,6 +26,7 @@
 #include "catalog/pg_type_d.h"
 
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_collation_d.h"
 #include "catalog/pg_operator.h"
@@ -113,8 +114,10 @@ static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
 								   List *columnsUsedInFilters);
 static List *GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds);
 static List *GetExternalIcebergFieldsForAttributes(Oid relationId, List *attrNos);
-static List *GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdCache, List *columnStats,
+static List *GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
+									   HTAB *fieldIdCache, List *columnStats,
 									   List *partitionTransformsUsedInQuery, Partition * partition);
+static bool ColumnIsNotNull(Oid relationId, AttrNumber attrNo);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 													  ColumnToFieldIdMapping * entry);
 static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
@@ -275,7 +278,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 		/* calculate bound constraints */
 		columnBoundConstraints =
-			GetColumnBoundConstraints(relationId, fieldIdsUsedInQuery, columnStats,
+			GetColumnBoundConstraints(relationId, pruneType, fieldIdsUsedInQuery, columnStats,
 									  partitionTransformsUsedInQuery, partition);
 
 		bool		includeDataFile = false;
@@ -548,7 +551,8 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 * query. The constraints are based on the column statistics.
 */
 static List *
-GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStats,
+GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
+						  HTAB *fieldIdMapping, List *columnStats,
 						  List *partitionTransformsUsedInQuery, Partition * partition)
 {
 	List	   *constraintList = NIL;
@@ -568,7 +572,18 @@ GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStat
 	hash_seq_init(&status, fieldIdMapping);
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
-		if (EnableDataFilePruning)
+		/*
+		 * Column min/max stats only describe the non-NULL values in a file
+		 * and say nothing about whether the file also contains NULLs. That is
+		 * fine for refuting a filter (PARTIAL_MATCH), since NULLs never
+		 * satisfy a strict filter, but it cannot prove that every row in the
+		 * file matches (FULL_MATCH). Only use the stats for that when the
+		 * column cannot be NULL.
+		 */
+		bool		useColumnStats = EnableDataFilePruning &&
+			(pruneType != FULL_MATCH || ColumnIsNotNull(relationId, entry->attrNo));
+
+		if (useColumnStats)
 		{
 			List	   *columnStatsBoundConstraints =
 				GetColumnBoundConstraintsFromColumnStats(relationId,
@@ -593,6 +608,26 @@ GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStat
 	return constraintList;
 }
 
+
+/*
+ * ColumnIsNotNull returns whether the given column has a NOT NULL constraint.
+ */
+static bool
+ColumnIsNotNull(Oid relationId, AttrNumber attrNo)
+{
+	HeapTuple	tuple = SearchSysCache2(ATTNUM,
+										ObjectIdGetDatum(relationId),
+										Int16GetDatum(attrNo));
+	bool		notNull = false;
+
+	if (HeapTupleIsValid(tuple))
+	{
+		notNull = ((Form_pg_attribute) GETSTRUCT(tuple))->attnotnull;
+		ReleaseSysCache(tuple);
+	}
+
+	return notNull;
+}
 
 /*
 * GetColumnBoundConstraintsFromColumnStats returns the constraints for the
