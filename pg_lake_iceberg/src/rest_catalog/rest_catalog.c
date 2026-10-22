@@ -104,8 +104,22 @@ FetchRestCatalogConfigPrefix(RestCatalogOptions * opts)
 	char	   *configUrl = psprintf(REST_CATALOG_CONFIG, opts->baseUri);
 
 	if (opts->warehouse != NULL)
+	{
+		/* URLEncodePath leaves '%' alone, so escape it first */
+		StringInfoData escaped;
+
+		initStringInfo(&escaped);
+		for (const char *cursor = opts->warehouse; *cursor; cursor++)
+		{
+			if (*cursor == '%')
+				appendStringInfoString(&escaped, "%25");
+			else
+				appendStringInfoChar(&escaped, *cursor);
+		}
+
 		configUrl = psprintf("%s?warehouse=%s", configUrl,
-							 URLEncodePath(opts->warehouse));
+							 URLEncodePath(escaped.data));
+	}
 
 	List	   *headers = GetHeadersWithAuth(opts);
 	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, configUrl, NULL, headers);

@@ -290,7 +290,7 @@ def test_warehouse_sent_and_url_encoded(
     returned only in defaults.prefix (as Lakekeeper does) is used.
     """
     requests = []
-    warehouse = "s3://bucket/my wh&x=1"
+    warehouse = "s3://bucket/my wh&x=1+2%20z"
     lakekeeper_uuid = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
     config_body = json.dumps({"overrides": {}, "defaults": {"prefix": lakekeeper_uuid}})
     httpd, port = _start_mock_server({"/v1/config": (200, config_body)}, requests)
