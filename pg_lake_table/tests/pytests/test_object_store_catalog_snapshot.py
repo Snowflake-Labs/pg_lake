@@ -916,7 +916,7 @@ def test_functions_read_their_statements_version(
         f"FROM {schema}.read_tbl CROSS JOIN {schema}.rows_after(%s) f"
     )
 
-    # the outer scan and the query inside the function share one read
+    # the outer scan and the query inside the function see one version
     rows, catalog_reads = _run_counting_catalog_reads(pg_conn, join_query % 0)
     assert tuple(rows[0]) == (5, 5)
     assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
@@ -971,7 +971,7 @@ def test_functions_read_their_statements_version(
 # version even when the catalog moves between two of their reads, where each
 # of those queries would read a heap table under a new snapshot.  A procedure
 # that commits in between reads anew after the commit, which
-# test_open_cursor_read_goes_with_the_transaction covers.
+# test_open_cursor_versions_go_with_the_transaction covers.
 def test_do_block_procedure_trigger_and_sql_function_read_their_statements_version(
     pg_conn,
     s3,
@@ -1188,13 +1188,13 @@ def test_cursor_reads_the_version_it_was_declared_with(
     pg_conn.commit()
 
 
-# A cursor reads for as long as it is open, which can be past the statement
-# that declared it, so a transaction can end with a cursor's read still
-# there.  Every way of ending the transaction ends that read too, and the next
-# transaction reads the catalog as it stands.  A procedure that commits
-# between two reads ends a transaction in the middle of a statement, and its
-# read after the commit is a read of the new transaction.
-def test_open_cursor_read_goes_with_the_transaction(
+# A cursor keeps its versions for as long as it is open, which can be past the
+# statement that declared it, so a transaction can end with a cursor's
+# versions still held.  Every way of ending the transaction drops them too,
+# and the next transaction sees the catalog as it stands.  A procedure that
+# commits between two reads ends a transaction in the middle of a statement,
+# and what it reads after the commit it sees as the new transaction does.
+def test_open_cursor_versions_go_with_the_transaction(
     pg_conn,
     s3,
     extension,
@@ -1257,8 +1257,8 @@ def test_open_cursor_read_goes_with_the_transaction(
 
         end_with_cursor_open(prepare)
 
-    # a CALL outside a transaction block may commit, and the read after the
-    # commit is in a transaction of its own
+    # a CALL outside a transaction block may commit, and what it reads after
+    # the commit is read in a transaction of its own
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
     pg_conn.autocommit = True
@@ -1280,9 +1280,9 @@ def test_open_cursor_read_goes_with_the_transaction(
 
 
 # A subtransaction that aborts inside a function, as an EXCEPTION block does,
-# leaves the read of the statement that called the function in place, because
-# what the statement read is still what it is reading.  The function keeps
-# reading that version after the block, including after the catalog moved.
+# leaves the versions of the statement that called the function in place,
+# because they are still what the statement reads.  The function keeps
+# seeing that version after the block, including after the catalog moved.
 def test_subtransaction_abort_inside_a_function(
     pg_conn,
     s3,
@@ -1409,8 +1409,8 @@ def test_attach_reads_catalog_as_it_stands(
 # right after the statement under the same snapshot, which it moves to a new
 # command in place, and it does that at the top level, in a PL/pgSQL statement
 # and in a SQL function alike.  Each place is one statement, so the action
-# reads the version the statement it was added to read.  Holding the snapshot
-# itself for a read crashed assert-enabled builds in all three.
+# sees the version the statement it was added to sees.  Holding the snapshot
+# itself to tell statements apart crashed assert-enabled builds in all three.
 def test_rule_actions_read_one_version(
     pg_conn,
     s3,
@@ -1456,7 +1456,9 @@ def test_rule_actions_read_one_version(
 
     for kind, statement in statements.items():
         catalog_reads = _count_catalog_reads(pg_conn, statement)
-        assert catalog_reads == 1, f"{kind}: expected one read, got {catalog_reads}"
+        assert (
+            catalog_reads == 1
+        ), f"{kind}: expected one catalog read, got {catalog_reads}"
 
         for table_name in ("counted", "counted_log"):
             rows = run_query(f"SELECT n FROM {schema}.{table_name}", pg_conn)
@@ -1609,7 +1611,7 @@ def test_nested_procedures_read_anew_after_a_commit(
 # failure leaves that version in place, and the procedure reads anew only
 # after it commits, under either isolation level.
 @pytest.mark.parametrize("isolation_level", ["read committed", "repeatable read"])
-def test_exception_block_in_a_procedure_keeps_the_read(
+def test_exception_block_in_a_procedure_keeps_the_version(
     isolation_level,
     pg_conn,
     s3,
@@ -1683,9 +1685,10 @@ def test_exception_block_in_a_procedure_keeps_the_read(
 
 
 # Another session changing the table sends this session cache invalidations,
-# which rebuild what Postgres caches about the table.  A read is not one of
-# those caches, so a REPEATABLE READ transaction keeps its version through
-# them and does not read the catalog again.
+# which rebuild what Postgres caches about the table.  The versions a
+# transaction holds are not one of those caches, so a REPEATABLE READ
+# transaction keeps its version through them and does not read the catalog
+# again.
 def test_invalidations_keep_the_held_version(
     pg_conn,
     superuser_conn,

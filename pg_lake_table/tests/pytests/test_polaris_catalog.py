@@ -833,7 +833,7 @@ def test_metadata_fetch(
         assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
         superuser_conn.commit()
 
-    # A read holds the catalog's answer under the relation that asked, so a
+    # The catalog's answer is held under the relation that asked, so a
     # relation repointed at another table inside a REPEATABLE READ
     # transaction keeps reading the table that transaction read, and the next
     # transaction asks about the table it points at now.  Renaming moves no

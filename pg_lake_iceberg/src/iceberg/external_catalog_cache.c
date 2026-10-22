@@ -26,53 +26,55 @@
  * catalog can be read as of two different points in time. Neither is a state
  * those tables ever had together.
  *
- * So the answers are held in a read, and each question is asked once per
- * read:
+ * So the first answer is held, and every later question in the same version
+ * scope gets the same answer. The version scope is how long readers see one
+ * version of each external catalog, and it follows the isolation level the
+ * way the snapshot of a statement does:
  *
- * - under REPEATABLE READ and SERIALIZABLE, a read lasts for the transaction,
- *   because those levels read one state of the database for all of it;
- * - under READ COMMITTED, a read lasts for the portal that runs the
- *   statement, and the next statement asks again. A portal runs every query
- *   of its statement, including the queries of the functions, DO blocks,
- *   procedures and triggers the statement calls, and with the extended
- *   protocol it spans the Bind and Execute messages that start and run it.
- *   A cursor is a portal of its own and reads for as long as it is open.
+ * - REPEATABLE READ and SERIALIZABLE read the whole transaction from one
+ *   snapshot, so the version scope is the transaction;
+ * - READ COMMITTED reads each statement from a new snapshot, so the version
+ *   scope is the statement, and the next statement asks again.
  *
- * A read ends when Postgres releases the resource owner of its portal or of
- * its transaction: when a statement is done, when a cursor closes, when the
- * subtransaction that opened a cursor aborts, and when the transaction ends
- * by commit, abort or PREPARE TRANSACTION. Subtransactions that abort inside
- * a statement leave its read in place, because what the statement read is
- * still what it is reading. Reads live under TopTransactionContext, so
- * nothing they hold outlives the transaction either way.
+ * GetCatalogVersionScope() applies that rule. Each version scope ends when
+ * Postgres releases a resource owner, which GetCatalogVersionScopeOwner()
+ * picks: TopTransactionResourceOwner for a transaction, and the resource
+ * owner of the portal that runs a statement for a statement. A resource
+ * release callback drops the versions held for a scope as its owner goes, so
+ * they go however the scope ends: a statement finishing, a cursor closing,
+ * the subtransaction that opened a cursor aborting, or the transaction ending
+ * by commit, abort or PREPARE TRANSACTION. A subtransaction that aborts inside
+ * a statement leaves the statement's versions in place, since they are still
+ * what the statement reads. They are all allocated under
+ * TopTransactionContext, so nothing outlives the transaction either way.
  *
- * What a read holds follows how the catalog publishes:
+ * What a scope holds follows how the catalog publishes:
  *
- * - a REST catalog answers for one table per request, so a read holds the
- *   metadata location of each relation it asked about;
+ * - a REST catalog answers for one table per request, so the metadata
+ *   location of each relation asked about is held;
  * - an object store catalog publishes all of its tables as one document at a
- *   fixed path, so a read holds the document, which is what makes two tables
- *   of one catalog come from the same version of it.
+ *   fixed path, so the document is held, which is what makes two tables of
+ *   one catalog come from the same version of it.
  *
  * The limits, which the tests lock:
  *
- * - a REPEATABLE READ or SERIALIZABLE transaction is held to the version of
- *   its first read of an external table, not to the version that stood when
- *   it took its snapshot;
- * - under READ COMMITTED a statement holds its version longer than Postgres
+ * - a REPEATABLE READ or SERIALIZABLE transaction sees the versions that
+ *   stood when it first asked, not the ones that stood when it took its
+ *   snapshot;
+ * - under READ COMMITTED a statement holds its versions longer than Postgres
  *   holds a heap table still, which every query of a volatile function, DO
  *   block, procedure or trigger reads under a new snapshot. A loop that polls
- *   an external table inside one statement therefore keeps reading the
- *   version the statement started with, until a procedure commits;
- * - a cursor, including the one a PL/pgSQL FOR loop over a query opens, reads
- *   the catalog as it stands when it opens, which can be newer than what the
- *   rest of its statement reads;
- * - a read holds a REST answer under the relation that asked, so a relation
- *   that ALTER FOREIGN TABLE points at another table keeps reading the old
- *   one until the read ends;
+ *   an external table inside one statement therefore keeps seeing the version
+ *   the statement started with, until a procedure commits;
+ * - a cursor, including the one a PL/pgSQL FOR loop over a query opens, is a
+ *   version scope of its own, so it sees the catalog as it stands when it
+ *   opens, which can be newer than what the rest of its statement sees;
+ * - a REST answer is held under the relation that asked, so a relation that
+ *   ALTER FOREIGN TABLE points at another table keeps seeing the old one until
+ *   its version scope ends;
  * - attaching an object_store table reads its catalog as it stands, the way
- *   the listing function does, so a table published since a read started can
- *   be attached, but that read cannot see it.
+ *   the listing function does, so a table published since a version scope
+ *   started can be attached, but that scope cannot see it.
  */
 
 #include "postgres.h"
@@ -94,6 +96,13 @@
 #include "pg_lake/util/s3_reader_utils.h"
 
 
+/* how long readers see one version of each external catalog */
+typedef enum CatalogVersionScope
+{
+	VERSION_SCOPE_TRANSACTION,
+	VERSION_SCOPE_STATEMENT
+}			CatalogVersionScope;
+
 /* where the REST catalog of a read-only table said that table is */
 typedef struct RestCatalogTableLocation
 {
@@ -108,13 +117,13 @@ typedef struct ObjectStoreCatalogDocument
 	char	   *content;
 }			ObjectStoreCatalogDocument;
 
-/* what external catalogs answered one portal or one transaction */
-typedef struct ExternalCatalogRead
+/* the versions of external catalogs held for one version scope */
+typedef struct CatalogVersions
 {
-	/* releasing this resource owner ends the read */
-	ResourceOwner owner;
+	/* releasing this resource owner ends the version scope */
+	ResourceOwner scopeOwner;
 
-	/* the read and everything it holds live here */
+	/* the versions and everything they hold live here */
 	MemoryContext context;
 
 	/* list of RestCatalogTableLocation */
@@ -122,36 +131,40 @@ typedef struct ExternalCatalogRead
 
 	/* list of ObjectStoreCatalogDocument */
 	List	   *objectStoreCatalogDocuments;
-}			ExternalCatalogRead;
+}			CatalogVersions;
 
 
-/* the reads of the current transaction, in ExternalCatalogReadsContext */
-static List *ExternalCatalogReads = NIL;
-static MemoryContext ExternalCatalogReadsContext = NULL;
+/*
+ * The versions held for the version scopes of the current transaction, one
+ * CatalogVersions per scope, in HeldCatalogVersionsContext.
+ */
+static List *HeldCatalogVersions = NIL;
+static MemoryContext HeldCatalogVersionsContext = NULL;
 
 static char *ResolveRestCatalogTable(Oid relationId);
 static char *ResolveObjectStoreCatalogTable(Oid relationId);
-static char *FindRestCatalogTableLocation(ExternalCatalogRead * read,
+static char *FindRestCatalogTableLocation(CatalogVersions * versions,
 										  Oid relationId);
-static void RememberRestCatalogTableLocation(ExternalCatalogRead * read,
+static void RememberRestCatalogTableLocation(CatalogVersions * versions,
 											 Oid relationId,
 											 const char *metadataLocation);
-static char *FindObjectStoreCatalogDocument(ExternalCatalogRead * read,
+static char *FindObjectStoreCatalogDocument(CatalogVersions * versions,
 											const char *path);
-static void RememberObjectStoreCatalogDocument(ExternalCatalogRead * read,
+static void RememberObjectStoreCatalogDocument(CatalogVersions * versions,
 											   const char *path,
 											   const char *content);
-static ExternalCatalogRead * GetCurrentExternalCatalogRead(void);
-static ResourceOwner GetCurrentReadOwner(void);
-static ExternalCatalogRead * StartExternalCatalogRead(ResourceOwner owner);
-static void EndExternalCatalogReads(ResourceReleasePhase phase, bool isCommit,
-									bool isTopLevel, void *arg);
-static void ForgetExternalCatalogReads(void *arg);
+static CatalogVersions * GetCurrentCatalogVersions(void);
+static CatalogVersionScope GetCatalogVersionScope(void);
+static ResourceOwner GetCatalogVersionScopeOwner(CatalogVersionScope scope);
+static CatalogVersions * CreateCatalogVersions(ResourceOwner scopeOwner);
+static void ReleaseCatalogVersions(ResourceReleasePhase phase, bool isCommit,
+								   bool isTopLevel, void *arg);
+static void ForgetHeldCatalogVersions(void *arg);
 
 
 /*
  * ResolveIcebergExternalMetadataLocation returns the metadata location of a
- * table pg_lake does not own, as the current read is entitled to see it.
+ * table pg_lake does not own, as the current version scope sees it.
  */
 char *
 ResolveIcebergExternalMetadataLocation(Oid relationId)
@@ -186,24 +199,26 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 
 /*
  * ResolveRestCatalogTable returns where the REST catalog of a read-only
- * table says that table is, asking the catalog only if the current read has
- * not asked it about that relation yet.
+ * table says that table is, asking the catalog only if nothing in the
+ * current version scope has asked about that relation yet.
  */
 static char *
 ResolveRestCatalogTable(Oid relationId)
 {
-	ExternalCatalogRead *read = GetCurrentExternalCatalogRead();
-	char	   *metadataLocation = FindRestCatalogTableLocation(read, relationId);
+	CatalogVersions *versions = GetCurrentCatalogVersions();
+	char	   *metadataLocation =
+		FindRestCatalogTableLocation(versions, relationId);
 
 	if (metadataLocation == NULL)
 	{
 		metadataLocation =
 			GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-		RememberRestCatalogTableLocation(read, relationId, metadataLocation);
+		RememberRestCatalogTableLocation(versions, relationId,
+										 metadataLocation);
 	}
 
-	/* the read can end before whatever the caller keeps this in */
+	/* the scope can end before whatever the caller keeps this in */
 	return pstrdup(metadataLocation);
 }
 
@@ -211,14 +226,14 @@ ResolveRestCatalogTable(Oid relationId)
 /*
  * ResolveObjectStoreCatalogTable returns where the catalog document of a
  * read-only object_store table says that table is, reading the document only
- * if the current read has not read it yet.
+ * if nothing in the current version scope has read it yet.
  */
 static char *
 ResolveObjectStoreCatalogTable(Oid relationId)
 {
 	char	   *path = GetExternalObjectStoreCatalogFilePathForTable(relationId);
-	ExternalCatalogRead *read = GetCurrentExternalCatalogRead();
-	char	   *content = FindObjectStoreCatalogDocument(read, path);
+	CatalogVersions *versions = GetCurrentCatalogVersions();
+	char	   *content = FindObjectStoreCatalogDocument(versions, path);
 
 	if (content == NULL)
 	{
@@ -229,7 +244,7 @@ ResolveObjectStoreCatalogTable(Oid relationId)
 		ereport(DEBUG1,
 				(errmsg("read external catalog document \"%s\"", path)));
 
-		RememberObjectStoreCatalogDocument(read, path, content);
+		RememberObjectStoreCatalogDocument(versions, path, content);
 	}
 
 	return GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId,
@@ -238,14 +253,14 @@ ResolveObjectStoreCatalogTable(Oid relationId)
 
 
 /*
- * FindRestCatalogTableLocation returns the metadata location the given read
- * got for a relation, or NULL if it has not asked about that relation.
+ * FindRestCatalogTableLocation returns the metadata location held for a
+ * relation, or NULL if the scope has not asked about that relation yet.
  */
 static char *
-FindRestCatalogTableLocation(ExternalCatalogRead * read, Oid relationId)
+FindRestCatalogTableLocation(CatalogVersions * versions, Oid relationId)
 {
 	foreach_ptr(RestCatalogTableLocation, location,
-				read->restCatalogTableLocations)
+				versions->restCatalogTableLocations)
 	{
 		if (location->relationId == relationId)
 			return location->metadataLocation;
@@ -256,22 +271,22 @@ FindRestCatalogTableLocation(ExternalCatalogRead * read, Oid relationId)
 
 
 /*
- * RememberRestCatalogTableLocation adds the metadata location the REST
- * catalog gave for a relation to the given read.
+ * RememberRestCatalogTableLocation holds the metadata location the REST
+ * catalog gave for a relation.
  */
 static void
-RememberRestCatalogTableLocation(ExternalCatalogRead * read, Oid relationId,
+RememberRestCatalogTableLocation(CatalogVersions * versions, Oid relationId,
 								 const char *metadataLocation)
 {
-	MemoryContext previousContext = MemoryContextSwitchTo(read->context);
+	MemoryContext previousContext = MemoryContextSwitchTo(versions->context);
 
 	RestCatalogTableLocation *location = palloc(sizeof(RestCatalogTableLocation));
 
 	location->relationId = relationId;
 	location->metadataLocation = pstrdup(metadataLocation);
 
-	read->restCatalogTableLocations =
-		lappend(read->restCatalogTableLocations, location);
+	versions->restCatalogTableLocations =
+		lappend(versions->restCatalogTableLocations, location);
 
 	MemoryContextSwitchTo(previousContext);
 }
@@ -279,13 +294,13 @@ RememberRestCatalogTableLocation(ExternalCatalogRead * read, Oid relationId,
 
 /*
  * FindObjectStoreCatalogDocument returns the content of the catalog document
- * the given read got from a path, or NULL if it has not read that path.
+ * held for a path, or NULL if the scope has not read that path yet.
  */
 static char *
-FindObjectStoreCatalogDocument(ExternalCatalogRead * read, const char *path)
+FindObjectStoreCatalogDocument(CatalogVersions * versions, const char *path)
 {
 	foreach_ptr(ObjectStoreCatalogDocument, document,
-				read->objectStoreCatalogDocuments)
+				versions->objectStoreCatalogDocuments)
 	{
 		if (strcmp(document->path, path) == 0)
 			return document->content;
@@ -296,14 +311,14 @@ FindObjectStoreCatalogDocument(ExternalCatalogRead * read, const char *path)
 
 
 /*
- * RememberObjectStoreCatalogDocument adds a catalog document read from a path
- * to the given read.
+ * RememberObjectStoreCatalogDocument holds a catalog document read from a
+ * path.
  */
 static void
-RememberObjectStoreCatalogDocument(ExternalCatalogRead * read, const char *path,
+RememberObjectStoreCatalogDocument(CatalogVersions * versions, const char *path,
 								   const char *content)
 {
-	MemoryContext previousContext = MemoryContextSwitchTo(read->context);
+	MemoryContext previousContext = MemoryContextSwitchTo(versions->context);
 
 	ObjectStoreCatalogDocument *document =
 		palloc(sizeof(ObjectStoreCatalogDocument));
@@ -311,47 +326,78 @@ RememberObjectStoreCatalogDocument(ExternalCatalogRead * read, const char *path,
 	document->path = pstrdup(path);
 	document->content = pstrdup(content);
 
-	read->objectStoreCatalogDocuments =
-		lappend(read->objectStoreCatalogDocuments, document);
+	versions->objectStoreCatalogDocuments =
+		lappend(versions->objectStoreCatalogDocuments, document);
 
 	MemoryContextSwitchTo(previousContext);
 }
 
 
 /*
- * GetCurrentExternalCatalogRead returns the read the current query belongs
- * to, starting it when the query is the first of its read to ask an external
- * catalog anything.
+ * GetCurrentCatalogVersions returns the versions held for the version scope
+ * of the current query, starting to hold them when the query is the first of
+ * its scope to ask an external catalog anything.
  */
-static ExternalCatalogRead *
-GetCurrentExternalCatalogRead(void)
+static CatalogVersions *
+GetCurrentCatalogVersions(void)
 {
 	Assert(IsTransactionState());
 
-	ResourceOwner owner = GetCurrentReadOwner();
+	CatalogVersionScope scope = GetCatalogVersionScope();
+	ResourceOwner scopeOwner = GetCatalogVersionScopeOwner(scope);
 
-	foreach_ptr(ExternalCatalogRead, read, ExternalCatalogReads)
+	foreach_ptr(CatalogVersions, versions, HeldCatalogVersions)
 	{
-		if (read->owner == owner)
-			return read;
+		if (versions->scopeOwner == scopeOwner)
+			return versions;
 	}
 
-	return StartExternalCatalogRead(owner);
+	return CreateCatalogVersions(scopeOwner);
 }
 
 
 /*
- * GetCurrentReadOwner returns the resource owner whose release ends the read
- * the current query belongs to: the active portal's under READ COMMITTED,
- * and the transaction's under REPEATABLE READ and SERIALIZABLE. A portal
- * that has no resource owner of its own, which is what a procedure's portal
- * is left with once the procedure commits, and a query that runs outside any
- * portal, read for the rest of the transaction.
+ * GetCatalogVersionScope returns how long the current transaction sees one
+ * version of each external catalog, which is how long it reads the rest of
+ * the database from one snapshot.
+ */
+static CatalogVersionScope
+GetCatalogVersionScope(void)
+{
+	/* one snapshot serves every statement of the transaction */
+	if (IsolationUsesXactSnapshot())
+		return VERSION_SCOPE_TRANSACTION;
+
+	/* every statement takes a snapshot of its own */
+	return VERSION_SCOPE_STATEMENT;
+}
+
+
+/*
+ * GetCatalogVersionScopeOwner returns the resource owner whose release ends
+ * the given version scope.
+ *
+ * A transaction ends with TopTransactionResourceOwner.
+ *
+ * A statement runs in a portal, and Postgres releases the portal's resource
+ * owner once the statement is done. The portal is also exactly the extent of
+ * the statement: the queries of the functions, DO blocks, procedures, triggers
+ * and rule actions the statement runs execute inside its portal, and with the
+ * extended protocol the portal spans both the Bind message that starts the
+ * statement's scans and the Execute message that runs its functions, which
+ * Postgres gives two different statement start times. A cursor is a portal of
+ * its own, so it is a statement of its own and keeps its versions for as long
+ * as it is open.
+ *
+ * A statement can also run where no portal has a resource owner for it: in a
+ * procedure after the procedure commits, at which point Postgres has released
+ * the portal's owner with the transaction, and outside any portal. Such a
+ * statement keeps its versions for the rest of its transaction.
  */
 static ResourceOwner
-GetCurrentReadOwner(void)
+GetCatalogVersionScopeOwner(CatalogVersionScope scope)
 {
-	if (!IsolationUsesXactSnapshot() &&
+	if (scope == VERSION_SCOPE_STATEMENT &&
 		ActivePortal != NULL && ActivePortal->resowner != NULL)
 		return ActivePortal->resowner;
 
@@ -360,92 +406,94 @@ GetCurrentReadOwner(void)
 
 
 /*
- * StartExternalCatalogRead starts an empty read that ends when the given
- * resource owner is released.
+ * CreateCatalogVersions starts holding versions for the version scope that
+ * releasing the given resource owner ends.
  */
-static ExternalCatalogRead *
-StartExternalCatalogRead(ResourceOwner owner)
+static CatalogVersions *
+CreateCatalogVersions(ResourceOwner scopeOwner)
 {
 	static bool releaseCallbackRegistered = false;
 
 	if (!releaseCallbackRegistered)
 	{
-		RegisterResourceReleaseCallback(EndExternalCatalogReads, NULL);
+		RegisterResourceReleaseCallback(ReleaseCatalogVersions, NULL);
 		releaseCallbackRegistered = true;
 	}
 
-	if (ExternalCatalogReadsContext == NULL)
+	if (HeldCatalogVersionsContext == NULL)
 	{
-		MemoryContext readsContext =
+		MemoryContext heldContext =
 			AllocSetContextCreate(TopTransactionContext,
-								  "pg_lake external catalog reads",
+								  "pg_lake held catalog versions",
 								  ALLOCSET_SMALL_SIZES);
 		MemoryContextCallback *forgetCallback =
-			MemoryContextAlloc(readsContext, sizeof(MemoryContextCallback));
+			MemoryContextAlloc(heldContext, sizeof(MemoryContextCallback));
 
-		forgetCallback->func = ForgetExternalCatalogReads;
+		forgetCallback->func = ForgetHeldCatalogVersions;
 		forgetCallback->arg = NULL;
 
-		MemoryContextRegisterResetCallback(readsContext, forgetCallback);
+		MemoryContextRegisterResetCallback(heldContext, forgetCallback);
 
-		ExternalCatalogReadsContext = readsContext;
+		HeldCatalogVersionsContext = heldContext;
 	}
 
-	MemoryContext readContext =
-		AllocSetContextCreate(ExternalCatalogReadsContext,
-							  "pg_lake external catalog read",
+	MemoryContext versionsContext =
+		AllocSetContextCreate(HeldCatalogVersionsContext,
+							  "pg_lake catalog versions",
 							  ALLOCSET_SMALL_SIZES);
-	ExternalCatalogRead *read =
-		MemoryContextAllocZero(readContext, sizeof(ExternalCatalogRead));
+	CatalogVersions *versions =
+		MemoryContextAllocZero(versionsContext, sizeof(CatalogVersions));
 
-	read->owner = owner;
-	read->context = readContext;
+	versions->scopeOwner = scopeOwner;
+	versions->context = versionsContext;
 
 	MemoryContext previousContext =
-		MemoryContextSwitchTo(ExternalCatalogReadsContext);
+		MemoryContextSwitchTo(HeldCatalogVersionsContext);
 
-	ExternalCatalogReads = lappend(ExternalCatalogReads, read);
+	HeldCatalogVersions = lappend(HeldCatalogVersions, versions);
 
 	MemoryContextSwitchTo(previousContext);
 
-	return read;
+	return versions;
 }
 
 
 /*
- * EndExternalCatalogReads ends the reads of a resource owner as Postgres
- * releases that owner. resowner.c makes the owner it releases the current one
- * while it calls back, and calls back for each phase of the release, so the
- * first phase ends the reads and the others find nothing left to end.
+ * ReleaseCatalogVersions drops the versions of a version scope as Postgres
+ * releases the resource owner that ends it. resowner.c makes the owner it
+ * releases the current one while it calls back, and calls back for each phase
+ * of the release, so the first phase drops the versions and the others find
+ * nothing left to drop.
  */
 static void
-EndExternalCatalogReads(ResourceReleasePhase phase, bool isCommit,
-						bool isTopLevel, void *arg)
+ReleaseCatalogVersions(ResourceReleasePhase phase, bool isCommit,
+					   bool isTopLevel, void *arg)
 {
-	ListCell   *readCell = NULL;
+	ListCell   *versionsCell = NULL;
 
-	foreach(readCell, ExternalCatalogReads)
+	foreach(versionsCell, HeldCatalogVersions)
 	{
-		ExternalCatalogRead *read = lfirst(readCell);
+		CatalogVersions *versions = lfirst(versionsCell);
 
-		if (read->owner != CurrentResourceOwner)
+		if (versions->scopeOwner != CurrentResourceOwner)
 			continue;
 
-		ExternalCatalogReads =
-			foreach_delete_current(ExternalCatalogReads, readCell);
+		HeldCatalogVersions =
+			foreach_delete_current(HeldCatalogVersions, versionsCell);
 
-		MemoryContextDelete(read->context);
+		MemoryContextDelete(versions->context);
 	}
 }
 
 
 /*
- * ForgetExternalCatalogReads forgets the reads of a transaction as its memory
- * goes, by which time releasing its resource owners has ended every read.
+ * ForgetHeldCatalogVersions forgets the versions of a transaction as its
+ * memory goes, by which time releasing its resource owners has dropped them
+ * all.
  */
 static void
-ForgetExternalCatalogReads(void *arg)
+ForgetHeldCatalogVersions(void *arg)
 {
-	ExternalCatalogReads = NIL;
-	ExternalCatalogReadsContext = NULL;
+	HeldCatalogVersions = NIL;
+	HeldCatalogVersionsContext = NULL;
 }
