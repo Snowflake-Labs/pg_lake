@@ -2189,21 +2189,33 @@ def _azure_credential(superuser_conn, shape, location, vended_config):
     """Load the table from a mock catalog; return its one Azure credential."""
     httpd, thread = _serve_provider_case(shape, location, vended_config, superuser_conn)
     try:
-        superuser_conn.notices.clear()
-        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
-        assert not any(
-            "ignoring vended credentials" in n for n in superuser_conn.notices
-        ), "\n".join(superuser_conn.notices)
-        if summary is None:
-            return None
-        assert ";" not in summary, f"expected one credential, got {summary!r}"
-        fields = summary.split("|")
-        assert fields[0] == "azure", summary
-        keys = ["account", "scope", "sas", "expiry", "blob", "dfs"]
-        return dict(zip(keys, fields[1:]))
+        return _azure_credential_from_catalog(superuser_conn)
     finally:
         _drop_vended_creds_fn(superuser_conn)
         _stop(httpd, thread, superuser_conn)
+
+
+def _azure_credential_from_catalog(superuser_conn):
+    """One load against a catalog already being served; its Azure credential.
+
+    Split out of _azure_credential so a test can load more than once with no
+    catalog teardown in between.  Starting and stopping a catalog moves the
+    REST credential settings, and changing one of those flushes the token cache
+    and the vended-credentials cache with it, so two loads that have to share
+    anything held in that cache cannot have a teardown between them.
+    """
+    superuser_conn.notices.clear()
+    summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+    assert not any(
+        "ignoring vended credentials" in n for n in superuser_conn.notices
+    ), "\n".join(superuser_conn.notices)
+    if summary is None:
+        return None
+    assert ";" not in summary, f"expected one credential, got {summary!r}"
+    fields = summary.split("|")
+    assert fields[0] == "azure", summary
+    keys = ["account", "scope", "sas", "expiry", "blob", "dfs"]
+    return dict(zip(keys, fields[1:]))
 
 
 @pytest.mark.parametrize("shape", ["storage-credentials", "config"])
@@ -2511,24 +2523,33 @@ def test_vended_credentials_azure_refused_endpoint_reported_once(
 
     endpoint = f"http://169.254.169.254/{uuid.uuid4().hex[:8]}"
 
+    # One catalog for all three loads, restated in place between them: the
+    # report is deduplicated for as long as the vended-credentials cache lives,
+    # and stopping a catalog can end that cache, so a catalog per load would let
+    # the second one report the same endpoint again legitimately.
+    vended = {
+        f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
+        f"adls.connection-string.{_ADLS_HOST}": endpoint,
+    }
+    httpd, thread = _serve_provider_case(
+        "storage-credentials", _ADLS_LOCATION, vended, superuser_conn
+    )
+
     def reported(stated):
-        _azure_credential(
-            superuser_conn,
-            "storage-credentials",
-            _ADLS_LOCATION,
-            {
-                f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
-                f"adls.connection-string.{_ADLS_HOST}": stated,
-            },
-        )
+        vended[f"adls.connection-string.{_ADLS_HOST}"] = stated
+        _azure_credential_from_catalog(superuser_conn)
         return any(
             n.startswith("WARNING") and "ignoring the endpoint the catalog vended" in n
             for n in superuser_conn.notices
         )
 
-    assert reported(endpoint)
-    assert not reported(endpoint), "the same endpoint was reported again"
-    assert reported(f"{endpoint}/other"), "another endpoint was not reported"
+    try:
+        assert reported(endpoint)
+        assert not reported(endpoint), "the same endpoint was reported again"
+        assert reported(f"{endpoint}/other"), "another endpoint was not reported"
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)
 
 
 def test_vended_credentials_azure_endpoint_allowed_by_the_host_allowlist(
