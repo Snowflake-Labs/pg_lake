@@ -179,9 +179,9 @@ PostgreSQL catalog and regular PostgreSQL tables.
 
 ### Define a catalog server
 
-Any member of `lake_write` can create a catalog server. Catalog servers always have
-`TYPE 'rest'`, and the names `postgres`, `object_store` and `rest` are reserved for the built-in
-catalogs:
+Any member of `lake_write` can create a catalog server. Catalog servers have `TYPE 'rest'`, or
+`TYPE 'iceberg-rest'` for [catalogs without a URL prefix](#catalogs-without-a-url-prefix), and
+the names `postgres`, `object_store` and `rest` are reserved for the built-in catalogs:
 
 ```sql
 CREATE SERVER polaris TYPE 'rest'
@@ -199,6 +199,24 @@ CREATE SERVER polaris TYPE 'rest'
 | `enable_vended_credentials` | server | Ask the catalog for temporary storage credentials instead of using pgduck_server's own. |
 | `scope` | server or user mapping | OAuth2 scope. Default `PRINCIPAL_ROLE:ALL`. The user mapping wins if both set it. |
 | `client_id`, `client_secret` | user mapping | OAuth2 client credentials. |
+
+#### Catalogs without a URL prefix
+
+A `TYPE 'rest'` server sends requests to `<rest_endpoint>/v1/<catalog name>/namespaces/...`.
+Some catalogs, such as the `apache/iceberg-rest-fixture` reference catalog, serve the Iceberg
+REST routes without that prefix. For those, create the server with `TYPE 'iceberg-rest'`, which
+sends requests to `<rest_endpoint>/v1/namespaces/...` instead. It takes the same options as a
+`TYPE 'rest'` server, and the catalog name still determines the storage location of new tables.
+The fixture does not check credentials either, so this server also sets `rest_auth_type 'none'`
+and needs no user mapping:
+
+```sql
+CREATE SERVER iceberg_rest TYPE 'iceberg-rest'
+  FOREIGN DATA WRAPPER iceberg_catalog
+  OPTIONS (rest_endpoint 'http://localhost:8181',
+           location_prefix 's3://lake-bucket',
+           rest_auth_type 'none');
+```
 
 ### Credentials and permissions
 

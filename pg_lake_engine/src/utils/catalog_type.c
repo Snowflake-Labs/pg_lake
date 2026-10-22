@@ -191,10 +191,23 @@ IsRestCatalog(const char *catalog)
 	/*
 	 * Any iceberg_catalog server reaching this point is user-created, and
 	 * ValidateIcebergCatalogServerDDL forces all user-created iceberg_catalog
-	 * servers to TYPE 'rest'.
+	 * servers to a REST catalog TYPE.
 	 */
-	Assert(pg_strcasecmp(server->servertype, REST_CATALOG_NAME) == 0);
+	Assert(IsRestCatalogServerType(server->servertype));
 	return true;
+}
+
+
+/*
+ * IsRestCatalogServerType returns true if serverType is one of the TYPEs a
+ * user-created iceberg_catalog server may have: 'rest' or 'iceberg-rest'.
+ */
+bool
+IsRestCatalogServerType(const char *serverType)
+{
+	return serverType != NULL &&
+		(pg_strcasecmp(serverType, REST_CATALOG_NAME) == 0 ||
+		 pg_strcasecmp(serverType, ICEBERG_REST_CATALOG_SERVER_TYPE) == 0);
 }
 
 
