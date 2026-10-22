@@ -55,7 +55,8 @@ PerformDeleteFromParquet(char *sourcePath,
 						 CopyDataCompression destinationCompression,
 						 DataFileSchema * schema,
 						 ReadDataStats * stats,
-						 List *leafFields)
+						 List *leafFields,
+						 bool skipCacheOnWrite)
 {
 	const char *remainderQuery =
 		DeleteFromParquetQuery(sourcePath, positionDeleteFiles, deletionFilePath, schema, stats);
@@ -64,9 +65,12 @@ PerformDeleteFromParquet(char *sourcePath,
 
 	initStringInfo(&command);
 
+	/* skip cache-on-write for this rewritten data file when requested */
+	char	   *copyDestination = NoCacheDestinationPath(destinationPath, skipCacheOnWrite);
+
 	appendStringInfo(&command, "COPY (%s) TO %s",
 					 remainderQuery,
-					 quote_literal_cstr(destinationPath));
+					 quote_literal_cstr(copyDestination));
 
 	/* start WITH options */
 	appendStringInfoString(&command, " WITH (format 'parquet'");
@@ -97,11 +101,16 @@ PerformDeleteFromParquet(char *sourcePath,
 	/* end WITH options */
 	appendStringInfoString(&command, ")");
 
-	return ExecuteCopyToCommandOnPGDuckConnection(command.data,
-												  leafFields,
-												  schema,
-												  destinationPath,
-												  DATA_FORMAT_PARQUET);
+	StatsCollector *statsCollector =
+		ExecuteCopyToCommandOnPGDuckConnection(command.data,
+											   leafFields,
+											   schema,
+											   destinationPath,
+											   DATA_FORMAT_PARQUET);
+
+	StripNoCachePrefixFromStats(statsCollector, skipCacheOnWrite);
+
+	return statsCollector;
 }
 
 

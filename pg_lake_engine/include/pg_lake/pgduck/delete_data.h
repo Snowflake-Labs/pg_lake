@@ -31,4 +31,5 @@ extern PGDLLEXPORT StatsCollector * PerformDeleteFromParquet(char *sourceDataFil
 															 CopyDataCompression destinationCompression,
 															 DataFileSchema * schema,
 															 ReadDataStats * stats,
-															 List *leafFields);
+															 List *leafFields,
+															 bool skipCacheOnWrite);

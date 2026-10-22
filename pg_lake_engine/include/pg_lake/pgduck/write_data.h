@@ -45,6 +45,10 @@ typedef enum ParquetVersion
 /* pg_lake_table.default_parquet_version */
 extern PGDLLEXPORT int DefaultParquetVersion;
 
+extern PGDLLEXPORT char *NoCacheDestinationPath(char *destinationPath,
+												bool skipCacheOnWrite);
+extern PGDLLEXPORT void StripNoCachePrefixFromStats(StatsCollector * statsCollector,
+													bool skipCacheOnWrite);
 extern PGDLLEXPORT StatsCollector * ConvertCSVFileTo(char *csvFilePath,
 													 TupleDesc tupleDesc,
 													 int maxLineSize,
@@ -53,7 +57,8 @@ extern PGDLLEXPORT StatsCollector * ConvertCSVFileTo(char *csvFilePath,
 													 CopyDataCompression destinationCompression,
 													 List *formatOptions,
 													 DataFileSchema * schema,
-													 List *leafFields);
+													 List *leafFields,
+													 bool skipCacheOnWrite);
 extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   char *destinationPath,
 													   CopyDataFormat destinationFormat,
@@ -66,7 +71,8 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   IcebergOutOfRangePolicy outOfRangePolicy,
 													   IcebergCompatibilityMode compatibilityMode,
 													   bool wrapNativeTypes,
-													   List *partitionByExprs);
+													   List *partitionByExprs,
+													   bool skipCacheOnWrite);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
 extern PGDLLEXPORT char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
