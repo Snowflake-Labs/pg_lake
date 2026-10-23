@@ -1197,6 +1197,49 @@ def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_locatio
     pg_conn.commit()
 
 
+def test_pruning_deletes_with_null_partition(
+    s3, pg_conn, extension, with_default_location
+):
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_deletes_null_part;
+        CREATE TABLE test_pruning_deletes_null_part.tbl (
+            col1 INT
+        ) USING iceberg WITH (autovacuum_enabled='False', partition_by='col1');
+
+        INSERT INTO test_pruning_deletes_null_part.tbl VALUES (1), (1);
+        INSERT INTO test_pruning_deletes_null_part.tbl VALUES (NULL), (NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # partition bounds account for NULL partition values, so the file in
+    # partition col1 = 1 is a full match even though col1 is nullable
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_null_part.tbl where col1 = 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 0
+    assert int(fetch_data_files_skipped(results)) == 1
+
+    run_command(
+        "delete from test_pruning_deletes_null_part.tbl where col1 = 1", pg_conn
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "select count(*), count(col1) from test_pruning_deletes_null_part.tbl", pg_conn
+    )
+    assert results[0][0] == 2
+    assert results[0][1] == 0
+
+    run_command("DROP SCHEMA test_pruning_deletes_null_part CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_pruning_deletes_trigger(s3, pg_conn, extension, with_default_location):
     explain_prefix = "EXPLAIN (verbose, format json, analyze) "
 
