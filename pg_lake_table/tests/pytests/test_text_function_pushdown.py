@@ -513,3 +513,15 @@ def test_initcap_on_pg_vs_duck(create_initcap_edge_case_tables, pg_conn):
         ["initcap_pushdown.tbl"],
         ["initcap_pushdown.heap_tbl"],
     )
+
+
+def test_internal_stub_function_errors_when_not_pushed_down(pg_conn):
+    # internal functions exist only for deparsing; running one in PostgreSQL
+    # raises an error instead of returning an invalid NULL pointer
+    error = run_query(
+        "SELECT __lake__internal__nsp__.to_hex('\\x01'::bytea)",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "can only be executed by the query engine" in error
+    pg_conn.rollback()
