@@ -208,7 +208,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 										 isResultRelation, NULL, snapshot);
 
 		/* prune the data files based on the filters in the query execution */
-		List	   *prunedDataFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);
+		List	   *prunedDataFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH, NULL);
 
 		/* for the pruned dataFiles, read the corresponding deletion files */
 		List	   *positionDeleteFiles =
@@ -226,7 +226,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 * Iceberg, since we only have statistics for Iceberg.
 		 */
 		if (isResultRelation)
-			fullMatches = PruneDataFiles(relationId, prunedDataFiles, baseRestrictInfoList, FULL_MATCH);
+			fullMatches = PruneDataFiles(relationId, prunedDataFiles, baseRestrictInfoList, FULL_MATCH, NULL);
 
 		/*
 		 * fullMatches is produced by filtering prunedDataFiles in order, so
@@ -644,7 +644,7 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 
 	FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
 
-	List	   *retainedFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);
+	List	   *retainedFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH, metadata);
 
 	ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, fileScans, positionDeleteScans);
 	*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles, deleteFiles,
