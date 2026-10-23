@@ -116,7 +116,7 @@ static void LoadShippablePgduckOperators(const PGDuckShippableOperator * operato
 static bool IsShippableStructType(Oid objectId);
 static char *GetObjectDescription(Oid classId, Oid objectId);
 static bool ArraySubscriptMayBeNegative(SubscriptingRef *sbsref);
-static bool IsDeniedBuiltinFunction(Oid functionId);
+static bool IsPostgresOnlyBuiltinFunction(Oid functionId);
 
 /*
  * Initialize the backend-lifespan cache of shippability decisions.
@@ -685,8 +685,8 @@ is_shippable(Oid objectId, Oid classId, Node *expr)
 	if (EnableStrictPushdown)
 		return false;
 
-	/* never ship built-ins that would read pgduck_server state */
-	if (classId == ProcedureRelationId && IsDeniedBuiltinFunction(objectId))
+	/* built-ins that must run in Postgres, not pgduck_server */
+	if (classId == ProcedureRelationId && IsPostgresOnlyBuiltinFunction(objectId))
 		return false;
 
 	/* Built-in objects are presumed shippable in non-strict mode */
@@ -695,13 +695,13 @@ is_shippable(Oid objectId, Oid classId, Node *expr)
 
 
 /*
- * IsDeniedBuiltinFunction returns whether a built-in function must not be
+ * IsPostgresOnlyBuiltinFunction returns whether a built-in function must not be
  * shipped even in non-strict mode, because DuckDB has a function of the same
  * name that reads or changes process-wide query engine state (settings that
  * may include credentials, database and schema names, etc).
  */
 static bool
-IsDeniedBuiltinFunction(Oid functionId)
+IsPostgresOnlyBuiltinFunction(Oid functionId)
 {
 	switch (functionId)
 	{
