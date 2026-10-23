@@ -337,6 +337,26 @@ def test_two_modifying_ctes(create_writable_tables, pg_conn):
 
     pg_conn.rollback()
 
+    # same with joins that repeat the target row, which use update tracking
+    error = run_command(
+        """
+        WITH d1 AS (
+            DELETE FROM test_table USING generate_series(1, 10) s
+            WHERE name = 'Alice' RETURNING age
+        ),
+        d2 AS (
+            UPDATE test_table SET age = age + 1 FROM generate_series(1, 10) s
+            WHERE name = 'Alice' RETURNING age
+        )
+        SELECT * FROM d1 UNION ALL SELECT * FROM d2;
+    """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert "pg_lake table test_table cannot be updated by multiple operations" in error
+
+    pg_conn.rollback()
+
 
 def test_system_column(create_writable_tables, pg_conn):
     error = run_command(
@@ -386,6 +406,17 @@ def test_delete_join_repeated_rows(pg_conn, s3, extension, with_default_location
     pg_conn.commit()
 
     for table_name in ["target", "target_iceberg"]:
+        # an earlier joined UPDATE in the same transaction must not affect
+        # deduplication in the DELETE
+        run_command(
+            f"""
+            UPDATE test_delete_repeated.{table_name} t SET val = t.val + 1
+            FROM generate_series(1, 10) s
+            WHERE t.id IN (1, 2)
+        """,
+            pg_conn,
+        )
+
         result = run_query(
             f"""
             DELETE FROM test_delete_repeated.{table_name} t
@@ -399,10 +430,10 @@ def test_delete_join_repeated_rows(pg_conn, s3, extension, with_default_location
         pg_conn.commit()
 
         result = run_query(
-            f"SELECT id FROM test_delete_repeated.{table_name} ORDER BY id",
+            f"SELECT id, val FROM test_delete_repeated.{table_name} ORDER BY id",
             pg_conn,
         )
-        assert [tuple(row) for row in result] == [(2,), (3,)]
+        assert [tuple(row) for row in result] == [(2, 1), (3, 0)]
 
     run_command("DROP SCHEMA test_delete_repeated CASCADE", pg_conn)
     pg_conn.commit()
