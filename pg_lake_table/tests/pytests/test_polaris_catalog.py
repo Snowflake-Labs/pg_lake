@@ -802,6 +802,33 @@ def test_metadata_fetch(
         ), volatility
         superuser_conn.commit()
 
+    # a FOR loop opens a cursor, which reads with the statement as well, so
+    # a statement that runs the loop for each of its rows asks the catalog once
+    run_command(
+        f"""
+            CREATE OR REPLACE FUNCTION "{catalog_namespace_name}_pg".loop_count()
+            RETURNS bigint LANGUAGE plpgsql AS $$ DECLARE r record; n bigint; BEGIN
+                FOR r IN SELECT count(*) AS c FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg" LOOP
+                    n := r.c;
+                END LOOP;
+                RETURN n;
+            END; $$
+             """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    superuser_conn.notices.clear()
+    res = run_query(
+        f"""
+            SELECT "{catalog_namespace_name}_pg".loop_count() FROM generate_series(1, 3)
+             """,
+        superuser_conn,
+    )
+    assert [row[0] for row in res] == [5, 5, 5]
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
+    superuser_conn.commit()
+
     # now, the same test with REPEATABLE READ and SERIALIZABLE
     tx_mode = ["REPEATABLE READ", "SERIALIZABLE"]
     for isolation_level in tx_mode:

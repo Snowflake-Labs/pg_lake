@@ -260,8 +260,9 @@ other engines without any changes in PostgreSQL. Dropping it only removes it fro
 
 A statement reads one version of the catalog: every reference to a table, every table of one
 `object_store` catalog, and every query the statement runs in functions, `DO` blocks, procedures
-and triggers reads the same version. Under `READ COMMITTED`, the next statement reads the version
-that stands by then, and a cursor reads the version that stood when it was opened. A procedure
+and triggers, including PL/pgSQL `FOR` loops, reads the same version. Under `READ COMMITTED`, the
+next statement reads the version that stands by then, and a cursor keeps the version of the
+statement that opened it for as long as it is open. A procedure
 that commits reads the catalog anew after each commit, so a procedure that polls an attached table
 for new commits should commit between polls. `REPEATABLE READ` and `SERIALIZABLE` hold a
 transaction to the version its first read of an attached table used.
