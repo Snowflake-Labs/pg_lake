@@ -48,6 +48,10 @@
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
+/* error bodies are small; anything larger or deeper is not worth parsing */
+#define MAX_ERROR_BODY_LENGTH (64 * 1024)
+#define MAX_ERROR_BODY_DEPTH 32
+
 
 /*
  * Retry actions returned by ClassifyRestCatalogRequestRetry.
@@ -241,12 +245,53 @@ SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
 
 
 /*
+ * IsParseableErrorBody returns whether an error body is short and shallow
+ * enough that jsonb_in cannot raise a hard error on it.  It counts nesting
+ * outside of strings, so it cannot raise either.
+ */
+static bool
+IsParseableErrorBody(const char *body)
+{
+	int			depth = 0;
+	bool		inString = false;
+	size_t		length = 0;
+
+	for (const char *cursor = body; *cursor != '\0'; cursor++)
+	{
+		if (++length > MAX_ERROR_BODY_LENGTH)
+			return false;
+
+		if (inString)
+		{
+			if (*cursor == '\\' && cursor[1] != '\0')
+				cursor++;
+			else if (*cursor == '"')
+				inString = false;
+		}
+		else if (*cursor == '"')
+			inString = true;
+		else if (*cursor == '{' || *cursor == '[')
+		{
+			if (++depth > MAX_ERROR_BODY_DEPTH)
+				return false;
+		}
+		else if (*cursor == '}' || *cursor == ']')
+			depth--;
+	}
+
+	return true;
+}
+
+
+/*
  * GetRestCatalogErrorFields sets the error message and type from a REST
  * catalog error response, or leaves them NULL.
  *
  * ReportHTTPError also runs after commit, where any ERROR becomes a PANIC,
  * and the body can be anything a catalog or a proxy in front of it sent.
- * So parse it without raising errors and skip what does not fit.
+ * So parse it without raising errors and skip what does not fit.  A soft
+ * parse still raises on deep nesting (check_stack_depth) and on oversized
+ * jsonb, so bodies that could hit either are skipped before parsing.
  */
 static void
 GetRestCatalogErrorFields(const char *body, const char **message, const char **type)
@@ -254,7 +299,7 @@ GetRestCatalogErrorFields(const char *body, const char **message, const char **t
 	ErrorSaveContext escontext = {T_ErrorSaveContext};
 	Datum		jsonbDatum;
 
-	if (body == NULL ||
+	if (body == NULL || !IsParseableErrorBody(body) ||
 		!DirectInputFunctionCallSafe(jsonb_in, (char *) body, InvalidOid, -1,
 									 (Node *) &escontext, &jsonbDatum))
 		return;
