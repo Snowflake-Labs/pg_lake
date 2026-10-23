@@ -264,9 +264,9 @@ GetRestCatalogErrorFields(const char *body, const char **message, const char **t
 		return;
 
 	JsonbValue *messageValue = getKeyJsonValueFromContainer(error->val.binary.data, "message",
-															 strlen("message"), NULL);
+															strlen("message"), NULL);
 	JsonbValue *typeValue = getKeyJsonValueFromContainer(error->val.binary.data, "type",
-														  strlen("type"), NULL);
+														 strlen("type"), NULL);
 
 	if (messageValue != NULL && messageValue->type == jbvString)
 		*message = pnstrdup(messageValue->val.string.val, messageValue->val.string.len);
