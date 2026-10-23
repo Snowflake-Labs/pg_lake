@@ -140,6 +140,12 @@ each table it reads or writes, and passes them to pgduck_server as in-memory sec
 that table's location, where they take precedence over pgduck_server's own secrets. See
 [REST catalogs](iceberg-catalogs.md#rest-catalogs).
 
+A vended S3 secret never takes its endpoint from the catalog (`s3.endpoint` is ignored). It
+inherits the endpoint and SSL setting from the pgduck_server secret that already covers the
+prefix, or uses the AWS default when there is none. To reach S3-compatible storage, or an AWS
+VPC interface, FIPS or dual-stack endpoint, configure the endpoint in a pgduck_server S3 secret
+scoped to the bucket.
+
 ### Supported storage URLs
 
 | Scheme | Storage | Read | Write |

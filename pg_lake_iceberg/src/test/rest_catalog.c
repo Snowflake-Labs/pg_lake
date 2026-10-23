@@ -103,7 +103,7 @@ get_rest_metadata_location(PG_FUNCTION_ARGS)
  * pipe-delimited summary:
  *
  *     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>|
- *      <region>|<endpoint>|<url-style>|<use-ssl>"
+ *      <region>|<url-style>"
  *
  * or, for an Azure SAS token:
  *
@@ -162,16 +162,14 @@ get_rest_vended_credentials(PG_FUNCTION_ARGS)
 			continue;
 		}
 
-		appendStringInfo(&buf, "%s%s|%s|%s|%s|%s|%s|%s|%s",
+		appendStringInfo(&buf, "%s%s|%s|%s|%s|%s|%s",
 						 buf.len > 0 ? ";" : "",
 						 creds->accessKeyId ? creds->accessKeyId : "",
 						 creds->scope ? creds->scope : "",
 						 creds->sessionToken ? "yes" : "no",
 						 creds->expiresAt > 0 ? "expiry" : "noexpiry",
 						 creds->region ? creds->region : "",
-						 creds->endpoint ? creds->endpoint : "",
-						 creds->urlStyle ? creds->urlStyle : "",
-						 creds->useSsl ? creds->useSsl : "");
+						 creds->urlStyle ? creds->urlStyle : "");
 	}
 
 	PG_RETURN_TEXT_P(cstring_to_text(buf.data));
