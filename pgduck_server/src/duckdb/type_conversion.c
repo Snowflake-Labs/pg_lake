@@ -1229,8 +1229,9 @@ array_to_text(duckdb_vector vector, duckdb_logical_type arrayLogicalType, int ro
 		else
 			appendStringInfoCharMacro(&topLevelBuffer, ',');
 
-		if (arrayElemTypeId == DUCKDB_TYPE_ARRAY || arrayElemTypeId == DUCKDB_TYPE_LIST)
-			/* nested types should not be quoted again */
+		if (elementOutputBuffer.buffer != NULL &&
+			(arrayElemTypeId == DUCKDB_TYPE_ARRAY || arrayElemTypeId == DUCKDB_TYPE_LIST))
+			/* nested types should not be quoted again, NULL is handled below */
 			appendStringInfoString(&topLevelBuffer, elementOutputBuffer.buffer);
 		else
 			AppendFieldValue(elementOutputBuffer.buffer, false, &topLevelBuffer);
@@ -1387,8 +1388,9 @@ list_to_text(duckdb_vector vector, duckdb_logical_type listLogicalType, int row,
 		else
 			appendStringInfoCharMacro(&topLevelBuffer, ',');
 
-		if (listElemTypeId == DUCKDB_TYPE_ARRAY || listElemTypeId == DUCKDB_TYPE_LIST)
-			/* nested types should not be quoted again */
+		if (elementOutputBuffer.buffer != NULL &&
+			(listElemTypeId == DUCKDB_TYPE_ARRAY || listElemTypeId == DUCKDB_TYPE_LIST))
+			/* nested types should not be quoted again, NULL is handled below */
 			appendStringInfoString(&topLevelBuffer, elementOutputBuffer.buffer);
 		else
 			AppendFieldValue(elementOutputBuffer.buffer, false, &topLevelBuffer);
