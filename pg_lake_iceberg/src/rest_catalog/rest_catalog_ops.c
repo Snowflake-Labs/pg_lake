@@ -1258,6 +1258,7 @@ HostEndsWith(const char *host, size_t hostLen, const char *suffix)
 static bool
 IsAccountEndpoint(const char *endpoint, const char *host)
 {
+	/* AzureEndpointOverride has checked for an http(s):// prefix */
 	const char *endpointHost = strstr(endpoint, "://") + strlen("://");
 	size_t		endpointHostLen = 0;
 

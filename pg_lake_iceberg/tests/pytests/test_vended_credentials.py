@@ -2559,6 +2559,51 @@ def test_vended_credentials_azure_endpoint_allowed_by_the_host_allowlist(
         superuser_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "endpoint, expected",
+    [
+        pytest.param(
+            "https://other.blob.core.windows.net",
+            ("https://acct.blob.core.windows.net", "https://acct.dfs.core.windows.net"),
+            id="another-account",
+        ),
+        pytest.param(
+            "https://storage.example.net",
+            ("https://storage.example.net", "https://storage.example.net"),
+            id="a-host-of-the-catalogs-own",
+        ),
+    ],
+)
+def test_vended_credentials_azure_endpoint_under_a_broad_host_suffix(
+    superuser_conn, iceberg_extension, installcheck, endpoint, expected
+):
+    """
+    A suffix an administrator adds admits every host under it for any
+    table, so a broad one such as ".net" lets a catalog state a host of its
+    own.  Under Azure's storage domains the endpoint still has to be the
+    location's account.
+    """
+    if installcheck:
+        return
+
+    run_command("SET pg_lake.allowed_azure_host_suffixes TO '.net'", superuser_conn)
+    superuser_conn.commit()
+    try:
+        cred = _azure_credential(
+            superuser_conn,
+            "storage-credentials",
+            _ADLS_LOCATION,
+            {
+                f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
+                f"adls.connection-string.{_ADLS_HOST}": endpoint,
+            },
+        )
+        assert (cred["blob"], cred["dfs"]) == expected
+    finally:
+        run_command("RESET pg_lake.allowed_azure_host_suffixes", superuser_conn)
+        superuser_conn.commit()
+
+
 def test_vended_credentials_azure_location_host_is_held_to_the_host_allowlist(
     superuser_conn, iceberg_extension, installcheck
 ):

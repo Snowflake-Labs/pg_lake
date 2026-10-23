@@ -150,9 +150,12 @@ A vended Azure secret uses the endpoint the catalog states (`adls.connection-str
 it is an endpoint of the storage account the table's location names, in the same cloud, such as
 that account's Private Link endpoint, or when its host is one you added to
 `pg_lake.allowed_azure_host_suffixes`, such as an emulator. Otherwise the endpoints follow from
-the account in the location. A catalog can state a host you added there for any table, so add
-only hosts you trust to serve every table. Vended credentials are not used for a location that
-names no account (`az://<container>/...`); configure a pgduck_server Azure secret for it instead.
+the account in the location. A host you added is used for any table, even one whose location
+names a real Azure storage account, so add only hosts you control: a broad suffix such as `.net`
+lets a catalog send the requests for any table's location to a host its operator runs. Under
+Azure's own storage domains, such as `core.windows.net`, the endpoint still has to belong to the
+location's account, whatever you add. Vended credentials are not used for a location that names
+no account (`az://<container>/...`); configure a pgduck_server Azure secret for it instead.
 
 ### Supported storage URLs
 
