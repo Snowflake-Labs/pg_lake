@@ -19,63 +19,25 @@
  * external_catalog_cache.c
  *
  * A table pg_lake does not own keeps its current metadata location in an
- * external catalog, so reading the table starts with asking that catalog
- * where the table is. Asking more than once while one statement runs exposes
- * the statement to whatever the catalog did in between: two references to
- * one table can read two versions of it, and two tables of one object store
- * catalog can be read as of two different points in time. Neither is a state
- * those tables ever had together.
+ * external catalog. Asking that catalog more than once in one read lets the
+ * read mix versions: two references to one table, or two tables of one
+ * object store catalog, can come back from different points in time.
  *
- * So the first answer is held, and every later question in the same version
- * scope gets the same answer. The version scope is how long readers see one
- * version of each external catalog, and it follows the isolation level the
- * way the snapshot of a statement does:
+ * So the first answer is held for the rest of the portal that asked, or for
+ * the rest of the transaction under REPEATABLE READ and SERIALIZABLE, the
+ * same span over which Postgres reuses a snapshot for the top-level query.
+ * A portal covers a statement across Bind and Execute, and everything that
+ * runs inside it. A cursor, including the one a PL/pgSQL FOR loop opens, is
+ * a portal of its own and asks again when it opens, like a READ COMMITTED
+ * query in a volatile function takes a new snapshot.
  *
- * - REPEATABLE READ and SERIALIZABLE read the whole transaction from one
- *   snapshot, so the version scope is the transaction;
- * - READ COMMITTED reads each statement from a new snapshot, so the version
- *   scope is the statement, and the next statement asks again.
+ * A REST catalog answers per table, so we hold the metadata location of each
+ * relation asked about. An object store catalog publishes all of its tables
+ * as one document, so we hold the document, which keeps its tables
+ * consistent with each other.
  *
- * GetCatalogVersionScope() applies that rule. Each version scope ends when
- * Postgres releases a resource owner, which GetCatalogVersionScopeOwner()
- * picks: TopTransactionResourceOwner for a transaction, and the resource
- * owner of the portal that runs a statement for a statement. Every held
- * answer carries the owner of its scope, and a resource release callback
- * drops the answers of an owner as Postgres releases it, so they go however
- * the scope ends: a statement finishing, a cursor closing, the subtransaction
- * that opened a cursor aborting, or the transaction ending by commit, abort
- * or PREPARE TRANSACTION. A subtransaction that aborts inside a statement
- * leaves the statement's answers in place, since they are still what the
- * statement reads. They are all allocated under TopTransactionContext, so
- * nothing outlives the transaction either way.
- *
- * What is held follows how the catalog publishes:
- *
- * - a REST catalog answers for one table per request, so the metadata
- *   location of each relation asked about is held;
- * - an object store catalog publishes all of its tables as one document at a
- *   fixed path, so the document is held, which is what makes two tables of
- *   one catalog come from the same version of it.
- *
- * The limits, which the tests lock:
- *
- * - a REPEATABLE READ or SERIALIZABLE transaction sees the versions that
- *   stood when it first asked, not the ones that stood when it took its
- *   snapshot;
- * - under READ COMMITTED a statement holds its versions longer than Postgres
- *   holds a heap table still, which every query of a volatile function, DO
- *   block, procedure or trigger reads under a new snapshot. A loop that polls
- *   an external table inside one statement therefore keeps seeing the version
- *   the statement started with, until a procedure commits;
- * - a cursor, including the one a PL/pgSQL FOR loop over a query opens, is a
- *   version scope of its own, so it sees the catalog as it stands when it
- *   opens, which can be newer than what the rest of its statement sees;
- * - a REST answer is held under the relation that asked, so a relation that
- *   ALTER FOREIGN TABLE points at another table keeps seeing the old one until
- *   its version scope ends;
- * - attaching an object_store table reads its catalog as it stands, the way
- *   the listing function does, so a table published since a version scope
- *   started can be attached, but that scope cannot see it.
+ * Held answers live in TopTransactionContext and are dropped when Postgres
+ * releases the resource owner they were held for.
  */
 
 #include "postgres.h"
@@ -97,69 +59,29 @@
 #include "pg_lake/util/s3_reader_utils.h"
 
 
-/* how long readers see one version of each external catalog */
-typedef enum CatalogVersionScope
-{
-	VERSION_SCOPE_TRANSACTION,
-	VERSION_SCOPE_STATEMENT
-}			CatalogVersionScope;
-
 /*
- * The answers external catalogs gave in the current transaction, each held
- * for the version scope it was asked in and found again by that scope and the
- * question: the relation for a REST catalog, the document path for an object
- * store catalog. A scope is named by the resource owner whose release ends
- * it.
- *
- * Under REPEATABLE READ and SERIALIZABLE every answer belongs to the one
- * scope of the transaction. Under READ COMMITTED a cursor is a scope of its
- * own and can outlive the statement that opened it, so answers of several
- * scopes can be held at once, and for one catalog they can be two versions of
- * it:
- *
- *   BEGIN;
- *   DECLARE c CURSOR FOR SELECT * FROM ext;    -- held for the scope of c
- *   SELECT * FROM ext;                         -- held for this statement
- *   FETCH c;                                   -- still the version of c
- *
- * A PL/pgSQL FOR loop over a query does the same inside one statement.
+ * An answer an external catalog gave, held until scopeOwner is released.
+ * The key is "rest:<relation oid>" for a REST table location, or the path of
+ * an object store catalog document.
  */
-typedef struct HeldRestTableLocation
+typedef struct HeldAnswer
 {
 	ResourceOwner scopeOwner;
-	Oid			relationId;
-	char	   *metadataLocation;
-}			HeldRestTableLocation;
+	char	   *key;
+	char	   *value;
+}			HeldAnswer;
 
-typedef struct HeldObjectStoreDocument
-{
-	ResourceOwner scopeOwner;
-	char	   *path;
-	char	   *content;
-}			HeldObjectStoreDocument;
-
-/* list of HeldRestTableLocation, in HeldAnswersContext */
-static List *HeldRestTableLocations = NIL;
-
-/* list of HeldObjectStoreDocument, in HeldAnswersContext */
-static List *HeldObjectStoreDocuments = NIL;
+/* list of HeldAnswer, in HeldAnswersContext */
+static List *HeldAnswers = NIL;
 
 static MemoryContext HeldAnswersContext = NULL;
 
 static char *ResolveRestCatalogTable(Oid relationId);
 static char *ResolveObjectStoreCatalogTable(Oid relationId);
-static char *FindHeldRestTableLocation(ResourceOwner scopeOwner,
-									   Oid relationId);
-static void HoldRestTableLocation(ResourceOwner scopeOwner, Oid relationId,
-								  const char *metadataLocation);
-static char *FindHeldObjectStoreDocument(ResourceOwner scopeOwner,
-										 const char *path);
-static void HoldObjectStoreDocument(ResourceOwner scopeOwner, const char *path,
-									const char *content);
-static ResourceOwner GetCurrentVersionScopeOwner(void);
-static CatalogVersionScope GetCatalogVersionScope(void);
-static ResourceOwner GetCatalogVersionScopeOwner(CatalogVersionScope scope);
-static MemoryContext GetHeldAnswersContext(void);
+static char *FindHeldAnswer(ResourceOwner scopeOwner, const char *key);
+static void HoldAnswer(ResourceOwner scopeOwner, const char *key,
+					   const char *value);
+static ResourceOwner GetVersionScopeOwner(void);
 static void ReleaseHeldAnswers(ResourceReleasePhase phase, bool isCommit,
 							   bool isTopLevel, void *arg);
 static void ForgetHeldAnswers(void *arg);
@@ -186,10 +108,7 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 		tableProperties.tableType == PG_LAKE_TABLE_TYPE &&
 		tableProperties.format == DATA_FORMAT_ICEBERG)
 	{
-		/*
-		 * The location is a table option, and the lock a reader holds on the
-		 * relation already keeps that still.
-		 */
+		/* the location is a table option, which the relation lock keeps still */
 		return GetForeignTablePath(relationId);
 	}
 
@@ -201,23 +120,22 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 
 
 /*
- * ResolveRestCatalogTable returns where the REST catalog of a read-only
- * table says that table is, asking the catalog only if nothing in the
- * current version scope has asked about that relation yet.
+ * ResolveRestCatalogTable returns the metadata location the REST catalog
+ * gives for a read-only table, asking at most once per version scope.
  */
 static char *
 ResolveRestCatalogTable(Oid relationId)
 {
-	ResourceOwner scopeOwner = GetCurrentVersionScopeOwner();
-	char	   *metadataLocation =
-		FindHeldRestTableLocation(scopeOwner, relationId);
+	ResourceOwner scopeOwner = GetVersionScopeOwner();
+	char	   *key = psprintf("rest:%u", relationId);
+	char	   *metadataLocation = FindHeldAnswer(scopeOwner, key);
 
 	if (metadataLocation == NULL)
 	{
 		metadataLocation =
 			GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-		HoldRestTableLocation(scopeOwner, relationId, metadataLocation);
+		HoldAnswer(scopeOwner, key, metadataLocation);
 	}
 
 	/* the scope can end before whatever the caller keeps this in */
@@ -226,27 +144,27 @@ ResolveRestCatalogTable(Oid relationId)
 
 
 /*
- * ResolveObjectStoreCatalogTable returns where the catalog document of a
- * read-only object_store table says that table is, reading the document only
- * if nothing in the current version scope has read it yet.
+ * ResolveObjectStoreCatalogTable returns the metadata location the catalog
+ * document of a read-only object_store table gives for it, reading the
+ * document at most once per version scope.
  */
 static char *
 ResolveObjectStoreCatalogTable(Oid relationId)
 {
 	char	   *path = GetExternalObjectStoreCatalogFilePathForTable(relationId);
-	ResourceOwner scopeOwner = GetCurrentVersionScopeOwner();
-	char	   *content = FindHeldObjectStoreDocument(scopeOwner, path);
+	ResourceOwner scopeOwner = GetVersionScopeOwner();
+	char	   *content = FindHeldAnswer(scopeOwner, path);
 
 	if (content == NULL)
 	{
 		/* catalog.json is a fixed path that may change out of band */
 		content = GetJsonFromURINoCache(path);
 
-		/* which version of the catalog a reader got is otherwise unanswerable */
+		/* lets tests count how many versions a read could have seen */
 		ereport(DEBUG1,
 				(errmsg("read external catalog document \"%s\"", path)));
 
-		HoldObjectStoreDocument(scopeOwner, path, content);
+		HoldAnswer(scopeOwner, path, content);
 	}
 
 	return GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId,
@@ -255,17 +173,16 @@ ResolveObjectStoreCatalogTable(Oid relationId)
 
 
 /*
- * FindHeldRestTableLocation returns the metadata location held for a
- * relation in the given scope, or NULL if the scope has not asked about it.
+ * FindHeldAnswer returns the answer held for a key in the given scope, or
+ * NULL if there is none.
  */
 static char *
-FindHeldRestTableLocation(ResourceOwner scopeOwner, Oid relationId)
+FindHeldAnswer(ResourceOwner scopeOwner, const char *key)
 {
-	foreach_ptr(HeldRestTableLocation, location, HeldRestTableLocations)
+	foreach_ptr(HeldAnswer, answer, HeldAnswers)
 	{
-		if (location->scopeOwner == scopeOwner &&
-			location->relationId == relationId)
-			return location->metadataLocation;
+		if (answer->scopeOwner == scopeOwner && strcmp(answer->key, key) == 0)
+			return answer->value;
 	}
 
 	return NULL;
@@ -273,139 +190,10 @@ FindHeldRestTableLocation(ResourceOwner scopeOwner, Oid relationId)
 
 
 /*
- * HoldRestTableLocation holds the metadata location the REST catalog gave
- * for a relation, for the rest of the given scope.
+ * HoldAnswer holds an answer for a key until scopeOwner is released.
  */
 static void
-HoldRestTableLocation(ResourceOwner scopeOwner, Oid relationId,
-					  const char *metadataLocation)
-{
-	MemoryContext previousContext =
-		MemoryContextSwitchTo(GetHeldAnswersContext());
-
-	HeldRestTableLocation *location = palloc(sizeof(HeldRestTableLocation));
-
-	location->scopeOwner = scopeOwner;
-	location->relationId = relationId;
-	location->metadataLocation = pstrdup(metadataLocation);
-
-	HeldRestTableLocations = lappend(HeldRestTableLocations, location);
-
-	MemoryContextSwitchTo(previousContext);
-}
-
-
-/*
- * FindHeldObjectStoreDocument returns the content of the catalog document
- * held for a path in the given scope, or NULL if the scope has not read it.
- */
-static char *
-FindHeldObjectStoreDocument(ResourceOwner scopeOwner, const char *path)
-{
-	foreach_ptr(HeldObjectStoreDocument, document, HeldObjectStoreDocuments)
-	{
-		if (document->scopeOwner == scopeOwner &&
-			strcmp(document->path, path) == 0)
-			return document->content;
-	}
-
-	return NULL;
-}
-
-
-/*
- * HoldObjectStoreDocument holds a catalog document read from a path, for the
- * rest of the given scope.
- */
-static void
-HoldObjectStoreDocument(ResourceOwner scopeOwner, const char *path,
-						const char *content)
-{
-	MemoryContext previousContext =
-		MemoryContextSwitchTo(GetHeldAnswersContext());
-
-	HeldObjectStoreDocument *document = palloc(sizeof(HeldObjectStoreDocument));
-
-	document->scopeOwner = scopeOwner;
-	document->path = pstrdup(path);
-	document->content = pstrdup(content);
-
-	HeldObjectStoreDocuments = lappend(HeldObjectStoreDocuments, document);
-
-	MemoryContextSwitchTo(previousContext);
-}
-
-
-/*
- * GetCurrentVersionScopeOwner returns the resource owner that names the
- * version scope of the current query.
- */
-static ResourceOwner
-GetCurrentVersionScopeOwner(void)
-{
-	Assert(IsTransactionState());
-
-	return GetCatalogVersionScopeOwner(GetCatalogVersionScope());
-}
-
-
-/*
- * GetCatalogVersionScope returns how long the current transaction sees one
- * version of each external catalog, which is how long it reads the rest of
- * the database from one snapshot.
- */
-static CatalogVersionScope
-GetCatalogVersionScope(void)
-{
-	/* one snapshot serves every statement of the transaction */
-	if (IsolationUsesXactSnapshot())
-		return VERSION_SCOPE_TRANSACTION;
-
-	/* every statement takes a snapshot of its own */
-	return VERSION_SCOPE_STATEMENT;
-}
-
-
-/*
- * GetCatalogVersionScopeOwner returns the resource owner whose release ends
- * the given version scope.
- *
- * A transaction ends with TopTransactionResourceOwner.
- *
- * A statement runs in a portal, and Postgres releases the portal's resource
- * owner once the statement is done. The portal is also exactly the extent of
- * the statement: the queries of the functions, DO blocks, procedures, triggers
- * and rule actions the statement runs execute inside its portal, and with the
- * extended protocol the portal spans both the Bind message that starts the
- * statement's scans and the Execute message that runs its functions, which
- * Postgres gives two different statement start times. A cursor is a portal of
- * its own, so it is a statement of its own and keeps its versions for as long
- * as it is open.
- *
- * A statement can also run where no portal has a resource owner for it: in a
- * procedure after the procedure commits, at which point Postgres has released
- * the portal's owner with the transaction, and outside any portal. Such a
- * statement keeps its versions for the rest of its transaction, so a
- * background worker that polls an external table outside a portal has to
- * commit between polls to see the catalog move, the way a procedure does.
- */
-static ResourceOwner
-GetCatalogVersionScopeOwner(CatalogVersionScope scope)
-{
-	if (scope == VERSION_SCOPE_STATEMENT &&
-		ActivePortal != NULL && ActivePortal->resowner != NULL)
-		return ActivePortal->resowner;
-
-	return TopTransactionResourceOwner;
-}
-
-
-/*
- * GetHeldAnswersContext returns the context the held answers of the current
- * transaction live in, creating it for the first answer of the transaction.
- */
-static MemoryContext
-GetHeldAnswersContext(void)
+HoldAnswer(ResourceOwner scopeOwner, const char *key, const char *value)
 {
 	static bool releaseCallbackRegistered = false;
 
@@ -426,22 +214,51 @@ GetHeldAnswersContext(void)
 
 		forgetCallback->func = ForgetHeldAnswers;
 		forgetCallback->arg = NULL;
-
 		MemoryContextRegisterResetCallback(answersContext, forgetCallback);
 
 		HeldAnswersContext = answersContext;
 	}
 
-	return HeldAnswersContext;
+	MemoryContext previousContext = MemoryContextSwitchTo(HeldAnswersContext);
+
+	HeldAnswer *answer = palloc(sizeof(HeldAnswer));
+
+	answer->scopeOwner = scopeOwner;
+	answer->key = pstrdup(key);
+	answer->value = pstrdup(value);
+
+	HeldAnswers = lappend(HeldAnswers, answer);
+
+	MemoryContextSwitchTo(previousContext);
 }
 
 
 /*
- * ReleaseHeldAnswers drops the answers held for a version scope as Postgres
- * releases the resource owner that ends it. resowner.c makes the owner it
- * releases the current one while it calls back, and calls back for each phase
- * of the release, so the first phase drops the answers and the others find
- * nothing left to drop.
+ * GetVersionScopeOwner returns the resource owner whose release ends the
+ * current version scope: the transaction's when it reads from one snapshot,
+ * otherwise the active portal's.
+ *
+ * With no active portal owner, as after a procedure commits or in a
+ * background worker, answers are held for the rest of the transaction, so a
+ * caller that polls has to commit between polls.
+ */
+static ResourceOwner
+GetVersionScopeOwner(void)
+{
+	Assert(IsTransactionState());
+
+	if (!IsolationUsesXactSnapshot() &&
+		ActivePortal != NULL && ActivePortal->resowner != NULL)
+		return ActivePortal->resowner;
+
+	return TopTransactionResourceOwner;
+}
+
+
+/*
+ * ReleaseHeldAnswers drops the answers held for the resource owner being
+ * released, which resowner.c makes CurrentResourceOwner while it calls back.
+ * It is called once per release phase; only the first finds anything.
  */
 static void
 ReleaseHeldAnswers(ResourceReleasePhase phase, bool isCommit,
@@ -449,45 +266,29 @@ ReleaseHeldAnswers(ResourceReleasePhase phase, bool isCommit,
 {
 	ListCell   *cell = NULL;
 
-	foreach(cell, HeldRestTableLocations)
+	foreach(cell, HeldAnswers)
 	{
-		HeldRestTableLocation *location = lfirst(cell);
+		HeldAnswer *answer = lfirst(cell);
 
-		if (location->scopeOwner != CurrentResourceOwner)
+		if (answer->scopeOwner != CurrentResourceOwner)
 			continue;
 
-		HeldRestTableLocations =
-			foreach_delete_current(HeldRestTableLocations, cell);
+		HeldAnswers = foreach_delete_current(HeldAnswers, cell);
 
-		pfree(location->metadataLocation);
-		pfree(location);
-	}
-
-	foreach(cell, HeldObjectStoreDocuments)
-	{
-		HeldObjectStoreDocument *document = lfirst(cell);
-
-		if (document->scopeOwner != CurrentResourceOwner)
-			continue;
-
-		HeldObjectStoreDocuments =
-			foreach_delete_current(HeldObjectStoreDocuments, cell);
-
-		pfree(document->path);
-		pfree(document->content);
-		pfree(document);
+		pfree(answer->key);
+		pfree(answer->value);
+		pfree(answer);
 	}
 }
 
 
 /*
- * ForgetHeldAnswers forgets the held answers of a transaction as its memory
- * goes, by which time releasing its resource owners has dropped them all.
+ * ForgetHeldAnswers resets our pointers when TopTransactionContext goes, by
+ * which point releasing the resource owners has dropped every answer.
  */
 static void
 ForgetHeldAnswers(void *arg)
 {
-	HeldRestTableLocations = NIL;
-	HeldObjectStoreDocuments = NIL;
+	HeldAnswers = NIL;
 	HeldAnswersContext = NULL;
 }
