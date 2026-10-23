@@ -135,16 +135,24 @@ Keep the init file readable only by the user that runs pgduck_server. For local 
 with MinIO, see [running MinIO locally](building-from-source.md#running-s3-compatible-service-minio-locally).
 
 Credentials only go through PostgreSQL when a REST catalog vends them
-(`enable_vended_credentials`). PostgreSQL then asks the catalog for temporary S3 credentials for
-each table it reads or writes, and passes them to pgduck_server as in-memory secrets scoped to
-that table's location, where they take precedence over pgduck_server's own secrets. See
-[REST catalogs](iceberg-catalogs.md#rest-catalogs).
+(`enable_vended_credentials`). PostgreSQL then asks the catalog for temporary S3 credentials or
+Azure SAS tokens for each table it reads or writes, and passes them to pgduck_server as in-memory
+secrets scoped to that table's location, where they take precedence over pgduck_server's own
+secrets. See [REST catalogs](iceberg-catalogs.md#rest-catalogs).
 
 A vended S3 secret never takes its endpoint from the catalog (`s3.endpoint` is ignored). It
 inherits the endpoint and SSL setting from the pgduck_server secret that already covers the
 prefix, or uses the AWS default when there is none. To reach S3-compatible storage, or an AWS
 VPC interface, FIPS or dual-stack endpoint, configure the endpoint in a pgduck_server S3 secret
 scoped to the bucket.
+
+A vended Azure secret uses the endpoint the catalog states (`adls.connection-string.*`) only when
+it is an endpoint of the storage account the table's location names, in the same cloud, such as
+that account's Private Link endpoint, or when its host is one you added to
+`pg_lake.allowed_azure_host_suffixes`, such as an emulator. Otherwise the endpoints follow from
+the account in the location. A catalog can state a host you added there for any table, so add
+only hosts you trust to serve every table. Vended credentials are not used for a location that
+names no account (`az://<container>/...`); configure a pgduck_server Azure secret for it instead.
 
 ### Supported storage URLs
 
