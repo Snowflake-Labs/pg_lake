@@ -225,6 +225,18 @@ _PG_init(void)
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							   CheckHttpClientTlsFile, NULL, NULL);
 
+	DefineCustomStringVariable("pg_lake_iceberg.horizon_tls_ca_path",
+							   gettext_noop("Path to an OpenSSL hashed certificate directory "
+											"trusted alongside pg_lake_iceberg.horizon_tls_ca_file "
+											"when verifying catalogs reached with rest_auth_type "
+											"'horizon'. Optional."),
+							   NULL,
+							   &HttpClientTlsCaPath,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   CheckHttpClientTlsDirectory, NULL, NULL);
+
 	DefineCustomStringVariable("pg_lake_iceberg.horizon_tls_cert_file",
 							   gettext_noop("Path to the client certificate presented to catalogs "
 											"reached with rest_auth_type 'horizon'. It is not "

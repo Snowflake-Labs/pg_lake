@@ -8,7 +8,6 @@ import tempfile
 import time
 from pathlib import Path
 
-import fastavro
 import pytest
 from pyiceberg.catalog.sql import SqlCatalog
 
@@ -262,6 +261,10 @@ def assert_manifests_have_table_metadata(s3, table_metadata):
     """Check the key-value metadata the Iceberg spec requires in each manifest
     of the current snapshot against the table metadata (the parsed
     metadata.json). Returns the checked manifest list records."""
+    # imported here, so that loading these helpers through utils_pytest
+    # does not require fastavro
+    import fastavro
+
     schemas = {schema["schema-id"]: schema for schema in table_metadata["schemas"]}
     specs = {spec["spec-id"]: spec for spec in table_metadata["partition-specs"]}
     current = next(
