@@ -1742,7 +1742,9 @@ def test_invalidations_keep_the_held_version(
 # A PL/pgSQL FOR loop over a query opens a cursor, which is a portal of its
 # own, so the loop reads the catalog as it stands when it starts, while the
 # statements around the loop read the version of the statement that called
-# the function.  That is one of the limits this file's header lists.
+# the function.  A statement that runs the loop once per row therefore reads
+# the catalog once per row.  That is one of the limits this file's header
+# lists.
 def test_for_loop_cursor_reads_the_catalog_as_it_opens(
     pg_conn,
     s3,
@@ -1769,6 +1771,16 @@ def test_for_loop_cursor_reads_the_catalog_as_it_opens(
         f"END; $$",
         pg_conn,
     )
+    run_command(
+        f"CREATE FUNCTION {schema}.loop_count() RETURNS bigint "
+        f"LANGUAGE plpgsql AS $$ DECLARE r record; n bigint; BEGIN "
+        f"  FOR r IN SELECT count(*) AS c FROM {schema}.read_tbl LOOP "
+        f"    n := r.c; "
+        f"  END LOOP; "
+        f"  RETURN n; "
+        f"END; $$",
+        pg_conn,
+    )
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
 
@@ -1783,6 +1795,15 @@ def test_for_loop_cursor_reads_the_catalog_as_it_opens(
         ),
     )
     assert tuple(rows[0]) == (5, 9, 5)
+    pg_conn.commit()
+
+    rows, catalog_reads = _run_counting_catalog_reads(
+        pg_conn,
+        f"SELECT array_agg({schema}.loop_count() ORDER BY g) "
+        f"FROM generate_series(1, 3) g",
+    )
+    assert rows[0][0] == [9, 9, 9]
+    assert catalog_reads == 3, f"expected three catalog reads, got {catalog_reads}"
     pg_conn.commit()
 
 
