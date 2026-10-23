@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/permissions/roles.h"
@@ -173,6 +174,27 @@ RemoteFileExists(char *path)
 
 
 /*
+ * IsRemovablePath returns whether a path is an object store URL that we
+ * may remove.
+ *
+ * pgduck_server removes anything its file system can open, including a
+ * local file.  Paths to remove can come from table metadata or from a REST
+ * catalog's metadata-location, so a path that is not a URL is skipped
+ * rather than handed to pgduck_server.
+ */
+static bool
+IsRemovablePath(const char *path)
+{
+	if (IsSupportedURL(path))
+		return true;
+
+	ereport(WARNING, (errmsg("not removing \"%s\" because it is not a supported URL",
+							path)));
+	return false;
+}
+
+
+/*
 * DeleteRemotePrefix lists all the files in the given path and deletes them.
 * It recurses into subdirectories/prefixes.
 *
@@ -183,6 +205,9 @@ RemoteFileExists(char *path)
 bool
 DeleteRemotePrefix(char *path)
 {
+	if (!IsRemovablePath(path))
+		return true;
+
 	StringInfo	recursivePath = makeStringInfo();
 
 	appendStringInfo(recursivePath, "%s/**", path);
@@ -202,6 +227,9 @@ DeleteRemotePrefix(char *path)
 bool
 DeleteRemoteFile(char *path)
 {
+	if (!IsRemovablePath(path))
+		return true;
+
 	char	   *query = psprintf("SELECT pg_lake_remove_file(%s)",
 								 quote_literal_cstr(path));
 
@@ -226,6 +254,19 @@ DeleteRemoteFile(char *path)
 bool
 DeleteRemoteFiles(List *paths)
 {
+	List	   *removablePaths = NIL;
+	ListCell   *removableCell = NULL;
+
+	foreach(removableCell, paths)
+	{
+		char	   *path = lfirst(removableCell);
+
+		if (IsRemovablePath(path))
+			removablePaths = lappend(removablePaths, path);
+	}
+
+	paths = removablePaths;
+
 	if (paths == NIL)
 		return true;
 

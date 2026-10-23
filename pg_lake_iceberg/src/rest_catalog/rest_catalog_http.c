@@ -39,6 +39,7 @@
 
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "nodes/miscnodes.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
@@ -240,6 +241,49 @@ SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
 
 
 /*
+ * GetRestCatalogErrorFields sets the error message and type from a REST
+ * catalog error response, or leaves them NULL.
+ *
+ * ReportHTTPError also runs after commit, where any ERROR becomes a PANIC,
+ * and the body can be anything a catalog or a proxy in front of it sent.
+ * So parse it without raising errors and skip what does not fit.
+ */
+static void
+GetRestCatalogErrorFields(const char *body, const char **message, const char **type)
+{
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	Datum		jsonbDatum;
+
+	if (body == NULL ||
+		!DirectInputFunctionCallSafe(jsonb_in, (char *) body, InvalidOid, -1,
+									 (Node *) &escontext, &jsonbDatum))
+		return;
+
+	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
+
+	if (!JsonContainerIsObject(&jsonb->root))
+		return;
+
+	JsonbValue *error = getKeyJsonValueFromContainer(&jsonb->root, "error", strlen("error"), NULL);
+
+	if (error == NULL || error->type != jbvBinary ||
+		!JsonContainerIsObject(error->val.binary.data))
+		return;
+
+	JsonbValue *messageValue = getKeyJsonValueFromContainer(error->val.binary.data, "message",
+															 strlen("message"), NULL);
+	JsonbValue *typeValue = getKeyJsonValueFromContainer(error->val.binary.data, "type",
+														  strlen("type"), NULL);
+
+	if (messageValue != NULL && messageValue->type == jbvString)
+		*message = pnstrdup(messageValue->val.string.val, messageValue->val.string.len);
+
+	if (typeValue != NULL && typeValue->type == jbvString)
+		*type = pnstrdup(typeValue->val.string.val, typeValue->val.string.len);
+}
+
+
+/*
 * Reports an HTTP error by raising an appropriate error message.
 * The error format of rest catalog is follows:
 * {
@@ -265,8 +309,10 @@ ReportHTTPError(HttpResult httpResult, int level)
 		return;
 	}
 
-	const char *message = httpResult.body ? JsonbGetStringByPath(httpResult.body, 2, "error", "message") : NULL;
-	const char *type = httpResult.body ? JsonbGetStringByPath(httpResult.body, 2, "error", "type") : NULL;
+	const char *message = NULL;
+	const char *type = NULL;
+
+	GetRestCatalogErrorFields(httpResult.body, &message, &type);
 
 	ereport(level,
 			(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
