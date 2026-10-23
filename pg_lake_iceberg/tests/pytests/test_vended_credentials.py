@@ -2452,6 +2452,44 @@ def test_vended_credentials_azure_endpoint_must_be_the_accounts_own(
     ), "\n".join(superuser_conn.notices)
 
 
+def test_vended_credentials_azure_endpoint_must_be_the_accounts_own_in_every_cloud(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    Every suffix pg_lake.allowed_azure_host_suffixes admits by default is
+    under a domain where anyone can create a storage account, so another
+    account's endpoint is ignored under each of them.  The suffixes come
+    from the setting's built-in default, so a cloud added there fails here
+    until it is added to AzureStorageDomains too.
+    """
+    if installcheck:
+        return
+
+    default_suffixes = run_query(
+        "SELECT boot_val FROM pg_settings "
+        "WHERE name = 'pg_lake.allowed_azure_host_suffixes'",
+        superuser_conn,
+    )[0][0]
+
+    for suffix in default_suffixes.split(","):
+        domain = suffix.split(".", 2)[2]
+        host = f"acct.dfs.{domain}"
+        cred = _azure_credential(
+            superuser_conn,
+            "storage-credentials",
+            f"abfss://container@{host}/ns/tbl",
+            {
+                f"adls.sas-token.{host}": "sv=2025-01-05&sig=X",
+                f"adls.connection-string.{host}": f"https://other{suffix}",
+            },
+        )
+
+        assert (cred["blob"], cred["dfs"]) == (
+            f"https://acct.blob.{domain}",
+            f"https://acct.dfs.{domain}",
+        ), suffix
+
+
 def test_vended_credentials_azure_refused_endpoint_reported_once(
     superuser_conn, iceberg_extension, installcheck
 ):
