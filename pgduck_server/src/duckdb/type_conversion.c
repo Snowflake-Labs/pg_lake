@@ -62,7 +62,9 @@ static DuckDBStatus func_name(duckdb_vector vector, duckdb_logical_type logicalT
 {																		\
     void *data = duckdb_vector_get_data(vector);						\
     data_type val = VECTOR_VALUE(data, data_type, row);					\
-    format_func((data_type)val, toTextBuffer);							\
+    DuckDBStatus status = format_func((data_type)val, toTextBuffer); \
+    if (status != DUCKDB_SUCCESS)						\
+        return status;							\
     return CHECK_OOM(toTextBuffer->buffer);								\
 }
 
@@ -572,6 +574,13 @@ pg_varchar_to_text(duckdb_string_t val, TextOutputBuffer * toTextBuffer)
 	else
 	{
 		length = val.value.pointer.length;
+		if (length >= MAX_RESULT_BUFFER_SIZE)
+		{
+			PGDUCK_SERVER_ERROR("result value of %zu bytes exceeds the maximum of %zu bytes",
+								(size_t) length, MAX_RESULT_BUFFER_SIZE - 1);
+			return DUCKDB_TYPE_CONVERSION_ERROR;
+		}
+
 		if (length >= STACK_ALLOCATED_OUTPUT_BUFFER_SIZE)
 		{
 			/*
@@ -789,6 +798,14 @@ blob_to_text(duckdb_vector vector, duckdb_logical_type blobType, int row, TextOu
 	/* prefix with \x, which adds 2 bytes */
 	if (emitEscapeSequence)
 		textBufferLength += 2;
+
+	if (blobLength >= MAX_RESULT_BUFFER_SIZE / 2 ||
+		textBufferLength >= MAX_RESULT_BUFFER_SIZE)
+	{
+		PGDUCK_SERVER_ERROR("result value of %zu bytes exceeds the maximum of %zu bytes",
+							textBufferLength, MAX_RESULT_BUFFER_SIZE - 1);
+		return DUCKDB_TYPE_CONVERSION_ERROR;
+	}
 
 	if (textBufferLength > STACK_ALLOCATED_OUTPUT_BUFFER_SIZE)
 	{
@@ -1225,6 +1242,18 @@ array_to_text(duckdb_vector vector, duckdb_logical_type arrayLogicalType, int ro
 			}
 		}
 
+		/* fail the query rather than let enlargeStringInfo() exit() */
+		if (!StringInfoHasRoomFor(&topLevelBuffer,
+								  MaxEscapedTextSize(elementOutputBuffer.buffer)))
+		{
+			PGDUCK_SERVER_ERROR("result value exceeds the maximum of %zu bytes",
+								MAX_RESULT_BUFFER_SIZE - 1);
+			CleanupOutputBuffer(&elementOutputBuffer);
+			pg_free(topLevelBuffer.data);
+			status = DUCKDB_TYPE_CONVERSION_ERROR;
+			goto cleanup;
+		}
+
 		if (firstField)
 			firstField = false;
 		else
@@ -1384,6 +1413,18 @@ list_to_text(duckdb_vector vector, duckdb_logical_type listLogicalType, int row,
 			}
 		}
 
+		/* fail the query rather than let enlargeStringInfo() exit() */
+		if (!StringInfoHasRoomFor(&topLevelBuffer,
+								  MaxEscapedTextSize(elementOutputBuffer.buffer)))
+		{
+			PGDUCK_SERVER_ERROR("result value exceeds the maximum of %zu bytes",
+								MAX_RESULT_BUFFER_SIZE - 1);
+			CleanupOutputBuffer(&elementOutputBuffer);
+			pg_free(topLevelBuffer.data);
+			status = DUCKDB_TYPE_CONVERSION_ERROR;
+			goto cleanup;
+		}
+
 		if (firstField)
 			firstField = false;
 		else
@@ -1526,6 +1567,18 @@ struct_to_text(duckdb_vector vector, duckdb_logical_type structLogicalType, int 
 				pg_free(topLevelBuffer.data);
 				goto cleanup;
 			}
+		}
+
+		/* fail the query rather than let enlargeStringInfo() exit() */
+		if (!StringInfoHasRoomFor(&topLevelBuffer,
+								  MaxEscapedTextSize(elementOutputBuffer.buffer)))
+		{
+			PGDUCK_SERVER_ERROR("result value exceeds the maximum of %zu bytes",
+								MAX_RESULT_BUFFER_SIZE - 1);
+			CleanupOutputBuffer(&elementOutputBuffer);
+			pg_free(topLevelBuffer.data);
+			status = DUCKDB_TYPE_CONVERSION_ERROR;
+			goto cleanup;
 		}
 
 		if (firstField)
