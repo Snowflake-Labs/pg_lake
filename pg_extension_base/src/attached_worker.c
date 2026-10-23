@@ -96,6 +96,9 @@ static char *ProcessProtocolMessages(AttachedWorker * worker, bool nowait,
 									 TupleDesc *resultDesc);
 static void ValidateWorkerTupleDesc(TupleDesc workerDesc, TupleDesc expectedDesc);
 static void ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue);
+static void ExecuteSqlStringInContext(const char *sql, MemoryContext parseContext,
+									  shm_mq_handle *tupleQueue,
+									  CommandDest commandDest);
 static void TrackLiveAttachedWorker(BackgroundWorkerHandle *workerHandle);
 static void RemoveAttachedWorkerHandle(BackgroundWorkerHandle *workerHandle);
 static void StopLiveAttachedWorkersAtExit(int code, Datum arg);
@@ -1023,13 +1026,42 @@ ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue)
 {
 	/*
 	 * Create a memory context for parsing that survives commands that
-	 * internally commit.
+	 * internally commit.  Never freed: this backend exits after one command.
 	 */
 	MemoryContext parseContext = AllocSetContextCreate(TopMemoryContext,
 													   "pg_extension_base worker parse",
 													   ALLOCSET_DEFAULT_MINSIZE,
 													   ALLOCSET_DEFAULT_INITSIZE,
 													   ALLOCSET_DEFAULT_MAXSIZE);
+
+	ExecuteSqlStringInContext(sql, parseContext, tupleQueue, DestRemote);
+}
+
+/*
+ * ExecuteSqlStringDiscardingResults runs sql the way an attached worker runs
+ * its command, at top level and with results discarded, so that a lone CALL in
+ * it may commit.  For a backend that runs many commands over its life, such as
+ * a base worker.
+ *
+ * The caller must be in a transaction and outside any transaction block, and
+ * owns parseContext: it has to survive the command's own commits, and the
+ * caller resets it afterwards, whether or not the command succeeded.
+ */
+void
+ExecuteSqlStringDiscardingResults(const char *sql, MemoryContext parseContext)
+{
+	ExecuteSqlStringInContext(sql, parseContext, NULL, DestNone);
+}
+
+/*
+ * ExecuteSqlStringInContext keeps parse and plan trees in parseContext and
+ * sends command tags to commandDest: an attached worker's registrant reads
+ * them, and a backend with no client has nowhere to send them.
+ */
+static void
+ExecuteSqlStringInContext(const char *sql, MemoryContext parseContext,
+						  shm_mq_handle *tupleQueue, CommandDest commandDest)
+{
 	MemoryContext oldContext = MemoryContextSwitchTo(parseContext);
 
 	/*
@@ -1059,7 +1091,7 @@ ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue)
 
 		set_ps_display(GetCommandTagName(commandTag));
 
-		BeginCommand(commandTag, DestRemote);
+		BeginCommand(commandTag, commandDest);
 
 		/* Set up a snapshot if parse analysis/planning will need one. */
 		bool		snapshotSet = false;
@@ -1173,7 +1205,7 @@ ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue)
 		 * results.  The user backend will report these in the absence of any
 		 * true query results.
 		 */
-		EndCommand(&qc, DestRemote, false);
+		EndCommand(&qc, commandDest, false);
 
 		/* Clean up the portal. */
 		PortalDrop(portal, false);
