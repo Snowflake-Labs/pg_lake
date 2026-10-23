@@ -362,13 +362,20 @@ install_shutdown_signal_handlers(void)
 
 
 /*
- * disable_shutdown_signals -- block SIGINT/SIGTERM in the calling thread.
+ * pgserver_block_shutdown_signals -- block SIGINT/SIGTERM in the calling
+ * thread.
  *
- * Used before pthread_create() so the child thread inherits a blocked
- * mask and never receives these signals.
+ * Used before pthread_create() so the child thread inherits a blocked mask
+ * and never receives these signals.  Only this server's main thread can act
+ * on one: the handler sets `running`, and nothing reads it until accept()
+ * returns, so a signal delivered to any other thread leaves the server
+ * accepting connections until the next one happens to arrive.  A
+ * process-directed signal goes to whichever thread is not blocking it, so
+ * main() calls this before it creates the first thread and every thread
+ * started during startup inherits the blocked mask.
  */
-static int
-disable_shutdown_signals(void)
+int
+pgserver_block_shutdown_signals(void)
 {
 	sigset_t	sigs;
 
@@ -416,6 +423,14 @@ int
 pgserver_run(PGServer * pgServer)
 {
 	if (install_shutdown_signal_handlers() != STATUS_OK)
+		return STATUS_ERROR;
+
+	/*
+	 * main() blocked these before the first thread was created.  One that
+	 * arrived during startup is pending on this thread and is delivered here,
+	 * which leaves `running` clear and skips the loop below entirely.
+	 */
+	if (enable_shutdown_signals() != STATUS_OK)
 		return STATUS_ERROR;
 
 	while (running)
@@ -489,7 +504,7 @@ pgserver_run(PGServer * pgServer)
 		initState->startFunction = pgServer->startFunction;
 		initState->pgClient = client;
 
-		if (disable_shutdown_signals() != STATUS_OK)
+		if (pgserver_block_shutdown_signals() != STATUS_OK)
 			exit(STATUS_ERROR);
 
 		if (pgserver_create_client_thread(initState) != OK)
