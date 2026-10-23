@@ -577,7 +577,7 @@ pg_varchar_to_text(duckdb_string_t val, TextOutputBuffer * toTextBuffer)
 		{
 			PGDUCK_SERVER_ERROR("result value of %zu bytes exceeds the maximum of %zu bytes",
 								(size_t) length, MAX_RESULT_BUFFER_SIZE - 1);
-			return DUCKDB_TYPE_CONVERSION_ERROR;
+			return DUCKDB_RESULT_TOO_LARGE_ERROR;
 		}
 
 		if (length >= STACK_ALLOCATED_OUTPUT_BUFFER_SIZE)
@@ -803,7 +803,7 @@ blob_to_text(duckdb_vector vector, duckdb_logical_type blobType, int row, TextOu
 	{
 		PGDUCK_SERVER_ERROR("result value of %zu bytes exceeds the maximum of %zu bytes",
 							textBufferLength, MAX_RESULT_BUFFER_SIZE - 1);
-		return DUCKDB_TYPE_CONVERSION_ERROR;
+		return DUCKDB_RESULT_TOO_LARGE_ERROR;
 	}
 
 	if (textBufferLength > STACK_ALLOCATED_OUTPUT_BUFFER_SIZE)
@@ -1249,7 +1249,7 @@ array_to_text(duckdb_vector vector, duckdb_logical_type arrayLogicalType, int ro
 								MAX_RESULT_BUFFER_SIZE - 1);
 			CleanupOutputBuffer(&elementOutputBuffer);
 			pg_free(topLevelBuffer.data);
-			status = DUCKDB_TYPE_CONVERSION_ERROR;
+			status = DUCKDB_RESULT_TOO_LARGE_ERROR;
 			goto cleanup;
 		}
 
@@ -1420,7 +1420,7 @@ list_to_text(duckdb_vector vector, duckdb_logical_type listLogicalType, int row,
 								MAX_RESULT_BUFFER_SIZE - 1);
 			CleanupOutputBuffer(&elementOutputBuffer);
 			pg_free(topLevelBuffer.data);
-			status = DUCKDB_TYPE_CONVERSION_ERROR;
+			status = DUCKDB_RESULT_TOO_LARGE_ERROR;
 			goto cleanup;
 		}
 
@@ -1576,7 +1576,7 @@ struct_to_text(duckdb_vector vector, duckdb_logical_type structLogicalType, int 
 								MAX_RESULT_BUFFER_SIZE - 1);
 			CleanupOutputBuffer(&elementOutputBuffer);
 			pg_free(topLevelBuffer.data);
-			status = DUCKDB_TYPE_CONVERSION_ERROR;
+			status = DUCKDB_RESULT_TOO_LARGE_ERROR;
 			goto cleanup;
 		}
 
