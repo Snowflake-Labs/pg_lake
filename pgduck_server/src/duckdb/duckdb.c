@@ -849,6 +849,26 @@ duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type duckType,
 	if (status != DUCKDB_SUCCESS)
 		return status;
 
+	/*
+	 * The frontend enlargeStringInfo() calls exit() if the message buffer
+	 * would exceed MaxAllocSize, which would take down the server for every
+	 * client. Fail the query instead.
+	 */
+	size_t		maxAppendSize = responseFormat->isTransmit ?
+		MaxEscapedTextSize(toTextBuffer.buffer) :
+		strlen(toTextBuffer.buffer) + sizeof(int32);
+
+	if (!StringInfoHasRoomFor(output, maxAppendSize))
+	{
+		PGDUCK_SERVER_ERROR("result row exceeds the maximum message size of %zu bytes",
+							MAX_RESULT_BUFFER_SIZE - 1);
+
+		if (toTextBuffer.needsFree)
+			pg_free(toTextBuffer.buffer);
+
+		return DUCKDB_TYPE_CONVERSION_ERROR;
+	}
+
 	if (responseFormat->isTransmit)
 	{
 		append_escaped_csv(output, toTextBuffer.buffer);
