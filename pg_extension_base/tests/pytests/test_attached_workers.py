@@ -120,6 +120,45 @@ def test_worker_uses_caller_search_path(superuser_conn, pg_extension_base):
         superuser_conn.commit()
 
 
+def test_worker_uses_search_path_from_set_local_and_function(
+    superuser_conn, pg_extension_base
+):
+    """SET LOCAL and a function's SET clause pin the path with
+    GUC_ACTION_LOCAL/SAVE; the worker must still see it."""
+    run_command(
+        """
+        DROP SCHEMA IF EXISTS attached_sp_local CASCADE;
+        CREATE SCHEMA attached_sp_local;
+        CREATE TABLE attached_sp_local.t (x int);
+        CREATE FUNCTION attached_sp_local.insert_via_worker() RETURNS void
+        LANGUAGE sql SET search_path = attached_sp_local, pg_catalog AS
+        $fn$ SELECT extension_base.run_attached($$INSERT INTO t VALUES (2)$$) $fn$;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        run_command(
+            "SET LOCAL search_path = attached_sp_local, pg_catalog", superuser_conn
+        )
+        run_command(
+            "SELECT * FROM extension_base.run_attached($$INSERT INTO t VALUES (1)$$)",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        run_command("SELECT attached_sp_local.insert_via_worker()", superuser_conn)
+        superuser_conn.commit()
+
+        result = run_query("SELECT count(*) FROM attached_sp_local.t", superuser_conn)
+        assert result[0]["count"] == 2
+    finally:
+        superuser_conn.rollback()
+        run_command("DROP SCHEMA attached_sp_local CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
 def test_write_while_server_configured_read_only(superuser_conn, pg_extension_base):
     """
     An attached worker must inherit the caller's writability.
