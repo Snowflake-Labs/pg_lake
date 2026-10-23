@@ -1183,18 +1183,14 @@ def test_worker_ignores_database_search_path(superuser_conn):
         f"dbname=base_worker_sp user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
     )
     other_conn.autocommit = True
-    run_command(
-        "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn
-    )
+    run_command("CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn)
 
     worker_count = wait_until_equal(
         lambda: count_pg_extension_base_workers(superuser_conn), 1
     )
     assert worker_count == 1
 
-    hits = run_query(
-        "SELECT last_value, is_called FROM evil.hits", other_conn
-    )[0]
+    hits = run_query("SELECT last_value, is_called FROM evil.hits", other_conn)[0]
     assert hits[1] is False, "a base worker called the database owner's operator"
 
     other_conn.close()
