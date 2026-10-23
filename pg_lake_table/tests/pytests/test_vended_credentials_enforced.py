@@ -912,6 +912,90 @@ def test_catalog_supplied_endpoint_still_reaches_the_store(
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
+def test_catalog_cannot_redirect_endpoint(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """A catalog cannot point a prefix at an endpoint of its own choosing.
+
+    Vended secrets live in the pgduck_server shared by every role, and win
+    over the static secret by having a more specific scope, so an endpoint
+    the catalog picked would move other roles' requests under that scope
+    to the catalog's host.  The catalog's s3.endpoint is not used: the
+    secret inherits the endpoint of the static secret, and the scan still
+    reaches the store.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_redirect"
+    table = "vc_redirect"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    meta_key, meta_secret = server.create_scoped_user(
+        "mv_meta_redirect",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    data_key, data_secret = server.create_scoped_user("mv_data_redirect", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {
+                "prefix": location + "/",
+                "config": {
+                    "s3.access-key-id": data_key,
+                    "s3.secret-access-key": data_secret,
+                    "client.region": server.region,
+                    # a host nothing listens on, standing in for the attacker's
+                    "s3.endpoint": "http://127.0.0.2:1",
+                },
+            },
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, meta_key, meta_secret)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 10
+
+        secrets = run_query(
+            "SELECT secret_string FROM duckdb_secrets() "
+            "WHERE name LIKE 'pglake_vended_%'",
+            pgduck_conn,
+        )
+        assert secrets, "no vended secret was pushed"
+        for (secret_string,) in secrets:
+            assert "127.0.0.2:1" not in secret_string
+            assert f"endpoint={server.endpoint}" in secret_string
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
 def test_data_only_credential_serves_repeated_scans(
     superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
 ):

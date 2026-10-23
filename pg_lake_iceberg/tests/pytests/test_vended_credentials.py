@@ -867,7 +867,7 @@ def test_vended_credentials_multiple_tables_independent_creds(
 # These use the get_rest_vended_credentials test shim, which loads a table
 # and returns the extracted credential fields as a pipe-delimited summary:
 #     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>|
-#      <region>|<endpoint>|<url-style>|<use-ssl>"
+#      <region>|<url-style>"
 # ---------------------------------------------------------------------------
 
 _VENDED_CREDS_FN = """
@@ -994,9 +994,7 @@ def test_vended_credentials_scope_from_metadata_location(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "test_ns", "test_table")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "VENDED_ACCESS_KEY_123"
         # mock returns metadata.location = s3://test-bucket/test-ns/test-table
         assert scope == "s3://test-bucket/test-ns/test-table/"
@@ -1005,7 +1003,6 @@ def test_vended_credentials_scope_from_metadata_location(
         assert expiry == "noexpiry"
         # region comes from client.region; the base mock vends no S3 settings
         assert region == "us-west-2"
-        assert endpoint == ""
         assert url_style == ""
 
     finally:
@@ -1164,9 +1161,7 @@ def test_vended_credentials_no_scope_when_undeterminable(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "NOSCOPE_KEY"
         assert scope == "", f"expected no scope, got {scope!r}"
 
@@ -1238,9 +1233,7 @@ def test_vended_credentials_storage_credentials_array(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "SC_ACCESS_KEY"
         # scope comes from the storage-credential prefix (already ends in /)
         assert scope == "s3://sc-bucket/ns/tbl/"
@@ -1320,9 +1313,7 @@ def test_vended_credentials_region_falls_back_to_table_config(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "RG_ACCESS_KEY"
         assert region == "us-west-2"
 
@@ -1387,9 +1378,7 @@ def test_vended_credentials_expiry_from_config(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "EXP_KEY"
         assert scope == "s3://exp-bucket/ns/tbl/"
         assert expiry == "expiry"
@@ -1407,9 +1396,10 @@ def test_vended_credentials_s3_settings_from_config(
     superuser_conn, iceberg_extension, installcheck
 ):
     """
-    The catalog's own S3 connection settings are parsed from the config
-    map: s3.endpoint -> endpoint, s3.path-style-access -> url-style, and
-    s3.region is used as the region fallback when client.region is absent.
+    The catalog's own S3 settings are parsed from the config map:
+    s3.path-style-access -> url-style, and s3.region is used as the region
+    fallback when client.region is absent.  s3.endpoint is not used: the
+    endpoint always comes from the secret that already covers the prefix.
     """
     if installcheck:
         return
@@ -1458,95 +1448,12 @@ def test_vended_credentials_s3_settings_from_config(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "CFG_KEY"
         assert scope == "s3://cfg-bucket/ns/tbl/"
         assert has_token == "no"
         assert region == "ap-south-1"
-        assert endpoint == "minio.example.com:9000"
         assert url_style == "path"
-        # no scheme to read SSL from, so it is left to be inherited
-        assert use_ssl == ""
-
-    finally:
-        run_command(
-            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
-            superuser_conn,
-        )
-        superuser_conn.commit()
-        _stop(httpd, thread)
-
-
-@pytest.mark.parametrize(
-    "catalog_endpoint,expected_endpoint,expected_ssl",
-    [
-        ("http://minio.example.com:9000", "minio.example.com:9000", "false"),
-        ("https://s3.example.com/", "s3.example.com", "true"),
-    ],
-)
-def test_vended_credentials_endpoint_scheme_decides_ssl(
-    superuser_conn,
-    iceberg_extension,
-    installcheck,
-    catalog_endpoint,
-    expected_endpoint,
-    expected_ssl,
-):
-    """
-    Iceberg states s3.endpoint as a URL; DuckDB wants a bare host[:port]
-    and a separate USE_SSL.  The scheme decides SSL, so a catalog pointing
-    at a plaintext store is honored rather than inheriting SSL from
-    whatever secret happens to cover the prefix.
-    """
-    if installcheck:
-        return
-
-    def _make_handler():
-        class _Handler(BaseHTTPRequestHandler):
-            def _handle(self):
-                length = int(self.headers.get("Content-Length", 0))
-                if length > 0:
-                    self.rfile.read(length)
-                if _oauth_or_none(self):
-                    return
-                if "/tables/" in self.path and self.command == "GET":
-                    _reply(
-                        self,
-                        {
-                            "metadata-location": "s3://ssl-bucket/ns/tbl/metadata/v1.metadata.json",
-                            "metadata": {
-                                "format-version": 2,
-                                "table-uuid": str(uuid.uuid4()),
-                                "location": "s3://ssl-bucket/ns/tbl",
-                            },
-                            "config": {
-                                "s3.access-key-id": "SSL_KEY",
-                                "s3.secret-access-key": "SSL_SECRET",
-                                "s3.endpoint": catalog_endpoint,
-                            },
-                        },
-                    )
-                    return
-                self.send_response(404)
-                self.end_headers()
-
-            do_GET = _handle
-            do_POST = _handle
-
-            def log_message(self, fmt, *args):
-                pass
-
-        return _Handler
-
-    httpd, thread = _serve(_make_handler())
-    try:
-        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
-
-        _, _, _, _, _, endpoint, _, use_ssl = summary.split("|")
-        assert endpoint == expected_endpoint
-        assert use_ssl == expected_ssl
 
     finally:
         run_command(
@@ -1615,9 +1522,7 @@ def test_vended_credentials_scope_clamped_to_table_root(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "CLAMP_KEY"
         # clamped from the broad "s3://wh-bucket/" down to the table root
         assert scope == "s3://wh-bucket/ns/tbl/"

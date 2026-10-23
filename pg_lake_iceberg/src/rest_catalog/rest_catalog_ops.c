@@ -647,12 +647,8 @@ FreeCachedVendedCredentials(VendedCredentials * creds)
 		pfree(creds->sessionToken);
 	if (creds->region != NULL)
 		pfree(creds->region);
-	if (creds->endpoint != NULL)
-		pfree(creds->endpoint);
 	if (creds->urlStyle != NULL)
 		pfree(creds->urlStyle);
-	if (creds->useSsl != NULL)
-		pfree(creds->useSsl);
 	if (creds->accountName != NULL)
 		pfree(creds->accountName);
 	if (creds->sasToken != NULL)
@@ -800,12 +796,8 @@ StoreVendedCredentialsInCache(List *credentials,
 			pstrdup(creds->sessionToken) : NULL;
 		cached->region = creds->region ?
 			pstrdup(creds->region) : NULL;
-		cached->endpoint = creds->endpoint ?
-			pstrdup(creds->endpoint) : NULL;
 		cached->urlStyle = creds->urlStyle ?
 			pstrdup(creds->urlStyle) : NULL;
-		cached->useSsl = creds->useSsl ?
-			pstrdup(creds->useSsl) : NULL;
 		cached->accountName = creds->accountName ?
 			pstrdup(creds->accountName) : NULL;
 		cached->sasToken = creds->sasToken ?
@@ -1084,45 +1076,10 @@ ParseVendedS3CredsFromConfig(Jsonb *body, const char *mapKey,
 	creds->fetchedAt = GetCurrentTimestamp();
 
 	/*
-	 * Iceberg states the endpoint as a URL, while DuckDB wants a bare
-	 * host[:port] plus a separate USE_SSL.  Split the two apart, so a catalog
-	 * pointing at a plaintext store is honored instead of being inherited
-	 * from whatever secret happens to cover the prefix.
+	 * s3.endpoint is deliberately not read: where a vended secret sends its
+	 * requests is decided by the secret that already covers the prefix (see
+	 * PushNamedS3Secret), not by the catalog.
 	 */
-	char	   *endpointUrl = GetVendedConfigString(body, mapKey, "s3.endpoint");
-
-	if (endpointUrl != NULL)
-	{
-		if (pg_strncasecmp(endpointUrl, "https://", 8) == 0)
-		{
-			creds->endpoint = pstrdup(endpointUrl + 8);
-			creds->useSsl = pstrdup("true");
-		}
-		else if (pg_strncasecmp(endpointUrl, "http://", 7) == 0)
-		{
-			creds->endpoint = pstrdup(endpointUrl + 7);
-			creds->useSsl = pstrdup("false");
-		}
-		else
-		{
-			/* No scheme to read SSL from; leave it to be inherited. */
-			creds->endpoint = pstrdup(endpointUrl);
-		}
-
-		/* A trailing slash is part of a URL, not of a DuckDB endpoint. */
-		int			endpointLen = strlen(creds->endpoint);
-
-		while (endpointLen > 0 && creds->endpoint[endpointLen - 1] == '/')
-			creds->endpoint[--endpointLen] = '\0';
-
-		if (endpointLen == 0)
-		{
-			pfree(creds->endpoint);
-			creds->endpoint = NULL;
-		}
-
-		pfree(endpointUrl);
-	}
 
 	/*
 	 * Map the Iceberg "s3.path-style-access" boolean onto DuckDB's URL_STYLE.
@@ -2247,9 +2204,7 @@ IcebergProvideStorageCredentials(Oid relationId)
 			creds->secretAccessKey ? pstrdup(creds->secretAccessKey) : NULL;
 		sc->sessionToken = creds->sessionToken ? pstrdup(creds->sessionToken) : NULL;
 		sc->region = creds->region ? pstrdup(creds->region) : NULL;
-		sc->endpoint = creds->endpoint ? pstrdup(creds->endpoint) : NULL;
 		sc->urlStyle = creds->urlStyle ? pstrdup(creds->urlStyle) : NULL;
-		sc->useSsl = creds->useSsl ? pstrdup(creds->useSsl) : NULL;
 		sc->accountName = creds->accountName ? pstrdup(creds->accountName) : NULL;
 		sc->sasToken = creds->sasToken ? pstrdup(creds->sasToken) : NULL;
 		sc->blobEndpoint = creds->blobEndpoint ? pstrdup(creds->blobEndpoint) : NULL;
