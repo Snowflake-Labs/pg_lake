@@ -46,13 +46,21 @@
 /* 180 seconds */
 #define TOTAL_TIMEOUT_MS   180000
 
+/*
+ * The largest response body (or header block) we keep.  REST catalog
+ * responses also arrive after commit, where a palloc beyond MaxAllocSize
+ * would raise an ERROR and so a PANIC.  A larger response fails the
+ * request instead.
+ */
+#define MAX_RESPONSE_DATA_SIZE (256 * 1024 * 1024)
+
 
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
 									 const List *headers, HttpTlsClientAuth clientAuth);
 static bool CheckMinCurlVersion(const curl_version_info_data *versionInfo);
 static size_t CurlResponseBodyWriteCallback(void *ptr, size_t size, size_t nmemb, void *userdata);
 static size_t CurlResponseHeaderWriteCallback(void *ptr, size_t size, size_t nmemb, void *userdata);
-static void GrowResponseData(char **data, size_t *dataLength, void *newData, size_t newDataBytes);
+static bool GrowResponseData(char **data, size_t *dataLength, void *newData, size_t newDataBytes);
 #if CURL_AT_LEAST_VERSION(7, 32, 0)
 static int	CurlProgressCallback(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
 								 curl_off_t ultotal, curl_off_t ulnow);
@@ -521,7 +529,9 @@ CurlResponseBodyWriteCallback(void *ptr, size_t size, size_t nmemb, void *userda
 
 	HttpResult *res = (HttpResult *) userdata;
 
-	GrowResponseData(&res->body, &res->bodyLength, ptr, bytes);
+	/* returning anything other than bytes makes curl fail the request */
+	if (!GrowResponseData(&res->body, &res->bodyLength, ptr, bytes))
+		return 0;
 
 	/* success: tell curl we consumed all */
 	return bytes;
@@ -539,7 +549,9 @@ CurlResponseHeaderWriteCallback(void *ptr, size_t size, size_t nmemb, void *user
 
 	HttpResult *res = (HttpResult *) userdata;
 
-	GrowResponseData(&res->headers, &res->headersLength, ptr, bytes);
+	/* returning anything other than bytes makes curl fail the request */
+	if (!GrowResponseData(&res->headers, &res->headersLength, ptr, bytes))
+		return 0;
 
 	/* success: tell curl we consumed all */
 	return bytes;
@@ -547,33 +559,33 @@ CurlResponseHeaderWriteCallback(void *ptr, size_t size, size_t nmemb, void *user
 
 
 /*
- * GrowResponseData grows the response data buffers.
+ * GrowResponseData grows the response data buffers, and returns false when
+ * the data would exceed MAX_RESPONSE_DATA_SIZE or memory runs out.
  */
-static void
+static bool
 GrowResponseData(char **data, size_t *dataLength, void *newData, size_t newDataBytes)
 {
+	char	   *newBuffer = NULL;
+
+	if (newDataBytes > MAX_RESPONSE_DATA_SIZE - *dataLength)
+		return false;
+
 	/* ensure null terminated */
 	if (*data == NULL)
-		*data = palloc_extended(newDataBytes + 1, MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
+		newBuffer = palloc_extended(newDataBytes + 1, MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
 	else
-	{
-		*data = repalloc_extended(*data, *dataLength + newDataBytes + 1, MCXT_ALLOC_NO_OOM);
-		memset(*data + *dataLength, 0, newDataBytes + 1);	/* zero out new space */
-	}
+		newBuffer = repalloc_extended(*data, *dataLength + newDataBytes + 1, MCXT_ALLOC_NO_OOM);
 
-	if (*data == NULL)
-	{
-		/*
-		 * signals an error to curl when return value is different than the
-		 * amount passed to callback
-		 */
-		*dataLength = 0;
-		return;
-	}
+	if (newBuffer == NULL)
+		return false;
 
+	*data = newBuffer;
+	memset(*data + *dataLength, 0, newDataBytes + 1);	/* zero out new space */
 	memcpy(*data + *dataLength, newData, newDataBytes);
 
 	*dataLength += newDataBytes;
+
+	return true;
 }
 
 /*
