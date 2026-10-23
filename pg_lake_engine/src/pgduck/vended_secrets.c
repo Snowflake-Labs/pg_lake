@@ -155,13 +155,12 @@ ExtractFieldFromSecretString(const char *secretString, const char *key)
  * been vended at all.  Vended secrets are excluded, since one of those
  * is likely this very secret from an earlier push.
  *
- * This is what lets a vended secret reach an S3-compatible store whose
- * catalog states only part of the connection: without it DuckDB falls
- * back to real-AWS defaults and the scan leaves the deployment
- * entirely.  What it cannot do is move a credential somewhere the
- * catalog did not point: the caller keeps every value the catalog
- * stated, so a secret in a namespace other tenants can write to can
- * only supply a setting nobody else has.
+ * This is what lets a vended secret reach an S3-compatible store: the
+ * catalog's endpoint is never used, so without it DuckDB falls back to
+ * real-AWS defaults and the scan leaves the deployment entirely.  It is
+ * safe to take the endpoint from here because non-vended secrets come
+ * only from whoever runs pgduck_server (its startup defaults and init
+ * file), not from a catalog or a database role.
  */
 static S3InheritedSettings
 LookupInheritedS3Settings(PGDuckConnection * conn, const char *s3Prefix)
