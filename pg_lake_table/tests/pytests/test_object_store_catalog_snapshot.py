@@ -1776,3 +1776,114 @@ def test_for_loop_cursor_reads_the_catalog_as_it_opens(
     )
     assert tuple(rows[0]) == (5, 9, 5)
     pg_conn.commit()
+
+
+# A cursor whose query calls a function that reads an external table asks the
+# catalog at FETCH time, inside its own portal, so every FETCH asks the
+# cursor's version scope again.
+def _create_counting_function(pg_conn, schema):
+    run_command(
+        f"CREATE FUNCTION {schema}.row_count() RETURNS bigint VOLATILE "
+        f"LANGUAGE plpgsql AS $$ BEGIN "
+        f"  RETURN (SELECT count(*) FROM {schema}.read_tbl); "
+        f"END; $$",
+        pg_conn,
+    )
+
+
+def _declare_counting_cursor(pg_conn, schema, cursor_name):
+    run_command(
+        f"DECLARE {cursor_name} CURSOR FOR "
+        f"SELECT g, {schema}.row_count() FROM generate_series(1, 3) g",
+        pg_conn,
+    )
+
+
+# An open cursor and the statements after it are version scopes held side by
+# side, each with its own version of the catalog.  A statement that read a
+# newer version and ended takes only its own answers with it, so the cursor
+# keeps answering with the version it read first.
+def test_cursor_keeps_its_version_while_statements_come_and_go(
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_cursor_scope"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+    _create_counting_function(pg_conn, schema)
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    assert run_query("SHOW transaction_isolation", pg_conn)[0][0] == "read committed"
+    _declare_counting_cursor(pg_conn, schema, "counting_cursor")
+
+    # the first FETCH is the first time the cursor's scope asks
+    rows, catalog_reads = _run_counting_catalog_reads(
+        pg_conn, "FETCH 1 FROM counting_cursor"
+    )
+    assert rows[0][1] == 5
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
+
+    _put_catalog(s3, key, body_late)
+
+    # a statement in between is a scope of its own and sees the rewrite
+    rows, catalog_reads = _run_counting_catalog_reads(
+        pg_conn, f"SELECT count(*) FROM {schema}.read_tbl"
+    )
+    assert rows[0][0] == 9
+    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
+
+    # its end left the cursor's answers in place
+    rows, catalog_reads = _run_counting_catalog_reads(
+        pg_conn, "FETCH 1 FROM counting_cursor"
+    )
+    assert rows[0][1] == 5
+    assert catalog_reads == 0, f"expected no catalog read, got {catalog_reads}"
+    pg_conn.commit()
+
+
+# Two cursors open at once are two version scopes.  Closing one ends its
+# scope and drops its answers, and only those: the other cursor keeps reading
+# the version it opened with.
+def test_closing_a_cursor_drops_only_its_answers(
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+    reader_catalog_prefix,
+):
+    schema = "test_osc_two_cursors"
+    _reset_schema(pg_conn, schema)
+    key, body_early, body_late = _two_catalog_versions(
+        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
+    )
+    _create_counting_function(pg_conn, schema)
+    _put_catalog(s3, key, body_early)
+    pg_conn.commit()
+
+    assert run_query("SHOW transaction_isolation", pg_conn)[0][0] == "read committed"
+
+    _declare_counting_cursor(pg_conn, schema, "early_cursor")
+    assert run_query("FETCH 1 FROM early_cursor", pg_conn)[0][1] == 5
+
+    _put_catalog(s3, key, body_late)
+    _declare_counting_cursor(pg_conn, schema, "late_cursor")
+    assert run_query("FETCH 1 FROM late_cursor", pg_conn)[0][1] == 9
+
+    # with the catalog moved back, a cursor that asked again would show it
+    _put_catalog(s3, key, body_early)
+    run_command("CLOSE early_cursor", pg_conn)
+
+    rows, catalog_reads = _run_counting_catalog_reads(
+        pg_conn, "FETCH 1 FROM late_cursor"
+    )
+    assert rows[0][1] == 9
+    assert catalog_reads == 0, f"expected no catalog read, got {catalog_reads}"
+    pg_conn.commit()
