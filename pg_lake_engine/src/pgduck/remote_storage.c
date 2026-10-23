@@ -179,8 +179,9 @@ RemoteFileExists(char *path)
  *
  * pgduck_server removes anything its file system can open, including a
  * local file.  Paths to remove can come from table metadata or from a REST
- * catalog's metadata-location, so a path that is not a URL is skipped
- * rather than handed to pgduck_server.
+ * catalog's metadata-location, so a path that is not a URL is never handed
+ * to pgduck_server.  Callers see it as a failed removal, like any other
+ * path that cannot be removed.
  */
 static bool
 IsRemovablePath(const char *path)
@@ -189,7 +190,7 @@ IsRemovablePath(const char *path)
 		return true;
 
 	ereport(WARNING, (errmsg("not removing \"%s\" because it is not a supported URL",
-							path)));
+							 path)));
 	return false;
 }
 
@@ -206,7 +207,7 @@ bool
 DeleteRemotePrefix(char *path)
 {
 	if (!IsRemovablePath(path))
-		return true;
+		return false;
 
 	StringInfo	recursivePath = makeStringInfo();
 
@@ -228,7 +229,7 @@ bool
 DeleteRemoteFile(char *path)
 {
 	if (!IsRemovablePath(path))
-		return true;
+		return false;
 
 	char	   *query = psprintf("SELECT pg_lake_remove_file(%s)",
 								 quote_literal_cstr(path));
@@ -254,18 +255,14 @@ DeleteRemoteFile(char *path)
 bool
 DeleteRemoteFiles(List *paths)
 {
-	List	   *removablePaths = NIL;
 	ListCell   *removableCell = NULL;
 
+	/* fail the batch, so the caller finds the path by trying each one */
 	foreach(removableCell, paths)
 	{
-		char	   *path = lfirst(removableCell);
-
-		if (IsRemovablePath(path))
-			removablePaths = lappend(removablePaths, path);
+		if (!IsRemovablePath(lfirst(removableCell)))
+			return false;
 	}
-
-	paths = removablePaths;
 
 	if (paths == NIL)
 		return true;
