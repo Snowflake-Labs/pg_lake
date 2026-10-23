@@ -86,6 +86,7 @@
 	((status) == DUCKDB_QUERY_ERROR ||			 \
 	 (status) == DUCKDB_TYPE_CONVERSION_ERROR || \
 	 (status) == DUCKDB_FATAL_ERROR || \
+	 (status) == DUCKDB_RESULT_TOO_LARGE_ERROR || \
 	 (status) == DUCKDB_OUT_OF_MEMORY_ERROR)
 
 #define IS_FATAL_DUCKDB_STATUS(status) \
@@ -571,7 +572,7 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 
 		char		queryForLog[QUERY_LOG_BUF_SIZE];
 
-		PGDUCK_SERVER_WARN("query from client %d failed during parse: %s; query: %.500s",
+		PGDUCK_SERVER_WARN("query from client %d failed during parse: %.4096s; query: %.500s",
 						   pgSession->pgClient->clientSocket,
 						   errorMessage,
 						   QueryStringForLog(queryStringCopy, queryForLog,
@@ -726,7 +727,7 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
 
 			char		queryForLog[QUERY_LOG_BUF_SIZE];
 
-			PGDUCK_SERVER_WARN("query from client %d failed during bind: %s; query: %.500s",
+			PGDUCK_SERVER_WARN("query from client %d failed during bind: %.4096s; query: %.500s",
 							   pgSession->pgClient->clientSocket,
 							   errorMessage,
 							   QueryStringForLog(pgSession->pgSessionPreparedStmt.queryString,
@@ -892,6 +893,8 @@ sqlstate_for_status(DuckDBStatus status)
 	{
 		case DUCKDB_OUT_OF_MEMORY_ERROR:
 			return PGDUCK_SQLSTATE_OUT_OF_MEMORY;
+		case DUCKDB_RESULT_TOO_LARGE_ERROR:
+			return PGDUCK_SQLSTATE_PROGRAM_LIMIT_EXCEEDED;
 		case DUCKDB_FATAL_ERROR:
 		case DUCKDB_INITIALIZATION_ERROR:
 		case DUCKDB_SESSION_INITIALIZATION_ERROR:
@@ -952,6 +955,11 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
 			 */
 			errorRes = pgsession_send_postgres_error(pgSession, ERROR,
 													 errorMessage != NULL ? errorMessage : "Unsupported type",
+													 sqlState);
+			break;
+		case DUCKDB_RESULT_TOO_LARGE_ERROR:
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR,
+													 "result value or row exceeds the maximum message size of 1 GB",
 													 sqlState);
 			break;
 		case DUCKDB_OUT_OF_MEMORY_ERROR:

@@ -51,3 +51,32 @@ def test_large_result_value(pgduck_server, query):
 def test_large_result_value_transmit(pgduck_server):
     # CSV escaping doubles the size of every quote
     _assert_query_fails(f"SELECT repeat('\"', {HALF_GB_PLUS})", transmit=True)
+
+
+# Largest value the per-value check admits in a DataRow (2-byte column count,
+# 4-byte length word, terminating NUL); the NULL marker after it must not exit().
+MAX_DATAROW_VALUE = 0x3FFFFFFF - 2 - 4 - 1
+
+
+def test_large_result_row_trailing_null(pgduck_server):
+    _assert_query_fails(f"SELECT repeat('a', {MAX_DATAROW_VALUE}), NULL::text")
+
+
+def test_large_error_message(pgduck_server):
+    # the cast error echoes the whole input value
+    _assert_query_fails("SELECT repeat('a', 1100000000)::int")
+
+
+def test_large_result_value_sqlstate(pgduck_server):
+    conn = psycopg2.connect(
+        host=server_params.PGDUCK_UNIX_DOMAIN_PATH, port=server_params.PGDUCK_PORT
+    )
+    try:
+        cur = conn.cursor()
+        with pytest.raises(psycopg2.Error) as excinfo:
+            cur.execute(f"SELECT repeat('a', {ONE_GB})")
+            cur.fetchall()
+        assert excinfo.value.pgcode == "54000"
+        assert "exceeds the maximum message size" in str(excinfo.value)
+    finally:
+        conn.close()
