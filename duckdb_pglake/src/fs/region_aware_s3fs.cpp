@@ -15,7 +15,6 @@
  * limitations under the License.
  */
 
-#include <regex>
 
 #include "crypto.hpp"
 #include "duckdb.hpp"
@@ -47,8 +46,7 @@ map<string, string> S3ExpressRegionShorthand = {
 	{"eun1", "eu-north-1"}
 };
 
-static std::regex S3_EXPRESS_URL_PATTERN("s3://[a-z0-9-]+-([a-z0-9]+)-([a-z0-9]+)--x-s3/.*");
-
+static bool ParseS3ExpressUrl(const string &url, string &shortRegion, string &az);
 static bool UrlHasQueryArgument(const string &url, const string &queryArgument);
 static string AddQueryArgumentToUrl(const string &url, const string &name, const string &value);
 static string RemoveQueryArgumentFromUrl(string url, const string &name);
@@ -351,9 +349,62 @@ LooksLikeRegionMismatch(const ErrorData &error)
 static bool
 UrlHasQueryArgument(const string &url, const string &queryArgument)
 {
-	std::regex pattern("[?&]" + queryArgument + "=");
+	return url.find("?" + queryArgument + "=") != string::npos ||
+		url.find("&" + queryArgument + "=") != string::npos;
+}
 
-	return std::regex_search(url.c_str(), pattern);
+
+/*
+ * ParseS3ExpressUrl returns whether the url looks like
+ * s3://<name>-<short region>-<az>--x-s3/<key> and if so, sets the short
+ * region and availability zone.
+ *
+ * This is parsed by hand rather than with std::regex: libstdc++ matches
+ * with recursion per character, so a long URL overflows the stack.
+ */
+static bool
+ParseS3ExpressUrl(const string &url, string &shortRegion, string &az)
+{
+	const string scheme = "s3://";
+	const string suffix = "--x-s3";
+
+	if (url.compare(0, scheme.size(), scheme) != 0)
+		return false;
+
+	size_t slash = url.find('/', scheme.size());
+
+	if (slash == string::npos)
+		return false;
+
+	string bucket = url.substr(scheme.size(), slash - scheme.size());
+
+	if (bucket.size() <= suffix.size() ||
+		bucket.compare(bucket.size() - suffix.size(), suffix.size(), suffix) != 0)
+		return false;
+
+	string baseName = bucket.substr(0, bucket.size() - suffix.size());
+
+	for (char ch : baseName)
+	{
+		if (!((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '-'))
+			return false;
+	}
+
+	/* the last two dash-separated parts, after a non-empty name */
+	size_t azDash = baseName.rfind('-');
+
+	if (azDash == string::npos || azDash == 0)
+		return false;
+
+	size_t regionDash = baseName.rfind('-', azDash - 1);
+
+	if (regionDash == string::npos || regionDash == 0)
+		return false;
+
+	shortRegion = baseName.substr(regionDash + 1, azDash - regionDash - 1);
+	az = baseName.substr(azDash + 1);
+
+	return !shortRegion.empty() && !az.empty();
 }
 
 
@@ -382,14 +433,12 @@ RegionAwareS3FileSystem::GetBucketUrl(const string &url, optional_ptr<FileOpener
 bool
 AddS3ExpressRegionEndpoint(const string &url, string &expressUrl)
 {
-	std::smatch match;
+	string shortRegion;
+	string az;
 
-	if (!std::regex_match(url, match, S3_EXPRESS_URL_PATTERN))
+	if (!ParseS3ExpressUrl(url, shortRegion, az))
 		/* not quite an S3 express URL */
 		return false;
-
-	string shortRegion = match[1];
-	string az = match[2];
 
 	if (!S3ExpressRegionShorthand.count(shortRegion))
 		/* not a recognized region */
@@ -412,13 +461,12 @@ AddS3ExpressRegionEndpoint(const string &url, string &expressUrl)
 static bool
 IsS3ExpressUrlWithRegion(const string &url, string &region)
 {
-	std::smatch match;
+	string shortRegion;
+	string az;
 
-	if (!std::regex_match(url, match, S3_EXPRESS_URL_PATTERN))
+	if (!ParseS3ExpressUrl(url, shortRegion, az))
 		/* not quite an S3 express URL */
 		return false;
-
-	string shortRegion = match[1];
 
 	if (!S3ExpressRegionShorthand.count(shortRegion))
 		/* not a recognized region */
