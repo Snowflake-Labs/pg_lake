@@ -37,6 +37,7 @@
 
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "nodes/miscnodes.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
@@ -44,6 +45,10 @@
 #include "pg_extension_base/base_workers.h"
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+
+/* error bodies are small; anything larger or deeper is not worth parsing */
+#define MAX_ERROR_BODY_LENGTH (64 * 1024)
+#define MAX_ERROR_BODY_DEPTH 32
 
 
 /*
@@ -233,6 +238,90 @@ SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
 
 
 /*
+ * IsParseableErrorBody returns whether an error body is short and shallow
+ * enough that jsonb_in cannot raise a hard error on it.  It counts nesting
+ * outside of strings, so it cannot raise either.
+ */
+static bool
+IsParseableErrorBody(const char *body)
+{
+	int			depth = 0;
+	bool		inString = false;
+	size_t		length = 0;
+
+	for (const char *cursor = body; *cursor != '\0'; cursor++)
+	{
+		if (++length > MAX_ERROR_BODY_LENGTH)
+			return false;
+
+		if (inString)
+		{
+			if (*cursor == '\\' && cursor[1] != '\0')
+				cursor++;
+			else if (*cursor == '"')
+				inString = false;
+		}
+		else if (*cursor == '"')
+			inString = true;
+		else if (*cursor == '{' || *cursor == '[')
+		{
+			if (++depth > MAX_ERROR_BODY_DEPTH)
+				return false;
+		}
+		else if (*cursor == '}' || *cursor == ']')
+			depth--;
+	}
+
+	return true;
+}
+
+
+/*
+ * GetRestCatalogErrorFields sets the error message and type from a REST
+ * catalog error response, or leaves them NULL.
+ *
+ * ReportHTTPError also runs after commit, where any ERROR becomes a PANIC,
+ * and the body can be anything a catalog or a proxy in front of it sent.
+ * So parse it without raising errors and skip what does not fit.  A soft
+ * parse still raises on deep nesting (check_stack_depth) and on oversized
+ * jsonb, so bodies that could hit either are skipped before parsing.
+ */
+static void
+GetRestCatalogErrorFields(const char *body, const char **message, const char **type)
+{
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	Datum		jsonbDatum;
+
+	if (body == NULL || !IsParseableErrorBody(body) ||
+		!DirectInputFunctionCallSafe(jsonb_in, (char *) body, InvalidOid, -1,
+									 (Node *) &escontext, &jsonbDatum))
+		return;
+
+	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
+
+	if (!JsonContainerIsObject(&jsonb->root))
+		return;
+
+	JsonbValue *error = getKeyJsonValueFromContainer(&jsonb->root, "error", strlen("error"), NULL);
+
+	if (error == NULL || error->type != jbvBinary ||
+		!JsonContainerIsObject(error->val.binary.data))
+		return;
+
+	JsonbValue *messageValue = getKeyJsonValueFromContainer(error->val.binary.data, "message",
+															strlen("message"), NULL);
+	JsonbValue *typeValue = getKeyJsonValueFromContainer(error->val.binary.data, "type",
+														 strlen("type"), NULL);
+
+	if (messageValue != NULL && messageValue->type == jbvString)
+		*message = pnstrdup(messageValue->val.string.val, messageValue->val.string.len);
+
+	if (typeValue != NULL && typeValue->type == jbvString)
+		*type = pnstrdup(typeValue->val.string.val, typeValue->val.string.len);
+}
+
+
+/*
 * Reports an HTTP error by raising an appropriate error message.
 * The error format of rest catalog is follows:
 * {
@@ -258,8 +347,10 @@ ReportHTTPError(HttpResult httpResult, int level)
 		return;
 	}
 
-	const char *message = httpResult.body ? JsonbGetStringByPath(httpResult.body, 2, "error", "message") : NULL;
-	const char *type = httpResult.body ? JsonbGetStringByPath(httpResult.body, 2, "error", "type") : NULL;
+	const char *message = NULL;
+	const char *type = NULL;
+
+	GetRestCatalogErrorFields(httpResult.body, &message, &type);
 
 	ereport(level,
 			(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
