@@ -39,16 +39,17 @@
  * GetCatalogVersionScope() applies that rule. Each version scope ends when
  * Postgres releases a resource owner, which GetCatalogVersionScopeOwner()
  * picks: TopTransactionResourceOwner for a transaction, and the resource
- * owner of the portal that runs a statement for a statement. A resource
- * release callback drops the versions held for a scope as its owner goes, so
- * they go however the scope ends: a statement finishing, a cursor closing,
- * the subtransaction that opened a cursor aborting, or the transaction ending
- * by commit, abort or PREPARE TRANSACTION. A subtransaction that aborts inside
- * a statement leaves the statement's versions in place, since they are still
- * what the statement reads. They are all allocated under
- * TopTransactionContext, so nothing outlives the transaction either way.
+ * owner of the portal that runs a statement for a statement. Every held
+ * answer carries the owner of its scope, and a resource release callback
+ * drops the answers of an owner as Postgres releases it, so they go however
+ * the scope ends: a statement finishing, a cursor closing, the subtransaction
+ * that opened a cursor aborting, or the transaction ending by commit, abort
+ * or PREPARE TRANSACTION. A subtransaction that aborts inside a statement
+ * leaves the statement's answers in place, since they are still what the
+ * statement reads. They are all allocated under TopTransactionContext, so
+ * nothing outlives the transaction either way.
  *
- * What a scope holds follows how the catalog publishes:
+ * What is held follows how the catalog publishes:
  *
  * - a REST catalog answers for one table per request, so the metadata
  *   location of each relation asked about is held;
@@ -103,63 +104,65 @@ typedef enum CatalogVersionScope
 	VERSION_SCOPE_STATEMENT
 }			CatalogVersionScope;
 
-/* where the REST catalog of a read-only table said that table is */
-typedef struct RestCatalogTableLocation
+/*
+ * The answers external catalogs gave in the current transaction, each held
+ * for the version scope it was asked in and found again by that scope and the
+ * question: the relation for a REST catalog, the document path for an object
+ * store catalog. A scope is named by the resource owner whose release ends
+ * it.
+ *
+ * Under REPEATABLE READ and SERIALIZABLE every answer belongs to the one
+ * scope of the transaction. Under READ COMMITTED a cursor is a scope of its
+ * own and can outlive the statement that opened it, so answers of several
+ * scopes can be held at once, and for one catalog they can be two versions of
+ * it:
+ *
+ *   BEGIN;
+ *   DECLARE c CURSOR FOR SELECT * FROM ext;    -- held for the scope of c
+ *   SELECT * FROM ext;                         -- held for this statement
+ *   FETCH c;                                   -- still the version of c
+ *
+ * A PL/pgSQL FOR loop over a query does the same inside one statement.
+ */
+typedef struct HeldRestTableLocation
 {
+	ResourceOwner scopeOwner;
 	Oid			relationId;
 	char	   *metadataLocation;
-}			RestCatalogTableLocation;
+}			HeldRestTableLocation;
 
-/* an object store catalog document, as it was read from its path */
-typedef struct ObjectStoreCatalogDocument
+typedef struct HeldObjectStoreDocument
 {
+	ResourceOwner scopeOwner;
 	char	   *path;
 	char	   *content;
-}			ObjectStoreCatalogDocument;
+}			HeldObjectStoreDocument;
 
-/* the versions of external catalogs held for one version scope */
-typedef struct CatalogVersions
-{
-	/* releasing this resource owner ends the version scope */
-	ResourceOwner scopeOwner;
+/* list of HeldRestTableLocation, in HeldAnswersContext */
+static List *HeldRestTableLocations = NIL;
 
-	/* the versions and everything they hold live here */
-	MemoryContext context;
+/* list of HeldObjectStoreDocument, in HeldAnswersContext */
+static List *HeldObjectStoreDocuments = NIL;
 
-	/* list of RestCatalogTableLocation */
-	List	   *restCatalogTableLocations;
-
-	/* list of ObjectStoreCatalogDocument */
-	List	   *objectStoreCatalogDocuments;
-}			CatalogVersions;
-
-
-/*
- * The versions held for the version scopes of the current transaction, one
- * CatalogVersions per scope, in HeldCatalogVersionsContext.
- */
-static List *HeldCatalogVersions = NIL;
-static MemoryContext HeldCatalogVersionsContext = NULL;
+static MemoryContext HeldAnswersContext = NULL;
 
 static char *ResolveRestCatalogTable(Oid relationId);
 static char *ResolveObjectStoreCatalogTable(Oid relationId);
-static char *FindRestCatalogTableLocation(CatalogVersions * versions,
-										  Oid relationId);
-static void RememberRestCatalogTableLocation(CatalogVersions * versions,
-											 Oid relationId,
-											 const char *metadataLocation);
-static char *FindObjectStoreCatalogDocument(CatalogVersions * versions,
-											const char *path);
-static void RememberObjectStoreCatalogDocument(CatalogVersions * versions,
-											   const char *path,
-											   const char *content);
-static CatalogVersions * GetCurrentCatalogVersions(void);
+static char *FindHeldRestTableLocation(ResourceOwner scopeOwner,
+									   Oid relationId);
+static void HoldRestTableLocation(ResourceOwner scopeOwner, Oid relationId,
+								  const char *metadataLocation);
+static char *FindHeldObjectStoreDocument(ResourceOwner scopeOwner,
+										 const char *path);
+static void HoldObjectStoreDocument(ResourceOwner scopeOwner, const char *path,
+									const char *content);
+static ResourceOwner GetCurrentVersionScopeOwner(void);
 static CatalogVersionScope GetCatalogVersionScope(void);
 static ResourceOwner GetCatalogVersionScopeOwner(CatalogVersionScope scope);
-static CatalogVersions * CreateCatalogVersions(ResourceOwner scopeOwner);
-static void ReleaseCatalogVersions(ResourceReleasePhase phase, bool isCommit,
-								   bool isTopLevel, void *arg);
-static void ForgetHeldCatalogVersions(void *arg);
+static MemoryContext GetHeldAnswersContext(void);
+static void ReleaseHeldAnswers(ResourceReleasePhase phase, bool isCommit,
+							   bool isTopLevel, void *arg);
+static void ForgetHeldAnswers(void *arg);
 
 
 /*
@@ -205,17 +208,16 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 static char *
 ResolveRestCatalogTable(Oid relationId)
 {
-	CatalogVersions *versions = GetCurrentCatalogVersions();
+	ResourceOwner scopeOwner = GetCurrentVersionScopeOwner();
 	char	   *metadataLocation =
-		FindRestCatalogTableLocation(versions, relationId);
+		FindHeldRestTableLocation(scopeOwner, relationId);
 
 	if (metadataLocation == NULL)
 	{
 		metadataLocation =
 			GetMetadataLocationForRestCatalogForIcebergTable(relationId);
 
-		RememberRestCatalogTableLocation(versions, relationId,
-										 metadataLocation);
+		HoldRestTableLocation(scopeOwner, relationId, metadataLocation);
 	}
 
 	/* the scope can end before whatever the caller keeps this in */
@@ -232,8 +234,8 @@ static char *
 ResolveObjectStoreCatalogTable(Oid relationId)
 {
 	char	   *path = GetExternalObjectStoreCatalogFilePathForTable(relationId);
-	CatalogVersions *versions = GetCurrentCatalogVersions();
-	char	   *content = FindObjectStoreCatalogDocument(versions, path);
+	ResourceOwner scopeOwner = GetCurrentVersionScopeOwner();
+	char	   *content = FindHeldObjectStoreDocument(scopeOwner, path);
 
 	if (content == NULL)
 	{
@@ -244,7 +246,7 @@ ResolveObjectStoreCatalogTable(Oid relationId)
 		ereport(DEBUG1,
 				(errmsg("read external catalog document \"%s\"", path)));
 
-		RememberObjectStoreCatalogDocument(versions, path, content);
+		HoldObjectStoreDocument(scopeOwner, path, content);
 	}
 
 	return GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId,
@@ -253,16 +255,16 @@ ResolveObjectStoreCatalogTable(Oid relationId)
 
 
 /*
- * FindRestCatalogTableLocation returns the metadata location held for a
- * relation, or NULL if the scope has not asked about that relation yet.
+ * FindHeldRestTableLocation returns the metadata location held for a
+ * relation in the given scope, or NULL if the scope has not asked about it.
  */
 static char *
-FindRestCatalogTableLocation(CatalogVersions * versions, Oid relationId)
+FindHeldRestTableLocation(ResourceOwner scopeOwner, Oid relationId)
 {
-	foreach_ptr(RestCatalogTableLocation, location,
-				versions->restCatalogTableLocations)
+	foreach_ptr(HeldRestTableLocation, location, HeldRestTableLocations)
 	{
-		if (location->relationId == relationId)
+		if (location->scopeOwner == scopeOwner &&
+			location->relationId == relationId)
 			return location->metadataLocation;
 	}
 
@@ -271,38 +273,39 @@ FindRestCatalogTableLocation(CatalogVersions * versions, Oid relationId)
 
 
 /*
- * RememberRestCatalogTableLocation holds the metadata location the REST
- * catalog gave for a relation.
+ * HoldRestTableLocation holds the metadata location the REST catalog gave
+ * for a relation, for the rest of the given scope.
  */
 static void
-RememberRestCatalogTableLocation(CatalogVersions * versions, Oid relationId,
-								 const char *metadataLocation)
+HoldRestTableLocation(ResourceOwner scopeOwner, Oid relationId,
+					  const char *metadataLocation)
 {
-	MemoryContext previousContext = MemoryContextSwitchTo(versions->context);
+	MemoryContext previousContext =
+		MemoryContextSwitchTo(GetHeldAnswersContext());
 
-	RestCatalogTableLocation *location = palloc(sizeof(RestCatalogTableLocation));
+	HeldRestTableLocation *location = palloc(sizeof(HeldRestTableLocation));
 
+	location->scopeOwner = scopeOwner;
 	location->relationId = relationId;
 	location->metadataLocation = pstrdup(metadataLocation);
 
-	versions->restCatalogTableLocations =
-		lappend(versions->restCatalogTableLocations, location);
+	HeldRestTableLocations = lappend(HeldRestTableLocations, location);
 
 	MemoryContextSwitchTo(previousContext);
 }
 
 
 /*
- * FindObjectStoreCatalogDocument returns the content of the catalog document
- * held for a path, or NULL if the scope has not read that path yet.
+ * FindHeldObjectStoreDocument returns the content of the catalog document
+ * held for a path in the given scope, or NULL if the scope has not read it.
  */
 static char *
-FindObjectStoreCatalogDocument(CatalogVersions * versions, const char *path)
+FindHeldObjectStoreDocument(ResourceOwner scopeOwner, const char *path)
 {
-	foreach_ptr(ObjectStoreCatalogDocument, document,
-				versions->objectStoreCatalogDocuments)
+	foreach_ptr(HeldObjectStoreDocument, document, HeldObjectStoreDocuments)
 	{
-		if (strcmp(document->path, path) == 0)
+		if (document->scopeOwner == scopeOwner &&
+			strcmp(document->path, path) == 0)
 			return document->content;
 	}
 
@@ -311,48 +314,38 @@ FindObjectStoreCatalogDocument(CatalogVersions * versions, const char *path)
 
 
 /*
- * RememberObjectStoreCatalogDocument holds a catalog document read from a
- * path.
+ * HoldObjectStoreDocument holds a catalog document read from a path, for the
+ * rest of the given scope.
  */
 static void
-RememberObjectStoreCatalogDocument(CatalogVersions * versions, const char *path,
-								   const char *content)
+HoldObjectStoreDocument(ResourceOwner scopeOwner, const char *path,
+						const char *content)
 {
-	MemoryContext previousContext = MemoryContextSwitchTo(versions->context);
+	MemoryContext previousContext =
+		MemoryContextSwitchTo(GetHeldAnswersContext());
 
-	ObjectStoreCatalogDocument *document =
-		palloc(sizeof(ObjectStoreCatalogDocument));
+	HeldObjectStoreDocument *document = palloc(sizeof(HeldObjectStoreDocument));
 
+	document->scopeOwner = scopeOwner;
 	document->path = pstrdup(path);
 	document->content = pstrdup(content);
 
-	versions->objectStoreCatalogDocuments =
-		lappend(versions->objectStoreCatalogDocuments, document);
+	HeldObjectStoreDocuments = lappend(HeldObjectStoreDocuments, document);
 
 	MemoryContextSwitchTo(previousContext);
 }
 
 
 /*
- * GetCurrentCatalogVersions returns the versions held for the version scope
- * of the current query, starting to hold them when the query is the first of
- * its scope to ask an external catalog anything.
+ * GetCurrentVersionScopeOwner returns the resource owner that names the
+ * version scope of the current query.
  */
-static CatalogVersions *
-GetCurrentCatalogVersions(void)
+static ResourceOwner
+GetCurrentVersionScopeOwner(void)
 {
 	Assert(IsTransactionState());
 
-	CatalogVersionScope scope = GetCatalogVersionScope();
-	ResourceOwner scopeOwner = GetCatalogVersionScopeOwner(scope);
-
-	foreach_ptr(CatalogVersions, versions, HeldCatalogVersions)
-	{
-		if (versions->scopeOwner == scopeOwner)
-			return versions;
-	}
-
-	return CreateCatalogVersions(scopeOwner);
+	return GetCatalogVersionScopeOwner(GetCatalogVersionScope());
 }
 
 
@@ -406,94 +399,93 @@ GetCatalogVersionScopeOwner(CatalogVersionScope scope)
 
 
 /*
- * CreateCatalogVersions starts holding versions for the version scope that
- * releasing the given resource owner ends.
+ * GetHeldAnswersContext returns the context the held answers of the current
+ * transaction live in, creating it for the first answer of the transaction.
  */
-static CatalogVersions *
-CreateCatalogVersions(ResourceOwner scopeOwner)
+static MemoryContext
+GetHeldAnswersContext(void)
 {
 	static bool releaseCallbackRegistered = false;
 
 	if (!releaseCallbackRegistered)
 	{
-		RegisterResourceReleaseCallback(ReleaseCatalogVersions, NULL);
+		RegisterResourceReleaseCallback(ReleaseHeldAnswers, NULL);
 		releaseCallbackRegistered = true;
 	}
 
-	if (HeldCatalogVersionsContext == NULL)
+	if (HeldAnswersContext == NULL)
 	{
-		MemoryContext heldContext =
+		MemoryContext answersContext =
 			AllocSetContextCreate(TopTransactionContext,
-								  "pg_lake held catalog versions",
+								  "pg_lake held external catalog answers",
 								  ALLOCSET_SMALL_SIZES);
 		MemoryContextCallback *forgetCallback =
-			MemoryContextAlloc(heldContext, sizeof(MemoryContextCallback));
+			MemoryContextAlloc(answersContext, sizeof(MemoryContextCallback));
 
-		forgetCallback->func = ForgetHeldCatalogVersions;
+		forgetCallback->func = ForgetHeldAnswers;
 		forgetCallback->arg = NULL;
 
-		MemoryContextRegisterResetCallback(heldContext, forgetCallback);
+		MemoryContextRegisterResetCallback(answersContext, forgetCallback);
 
-		HeldCatalogVersionsContext = heldContext;
+		HeldAnswersContext = answersContext;
 	}
 
-	MemoryContext versionsContext =
-		AllocSetContextCreate(HeldCatalogVersionsContext,
-							  "pg_lake catalog versions",
-							  ALLOCSET_SMALL_SIZES);
-	CatalogVersions *versions =
-		MemoryContextAllocZero(versionsContext, sizeof(CatalogVersions));
-
-	versions->scopeOwner = scopeOwner;
-	versions->context = versionsContext;
-
-	MemoryContext previousContext =
-		MemoryContextSwitchTo(HeldCatalogVersionsContext);
-
-	HeldCatalogVersions = lappend(HeldCatalogVersions, versions);
-
-	MemoryContextSwitchTo(previousContext);
-
-	return versions;
+	return HeldAnswersContext;
 }
 
 
 /*
- * ReleaseCatalogVersions drops the versions of a version scope as Postgres
+ * ReleaseHeldAnswers drops the answers held for a version scope as Postgres
  * releases the resource owner that ends it. resowner.c makes the owner it
  * releases the current one while it calls back, and calls back for each phase
- * of the release, so the first phase drops the versions and the others find
+ * of the release, so the first phase drops the answers and the others find
  * nothing left to drop.
  */
 static void
-ReleaseCatalogVersions(ResourceReleasePhase phase, bool isCommit,
-					   bool isTopLevel, void *arg)
+ReleaseHeldAnswers(ResourceReleasePhase phase, bool isCommit,
+				   bool isTopLevel, void *arg)
 {
-	ListCell   *versionsCell = NULL;
+	ListCell   *cell = NULL;
 
-	foreach(versionsCell, HeldCatalogVersions)
+	foreach(cell, HeldRestTableLocations)
 	{
-		CatalogVersions *versions = lfirst(versionsCell);
+		HeldRestTableLocation *location = lfirst(cell);
 
-		if (versions->scopeOwner != CurrentResourceOwner)
+		if (location->scopeOwner != CurrentResourceOwner)
 			continue;
 
-		HeldCatalogVersions =
-			foreach_delete_current(HeldCatalogVersions, versionsCell);
+		HeldRestTableLocations =
+			foreach_delete_current(HeldRestTableLocations, cell);
 
-		MemoryContextDelete(versions->context);
+		pfree(location->metadataLocation);
+		pfree(location);
+	}
+
+	foreach(cell, HeldObjectStoreDocuments)
+	{
+		HeldObjectStoreDocument *document = lfirst(cell);
+
+		if (document->scopeOwner != CurrentResourceOwner)
+			continue;
+
+		HeldObjectStoreDocuments =
+			foreach_delete_current(HeldObjectStoreDocuments, cell);
+
+		pfree(document->path);
+		pfree(document->content);
+		pfree(document);
 	}
 }
 
 
 /*
- * ForgetHeldCatalogVersions forgets the versions of a transaction as its
- * memory goes, by which time releasing its resource owners has dropped them
- * all.
+ * ForgetHeldAnswers forgets the held answers of a transaction as its memory
+ * goes, by which time releasing its resource owners has dropped them all.
  */
 static void
-ForgetHeldCatalogVersions(void *arg)
+ForgetHeldAnswers(void *arg)
 {
-	HeldCatalogVersions = NIL;
-	HeldCatalogVersionsContext = NULL;
+	HeldRestTableLocations = NIL;
+	HeldObjectStoreDocuments = NIL;
+	HeldAnswersContext = NULL;
 }
