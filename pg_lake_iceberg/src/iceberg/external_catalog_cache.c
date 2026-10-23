@@ -409,7 +409,9 @@ GetCatalogVersionScope(void)
  * A statement can also run where no portal has a resource owner for it: in a
  * procedure after the procedure commits, at which point Postgres has released
  * the portal's owner with the transaction, and outside any portal. Such a
- * statement keeps its versions for the rest of its transaction.
+ * statement keeps its versions for the rest of its transaction, so a
+ * background worker that polls an external table outside a portal has to
+ * commit between polls to see the catalog move, the way a procedure does.
  */
 static ResourceOwner
 GetCatalogVersionScopeOwner(CatalogVersionScope scope,
