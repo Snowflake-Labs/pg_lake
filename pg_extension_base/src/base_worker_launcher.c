@@ -93,6 +93,7 @@
 #include "utils/catcache.h"
 #include "utils/fmgroids.h"
 #include "utils/fmgrprotos.h"
+#include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/resowner.h"
@@ -414,6 +415,7 @@ static void PgExtensionBaseDatabaseStarterSharedMemoryExit(int code, Datum arg);
 static int64 DatabaseStarterNextWakeTimeMs(void);
 static bool StartAllBaseWorkers(List *workerRegistrationList);
 static List *GetBaseWorkerRegistrationList(void);
+static void SetBaseWorkerSearchPath(void);
 static StartBaseWorkerResult StartBaseWorker(int workerId, Oid extensionId,
 											 Oid entryPointFunctionId);
 static LockAcquireResult LockDatabaseStarter(Oid databaseId, LOCKMODE lockMode,
@@ -1446,6 +1448,7 @@ PgExtensionBaseDatabaseStarterMain(Datum databaseIdDatum)
 
 	/* connect to our database */
 	BackgroundWorkerInitializeConnectionByOid(databaseId, InvalidOid, 0);
+	SetBaseWorkerSearchPath();
 
 	MemoryContext outerContext = CurrentMemoryContext;
 
@@ -1912,6 +1915,24 @@ IsWorkerRegistered(int32 workerId)
 	PopActiveSnapshot();
 
 	return isWorkerRegistered;
+}
+
+
+/*
+ * SetBaseWorkerSearchPath pins the search_path of a worker that just
+ * connected to a database.
+ *
+ * A background worker takes its search_path from ALTER DATABASE/ROLE ...
+ * SET, which the database owner controls, while the worker runs as the
+ * bootstrap superuser.  An owner-set path could resolve an unqualified
+ * function or operator in the worker's queries to one the owner created,
+ * so we search only pg_catalog, as autovacuum does.  It is set at session
+ * level, so a COMMIT or ROLLBACK in an entry point cannot undo it.
+ */
+static void
+SetBaseWorkerSearchPath(void)
+{
+	SetConfigOption("search_path", "pg_catalog, pg_temp", PGC_SUSET, PGC_S_SESSION);
 }
 
 
@@ -2421,6 +2442,7 @@ PgExtensionBaseWorkerMain(Datum arg)
 	 * exit above.
 	 */
 	BackgroundWorkerInitializeConnectionByOid(databaseId, InvalidOid, 0);
+	SetBaseWorkerSearchPath();
 
 	MemoryContext outerContext = CurrentMemoryContext;
 
