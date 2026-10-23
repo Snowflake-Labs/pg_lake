@@ -1176,12 +1176,22 @@ def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_locatio
     assert results[0][0] == 2
     assert results[0][1] == 0
 
-    # IS NULL filters still remove whole files without scanning
+    # the remaining files are all NULL, but nullable columns never use stats
+    # for a full match, so IS NULL also has to scan the files
     results = run_query(
         f"{explain_prefix} delete from test_pruning_deletes_nulls.tbl where col1 is null",
         pg_conn,
     )
     assert int(fetch_data_files_used(results)) == 2
+    assert int(fetch_data_files_skipped(results)) == 0
+
+    run_command(
+        "delete from test_pruning_deletes_nulls.tbl where col1 is null", pg_conn
+    )
+    pg_conn.commit()
+
+    results = run_query("select count(*) from test_pruning_deletes_nulls.tbl", pg_conn)
+    assert results[0][0] == 0
 
     run_command("DROP SCHEMA test_pruning_deletes_nulls CASCADE", pg_conn)
     pg_conn.commit()
