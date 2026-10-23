@@ -1148,3 +1148,52 @@ def test_database_starter_lock_is_outside_the_database_lock_space(superuser_conn
         "DROP EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
     )
     superuser_conn.commit()
+
+
+def test_worker_ignores_database_search_path(superuser_conn):
+    """Base workers run as the bootstrap superuser, so they must not resolve
+    names through a search_path the database owner set with ALTER DATABASE."""
+    superuser_conn.rollback()
+    superuser_conn.autocommit = True
+    run_command("CREATE DATABASE base_worker_sp", superuser_conn)
+
+    other_conn = psycopg2.connect(
+        f"dbname=base_worker_sp user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
+    )
+    other_conn.autocommit = True
+    run_command(
+        """
+        CREATE SCHEMA evil;
+        CREATE SEQUENCE evil.hits;
+        CREATE FUNCTION evil.oideq(a oid, b oid) RETURNS bool
+        LANGUAGE plpgsql AS $fn$
+        BEGIN
+            PERFORM pg_catalog.nextval('evil.hits');
+            RETURN a OPERATOR(pg_catalog.=) b;
+        END $fn$;
+        CREATE OPERATOR evil.= (
+            LEFTARG = oid, RIGHTARG = oid, FUNCTION = evil.oideq);
+        ALTER DATABASE base_worker_sp SET search_path = evil, pg_catalog;
+        """,
+        other_conn,
+    )
+    other_conn.close()
+
+    # a new session picks up the database search_path, as a worker would
+    other_conn = psycopg2.connect(
+        f"dbname=base_worker_sp user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
+    )
+    other_conn.autocommit = True
+    run_command("CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", other_conn)
+
+    worker_count = wait_until_equal(
+        lambda: count_pg_extension_base_workers(superuser_conn), 1
+    )
+    assert worker_count == 1
+
+    hits = run_query("SELECT last_value, is_called FROM evil.hits", other_conn)[0]
+    assert hits[1] is False, "a base worker called the database owner's operator"
+
+    other_conn.close()
+    run_command("DROP DATABASE base_worker_sp WITH (FORCE)", superuser_conn)
+    superuser_conn.autocommit = False
