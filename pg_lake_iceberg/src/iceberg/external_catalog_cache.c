@@ -39,10 +39,7 @@
  * GetCatalogVersionScope() applies that rule. Each version scope ends when
  * Postgres releases a resource owner, which GetCatalogVersionScopeOwner()
  * picks: TopTransactionResourceOwner for a transaction, and the resource
- * owner of the portal that runs a statement for a statement. A cursor the
- * statement opens reads the statement's version too, and keeps a copy under
- * its own owner, so it goes on reading that version after the statement
- * ends, the way a cursor keeps the snapshot it opened with. Every held
+ * owner of the portal that runs a statement for a statement. Every held
  * answer carries the owner of its scope, and a resource release callback
  * drops the answers of an owner as Postgres releases it, so they go however
  * the scope ends: a statement finishing, a cursor closing, the subtransaction
@@ -70,11 +67,9 @@
  *   block, procedure or trigger reads under a new snapshot. A loop that polls
  *   an external table inside one statement therefore keeps seeing the version
  *   the statement started with, until a procedure commits;
- * - a cursor that a statement opens, such as the one a PL/pgSQL FOR loop over
- *   a query opens, sees its statement's version only when the client runs
- *   that statement in the unnamed portal, which the simple protocol always
- *   does. Under a named portal of the extended protocol, and outside any
- *   portal, it sees the catalog as it stands when it opens;
+ * - a cursor, including the one a PL/pgSQL FOR loop over a query opens, is a
+ *   version scope of its own, so it sees the catalog as it stands when it
+ *   opens, which can be newer than what the rest of its statement sees;
  * - a REST answer is held under the relation that asked, so a relation that
  *   ALTER FOREIGN TABLE points at another table keeps seeing the old one until
  *   its version scope ends;
@@ -127,8 +122,7 @@ typedef enum CatalogVersionScope
  *   SELECT * FROM ext;                         -- held for this statement
  *   FETCH c;                                   -- still the version of c
  *
- * A cursor a running statement opens, such as a PL/pgSQL FOR loop's, holds
- * copies of the answers of that statement, so it reads the same version.
+ * A PL/pgSQL FOR loop over a query does the same inside one statement.
  */
 typedef struct HeldRestTableLocation
 {
@@ -162,11 +156,9 @@ static char *FindHeldObjectStoreDocument(ResourceOwner scopeOwner,
 										 const char *path);
 static void HoldObjectStoreDocument(ResourceOwner scopeOwner, const char *path,
 									const char *content);
-static ResourceOwner GetCurrentVersionScopeOwner(ResourceOwner *openingCursorOwner);
+static ResourceOwner GetCurrentVersionScopeOwner(void);
 static CatalogVersionScope GetCatalogVersionScope(void);
-static ResourceOwner GetCatalogVersionScopeOwner(CatalogVersionScope scope,
-												 ResourceOwner *openingCursorOwner);
-static Portal GetPortalOpeningActiveCursor(void);
+static ResourceOwner GetCatalogVersionScopeOwner(CatalogVersionScope scope);
 static MemoryContext GetHeldAnswersContext(void);
 static void ReleaseHeldAnswers(ResourceReleasePhase phase, bool isCommit,
 							   bool isTopLevel, void *arg);
@@ -216,8 +208,7 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 static char *
 ResolveRestCatalogTable(Oid relationId)
 {
-	ResourceOwner openingCursorOwner = NULL;
-	ResourceOwner scopeOwner = GetCurrentVersionScopeOwner(&openingCursorOwner);
+	ResourceOwner scopeOwner = GetCurrentVersionScopeOwner();
 	char	   *metadataLocation =
 		FindHeldRestTableLocation(scopeOwner, relationId);
 
@@ -228,10 +219,6 @@ ResolveRestCatalogTable(Oid relationId)
 
 		HoldRestTableLocation(scopeOwner, relationId, metadataLocation);
 	}
-
-	if (openingCursorOwner != NULL &&
-		FindHeldRestTableLocation(openingCursorOwner, relationId) == NULL)
-		HoldRestTableLocation(openingCursorOwner, relationId, metadataLocation);
 
 	/* the scope can end before whatever the caller keeps this in */
 	return pstrdup(metadataLocation);
@@ -247,8 +234,7 @@ static char *
 ResolveObjectStoreCatalogTable(Oid relationId)
 {
 	char	   *path = GetExternalObjectStoreCatalogFilePathForTable(relationId);
-	ResourceOwner openingCursorOwner = NULL;
-	ResourceOwner scopeOwner = GetCurrentVersionScopeOwner(&openingCursorOwner);
+	ResourceOwner scopeOwner = GetCurrentVersionScopeOwner();
 	char	   *content = FindHeldObjectStoreDocument(scopeOwner, path);
 
 	if (content == NULL)
@@ -262,10 +248,6 @@ ResolveObjectStoreCatalogTable(Oid relationId)
 
 		HoldObjectStoreDocument(scopeOwner, path, content);
 	}
-
-	if (openingCursorOwner != NULL &&
-		FindHeldObjectStoreDocument(openingCursorOwner, path) == NULL)
-		HoldObjectStoreDocument(openingCursorOwner, path, content);
 
 	return GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId,
 																	 content);
@@ -356,16 +338,14 @@ HoldObjectStoreDocument(ResourceOwner scopeOwner, const char *path,
 
 /*
  * GetCurrentVersionScopeOwner returns the resource owner that names the
- * version scope of the current query, and in *openingCursorOwner the owner
- * of a cursor the query is opening inside that scope, or NULL.
+ * version scope of the current query.
  */
 static ResourceOwner
-GetCurrentVersionScopeOwner(ResourceOwner *openingCursorOwner)
+GetCurrentVersionScopeOwner(void)
 {
 	Assert(IsTransactionState());
 
-	return GetCatalogVersionScopeOwner(GetCatalogVersionScope(),
-									   openingCursorOwner);
+	return GetCatalogVersionScopeOwner(GetCatalogVersionScope());
 }
 
 
@@ -398,13 +378,9 @@ GetCatalogVersionScope(void)
  * and rule actions the statement runs execute inside its portal, and with the
  * extended protocol the portal spans both the Bind message that starts the
  * statement's scans and the Execute message that runs its functions, which
- * Postgres gives two different statement start times.
- *
- * A cursor is a portal of its own, which keeps its versions for as long as it
- * is open. A cursor that the client's statement opens reads the statement's
- * versions as it starts its scans, and keeps a copy of each under its own
- * owner, returned in *openingCursorOwner, for what it reads after the
- * statement ends.
+ * Postgres gives two different statement start times. A cursor is a portal of
+ * its own, so it is a statement of its own and keeps its versions for as long
+ * as it is open.
  *
  * A statement can also run where no portal has a resource owner for it: in a
  * procedure after the procedure commits, at which point Postgres has released
@@ -414,54 +390,13 @@ GetCatalogVersionScope(void)
  * commit between polls to see the catalog move, the way a procedure does.
  */
 static ResourceOwner
-GetCatalogVersionScopeOwner(CatalogVersionScope scope,
-							ResourceOwner *openingCursorOwner)
+GetCatalogVersionScopeOwner(CatalogVersionScope scope)
 {
-	*openingCursorOwner = NULL;
-
-	if (scope == VERSION_SCOPE_TRANSACTION)
-		return TopTransactionResourceOwner;
-
-	Portal		statementPortal = ActivePortal;
-	Portal		openingStatementPortal = GetPortalOpeningActiveCursor();
-
-	if (openingStatementPortal != NULL)
-	{
-		*openingCursorOwner = ActivePortal->resowner;
-		statementPortal = openingStatementPortal;
-	}
-
-	if (statementPortal != NULL && statementPortal->resowner != NULL)
-		return statementPortal->resowner;
+	if (scope == VERSION_SCOPE_STATEMENT &&
+		ActivePortal != NULL && ActivePortal->resowner != NULL)
+		return ActivePortal->resowner;
 
 	return TopTransactionResourceOwner;
-}
-
-
-/*
- * GetPortalOpeningActiveCursor returns the portal of the client's statement
- * when the active portal is a cursor that statement is opening, such as the
- * one a PL/pgSQL FOR loop over a query opens, or NULL otherwise.
- *
- * Postgres does not link a portal to the portal that opened it, but a client
- * runs its statement in the unnamed portal, as the simple protocol always
- * does, and so does the extended protocol for a portal the client leaves
- * unnamed.
- */
-static Portal
-GetPortalOpeningActiveCursor(void)
-{
-	/* PortalStart starts the scans of a cursor before marking it ready */
-	if (ActivePortal == NULL || ActivePortal->status != PORTAL_DEFINED)
-		return NULL;
-
-	Portal		clientPortal = GetPortalByName("");
-
-	if (clientPortal == NULL || clientPortal == ActivePortal ||
-		clientPortal->status != PORTAL_ACTIVE)
-		return NULL;
-
-	return clientPortal;
 }
 
 

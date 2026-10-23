@@ -19,13 +19,11 @@ import time
 #   * one statement reads one version of the catalog, whatever its isolation
 #     level and however many tables and references it has, including every
 #     query it runs in functions of any volatility, DO blocks, procedures,
-#     triggers and rule actions, every PL/pgSQL FOR loop those run, and across
-#     the Bind and Execute messages that start and run it with the extended
-#     protocol;
+#     triggers and rule actions, and across the Bind and Execute messages that
+#     start and run it with the extended protocol;
 #   * READ COMMITTED reads the catalog as it stands in each new statement,
 #     including each statement of a multi-statement message, and a cursor
-#     reads the version of the statement that opened it for as long as it is
-#     open;
+#     reads the version that stood when it was opened;
 #   * REPEATABLE READ and SERIALIZABLE hold the whole transaction to the
 #     version it started reading with, including for a table it touches for
 #     the first time in a later statement, and including inside functions;
@@ -47,10 +45,8 @@ import time
 #     place moves under READ COMMITTED, so a loop polling an external table
 #     inside one statement sees the catalog move only once a procedure
 #     commits;
-#   * a cursor a function opens, such as a FOR loop's, reads the version of
-#     its statement when the client runs that statement in the unnamed
-#     portal, as the simple protocol always does, and the catalog as it stands
-#     when it opens under a portal the client named;
+#   * a cursor, including the one a PL/pgSQL FOR loop over a query opens,
+#     reads the catalog as it stands when it opens;
 #   * attaching a table reads the catalog as it stands, so a table published
 #     since a REPEATABLE READ transaction pinned the catalog can be attached in
 #     it, but not read until the pin is released.
@@ -1744,11 +1740,10 @@ def test_invalidations_keep_the_held_version(
 
 
 # A PL/pgSQL FOR loop over a query opens a cursor, which is a portal of its
-# own, and reads the version of the statement that called the function, the
-# way the function's other queries do.  So a statement that calls such a
-# function for each of its rows reads the catalog once, however the catalog
-# moves between two of the calls.
-def test_for_loop_reads_its_statements_version(
+# own, so the loop reads the catalog as it stands when it starts, while the
+# statements around the loop read the version of the statement that called
+# the function.  That is one of the limits this file's header lists.
+def test_for_loop_cursor_reads_the_catalog_as_it_opens(
     pg_conn,
     s3,
     extension,
@@ -1774,17 +1769,6 @@ def test_for_loop_reads_its_statements_version(
         f"END; $$",
         pg_conn,
     )
-    run_command(
-        f"CREATE FUNCTION {schema}.loop_count_then_wait() RETURNS bigint "
-        f"LANGUAGE plpgsql AS $$ DECLARE r record; n bigint; BEGIN "
-        f"  FOR r IN SELECT count(*) AS c FROM {schema}.read_tbl LOOP "
-        f"    n := r.c; "
-        f"  END LOOP; "
-        f"  {WAIT_FOR_REWRITE} "
-        f"  RETURN n; "
-        f"END; $$",
-        pg_conn,
-    )
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
 
@@ -1798,73 +1782,7 @@ def test_for_loop_reads_its_statements_version(
             pg_conn,
         ),
     )
-    assert tuple(rows[0]) == (5, 5, 5)
-    pg_conn.commit()
-
-    _put_catalog(s3, key, body_early)
-    pg_conn.commit()
-    calls_query = (
-        f"SELECT array_agg({schema}.loop_count_then_wait() ORDER BY g) "
-        f"FROM generate_series(1, 3) g"
-    )
-
-    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, calls_query)
-    assert rows[0][0] == [5, 5, 5]
-    assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
-    pg_conn.commit()
-
-    # the catalog moves between the first call and the second
-    rows = _rewrite_while_waiting(
-        s3, key, body_late, lambda: run_query(calls_query, pg_conn)
-    )
-    assert rows[0][0] == [5, 5, 5]
-    pg_conn.commit()
-
-    assert run_query(calls_query, pg_conn)[0][0] == [9, 9, 9]
-    pg_conn.commit()
-
-
-# A cursor that a function opens and returns outlives the statement that
-# opened it, and keeps reading that statement's version: a later FETCH runs
-# the cursor's function calls against the version the cursor's own scan
-# started with, not against the catalog as it stands by then.
-def test_cursor_opened_by_a_function_keeps_its_statements_version(
-    pg_conn,
-    s3,
-    extension,
-    with_default_location,
-    adjust_object_store_settings,
-    reader_catalog_prefix,
-):
-    schema = "test_osc_opened_cursor"
-    _reset_schema(pg_conn, schema)
-    key, body_early, body_late = _two_catalog_versions(
-        pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
-    )
-    _create_counting_function(pg_conn, schema)
-    run_command(
-        f"CREATE FUNCTION {schema}.open_counting(c refcursor) RETURNS refcursor "
-        f"LANGUAGE plpgsql AS $$ BEGIN "
-        f"  OPEN c FOR SELECT (SELECT count(*) FROM {schema}.read_tbl) AS scanned, "
-        f"    {schema}.row_count() AS counted; "
-        f"  RETURN c; "
-        f"END; $$",
-        pg_conn,
-    )
-    _put_catalog(s3, key, body_early)
-    pg_conn.commit()
-
-    assert run_query("SHOW transaction_isolation", pg_conn)[0][0] == "read committed"
-    run_query(f"SELECT {schema}.open_counting('opened_cursor')", pg_conn)
-
-    _put_catalog(s3, key, body_late)
-    assert run_query(f"SELECT count(*) FROM {schema}.read_tbl", pg_conn)[0][0] == 9
-
-    rows, catalog_reads = _run_counting_catalog_reads(
-        pg_conn, "FETCH ALL FROM opened_cursor"
-    )
-    assert [tuple(row) for row in rows] == [(5, 5)]
-    assert catalog_reads == 0, f"expected no catalog read, got {catalog_reads}"
+    assert tuple(rows[0]) == (5, 9, 5)
     pg_conn.commit()
 
 
