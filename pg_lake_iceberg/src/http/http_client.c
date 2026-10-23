@@ -32,6 +32,7 @@
 #include "utils/memutils.h"
 #include "pg_lake/http/http_client.h"
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <stdlib.h>
@@ -88,6 +89,7 @@ static bool curlInitialized = false;
 bool		HttpClientTraceTraffic = false;
 
 char	   *HttpClientTlsCaFile = "";
+char	   *HttpClientTlsCaPath = "";
 char	   *HttpClientTlsCertFile = "";
 char	   *HttpClientTlsKeyFile = "";
 
@@ -141,6 +143,41 @@ CheckHttpClientTlsFile(char **newval, void **extra, GucSource source)
 	if (access(*newval, R_OK) != 0)
 	{
 		GUC_check_errdetail("Cannot read file \"%s\": %m.", *newval);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * CheckHttpClientTlsDirectory rejects a CA path that is not a searchable
+ * directory.  A bundle file here is accepted by curl, but OpenSSL's hashed
+ * lookup then finds nothing and every handshake fails with a generic error.
+ */
+bool
+CheckHttpClientTlsDirectory(char **newval, void **extra, GucSource source)
+{
+	struct stat pathStatus;
+
+	if (*newval == NULL || **newval == '\0')
+		return true;
+
+	if (stat(*newval, &pathStatus) != 0)
+	{
+		GUC_check_errdetail("Cannot access directory \"%s\": %m.", *newval);
+		return false;
+	}
+
+	if (!S_ISDIR(pathStatus.st_mode))
+	{
+		GUC_check_errdetail("\"%s\" is not a directory.", *newval);
+		return false;
+	}
+
+	if (access(*newval, R_OK | X_OK) != 0)
+	{
+		GUC_check_errdetail("Cannot search directory \"%s\": %m.", *newval);
 		return false;
 	}
 
@@ -231,6 +268,15 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 		GetHttpClientTlsMaterial() == HTTP_TLS_MATERIAL_COMPLETE)
 	{
 		CURL_SETOPT(curl, CURLOPT_CAINFO, HttpClientTlsCaFile);
+
+		/*
+		 * CAINFO replaces the system store, so a copy of the public roots in
+		 * it goes stale.  A hashed directory is read at verification time and
+		 * is consulted alongside CAINFO.
+		 */
+		if (HttpClientTlsCaPath != NULL && HttpClientTlsCaPath[0] != '\0')
+			CURL_SETOPT(curl, CURLOPT_CAPATH, HttpClientTlsCaPath);
+
 		CURL_SETOPT(curl, CURLOPT_SSLCERT, HttpClientTlsCertFile);
 		CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
 	}
