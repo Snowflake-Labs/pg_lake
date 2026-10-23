@@ -69,7 +69,7 @@ static void InitPushedSecretsIfNeeded(void);
 static List *ResolveStorageCredentials(Oid relationId);
 static void BestEffortReconcile(Oid relationId, List *toPush, List *toDrop);
 static void ReconcileSecrets(Oid relationId, List *toPush, List *toDrop);
-static VendedS3Secret MakeVendedS3Secret(const StorageCredential * sc);
+static VendedSecret MakeVendedSecret(const StorageCredential * sc);
 static void ReportOrRethrowBestEffortError(ErrorData *edata, const char *what,
 										   Oid relationId);
 
@@ -320,14 +320,15 @@ ResolveStorageCredentials(Oid relationId)
 
 
 /*
- * MakeVendedS3Secret projects a resolved StorageCredential onto the
- * VendedS3Secret the pgduck secret layer consumes.
+ * MakeVendedSecret projects a resolved StorageCredential onto the
+ * VendedSecret the pgduck secret layer consumes.
  */
-static VendedS3Secret
-MakeVendedS3Secret(const StorageCredential * sc)
+static VendedSecret
+MakeVendedSecret(const StorageCredential * sc)
 {
-	VendedS3Secret secret = {0};
+	VendedSecret secret = {0};
 
+	secret.provider = sc->provider;
 	secret.serverOid = sc->serverOid;
 	secret.secretId = sc->secretId;
 	secret.scope = sc->scopePrefix;
@@ -338,6 +339,10 @@ MakeVendedS3Secret(const StorageCredential * sc)
 	secret.endpoint = sc->endpoint;
 	secret.urlStyle = sc->urlStyle;
 	secret.useSsl = sc->useSsl;
+	secret.accountName = sc->accountName;
+	secret.sasToken = sc->sasToken;
+	secret.blobEndpoint = sc->blobEndpoint;
+	secret.dfsEndpoint = sc->dfsEndpoint;
 
 	return secret;
 }
@@ -368,7 +373,7 @@ ReconcileSecrets(Oid relationId, List *toPush, List *toDrop)
 		foreach(lc, toPush)
 		{
 			StorageCredential *sc = (StorageCredential *) lfirst(lc);
-			VendedS3Secret secret = MakeVendedS3Secret(sc);
+			VendedSecret secret = MakeVendedSecret(sc);
 			char	   *name = GenerateVendedSecretName(sc->serverOid,
 														sc->secretId);
 			char		key[SECRET_NAME_MAXLEN];

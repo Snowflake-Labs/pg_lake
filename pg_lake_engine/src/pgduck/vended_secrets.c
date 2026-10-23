@@ -18,8 +18,8 @@
 /*
  * vended_secrets.c
  *
- * Manages DuckDB scoped secrets for vended S3 credentials from
- * Iceberg REST catalogs.  Secrets are pushed to pgduck_server via
+ * Manages DuckDB scoped secrets for vended credentials from Iceberg
+ * REST catalogs.  Secrets are pushed to pgduck_server via
  * CREATE OR REPLACE SECRET with a URL-scoped SCOPE, so DuckDB's
  * secret manager automatically selects the most specific match.
  */
@@ -214,12 +214,11 @@ LookupInheritedS3Settings(PGDuckConnection * conn, const char *s3Prefix)
 
 
 /*
- * AppendS3ConnectionSetting adds ", <keyword> '<value>'" to sql,
- * escaping the value for safe interpolation.
+ * AppendSecretSetting adds ", <keyword> '<value>'" to sql, escaping the
+ * value for safe interpolation.
  */
 static void
-AppendS3ConnectionSetting(StringInfo sql, const char *keyword,
-						  const char *value)
+AppendSecretSetting(StringInfo sql, const char *keyword, const char *value)
 {
 	char	   *escaped = EscapeSingleQuotes(value);
 
@@ -229,7 +228,7 @@ AppendS3ConnectionSetting(StringInfo sql, const char *keyword,
 
 
 /*
- * BuildCreateSecretSQL constructs the DuckDB SQL statement for
+ * BuildCreateS3SecretSQL constructs the DuckDB SQL statement for
  * creating or replacing a vended S3 secret.
  *
  * All values are treated as untrusted input and single-quote-escaped to
@@ -243,13 +242,15 @@ AppendS3ConnectionSetting(StringInfo sql, const char *keyword,
  * as unset.
  */
 static char *
-BuildCreateSecretSQL(const char *secretName,
-					 const VendedS3Secret * secret,
-					 const char *endpoint,
-					 const char *urlStyle,
-					 const char *useSsl)
+BuildCreateS3SecretSQL(const char *secretName,
+					   const VendedSecret * secret,
+					   const char *endpoint,
+					   const char *urlStyle,
+					   const char *useSsl)
 {
 	StringInfoData sql;
+
+	Assert(secret->accessKeyId != NULL && secret->secretAccessKey != NULL);
 
 	initStringInfo(&sql);
 
@@ -264,16 +265,16 @@ BuildCreateSecretSQL(const char *secretName,
 					 secretName, escapedKeyId, escapedSecret);
 
 	if (secret->sessionToken != NULL)
-		AppendS3ConnectionSetting(&sql, "SESSION_TOKEN", secret->sessionToken);
+		AppendSecretSetting(&sql, "SESSION_TOKEN", secret->sessionToken);
 
 	if (secret->region != NULL)
-		AppendS3ConnectionSetting(&sql, "REGION", secret->region);
+		AppendSecretSetting(&sql, "REGION", secret->region);
 
 	if (endpoint != NULL)
-		AppendS3ConnectionSetting(&sql, "ENDPOINT", endpoint);
+		AppendSecretSetting(&sql, "ENDPOINT", endpoint);
 
 	if (urlStyle != NULL)
-		AppendS3ConnectionSetting(&sql, "URL_STYLE", urlStyle);
+		AppendSecretSetting(&sql, "URL_STYLE", urlStyle);
 
 	if (useSsl != NULL)
 	{
@@ -290,7 +291,7 @@ BuildCreateSecretSQL(const char *secretName,
 	}
 
 	if (secret->scope != NULL)
-		AppendS3ConnectionSetting(&sql, "SCOPE", secret->scope);
+		AppendSecretSetting(&sql, "SCOPE", secret->scope);
 
 	appendStringInfoChar(&sql, ')');
 
@@ -302,8 +303,8 @@ BuildCreateSecretSQL(const char *secretName,
 
 
 /*
- * PushNamedVendedSecret resolves the S3 connection settings and creates
- * the vended secret under the given name.
+ * PushNamedS3Secret resolves the S3 connection settings and creates the
+ * vended secret under the given name.
  *
  * The catalog is the authority on where its own storage lives, so its
  * values are taken as given.  Each setting is resolved on its own,
@@ -319,9 +320,9 @@ BuildCreateSecretSQL(const char *secretName,
  * left to fill in.
  */
 static void
-PushNamedVendedSecret(PGDuckConnection * conn,
-					  const char *secretName,
-					  const VendedS3Secret * secret)
+PushNamedS3Secret(PGDuckConnection * conn,
+				  const char *secretName,
+				  const VendedSecret * secret)
 {
 	const char *endpoint = secret->endpoint;
 	const char *urlStyle = secret->urlStyle;
@@ -340,9 +341,100 @@ PushNamedVendedSecret(PGDuckConnection * conn,
 			useSsl = inherited.useSsl;
 	}
 
-	char	   *sql = BuildCreateSecretSQL(secretName, secret,
-										   endpoint, urlStyle, useSsl);
+	char	   *sql = BuildCreateS3SecretSQL(secretName, secret,
+											 endpoint, urlStyle, useSsl);
 
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, sql);
+
+	CheckPGDuckResult(conn, result);
+	PQclear(result);
+
+	pfree(sql);
+}
+
+
+/*
+ * AppendConnectionStringField adds "<field>=<value>" to an Azure
+ * connection string, skipping a NULL value.
+ *
+ * The value comes from the catalog, and the Azure SDK splits a
+ * connection string at ';', so a value containing one would add a field
+ * of its own -- a BlobEndpoint of its choosing, say, which would send
+ * the SAS token to that host.  Refuse it rather than escape it: the SDK
+ * has no escape for ';'.  The value itself stays out of the error, since
+ * it may be the token.
+ */
+static void
+AppendConnectionStringField(StringInfo connectionString, const char *field,
+							const char *value)
+{
+	if (value == NULL)
+		return;
+
+	if (strchr(value, ';') != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("vended Azure credential has a %s containing \";\"",
+						field)));
+
+	appendStringInfo(connectionString, "%s%s=%s",
+					 connectionString->len > 0 ? ";" : "", field, value);
+}
+
+
+/*
+ * BuildCreateAzureSecretSQL constructs the DuckDB SQL statement for
+ * creating or replacing a vended Azure secret.  DuckDB's Azure secret
+ * has no SAS parameter, but passes CONNECTION_STRING to the Azure SDK,
+ * which accepts SharedAccessSignature there.  AccountName is required
+ * whenever a URL names its account, since DuckDB checks the two agree.
+ */
+static char *
+BuildCreateAzureSecretSQL(const char *secretName, const VendedSecret * secret)
+{
+	StringInfoData connectionString;
+	StringInfoData sql;
+
+	Assert(secret->accountName != NULL && secret->sasToken != NULL);
+
+	initStringInfo(&connectionString);
+	AppendConnectionStringField(&connectionString, "AccountName",
+								secret->accountName);
+	AppendConnectionStringField(&connectionString, "BlobEndpoint",
+								secret->blobEndpoint);
+	AppendConnectionStringField(&connectionString, "DfsEndpoint",
+								secret->dfsEndpoint);
+	AppendConnectionStringField(&connectionString, "SharedAccessSignature",
+								secret->sasToken);
+
+	initStringInfo(&sql);
+	appendStringInfo(&sql, "CREATE OR REPLACE SECRET \"%s\" (TYPE AZURE",
+					 secretName);
+	AppendSecretSetting(&sql, "CONNECTION_STRING", connectionString.data);
+
+	if (secret->scope != NULL)
+		AppendSecretSetting(&sql, "SCOPE", secret->scope);
+
+	appendStringInfoChar(&sql, ')');
+
+	pfree(connectionString.data);
+
+	return sql.data;
+}
+
+
+/*
+ * PushNamedAzureSecret creates the vended Azure secret under the given
+ * name.  Unlike an S3 secret it inherits nothing from the secret already
+ * covering the scope, since DuckDB redacts an Azure secret's connection
+ * string.
+ */
+static void
+PushNamedAzureSecret(PGDuckConnection * conn,
+					 const char *secretName,
+					 const VendedSecret * secret)
+{
+	char	   *sql = BuildCreateAzureSecretSQL(secretName, secret);
 	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, sql);
 
 	CheckPGDuckResult(conn, result);
@@ -367,14 +459,17 @@ PushNamedVendedSecret(PGDuckConnection * conn,
  */
 void
 PushVendedSecretToPGDuck(PGDuckConnection * conn,
-						 const VendedS3Secret * secret)
+						 const VendedSecret * secret)
 {
 	char	   *secretName = GenerateVendedSecretName(secret->serverOid,
 													  secret->secretId);
 
 	elog(DEBUG2, "pushing vended secret \"%s\" to pgduck_server", secretName);
 
-	PushNamedVendedSecret(conn, secretName, secret);
+	if (secret->provider == VENDED_STORAGE_AZURE)
+		PushNamedAzureSecret(conn, secretName, secret);
+	else
+		PushNamedS3Secret(conn, secretName, secret);
 
 	pfree(secretName);
 }

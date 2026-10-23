@@ -24,6 +24,7 @@ extern PGDLLEXPORT Oid PgLakeWriteRoleId(void);
 extern PGDLLEXPORT void CheckURLReadAccess(const char *url);
 extern PGDLLEXPORT void CheckURLWriteAccess(const char *url);
 extern PGDLLEXPORT void ValidateStorageURL(const char *url);
+extern PGDLLEXPORT bool IsAllowedAzureEndpoint(const char *endpoint);
 
 
 #endif

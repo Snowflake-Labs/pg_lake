@@ -469,6 +469,39 @@ JsonbGetObject(Jsonb *jb, const char *key)
 
 
 /*
+ * JsonbObjectKeys returns an object's own keys as palloc'd strings.  When
+ * mapKey is NULL the object is jb itself; otherwise it is the object
+ * stored under jb->mapKey.  Returns NIL when there is no such object.
+ */
+List *
+JsonbObjectKeys(Jsonb *jb, const char *mapKey)
+{
+	if (jb == NULL)
+		return NIL;
+
+	Jsonb	   *object = mapKey == NULL ? jb : JsonbGetObject(jb, mapKey);
+
+	if (object == NULL || !JsonContainerIsObject(&object->root))
+		return NIL;
+
+	List	   *keys = NIL;
+	JsonbIterator *it = JsonbIteratorInit(&object->root);
+	JsonbValue	value;
+	JsonbIteratorToken token;
+
+	/* skipNested confines this to the object's own keys */
+	while ((token = JsonbIteratorNext(&it, &value, true)) != WJB_DONE)
+	{
+		if (token == WJB_KEY && value.type == jbvString)
+			keys = lappend(keys, pnstrdup(value.val.string.val,
+										  value.val.string.len));
+	}
+
+	return keys;
+}
+
+
+/*
  * JsonbGetArrayElementObjects navigates a top-level object key
  * `arrayKey` that holds a JSON array and returns one JsonbArrayElement
  * per array element, in order.  Each element's `objectKey` nested
