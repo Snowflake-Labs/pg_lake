@@ -2429,10 +2429,10 @@ def test_vended_credentials_azure_endpoints(
 ):
     """
     The endpoints come from the table's own host, so a sovereign cloud is
-    not sent to the public one.  A catalog can state an endpoint of its own
-    under adls.connection-string.<host>, which in Iceberg's ADLS FileIO is
-    an endpoint URL; a value that is a connection string instead is not
-    taken for one.
+    not sent to the public one.  A catalog can state another endpoint of
+    that account, a private endpoint say, under adls.connection-string.<host>,
+    which in Iceberg's ADLS FileIO is an endpoint URL; a value that is a
+    connection string instead is not taken for one.
     """
     if installcheck:
         return
@@ -2475,6 +2475,55 @@ def test_vended_credentials_azure_endpoint_is_held_to_the_host_allowlist(
     plain: userinfo, a backslash or an escape could otherwise pass the
     suffix match here and be read as a different host by the Azure SDK.  A
     refused endpoint is reported and the table's own host is used instead.
+    """
+    if installcheck:
+        return
+
+    cred = _azure_credential(
+        superuser_conn,
+        "storage-credentials",
+        _ADLS_LOCATION,
+        {
+            f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
+            f"adls.connection-string.{_ADLS_HOST}": endpoint,
+        },
+    )
+
+    assert (cred["blob"], cred["dfs"]) == (
+        "https://acct.blob.core.windows.net",
+        "https://acct.dfs.core.windows.net",
+    )
+    assert any(
+        "ignoring the endpoint the catalog vended" in n for n in superuser_conn.notices
+    ), "\n".join(superuser_conn.notices)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        pytest.param("https://other.blob.core.windows.net", id="another-account"),
+        pytest.param(
+            "https://other.privatelink.dfs.core.windows.net",
+            id="another-accounts-private-endpoint",
+        ),
+        pytest.param("https://acct.blob.core.chinacloudapi.cn", id="another-cloud"),
+        pytest.param("https://acct.blob.core.windows.net/other", id="a-path"),
+    ],
+)
+def test_vended_credentials_azure_endpoint_must_be_the_accounts_own(
+    superuser_conn, iceberg_extension, installcheck, endpoint
+):
+    """
+    Regression test for: a catalog-stated endpoint could send the requests
+    for a table's location to another storage account.
+
+    Anyone can create a storage account under Azure's storage domains, so
+    the default pg_lake.allowed_azure_host_suffixes admits accounts the
+    catalog's operator controls, and the vended secret serves every session
+    reading under the table's location.  An endpoint there has to be the
+    account's own, in the same cloud, with no path, which would put the
+    requests in another container.  Any other is reported and the table's
+    own host is used instead.
     """
     if installcheck:
         return
@@ -2613,8 +2662,8 @@ def test_vended_credentials_azure_account_name_must_be_valid(
 
     httpd, thread = _serve_provider_case(
         "config",
-        "az://container/ns/tbl",
-        {"adls.sas-token": "sv=2025-01-05&sig=X", "adls.account-name": account},
+        f"abfss://container@{account}.dfs.core.windows.net/ns/tbl",
+        {"adls.sas-token": "sv=2025-01-05&sig=X"},
         superuser_conn,
     )
     try:
@@ -2632,24 +2681,38 @@ def test_vended_credentials_azure_account_name_must_be_valid(
         _stop(httpd, thread, superuser_conn)
 
 
-def test_vended_credentials_azure_short_url_takes_the_stated_account(
-    superuser_conn, iceberg_extension, installcheck
+@pytest.mark.parametrize("shape", ["storage-credentials", "config"])
+def test_vended_credentials_azure_location_must_name_its_account(
+    superuser_conn, iceberg_extension, installcheck, shape
 ):
     """
-    az://<container>/<path> names no account, so the one the catalog
-    states is used, and the endpoints are left for the Azure SDK to derive
-    from it.
+    Regression test for: the catalog chose the storage account for a
+    location that names none.
+
+    az://<container>/<path> leaves the account to the secret, and the
+    vended secret serves every session reading under the table's location,
+    so the account adls.account-name states would serve all of them.  Such
+    a credential is not used, and is reported.
     """
     if installcheck:
         return
 
-    cred = _azure_credential(
-        superuser_conn,
-        "config",
+    httpd, thread = _serve_provider_case(
+        shape,
         "az://container/ns/tbl",
         {"adls.sas-token.acct": "sv=2025-01-05&sig=X", "adls.account-name": "acct"},
+        superuser_conn,
     )
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-    assert cred["account"] == "acct"
-    assert cred["scope"] == "az://container/ns/tbl/"
-    assert (cred["blob"], cred["dfs"]) == ("", "")
+        assert summary is None, f"expected no credential, got {summary!r}"
+        assert any(
+            "ignoring vended credentials for Azure Data Lake Storage" in n
+            for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)

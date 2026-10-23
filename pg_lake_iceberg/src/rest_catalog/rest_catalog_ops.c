@@ -1157,7 +1157,7 @@ ParseVendedS3CredsFromConfig(Jsonb *body, const char *mapKey,
  * qualified Azure URL names -- abfss://<container>@<host>/..., or
  * <host>/<container>/... after az://, azure:// or abfss:// -- and NULL
  * for any other URL.  That includes az://<container>/..., which names no
- * account at all and leaves it to the credential.
+ * account at all.
  */
 static char *
 AzureAccountHostFromLocation(const char *location)
@@ -1263,8 +1263,78 @@ AzureEndpointsFromHost(const char *host, char **blobEndpoint,
 
 
 /*
- * AzureEndpointOverride returns the endpoint a config map states for a
- * storage account under adls.connection-string.<host> or
+ * The domains Azure Storage serves its accounts under, in each cloud.
+ * Anyone can create an account in any of them.
+ */
+static const char *const AzureStorageDomains[] = {
+	".core.windows.net",
+	".core.usgovcloudapi.net",
+	".core.chinacloudapi.cn",
+	".storage.azure.net",
+};
+
+
+/*
+ * HostEndsWith returns whether the hostLen bytes at host end in suffix,
+ * with at least one byte before it.
+ */
+static bool
+HostEndsWith(const char *host, size_t hostLen, const char *suffix)
+{
+	size_t		suffixLen = strlen(suffix);
+
+	return hostLen > suffixLen &&
+		pg_strncasecmp(host + hostLen - suffixLen, suffix, suffixLen) == 0;
+}
+
+
+/*
+ * IsAccountEndpoint returns whether an endpoint IsAllowedAzureEndpoint
+ * accepted can only reach the storage account host names.  The default
+ * pg_lake.allowed_azure_host_suffixes admits every account under Azure's
+ * storage domains, including ones the catalog's operator created, so an
+ * endpoint there has to name host's account, in host's cloud, with no
+ * path, which would put the requests in another container.  A host
+ * outside those domains is one an administrator admitted, an emulator
+ * say, and is taken as is.
+ */
+static bool
+IsAccountEndpoint(const char *endpoint, const char *host)
+{
+	const char *endpointHost = strstr(endpoint, "://") + strlen("://");
+	size_t		endpointHostLen = 0;
+
+	while (isalnum((unsigned char) endpointHost[endpointHostLen]) ||
+		   endpointHost[endpointHostLen] == '.' ||
+		   endpointHost[endpointHostLen] == '-')
+		endpointHostLen++;
+
+	for (int i = 0; i < lengthof(AzureStorageDomains); i++)
+	{
+		const char *domain = AzureStorageDomains[i];
+
+		if (!HostEndsWith(endpointHost, endpointHostLen, domain))
+			continue;
+
+		const char *rest = endpointHost + endpointHostLen;
+		size_t		accountLen = strcspn(host, ".");
+
+		if (*rest == ':')
+			rest += 1 + strspn(rest + 1, "0123456789");
+
+		return *rest == '\0' &&
+			HostEndsWith(host, strlen(host), domain) &&
+			strcspn(endpointHost, ".") == accountLen &&
+			pg_strncasecmp(endpointHost, host, accountLen) == 0;
+	}
+
+	return true;
+}
+
+
+/*
+ * AzureEndpointOverride returns the endpoint a config map states for the
+ * storage account host names, under adls.connection-string.<host> or
  * .<account>.  In Iceberg's ADLS FileIO that key holds an endpoint URL
  * rather than a connection string, and is how an emulator or a private
  * endpoint is reached.  Anything but an http(s) URL is ignored, and so
@@ -1276,18 +1346,17 @@ AzureEndpointsFromHost(const char *host, char **blobEndpoint,
  * secret carries, whatever host the URL names.  So the endpoint is held
  * to pg_lake.allowed_azure_host_suffixes, the list a user-supplied Azure
  * URL is held to, and one outside it is ignored rather than handed over:
- * it would otherwise send pgduck_server's requests to any host.
+ * it would otherwise send pgduck_server's requests to any host.  It also
+ * has to be the account's own (IsAccountEndpoint), since the secret serves
+ * every session reading under the table's location.
  */
 static char *
 AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 					  const char *accountName, Oid serverOid)
 {
-	char	   *endpoint = NULL;
-
-	if (host != NULL)
-		endpoint = GetVendedConfigString(body, mapKey,
-										 psprintf("adls.connection-string.%s",
-												  host));
+	char	   *endpoint = GetVendedConfigString(body, mapKey,
+												 psprintf("adls.connection-string.%s",
+														  host));
 
 	if (endpoint == NULL)
 		endpoint = GetVendedConfigString(body, mapKey,
@@ -1304,11 +1373,11 @@ AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 	while (endpointLen > 0 && endpoint[endpointLen - 1] == '/')
 		endpoint[--endpointLen] = '\0';
 
+	char	   *reportKey = psprintf("endpoint/%u/%s/%s", serverOid,
+									 accountName, endpoint);
+
 	if (!IsAllowedAzureEndpoint(endpoint))
 	{
-		char	   *reportKey = psprintf("endpoint/%u/%s/%s", serverOid,
-										 accountName, endpoint);
-
 		ereport(FirstVendedReport(reportKey) ? WARNING : DEBUG2,
 				(errmsg("ignoring the endpoint the catalog vended for Azure "
 						"storage account \"%s\"", accountName),
@@ -1317,6 +1386,16 @@ AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 						   RedactSensitiveText(endpoint)),
 				 errhint("Add the endpoint's host to "
 						 "pg_lake.allowed_azure_host_suffixes to reach it.")));
+		return NULL;
+	}
+
+	if (!IsAccountEndpoint(endpoint, host))
+	{
+		ereport(FirstVendedReport(reportKey) ? WARNING : DEBUG2,
+				(errmsg("ignoring the endpoint the catalog vended for Azure "
+						"storage account \"%s\"", accountName),
+				 errdetail("\"%s\" is not that storage account's endpoint.",
+						   RedactSensitiveText(endpoint))));
 		return NULL;
 	}
 
@@ -1392,35 +1471,40 @@ SasTokenExpiry(const char *sasToken)
 /*
  * ParseVendedAzureCredsFromConfig builds an Azure VendedCredentials from
  * the SAS token an Iceberg config map carries for the storage account
- * scope is on, or returns NULL when it carries none for that account.
+ * scope's host names, or returns NULL when it carries none for that
+ * account.
  *
  * Catalogs state one token under several keys so every client finds its
  * own spelling: adls.sas-token.<host> (Iceberg 1.8 and later),
  * adls.sas-token.<account> (Iceberg 1.7), and a bare adls.sas-token
  * paired with adls.account-name (PyIceberg).  They are tried in that
- * order.  The account is the one scope's host names, or, when scope
- * names none, adls.account-name; a bare token stated for some other
- * account is not this table's credential.  It expires when the catalog
- * says, or else when the token itself says.
+ * order, and a bare token stated for some other account is not this
+ * table's credential.  It expires when the catalog says, or else when the
+ * token itself says.
+ *
+ * A scope that names no account, az://<container>/..., gets no
+ * credential: the secret serves every session reading under scope, and
+ * the account would be whichever one the catalog states.
  */
 static VendedCredentials *
 ParseVendedAzureCredsFromConfig(Jsonb *body, const char *mapKey,
 								const char *scope, Oid serverOid)
 {
 	char	   *host = AzureAccountHostFromLocation(scope);
+
+	if (host == NULL)
+		return NULL;
+
 	char	   *statedAccount = GetVendedConfigString(body, mapKey,
 													  "adls.account-name");
-	char	   *accountName = host != NULL ?
-		pnstrdup(host, strcspn(host, ".")) : statedAccount;
+	char	   *accountName = pnstrdup(host, strcspn(host, "."));
 
 	if (!IsAzureStorageAccountName(accountName))
 		return NULL;
 
-	char	   *sasToken = NULL;
-
-	if (host != NULL)
-		sasToken = GetVendedConfigString(body, mapKey,
-										 psprintf("adls.sas-token.%s", host));
+	char	   *sasToken = GetVendedConfigString(body, mapKey,
+												 psprintf("adls.sas-token.%s",
+														  host));
 
 	if (sasToken == NULL)
 		sasToken = GetVendedConfigString(body, mapKey,
@@ -1454,7 +1538,7 @@ ParseVendedAzureCredsFromConfig(Jsonb *body, const char *mapKey,
 		creds->blobEndpoint = endpoint;
 		creds->dfsEndpoint = pstrdup(endpoint);
 	}
-	else if (host != NULL)
+	else
 	{
 		AzureEndpointsFromHost(host, &creds->blobEndpoint, &creds->dfsEndpoint);
 
@@ -1472,12 +1556,9 @@ ParseVendedAzureCredsFromConfig(Jsonb *body, const char *mapKey,
 		}
 	}
 
-	char	   *expiresMsStr = NULL;
-
-	if (host != NULL)
-		expiresMsStr = GetVendedConfigString(body, mapKey,
-											 psprintf("adls.sas-token-expires-at-ms.%s",
-													  host));
+	char	   *expiresMsStr = GetVendedConfigString(body, mapKey,
+													 psprintf("adls.sas-token-expires-at-ms.%s",
+															  host));
 
 	if (expiresMsStr == NULL)
 		expiresMsStr = GetVendedConfigString(body, mapKey,
@@ -1534,7 +1615,7 @@ static const VendedStorage S3Storage = {
 static const VendedStorage AzureStorage = {
 	"Azure Data Lake Storage", "adls.", AzureSettingKeys,
 	ParseVendedAzureCredsFromConfig,
-	"pg_lake needs a SAS token for the storage account the table is on."
+	"pg_lake needs a SAS token for the storage account the table's location names."
 };
 
 static const VendedStorage GcsStorage = {
