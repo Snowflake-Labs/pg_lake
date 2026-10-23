@@ -1250,10 +1250,10 @@ HostEndsWith(const char *host, size_t hostLen, const char *suffix)
  * accepted can only reach the storage account host names.  The default
  * pg_lake.allowed_azure_host_suffixes admits every account under Azure's
  * storage domains, including ones the catalog's operator created, so an
- * endpoint there has to name host's account, in host's cloud, with no
- * path, which would put the requests in another container.  A host
- * outside those domains is one an administrator admitted, an emulator
- * say, and is taken as is.
+ * endpoint there has to name host's account, in host's cloud, and carry
+ * no path, since a path would put the requests in another container.  A
+ * host outside those domains is one an administrator admitted, an
+ * emulator say, and is taken as is.
  */
 static bool
 IsAccountEndpoint(const char *endpoint, const char *host)
