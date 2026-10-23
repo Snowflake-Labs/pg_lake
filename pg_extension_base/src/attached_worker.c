@@ -31,6 +31,7 @@
 
 #include "access/htup_details.h"
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "commands/dbcommands.h"
 #include "pg_extension_base/attached_worker.h"
@@ -74,7 +75,8 @@
 #define ATTACHED_WORKER_KEY_QUEUE		3
 #define ATTACHED_WORKER_KEY_FLAGS		4
 #define ATTACHED_WORKER_KEY_TUPLE_QUEUE	5
-#define ATTACHED_WORKER_NKEYS			6
+#define ATTACHED_WORKER_KEY_SEARCH_PATH	6
+#define ATTACHED_WORKER_NKEYS			7
 
 #define ATTACHED_WORKER_FLAG_RETURN_RESULTS	0x01
 #define ATTACHED_WORKER_FLAG_CALLER_WRITABLE	0x02
@@ -362,6 +364,17 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	if (!XactReadOnly)
 		flags |= ATTACHED_WORKER_FLAG_CALLER_WRITABLE;
 
+	/*
+	 * The worker resolves names through the caller's search_path, not the one
+	 * it would get from ALTER DATABASE/ROLE ... SET.  Those defaults are set
+	 * by the database owner, and the worker often runs as a more privileged
+	 * role than they are (callers use it to run commands as the superuser),
+	 * so an owner-set path could point an unqualified name in the command at
+	 * a function or operator of theirs.  The caller already chose the path
+	 * its command was written against, so the worker uses that one.
+	 */
+	char	   *searchPath = namespace_search_path;
+
 	/* estimate size of the background worker input */
 	shm_toc_estimator sharedMemoryEstimator;
 
@@ -369,6 +382,7 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(databaseName) + 1);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(userName) + 1);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(command) + 1);
+	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(searchPath) + 1);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, QUEUE_SIZE);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, sizeof(uint32));
 	if (flags & ATTACHED_WORKER_FLAG_RETURN_RESULTS)
@@ -399,6 +413,11 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 
 	strcpy(commandInShm, command);
 	shm_toc_insert(toc, ATTACHED_WORKER_KEY_COMMAND, commandInShm);
+
+	char	   *searchPathInShm = shm_toc_allocate(toc, strlen(searchPath) + 1);
+
+	strcpy(searchPathInShm, searchPath);
+	shm_toc_insert(toc, ATTACHED_WORKER_KEY_SEARCH_PATH, searchPathInShm);
 
 	/* set up the shared memory queue for responses */
 	shm_mq	   *outputQueue = shm_mq_create(shm_toc_allocate(toc, QUEUE_SIZE), QUEUE_SIZE);
@@ -933,6 +952,9 @@ AttachedWorkerMain(Datum mainArg)
 	char	   *databaseName = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_DATABASE, false);
 	char	   *userName = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_USERNAME, false);
 	char	   *command = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_COMMAND, false);
+
+	/* missing_ok, like the flags below, for a caller on an older library */
+	char	   *searchPath = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_SEARCH_PATH, true);
 	shm_mq	   *messageQueue = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_QUEUE, false);
 
 	/* Read flags (missing_ok for backward compatibility) */
@@ -984,6 +1006,14 @@ AttachedWorkerMain(Datum mainArg)
 	if (callerWritable)
 		SetConfigOption("default_transaction_read_only", "off",
 						PGC_USERSET, PGC_S_SESSION);
+
+	/*
+	 * Use the caller's search_path (see StartAttachedWorkerInternal).  It is
+	 * set at session level, so it overrides ALTER DATABASE/ROLE ... SET, and
+	 * a COMMIT or ROLLBACK in the command cannot undo it.
+	 */
+	if (searchPath != NULL)
+		SetConfigOption("search_path", searchPath, PGC_USERSET, PGC_S_SESSION);
 
 	/* Start the transaction */
 	StartTransactionCommand();

@@ -58,6 +58,68 @@ def test_write(superuser_conn, pg_extension_base):
     superuser_conn.rollback()
 
 
+def test_worker_uses_caller_search_path(superuser_conn, pg_extension_base):
+    """The worker resolves names through the caller's search_path, not the
+    database's default, so a database owner cannot point an unqualified name
+    in the command at an operator of theirs."""
+    db = server_params.PG_DATABASE
+    run_command(
+        """
+        DROP SCHEMA IF EXISTS attached_sp_evil CASCADE;
+        DROP SCHEMA IF EXISTS attached_sp_mine CASCADE;
+        CREATE SCHEMA attached_sp_evil;
+        CREATE SEQUENCE attached_sp_evil.hits;
+        CREATE FUNCTION attached_sp_evil.texteq(a text, b text) RETURNS bool
+        LANGUAGE plpgsql AS $fn$
+        BEGIN
+            PERFORM pg_catalog.nextval('attached_sp_evil.hits');
+            RETURN a OPERATOR(pg_catalog.=) b;
+        END $fn$;
+        CREATE OPERATOR attached_sp_evil.= (
+            LEFTARG = text, RIGHTARG = text, FUNCTION = attached_sp_evil.texteq);
+        CREATE SCHEMA attached_sp_mine;
+        CREATE TABLE attached_sp_mine.t (x int);
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f'ALTER DATABASE "{db}" SET search_path = attached_sp_evil, pg_catalog',
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        # Without a path of its own the worker would start on the database's
+        # path, where the planted = wins.
+        run_command("SET search_path = attached_sp_mine, pg_catalog", superuser_conn)
+
+        # The planted operator never runs ...
+        run_command(
+            "SELECT * FROM extension_base.run_attached($$SELECT 'a'::text = 'a'::text$$)",
+            superuser_conn,
+        )
+        result = run_query(
+            "SELECT is_called FROM attached_sp_evil.hits", superuser_conn
+        )
+        assert result[0]["is_called"] == False
+
+        # ... and an unqualified table resolves through the caller's path.
+        run_command(
+            "SELECT * FROM extension_base.run_attached($$INSERT INTO t VALUES (1)$$)",
+            superuser_conn,
+        )
+        result = run_query("SELECT count(*) FROM attached_sp_mine.t", superuser_conn)
+        assert result[0]["count"] == 1
+    finally:
+        superuser_conn.rollback()
+        run_command(f'ALTER DATABASE "{db}" RESET search_path', superuser_conn)
+        run_command(
+            "DROP SCHEMA attached_sp_evil CASCADE; DROP SCHEMA attached_sp_mine CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
 def test_write_while_server_configured_read_only(superuser_conn, pg_extension_base):
     """
     An attached worker must inherit the caller's writability.
