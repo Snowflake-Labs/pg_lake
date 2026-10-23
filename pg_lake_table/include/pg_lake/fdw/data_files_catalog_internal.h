@@ -34,7 +34,7 @@
  * data files that PgLakeAddDataFileHook opted in. Read by the old per-row
  * catalog code in data_files_catalog.c, written by data_files_catalog_batch.c.
  */
-#define TX_DATA_FILES_QUALIFIED_TABLE_NAME PG_LAKE_TABLE_SCHEMA "tx_data_file_ids"
+#define TX_DATA_FILES_QUALIFIED_TABLE_NAME "pg_temp.pg_lake_tx_data_file_ids"
 
 /* True when adjacent ops of this type can be collapsed into one bulk SQL. */
 bool		BatchableType(TableMetadataOperationType type);
