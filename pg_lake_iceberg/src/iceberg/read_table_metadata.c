@@ -314,7 +314,7 @@ ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field)
 
 	JsonExtractStringField(json, "name", FIELD_REQUIRED, &field->name, &nameLength);
 
-	JsonExtractField(json, "type", FIELD_OPTIONAL, &field->type);
+	JsonExtractField(json, "type", FIELD_REQUIRED, &field->type);
 	EnsureIcebergField(field->type);
 
 	JsonExtractBoolField(json, "required", FIELD_REQUIRED, &field->required);
@@ -558,10 +558,17 @@ ReadIcebergTypeFieldElement(JsonbContainer *json, DataFileSchemaField * fieldEle
 static bool
 JsonExtractField(JsonbContainer *topLevelJsonContainer, char *fieldName, FieldRequired required, Field * *field)
 {
+	if (!JsonContainerIsObject(topLevelJsonContainer))
+		ereport(ERROR, (errmsg("expected a JSON object in Iceberg schema "
+							   "when reading field %s", fieldName)));
+
 	JsonbValue *topLevelTypeFieldJson =
 		getKeyJsonValueFromContainer(topLevelJsonContainer, fieldName, strlen(fieldName), NULL);
-	Jsonb	   *topLevelJson =
-		JsonbValueToJsonb(topLevelTypeFieldJson);
+	Jsonb	   *topLevelJson = NULL;
+
+	/* a missing field is handled below, there is nothing to convert */
+	if (topLevelTypeFieldJson != NULL)
+		topLevelJson = JsonbValueToJsonb(topLevelTypeFieldJson);
 
 	/* each invocation of this function should fill one field */
 	*field = palloc0(sizeof(Field));
@@ -579,6 +586,9 @@ JsonExtractField(JsonbContainer *topLevelJsonContainer, char *fieldName, FieldRe
 	}
 	else if (topLevelTypeFieldJson != NULL && topLevelTypeFieldJson->type == jbvBinary)
 	{
+		if (!JsonContainerIsObject(topLevelTypeFieldJson->val.binary.data))
+			ereport(ERROR, (errmsg("corrupted field in Iceberg schema: %s", fieldName)));
+
 		/*
 		 * Now, we are going to parse the non-scalar json object. The json
 		 * object can be a map, list or struct. First, fetch the type field
