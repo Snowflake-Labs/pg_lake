@@ -57,7 +57,8 @@ import time
 # _run_counting_catalog_reads and _count_catalog_reads count those reports.
 # One test still races, the view one, to show the result a reader gets is right
 # end to end, and the tests for functions rewrite the catalog while a function
-# sleeps between two reads, to show which version each read got.
+# waits between two reads on a lock the test holds, to show which version each
+# read got.
 
 
 # The catalog export worker rewrites catalog.json whenever the set of pg_lake
@@ -218,28 +219,69 @@ def _count_catalog_reads(pg_conn, statement):
     return catalog_reads
 
 
-# Rewrite catalog.json one second into run, which sleeps between its reads, and
-# check the rewrite landed well before run returned, so that a read after the
-# sleep had the rewrite to see and a read that misses it is the pin rather than
-# a race the test lost.
-def _rewrite_one_second_into(s3, key, body, sleep_seconds, run):
-    rewritten_at = []
+# The functions under test wait on an advisory lock between two of their
+# reads.  _rewrite_while_waiting holds that lock from a session of its own
+# while it rewrites catalog.json, and nothing else takes it, so anywhere else
+# the wait is over at once.
+REWRITE_LOCK_KEYS = (741, 1)
+REWRITE_LOCK = "%d, %d" % REWRITE_LOCK_KEYS
+WAIT_FOR_REWRITE = (
+    f"PERFORM pg_advisory_lock({REWRITE_LOCK}); "
+    f"PERFORM pg_advisory_unlock({REWRITE_LOCK});"
+)
 
-    def rewrite_catalog():
-        _put_catalog(s3, key, body)
-        rewritten_at.append(time.monotonic())
+# the same wait in a SQL function body or a message of several statements
+WAIT_FOR_REWRITE_IN_SQL = WAIT_FOR_REWRITE.replace("PERFORM", "SELECT")
 
-    rewrite_timer = threading.Timer(1.0, rewrite_catalog)
-    rewrite_timer.start()
+
+# Run run in a thread and rewrite catalog.json while run waits between two of
+# its reads, so that the read before the wait saw the catalog as it was and the
+# read after it had the rewrite to see: a read that misses the rewrite is the
+# version held for it rather than a race the test lost.
+def _rewrite_while_waiting(s3, key, body, run):
+    lock_conn = open_pg_conn()
+    lock_conn.autocommit = True
+    run_command(f"SELECT pg_advisory_lock({REWRITE_LOCK})", lock_conn)
+
+    outcome = {}
+
+    def run_and_keep_outcome():
+        try:
+            outcome["result"] = run()
+        except Exception as error:
+            outcome["error"] = error
+
+    runner = threading.Thread(target=run_and_keep_outcome, daemon=True)
+    runner.start()
+    rewritten = False
     try:
-        result = run()
+        while runner.is_alive() and not rewritten:
+            if _rewrite_lock_waited_on(lock_conn):
+                _put_catalog(s3, key, body)
+                rewritten = True
+            else:
+                time.sleep(0.01)
     finally:
-        rewrite_timer.join(timeout=30)
+        run_command(f"SELECT pg_advisory_unlock({REWRITE_LOCK})", lock_conn)
+        lock_conn.close()
+        runner.join(timeout=60)
 
-    assert rewritten_at, "the rewriting thread did not run"
-    assert time.monotonic() - rewritten_at[0] > sleep_seconds / 2
+    if "error" in outcome:
+        raise outcome["error"]
+    assert rewritten, "run finished without waiting for the rewrite"
+    assert not runner.is_alive(), "run did not finish after the rewrite"
 
-    return result
+    return outcome["result"]
+
+
+# pg_locks shows the two keys of an advisory lock as its classid and objid
+def _rewrite_lock_waited_on(lock_conn):
+    return run_query(
+        f"SELECT EXISTS (SELECT FROM pg_locks WHERE locktype = 'advisory' "
+        f"AND classid = {REWRITE_LOCK_KEYS[0]} AND objid = {REWRITE_LOCK_KEYS[1]} "
+        f"AND objsubid = 2 AND NOT granted)",
+        lock_conn,
+    )[0][0]
 
 
 # The tests for functions record what each read saw in a table of their own,
@@ -323,13 +365,17 @@ def _two_catalog_versions(
                 )
                 pg_conn.commit()
 
-            wait_until_object_store_writable_table_pushed(pg_conn, schema, source_name)
             locations = early_locations if high == early_rows else late_locations
             locations[source_name] = _current_metadata_location(
                 pg_conn, schema, source_name
             )
 
         assert early_locations[source_name] != late_locations[source_name]
+
+    # the bodies take only the entries of the tables from the document the
+    # worker writes, and the worker writes every table into each document, so
+    # one written after the last commit has them all
+    wait_until_object_store_writable_table_pushed(pg_conn, schema, source_name)
 
     key, body_early, body_late = _reader_catalog_versions(
         pg_conn, s3, reader_prefix, early_locations, late_locations
@@ -889,19 +935,19 @@ def test_functions_read_their_statements_version(
     )
 
     run_command(
-        f"CREATE FUNCTION {schema}.rows_after(sleep_seconds float8) "
+        f"CREATE FUNCTION {schema}.rows_after_wait() "
         f"RETURNS TABLE (n bigint) {volatility} LANGUAGE plpgsql AS $$ BEGIN "
-        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {WAIT_FOR_REWRITE} "
         f"  RETURN QUERY SELECT count(*) FROM {schema}.read_tbl; "
         f"END; $$",
         pg_conn,
     )
     run_command(
-        f"CREATE FUNCTION {schema}.row_count_then_sleep(sleep_seconds float8) "
+        f"CREATE FUNCTION {schema}.row_count_then_wait() "
         f"RETURNS bigint {volatility} LANGUAGE plpgsql AS $$ "
         f"DECLARE n bigint; BEGIN "
         f"  SELECT count(*) INTO n FROM {schema}.read_tbl; "
-        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {WAIT_FOR_REWRITE} "
         f"  RETURN n; "
         f"END; $$",
         pg_conn,
@@ -913,24 +959,19 @@ def test_functions_read_their_statements_version(
 
     join_query = (
         f"SELECT count(*), max(f.n) "
-        f"FROM {schema}.read_tbl CROSS JOIN {schema}.rows_after(%s) f"
+        f"FROM {schema}.read_tbl CROSS JOIN {schema}.rows_after_wait() f"
     )
 
     # the outer scan and the query inside the function see one version
-    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, join_query % 0)
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, join_query)
     assert tuple(rows[0]) == (5, 5)
     assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
     pg_conn.commit()
 
     # the function reads after the rewrite and still gets the statement's
     # version
-    sleep_seconds = 3.0
-    rows = _rewrite_one_second_into(
-        s3,
-        key,
-        body_late,
-        sleep_seconds,
-        lambda: run_query(join_query % sleep_seconds, pg_conn),
+    rows = _rewrite_while_waiting(
+        s3, key, body_late, lambda: run_query(join_query, pg_conn)
     )
     assert tuple(rows[0]) == (5, 5)
     pg_conn.commit()
@@ -940,28 +981,23 @@ def test_functions_read_their_statements_version(
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
     calls_query = (
-        f"SELECT array_agg({schema}.row_count_then_sleep(%s) ORDER BY g) "
+        f"SELECT array_agg({schema}.row_count_then_wait() ORDER BY g) "
         f"FROM generate_series(1, 3) g"
     )
 
-    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, calls_query % 0)
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, calls_query)
     assert rows[0][0] == [5, 5, 5]
     assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
     pg_conn.commit()
 
-    sleep_seconds = 1.5
-    rows = _rewrite_one_second_into(
-        s3,
-        key,
-        body_late,
-        sleep_seconds,
-        lambda: run_query(calls_query % sleep_seconds, pg_conn),
+    rows = _rewrite_while_waiting(
+        s3, key, body_late, lambda: run_query(calls_query, pg_conn)
     )
     assert rows[0][0] == [5, 5, 5]
     pg_conn.commit()
 
     # the next statement reads the catalog as it stands
-    rows = run_query(calls_query % 0, pg_conn)
+    rows = run_query(calls_query, pg_conn)
     assert rows[0][0] == [9, 9, 9]
     pg_conn.commit()
 
@@ -987,57 +1023,56 @@ def test_do_block_procedure_trigger_and_sql_function_read_their_statements_versi
     )
     _create_seen_table(pg_conn, schema)
 
-    def read_twice(sleep_seconds, sleep_command="PERFORM"):
+    def read_twice(wait=WAIT_FOR_REWRITE):
         return (
             f"INSERT INTO {schema}.seen "
             f"  SELECT 'first', count(*) FROM {schema}.read_tbl; "
-            f"{sleep_command} pg_sleep({sleep_seconds}); "
+            f"{wait} "
             f"INSERT INTO {schema}.seen "
             f"  SELECT 'second', count(*) FROM {schema}.read_tbl; "
         )
 
     run_command(
-        f"CREATE PROCEDURE {schema}.read_twice(sleep_seconds float8) "
-        f"LANGUAGE plpgsql AS $$ BEGIN {read_twice('sleep_seconds')} END; $$",
+        f"CREATE PROCEDURE {schema}.read_twice() "
+        f"LANGUAGE plpgsql AS $$ BEGIN {read_twice()} END; $$",
         pg_conn,
     )
     run_command(
         f"CREATE FUNCTION {schema}.read_twice_on_insert() RETURNS trigger "
         f"LANGUAGE plpgsql AS $$ BEGIN "
-        f"  {read_twice('TG_ARGV[0]::float8')} RETURN NULL; "
+        f"  {read_twice()} RETURN NULL; "
         f"END; $$",
         pg_conn,
     )
-    run_command(f"CREATE TABLE {schema}.fire (sleep_seconds float8)", pg_conn)
+    run_command(f"CREATE TABLE {schema}.fire (a int)", pg_conn)
     run_command(
         f"CREATE TRIGGER read_twice AFTER INSERT ON {schema}.fire "
-        f"FOR EACH ROW EXECUTE FUNCTION {schema}.read_twice_on_insert('3')",
+        f"FOR EACH ROW EXECUTE FUNCTION {schema}.read_twice_on_insert()",
         pg_conn,
     )
 
     # each statement of a SQL function body is a query of its own as well
     run_command(
-        f"CREATE FUNCTION {schema}.read_twice_in_sql(sleep_seconds float8) "
+        f"CREATE FUNCTION {schema}.read_twice_in_sql() "
         f"RETURNS void LANGUAGE sql AS $$ "
-        f"  {read_twice('sleep_seconds', sleep_command='SELECT')} $$",
+        f"  {read_twice(WAIT_FOR_REWRITE_IN_SQL)} $$",
         pg_conn,
     )
     pg_conn.commit()
 
-    sleep_seconds = 3.0
     statements = {
-        "DO block": f"DO $$ BEGIN {read_twice(sleep_seconds)} END; $$",
-        "procedure": f"CALL {schema}.read_twice({sleep_seconds})",
-        "trigger": f"INSERT INTO {schema}.fire VALUES ({sleep_seconds})",
-        "SQL function": f"SELECT {schema}.read_twice_in_sql({sleep_seconds})",
+        "DO block": f"DO $$ BEGIN {read_twice()} END; $$",
+        "procedure": f"CALL {schema}.read_twice()",
+        "trigger": f"INSERT INTO {schema}.fire VALUES (1)",
+        "SQL function": f"SELECT {schema}.read_twice_in_sql()",
     }
 
     for kind, statement in statements.items():
         _put_catalog(s3, key, body_early)
         pg_conn.commit()
 
-        _rewrite_one_second_into(
-            s3, key, body_late, sleep_seconds, lambda: run_command(statement, pg_conn)
+        _rewrite_while_waiting(
+            s3, key, body_late, lambda: run_command(statement, pg_conn)
         )
         assert _seen(pg_conn, schema) == {"first": 5, "second": 5}, kind
         pg_conn.commit()
@@ -1046,12 +1081,10 @@ def test_do_block_procedure_trigger_and_sql_function_read_their_statements_versi
         assert run_query(f"SELECT count(*) FROM {schema}.read_tbl", pg_conn)[0][0] == 9
         pg_conn.commit()
 
-    # and two reads a moment apart are one catalog read, no timing needed
+    # and the two reads are one catalog read
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
-    catalog_reads = _count_catalog_reads(
-        pg_conn, f"DO $$ BEGIN {read_twice(0)} END; $$"
-    )
+    catalog_reads = _count_catalog_reads(pg_conn, f"DO $$ BEGIN {read_twice()} END; $$")
     assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
     pg_conn.rollback()
 
@@ -1081,15 +1114,12 @@ def test_each_statement_of_a_message_reads_with_its_own_snapshot(
     assert catalog_reads == 2, f"expected two catalog reads, got {catalog_reads}"
     pg_conn.commit()
 
-    sleep_seconds = 3.0
     message = (
         f"INSERT INTO {schema}.seen SELECT 'first', count(*) FROM {schema}.read_tbl; "
-        f"SELECT pg_sleep({sleep_seconds}); "
+        f"{WAIT_FOR_REWRITE_IN_SQL} "
         f"INSERT INTO {schema}.seen SELECT 'second', count(*) FROM {schema}.read_tbl"
     )
-    _rewrite_one_second_into(
-        s3, key, body_late, sleep_seconds, lambda: run_command(message, pg_conn)
-    )
+    _rewrite_while_waiting(s3, key, body_late, lambda: run_command(message, pg_conn))
     assert _seen(pg_conn, schema) == {"first": 5, "second": 9}
     pg_conn.commit()
 
@@ -1113,11 +1143,11 @@ def test_functions_read_the_transaction_version_under_transaction_snapshots(
         pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
     )
     run_command(
-        f"CREATE FUNCTION {schema}.read_twice(sleep_seconds float8, "
+        f"CREATE FUNCTION {schema}.read_twice("
         f"OUT first_read bigint, OUT second_read bigint) "
         f"VOLATILE LANGUAGE plpgsql AS $$ BEGIN "
         f"  SELECT count(*) INTO first_read FROM {schema}.read_tbl; "
-        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {WAIT_FOR_REWRITE} "
         f"  SELECT count(*) INTO second_read FROM {schema}.read_tbl; "
         f"END; $$",
         pg_conn,
@@ -1131,16 +1161,12 @@ def test_functions_read_the_transaction_version_under_transaction_snapshots(
         == isolation_level.lower()
     )
 
-    sleep_seconds = 3.0
-    rows = _rewrite_one_second_into(
+    rows = _rewrite_while_waiting(
         s3,
         key,
         body_late,
-        sleep_seconds,
         lambda: run_query(
-            f"SELECT first_read, second_read "
-            f"FROM {schema}.read_twice({sleep_seconds})",
-            pg_conn,
+            f"SELECT first_read, second_read FROM {schema}.read_twice()", pg_conn
         ),
     )
     assert tuple(rows[0]) == (5, 5)
@@ -1209,12 +1235,12 @@ def test_open_cursor_versions_go_with_the_transaction(
     )
     _create_seen_table(pg_conn, schema)
     run_command(
-        f"CREATE PROCEDURE {schema}.read_commit_read(sleep_seconds float8) "
+        f"CREATE PROCEDURE {schema}.read_commit_read() "
         f"LANGUAGE plpgsql AS $$ BEGIN "
         f"  INSERT INTO {schema}.seen "
         f"    SELECT 'before commit', count(*) FROM {schema}.read_tbl; "
         f"  COMMIT; "
-        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {WAIT_FOR_REWRITE} "
         f"  INSERT INTO {schema}.seen "
         f"    SELECT 'after commit', count(*) FROM {schema}.read_tbl; "
         f"END; $$",
@@ -1263,15 +1289,11 @@ def test_open_cursor_versions_go_with_the_transaction(
     pg_conn.commit()
     pg_conn.autocommit = True
     try:
-        sleep_seconds = 3.0
-        _rewrite_one_second_into(
+        _rewrite_while_waiting(
             s3,
             key,
             body_late,
-            sleep_seconds,
-            lambda: run_command(
-                f"CALL {schema}.read_commit_read({sleep_seconds})", pg_conn
-            ),
+            lambda: run_command(f"CALL {schema}.read_commit_read()", pg_conn),
         )
     finally:
         pg_conn.autocommit = False
@@ -1297,7 +1319,7 @@ def test_subtransaction_abort_inside_a_function(
         pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
     )
     run_command(
-        f"CREATE FUNCTION {schema}.read_through_failure(sleep_seconds float8, "
+        f"CREATE FUNCTION {schema}.read_through_failure("
         f"OUT inside bigint, OUT after bigint) "
         f"VOLATILE LANGUAGE plpgsql AS $$ BEGIN "
         f"  BEGIN "
@@ -1306,7 +1328,7 @@ def test_subtransaction_abort_inside_a_function(
         f"  EXCEPTION WHEN division_by_zero THEN "
         f"    NULL; "
         f"  END; "
-        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {WAIT_FOR_REWRITE} "
         f"  SELECT count(*) INTO after FROM {schema}.read_tbl; "
         f"END; $$",
         pg_conn,
@@ -1314,20 +1336,15 @@ def test_subtransaction_abort_inside_a_function(
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
 
-    call_query = f"SELECT inside, after FROM {schema}.read_through_failure(%s)"
+    call_query = f"SELECT inside, after FROM {schema}.read_through_failure()"
 
-    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, call_query % 0)
+    rows, catalog_reads = _run_counting_catalog_reads(pg_conn, call_query)
     assert tuple(rows[0]) == (5, 5)
     assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
     pg_conn.commit()
 
-    sleep_seconds = 3.0
-    rows = _rewrite_one_second_into(
-        s3,
-        key,
-        body_late,
-        sleep_seconds,
-        lambda: run_query(call_query % sleep_seconds, pg_conn),
+    rows = _rewrite_while_waiting(
+        s3, key, body_late, lambda: run_query(call_query, pg_conn)
     )
     assert tuple(rows[0]) == (5, 5)
     pg_conn.commit()
@@ -1489,9 +1506,9 @@ def test_extended_protocol_reads_one_version(
         pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
     )
     run_command(
-        f"CREATE FUNCTION {schema}.rows_after(sleep_seconds float8) "
+        f"CREATE FUNCTION {schema}.rows_after_wait() "
         f"RETURNS TABLE (n bigint) STABLE LANGUAGE plpgsql AS $$ BEGIN "
-        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {WAIT_FOR_REWRITE} "
         f"  RETURN QUERY SELECT count(*) FROM {schema}.read_tbl; "
         f"END; $$",
         pg_conn,
@@ -1501,7 +1518,8 @@ def test_extended_protocol_reads_one_version(
 
     join_query = (
         f"SELECT count(*), max(f.n) "
-        f"FROM {schema}.read_tbl CROSS JOIN {schema}.rows_after(%s) f"
+        f"FROM {schema}.read_tbl CROSS JOIN {schema}.rows_after_wait() f "
+        f"WHERE f.n >= %s"
     )
 
     notices = []
@@ -1512,7 +1530,7 @@ def test_extended_protocol_reads_one_version(
         conn.execute("SET client_min_messages TO DEBUG1")
         conn.commit()
 
-        row = conn.execute(join_query, (0.0,)).fetchone()
+        row = conn.execute(join_query, (0,)).fetchone()
         assert tuple(row) == (5, 5)
         catalog_reads = len([n for n in notices if CATALOG_READ_MESSAGE in n])
         assert catalog_reads == 1, f"expected one catalog read, got {catalog_reads}"
@@ -1520,18 +1538,16 @@ def test_extended_protocol_reads_one_version(
 
         # the scan resolved the catalog at Bind, before the rewrite, and the
         # function reads after it at Execute
-        sleep_seconds = 3.0
-        row = _rewrite_one_second_into(
+        row = _rewrite_while_waiting(
             s3,
             key,
             body_late,
-            sleep_seconds,
-            lambda: conn.execute(join_query, (sleep_seconds,)).fetchone(),
+            lambda: conn.execute(join_query, (0,)).fetchone(),
         )
         assert tuple(row) == (5, 5)
         conn.commit()
 
-        assert tuple(conn.execute(join_query, (0.0,)).fetchone()) == (9, 9)
+        assert tuple(conn.execute(join_query, (0,)).fetchone()) == (9, 9)
         conn.commit()
 
 
@@ -1560,21 +1576,21 @@ def test_nested_procedures_read_anew_after_a_commit(
         )
 
     run_command(
-        f"CREATE PROCEDURE {schema}.inner_read(sleep_seconds float8) "
+        f"CREATE PROCEDURE {schema}.inner_read() "
         f"LANGUAGE plpgsql AS $$ BEGIN "
-        f"  {record('inner before sleep')} "
-        f"  PERFORM pg_sleep(sleep_seconds); "
-        f"  {record('inner after sleep')} "
+        f"  {record('inner before wait')} "
+        f"  {WAIT_FOR_REWRITE} "
+        f"  {record('inner after wait')} "
         f"  COMMIT; "
         f"  {record('inner after commit')} "
         f"END; $$",
         pg_conn,
     )
     run_command(
-        f"CREATE PROCEDURE {schema}.outer_read(sleep_seconds float8) "
+        f"CREATE PROCEDURE {schema}.outer_read() "
         f"LANGUAGE plpgsql AS $$ BEGIN "
         f"  {record('outer before')} "
-        f"  CALL {schema}.inner_read(sleep_seconds); "
+        f"  CALL {schema}.inner_read(); "
         f"  {record('outer after')} "
         f"END; $$",
         pg_conn,
@@ -1585,21 +1601,19 @@ def test_nested_procedures_read_anew_after_a_commit(
     # only a CALL outside a transaction block may commit
     pg_conn.autocommit = True
     try:
-        sleep_seconds = 3.0
-        _rewrite_one_second_into(
+        _rewrite_while_waiting(
             s3,
             key,
             body_late,
-            sleep_seconds,
-            lambda: run_command(f"CALL {schema}.outer_read({sleep_seconds})", pg_conn),
+            lambda: run_command(f"CALL {schema}.outer_read()", pg_conn),
         )
     finally:
         pg_conn.autocommit = False
 
     assert _seen(pg_conn, schema) == {
         "outer before": 5,
-        "inner before sleep": 5,
-        "inner after sleep": 5,
+        "inner before wait": 5,
+        "inner after wait": 5,
         "inner after commit": 9,
         "outer after": 9,
     }
@@ -1630,12 +1644,12 @@ def test_exception_block_in_a_procedure_keeps_the_version(
     # what the failing block reads leaves it in a variable, because the
     # block's own writes go with its subtransaction
     run_command(
-        f"CREATE PROCEDURE {schema}.read_around_failure(sleep_seconds float8) "
+        f"CREATE PROCEDURE {schema}.read_around_failure() "
         f"LANGUAGE plpgsql AS $$ "
         f"DECLARE in_block bigint; in_handler bigint; BEGIN "
         f"  INSERT INTO {schema}.seen "
         f"    SELECT 'before', count(*) FROM {schema}.read_tbl; "
-        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {WAIT_FOR_REWRITE} "
         f"  BEGIN "
         f"    SELECT count(*) INTO in_block FROM {schema}.read_tbl; "
         f"    PERFORM 1 / 0; "
@@ -1660,15 +1674,11 @@ def test_exception_block_in_a_procedure_keeps_the_version(
         run_command(
             f"SET default_transaction_isolation TO '{isolation_level}'", pg_conn
         )
-        sleep_seconds = 3.0
-        _rewrite_one_second_into(
+        _rewrite_while_waiting(
             s3,
             key,
             body_late,
-            sleep_seconds,
-            lambda: run_command(
-                f"CALL {schema}.read_around_failure({sleep_seconds})", pg_conn
-            ),
+            lambda: run_command(f"CALL {schema}.read_around_failure()", pg_conn),
         )
     finally:
         run_command("RESET default_transaction_isolation", pg_conn)
@@ -1747,11 +1757,11 @@ def test_for_loop_cursor_reads_the_catalog_as_it_opens(
         pg_conn, s3, schema, ["read_tbl"], 5, 4, reader_catalog_prefix
     )
     run_command(
-        f"CREATE FUNCTION {schema}.read_around_loop(sleep_seconds float8, "
+        f"CREATE FUNCTION {schema}.read_around_loop("
         f"OUT before_loop bigint, OUT in_loop bigint, OUT after_loop bigint) "
         f"LANGUAGE plpgsql AS $$ DECLARE r record; BEGIN "
         f"  SELECT count(*) INTO before_loop FROM {schema}.read_tbl; "
-        f"  PERFORM pg_sleep(sleep_seconds); "
+        f"  {WAIT_FOR_REWRITE} "
         f"  FOR r IN SELECT count(*) AS n FROM {schema}.read_tbl LOOP "
         f"    in_loop := r.n; "
         f"  END LOOP; "
@@ -1762,15 +1772,13 @@ def test_for_loop_cursor_reads_the_catalog_as_it_opens(
     _put_catalog(s3, key, body_early)
     pg_conn.commit()
 
-    sleep_seconds = 3.0
-    rows = _rewrite_one_second_into(
+    rows = _rewrite_while_waiting(
         s3,
         key,
         body_late,
-        sleep_seconds,
         lambda: run_query(
             f"SELECT before_loop, in_loop, after_loop "
-            f"FROM {schema}.read_around_loop({sleep_seconds})",
+            f"FROM {schema}.read_around_loop()",
             pg_conn,
         ),
     )
