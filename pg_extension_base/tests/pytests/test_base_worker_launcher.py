@@ -1153,6 +1153,7 @@ def test_database_starter_lock_is_outside_the_database_lock_space(superuser_conn
 def test_worker_ignores_database_search_path(superuser_conn):
     """Base workers run as the bootstrap superuser, so they must not resolve
     names through a search_path the database owner set with ALTER DATABASE."""
+    superuser_conn.rollback()
     superuser_conn.autocommit = True
     run_command("CREATE DATABASE base_worker_sp", superuser_conn)
 
