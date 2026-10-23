@@ -867,7 +867,7 @@ def test_vended_credentials_multiple_tables_independent_creds(
 # These use the get_rest_vended_credentials test shim, which loads a table
 # and returns the extracted credential fields as a pipe-delimited summary:
 #     "<access-key-id>|<scope>|<yes|no session token>|<expiry|noexpiry>|
-#      <region>|<endpoint>|<url-style>|<use-ssl>"
+#      <region>|<url-style>"
 # ---------------------------------------------------------------------------
 
 _VENDED_CREDS_FN = """
@@ -994,9 +994,7 @@ def test_vended_credentials_scope_from_metadata_location(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "test_ns", "test_table")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "VENDED_ACCESS_KEY_123"
         # mock returns metadata.location = s3://test-bucket/test-ns/test-table
         assert scope == "s3://test-bucket/test-ns/test-table/"
@@ -1005,7 +1003,6 @@ def test_vended_credentials_scope_from_metadata_location(
         assert expiry == "noexpiry"
         # region comes from client.region; the base mock vends no S3 settings
         assert region == "us-west-2"
-        assert endpoint == ""
         assert url_style == ""
 
     finally:
@@ -1164,9 +1161,7 @@ def test_vended_credentials_no_scope_when_undeterminable(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "NOSCOPE_KEY"
         assert scope == "", f"expected no scope, got {scope!r}"
 
@@ -1238,9 +1233,7 @@ def test_vended_credentials_storage_credentials_array(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "SC_ACCESS_KEY"
         # scope comes from the storage-credential prefix (already ends in /)
         assert scope == "s3://sc-bucket/ns/tbl/"
@@ -1320,9 +1313,7 @@ def test_vended_credentials_region_falls_back_to_table_config(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "RG_ACCESS_KEY"
         assert region == "us-west-2"
 
@@ -1387,9 +1378,7 @@ def test_vended_credentials_expiry_from_config(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "EXP_KEY"
         assert scope == "s3://exp-bucket/ns/tbl/"
         assert expiry == "expiry"
@@ -1407,9 +1396,10 @@ def test_vended_credentials_s3_settings_from_config(
     superuser_conn, iceberg_extension, installcheck
 ):
     """
-    The catalog's own S3 connection settings are parsed from the config
-    map: s3.endpoint -> endpoint, s3.path-style-access -> url-style, and
-    s3.region is used as the region fallback when client.region is absent.
+    The catalog's own S3 settings are parsed from the config map:
+    s3.path-style-access -> url-style, and s3.region is used as the region
+    fallback when client.region is absent.  s3.endpoint is not used: the
+    endpoint always comes from the secret that already covers the prefix.
     """
     if installcheck:
         return
@@ -1458,95 +1448,12 @@ def test_vended_credentials_s3_settings_from_config(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "CFG_KEY"
         assert scope == "s3://cfg-bucket/ns/tbl/"
         assert has_token == "no"
         assert region == "ap-south-1"
-        assert endpoint == "minio.example.com:9000"
         assert url_style == "path"
-        # no scheme to read SSL from, so it is left to be inherited
-        assert use_ssl == ""
-
-    finally:
-        run_command(
-            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
-            superuser_conn,
-        )
-        superuser_conn.commit()
-        _stop(httpd, thread)
-
-
-@pytest.mark.parametrize(
-    "catalog_endpoint,expected_endpoint,expected_ssl",
-    [
-        ("http://minio.example.com:9000", "minio.example.com:9000", "false"),
-        ("https://s3.example.com/", "s3.example.com", "true"),
-    ],
-)
-def test_vended_credentials_endpoint_scheme_decides_ssl(
-    superuser_conn,
-    iceberg_extension,
-    installcheck,
-    catalog_endpoint,
-    expected_endpoint,
-    expected_ssl,
-):
-    """
-    Iceberg states s3.endpoint as a URL; DuckDB wants a bare host[:port]
-    and a separate USE_SSL.  The scheme decides SSL, so a catalog pointing
-    at a plaintext store is honored rather than inheriting SSL from
-    whatever secret happens to cover the prefix.
-    """
-    if installcheck:
-        return
-
-    def _make_handler():
-        class _Handler(BaseHTTPRequestHandler):
-            def _handle(self):
-                length = int(self.headers.get("Content-Length", 0))
-                if length > 0:
-                    self.rfile.read(length)
-                if _oauth_or_none(self):
-                    return
-                if "/tables/" in self.path and self.command == "GET":
-                    _reply(
-                        self,
-                        {
-                            "metadata-location": "s3://ssl-bucket/ns/tbl/metadata/v1.metadata.json",
-                            "metadata": {
-                                "format-version": 2,
-                                "table-uuid": str(uuid.uuid4()),
-                                "location": "s3://ssl-bucket/ns/tbl",
-                            },
-                            "config": {
-                                "s3.access-key-id": "SSL_KEY",
-                                "s3.secret-access-key": "SSL_SECRET",
-                                "s3.endpoint": catalog_endpoint,
-                            },
-                        },
-                    )
-                    return
-                self.send_response(404)
-                self.end_headers()
-
-            do_GET = _handle
-            do_POST = _handle
-
-            def log_message(self, fmt, *args):
-                pass
-
-        return _Handler
-
-    httpd, thread = _serve(_make_handler())
-    try:
-        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
-
-        _, _, _, _, _, endpoint, _, use_ssl = summary.split("|")
-        assert endpoint == expected_endpoint
-        assert use_ssl == expected_ssl
 
     finally:
         run_command(
@@ -1615,9 +1522,7 @@ def test_vended_credentials_scope_clamped_to_table_root(
     try:
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-        access_key, scope, has_token, expiry, region, endpoint, url_style, use_ssl = (
-            summary.split("|")
-        )
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
         assert access_key == "CLAMP_KEY"
         # clamped from the broad "s3://wh-bucket/" down to the table root
         assert scope == "s3://wh-bucket/ns/tbl/"
@@ -2429,10 +2334,10 @@ def test_vended_credentials_azure_endpoints(
 ):
     """
     The endpoints come from the table's own host, so a sovereign cloud is
-    not sent to the public one.  A catalog can state an endpoint of its own
-    under adls.connection-string.<host>, which in Iceberg's ADLS FileIO is
-    an endpoint URL; a value that is a connection string instead is not
-    taken for one.
+    not sent to the public one.  A catalog can state another endpoint of
+    that account, a private endpoint say, under adls.connection-string.<host>,
+    which in Iceberg's ADLS FileIO is an endpoint URL; a value that is a
+    connection string instead is not taken for one.
     """
     if installcheck:
         return
@@ -2496,6 +2401,93 @@ def test_vended_credentials_azure_endpoint_is_held_to_the_host_allowlist(
     assert any(
         "ignoring the endpoint the catalog vended" in n for n in superuser_conn.notices
     ), "\n".join(superuser_conn.notices)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        pytest.param("https://other.blob.core.windows.net", id="another-account"),
+        pytest.param(
+            "https://other.privatelink.dfs.core.windows.net",
+            id="another-accounts-private-endpoint",
+        ),
+        pytest.param("https://acct.blob.core.chinacloudapi.cn", id="another-cloud"),
+        pytest.param("https://acct.blob.core.windows.net/other", id="a-path"),
+    ],
+)
+def test_vended_credentials_azure_endpoint_must_be_the_accounts_own(
+    superuser_conn, iceberg_extension, installcheck, endpoint
+):
+    """
+    Regression test for: a catalog-stated endpoint could send the requests
+    for a table's location to another storage account.
+
+    Anyone can create a storage account under Azure's storage domains, so
+    the default pg_lake.allowed_azure_host_suffixes admits accounts the
+    catalog's operator controls, and the vended secret serves every session
+    reading under the table's location.  An endpoint there has to be the
+    account's own, in the same cloud, with no path, which would put the
+    requests in another container.  Any other is reported and the table's
+    own host is used instead.
+    """
+    if installcheck:
+        return
+
+    cred = _azure_credential(
+        superuser_conn,
+        "storage-credentials",
+        _ADLS_LOCATION,
+        {
+            f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
+            f"adls.connection-string.{_ADLS_HOST}": endpoint,
+        },
+    )
+
+    assert (cred["blob"], cred["dfs"]) == (
+        "https://acct.blob.core.windows.net",
+        "https://acct.dfs.core.windows.net",
+    )
+    assert any(
+        "ignoring the endpoint the catalog vended" in n for n in superuser_conn.notices
+    ), "\n".join(superuser_conn.notices)
+
+
+def test_vended_credentials_azure_endpoint_must_be_the_accounts_own_in_every_cloud(
+    superuser_conn, iceberg_extension, installcheck
+):
+    """
+    Every suffix pg_lake.allowed_azure_host_suffixes admits by default is
+    under a domain where anyone can create a storage account, so another
+    account's endpoint is ignored under each of them.  The suffixes come
+    from the setting's built-in default, so a cloud added there fails here
+    until it is added to AzureStorageDomains too.
+    """
+    if installcheck:
+        return
+
+    default_suffixes = run_query(
+        "SELECT boot_val FROM pg_settings "
+        "WHERE name = 'pg_lake.allowed_azure_host_suffixes'",
+        superuser_conn,
+    )[0][0]
+
+    for suffix in default_suffixes.split(","):
+        domain = suffix.split(".", 2)[2]
+        host = f"acct.dfs.{domain}"
+        cred = _azure_credential(
+            superuser_conn,
+            "storage-credentials",
+            f"abfss://container@{host}/ns/tbl",
+            {
+                f"adls.sas-token.{host}": "sv=2025-01-05&sig=X",
+                f"adls.connection-string.{host}": f"https://other{suffix}",
+            },
+        )
+
+        assert (cred["blob"], cred["dfs"]) == (
+            f"https://acct.blob.{domain}",
+            f"https://acct.dfs.{domain}",
+        ), suffix
 
 
 def test_vended_credentials_azure_refused_endpoint_reported_once(
@@ -2567,6 +2559,51 @@ def test_vended_credentials_azure_endpoint_allowed_by_the_host_allowlist(
         superuser_conn.commit()
 
 
+@pytest.mark.parametrize(
+    "endpoint, expected",
+    [
+        pytest.param(
+            "https://other.blob.core.windows.net",
+            ("https://acct.blob.core.windows.net", "https://acct.dfs.core.windows.net"),
+            id="another-account",
+        ),
+        pytest.param(
+            "https://storage.example.net",
+            ("https://storage.example.net", "https://storage.example.net"),
+            id="a-host-of-the-catalogs-own",
+        ),
+    ],
+)
+def test_vended_credentials_azure_endpoint_under_a_broad_host_suffix(
+    superuser_conn, iceberg_extension, installcheck, endpoint, expected
+):
+    """
+    A suffix an administrator adds admits every host under it for any
+    table, so a broad one such as ".net" lets a catalog state a host of its
+    own.  Under Azure's storage domains the endpoint still has to be the
+    location's account.
+    """
+    if installcheck:
+        return
+
+    run_command("SET pg_lake.allowed_azure_host_suffixes TO '.net'", superuser_conn)
+    superuser_conn.commit()
+    try:
+        cred = _azure_credential(
+            superuser_conn,
+            "storage-credentials",
+            _ADLS_LOCATION,
+            {
+                f"adls.sas-token.{_ADLS_HOST}": "sv=2025-01-05&sig=X",
+                f"adls.connection-string.{_ADLS_HOST}": endpoint,
+            },
+        )
+        assert (cred["blob"], cred["dfs"]) == expected
+    finally:
+        run_command("RESET pg_lake.allowed_azure_host_suffixes", superuser_conn)
+        superuser_conn.commit()
+
+
 def test_vended_credentials_azure_location_host_is_held_to_the_host_allowlist(
     superuser_conn, iceberg_extension, installcheck
 ):
@@ -2613,8 +2650,8 @@ def test_vended_credentials_azure_account_name_must_be_valid(
 
     httpd, thread = _serve_provider_case(
         "config",
-        "az://container/ns/tbl",
-        {"adls.sas-token": "sv=2025-01-05&sig=X", "adls.account-name": account},
+        f"abfss://container@{account}.dfs.core.windows.net/ns/tbl",
+        {"adls.sas-token": "sv=2025-01-05&sig=X"},
         superuser_conn,
     )
     try:
@@ -2632,24 +2669,38 @@ def test_vended_credentials_azure_account_name_must_be_valid(
         _stop(httpd, thread, superuser_conn)
 
 
-def test_vended_credentials_azure_short_url_takes_the_stated_account(
-    superuser_conn, iceberg_extension, installcheck
+@pytest.mark.parametrize("shape", ["storage-credentials", "config"])
+def test_vended_credentials_azure_location_must_name_its_account(
+    superuser_conn, iceberg_extension, installcheck, shape
 ):
     """
-    az://<container>/<path> names no account, so the one the catalog
-    states is used, and the endpoints are left for the Azure SDK to derive
-    from it.
+    Regression test for: the catalog chose the storage account for a
+    location that names none.
+
+    az://<container>/<path> leaves the account to the secret, and the
+    vended secret serves every session reading under the table's location,
+    so the account adls.account-name states would serve all of them.  Such
+    a credential is not used, and is reported.
     """
     if installcheck:
         return
 
-    cred = _azure_credential(
-        superuser_conn,
-        "config",
+    httpd, thread = _serve_provider_case(
+        shape,
         "az://container/ns/tbl",
         {"adls.sas-token.acct": "sv=2025-01-05&sig=X", "adls.account-name": "acct"},
+        superuser_conn,
     )
+    try:
+        superuser_conn.notices.clear()
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
-    assert cred["account"] == "acct"
-    assert cred["scope"] == "az://container/ns/tbl/"
-    assert (cred["blob"], cred["dfs"]) == ("", "")
+        assert summary is None, f"expected no credential, got {summary!r}"
+        assert any(
+            "ignoring vended credentials for Azure Data Lake Storage" in n
+            for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+    finally:
+        _drop_vended_creds_fn(superuser_conn)
+        _stop(httpd, thread, superuser_conn)
