@@ -111,6 +111,34 @@ runs:
       run: |
         python3.11 -m pipenv install --dev
 
+    # The pg_lake_table and pg_lake_iceberg pytest suites build a Spark
+    # session, and pyspark resolves the Iceberg jars through ivy on every
+    # start.  Nothing in the image ships them, so without this cache every
+    # job downloads ~111 MB from repo1.maven.org, and a blip there takes out
+    # the whole shard: ivy reports a failed fetch as "module not found", the
+    # JVM exits before the py4j gateway is up, and pyspark raises
+    # JAVA_GATEWAY_EXITED in setup for every Spark test in the run.  The
+    # fixture's own retry does not help, because a resolve takes ~3 s and all
+    # three attempts land inside the same outage.
+    #
+    # A warm cache resolves both modules offline in ~66 ms with nothing
+    # downloaded, so the common case stops depending on Maven Central at all.
+    #
+    # The path is not under HOME: ivy puts its cache in ${user.home}/.ivy2,
+    # and the JVM takes user.home from the passwd entry of the uid the
+    # container runs as (1001 -> /home/postgres), not from $HOME (which the
+    # runner sets to /github/home, where the pipenv cache above lives).
+    #
+    # The key covers both halves of the coordinates: Pipfile.lock pins the
+    # pyspark version that selects iceberg-spark-runtime-<spark>_2.12, and
+    # test_common/helpers/spark.py holds the hardcoded Iceberg version.
+    - uses: actions/cache@v5
+      if: ${{ inputs.test_make_target == 'check-pg_lake_table' || inputs.test_make_target == 'check-pg_lake_iceberg' }}
+      name: Cache ivy
+      with:
+        path: /home/postgres/.ivy2
+        key: ivy-${{ inputs.container_os }}-${{ hashFiles('Pipfile.lock', 'test_common/helpers/spark.py') }}
+
     - name: Run test
       shell: bash
       run: |
