@@ -10,9 +10,42 @@ LAST_UPDATED_SEQUENCE_NUMBER_FIELD_ID = 2147483539
 
 EXPLAIN = "EXPLAIN (analyze, verbose, format json) "
 
+# The results must not depend on pruning: with it off the file is always read,
+# and the footer bounds are still fetched while partition pruning is on.
+PRUNING_MODES = {
+    "pruning_on": [],
+    "data_file_pruning_off": ["pg_lake_table.enable_data_file_pruning"],
+    "all_pruning_off": [
+        "pg_lake_table.enable_data_file_pruning",
+        "pg_lake_table.enable_partition_pruning",
+    ],
+}
+
+
+@pytest.fixture(params=PRUNING_MODES.keys())
+def pruning_mode(request):
+    settings = PRUNING_MODES[request.param]
+
+    run_command_outside_tx(
+        [f"ALTER SYSTEM SET {setting} TO off;" for setting in settings]
+        + ["SELECT pg_reload_conf()"]
+    )
+
+    yield request.param
+
+    run_command_outside_tx(
+        [f"ALTER SYSTEM RESET {setting}" for setting in settings]
+        + ["SELECT pg_reload_conf()"]
+    )
+
+
+def expected_files_scanned(pruning_mode):
+    """Files a query matching no row scans: none when pruned, else the one file."""
+    return "0" if pruning_mode == "pruning_on" else "1"
+
 
 def test_row_id_ahead_of_columns(
-    pg_conn, pgduck_conn, add_files_procedure, with_default_location
+    pg_conn, pgduck_conn, add_files_procedure, with_default_location, pruning_mode
 ):
     """
     With _row_id ahead of a and b in the file, each column must still be pruned
@@ -22,33 +55,38 @@ def test_row_id_ahead_of_columns(
     create_external_table(
         pg_conn,
         pgduck_conn,
-        "row_id_first",
+        f"row_id_first_{pruning_mode}",
         "a bigint, b bigint",
         "SELECT 1000 + i AS _row_id, i AS a, 100 + i AS b FROM range(1, 11) t(i)",
         f"'_row_id': {ROW_ID_FIELD_ID}, 'a': 1, 'b': 2",
     )
 
-    result = run_query(f"SELECT sum(a), sum(b) FROM {SCHEMA}.row_id_first", pg_conn)
+    result = run_query(
+        f"SELECT sum(a), sum(b) FROM {SCHEMA}.row_id_first_{pruning_mode}", pg_conn
+    )
     assert result == [[55, 1055]]
 
     result = run_query(
-        f"SELECT count(*) FROM {SCHEMA}.row_id_first WHERE a = 5", pg_conn
+        f"SELECT count(*) FROM {SCHEMA}.row_id_first_{pruning_mode} WHERE a = 5",
+        pg_conn,
     )
     assert result[0][0] == 1
 
     result = run_query(
-        f"SELECT count(*) FROM {SCHEMA}.row_id_first WHERE b = 105", pg_conn
+        f"SELECT count(*) FROM {SCHEMA}.row_id_first_{pruning_mode} WHERE b = 105",
+        pg_conn,
     )
     assert result[0][0] == 1
 
     results = run_query(
-        f"{EXPLAIN} SELECT * FROM {SCHEMA}.row_id_first WHERE a = 50", pg_conn
+        f"{EXPLAIN} SELECT * FROM {SCHEMA}.row_id_first_{pruning_mode} WHERE a = 50",
+        pg_conn,
     )
-    assert fetch_data_files_used(results) == "0"
+    assert fetch_data_files_used(results) == expected_files_scanned(pruning_mode)
 
 
 def test_row_id_between_columns(
-    pg_conn, pgduck_conn, add_files_procedure, with_default_location
+    pg_conn, pgduck_conn, add_files_procedure, with_default_location, pruning_mode
 ):
     """
     With _row_id between a and ts in the file, ts must keep its own bounds.
@@ -57,7 +95,7 @@ def test_row_id_between_columns(
     create_external_table(
         pg_conn,
         pgduck_conn,
-        "row_id_middle",
+        f"row_id_middle_{pruning_mode}",
         "a bigint, ts timestamptz",
         "SELECT i AS a, 1000 + i AS _row_id, "
         "TIMESTAMPTZ '2026-01-01 00:00:00+00' + to_days(CAST(i AS INTEGER)) AS ts "
@@ -66,22 +104,22 @@ def test_row_id_between_columns(
     )
 
     result = run_query(
-        f"SELECT count(*) FROM {SCHEMA}.row_id_middle "
+        f"SELECT count(*) FROM {SCHEMA}.row_id_middle_{pruning_mode} "
         "WHERE ts >= '2026-01-06 00:00:00+00'",
         pg_conn,
     )
     assert result[0][0] == 6
 
     results = run_query(
-        f"{EXPLAIN} SELECT * FROM {SCHEMA}.row_id_middle "
+        f"{EXPLAIN} SELECT * FROM {SCHEMA}.row_id_middle_{pruning_mode} "
         "WHERE ts >= '2027-01-01 00:00:00+00'",
         pg_conn,
     )
-    assert fetch_data_files_used(results) == "0"
+    assert fetch_data_files_used(results) == expected_files_scanned(pruning_mode)
 
 
 def test_row_lineage_columns_as_a_compaction_writes_them(
-    pg_conn, pgduck_conn, add_files_procedure, with_default_location
+    pg_conn, pgduck_conn, add_files_procedure, with_default_location, pruning_mode
 ):
     """
     A compaction that keeps row lineage materializes both lineage columns:
@@ -93,7 +131,7 @@ def test_row_lineage_columns_as_a_compaction_writes_them(
     create_external_table(
         pg_conn,
         pgduck_conn,
-        "row_lineage_compacted",
+        f"row_lineage_compacted_{pruning_mode}",
         "kind text, a bigint, flag boolean, ts timestamptz",
         "SELECT CASE WHEN i % 2 = 0 THEN 'I' ELSE 'D' END AS kind, "
         "1000 + i AS _row_id, i AS a, i % 3 = 0 AS flag, "
@@ -111,7 +149,7 @@ def test_row_lineage_columns_as_a_compaction_writes_them(
         ("ts >= '2026-01-06 00:00:00+00'", 6),
     ]:
         result = run_query(
-            f"SELECT count(*) FROM {SCHEMA}.row_lineage_compacted WHERE {predicate}",
+            f"SELECT count(*) FROM {SCHEMA}.row_lineage_compacted_{pruning_mode} WHERE {predicate}",
             pg_conn,
         )
         assert result[0][0] == expected, predicate
