@@ -258,6 +258,15 @@ uppercase letters, and names set later with `ALTER`, are used as given.
 An attached table always reads the catalog's current version, so queries see new commits from
 other engines without any changes in PostgreSQL. Dropping it only removes it from PostgreSQL.
 
+A statement reads one version of the catalog: every reference to a table, every table of one
+`object_store` catalog, and every query the statement runs in functions, `DO` blocks, procedures
+and triggers reads the same version. Under `READ COMMITTED`, the next statement reads the version
+that stands by then, and a cursor, including the one a PL/pgSQL `FOR` loop opens, reads the
+version that stands when it opens. A procedure that commits reads the catalog anew after each
+commit, so a procedure that polls an attached table for new commits should commit between polls.
+`REPEATABLE READ` and `SERIALIZABLE` hold a transaction to the version its first read of an
+attached table used.
+
 To attach many tables from one catalog, set `catalog_name` on the server and mirror the
 namespaces as schemas. The other catalog options then follow from the names you use:
 

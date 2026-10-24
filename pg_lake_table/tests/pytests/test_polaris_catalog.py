@@ -694,6 +694,215 @@ def test_register_existing_table_renames(
     nuke_rest_catalog(rest_catalog, catalog_namespace_name)
 
 
+# How many times the catalog was asked about a table of this namespace since
+# the notices were last cleared, read off the traffic trace.
+def _count_catalog_fetches(conn, catalog_namespace_name):
+    return len(
+        [
+            line
+            for line in conn.notices
+            if "making GET request to URL" in str(line)
+            and catalog_namespace_name in str(line)
+        ]
+    )
+
+
+def test_metadata_fetch(
+    pg_conn,
+    superuser_conn,
+    set_polaris_gucs,
+    with_default_location,
+    s3,
+    polaris_session,
+    installcheck,
+    create_http_helper_functions,
+    grant_access_to_tables_internal,
+):
+
+    if installcheck:
+        return
+
+    catalog_namespace_name = "tmp_namespace_rename"
+    rest_catalog = create_iceberg_rest_catalog(catalog_namespace_name)
+    run_command(f"""CREATE SCHEMA "{catalog_namespace_name}_pg" """, pg_conn)
+
+    catalog_table_name = f"tmp_table_rename"
+    iceberg_table = create_rest_catalog_table(
+        catalog_table_name,
+        f"{catalog_namespace_name}",
+        rest_catalog,
+        False,
+        False,
+    )
+
+    run_command(
+        f"""CREATE TABLE "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg"() USING iceberg WITH (catalog='rest', read_only=True, catalog_name='{server_params.PG_DATABASE}', catalog_namespace='{catalog_namespace_name}', catalog_table_name='{catalog_table_name}')""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # the trace reports catalog traffic to the client, so it is restricted to
+    # superusers; the reads below have to run on the connection that has it on,
+    # because the notices arrive on the session that made the requests
+    superuser_conn.notices.clear()
+    run_command("set pg_lake_iceberg.http_client_trace_traffic to true", superuser_conn)
+
+    # running multiple commands in read-committed mode fetches metadata only once per statement
+    stmt_cnt = 3
+    for _ in range(0, stmt_cnt):
+        res = run_query(
+            f"""
+                SELECT * FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg";
+                 """,
+            superuser_conn,
+        )
+
+    # we executed 3 statements
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == stmt_cnt
+    superuser_conn.commit()
+
+    # a statement that names the table twice resolves it once, so its two
+    # references read one version of the table however the catalog moves
+    superuser_conn.notices.clear()
+    res = run_query(
+        f"""
+            SELECT (SELECT count(*) FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg") AS first_reference,
+                   (SELECT count(*) FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg") AS second_reference
+             """,
+        superuser_conn,
+    )
+    assert tuple(res[0]) == (5, 5)
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
+    superuser_conn.commit()
+
+    # a function reads with the statement that calls it, whatever its
+    # volatility, so three calls in one statement ask the catalog once
+    for volatility in ["VOLATILE", "STABLE"]:
+        run_command(
+            f"""
+                CREATE OR REPLACE FUNCTION "{catalog_namespace_name}_pg".row_count()
+                RETURNS bigint {volatility} LANGUAGE plpgsql AS $$ BEGIN
+                    RETURN (SELECT count(*) FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg");
+                END; $$
+                 """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        superuser_conn.notices.clear()
+        res = run_query(
+            f"""
+                SELECT "{catalog_namespace_name}_pg".row_count() FROM generate_series(1, 3)
+                 """,
+            superuser_conn,
+        )
+        assert [row[0] for row in res] == [5, 5, 5]
+        assert (
+            _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
+        ), volatility
+        superuser_conn.commit()
+
+    # a FOR loop opens a cursor, which is a portal of its own and asks the
+    # catalog again, so a statement that runs the loop for each of its rows
+    # asks once per row
+    run_command(
+        f"""
+            CREATE OR REPLACE FUNCTION "{catalog_namespace_name}_pg".loop_count()
+            RETURNS bigint LANGUAGE plpgsql AS $$ DECLARE r record; n bigint; BEGIN
+                FOR r IN SELECT count(*) AS c FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg" LOOP
+                    n := r.c;
+                END LOOP;
+                RETURN n;
+            END; $$
+             """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    superuser_conn.notices.clear()
+    res = run_query(
+        f"""
+            SELECT "{catalog_namespace_name}_pg".loop_count() FROM generate_series(1, 3)
+             """,
+        superuser_conn,
+    )
+    assert [row[0] for row in res] == [5, 5, 5]
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 3
+    superuser_conn.commit()
+
+    # now, the same test with REPEATABLE READ and SERIALIZABLE
+    tx_mode = ["REPEATABLE READ", "SERIALIZABLE"]
+    for isolation_level in tx_mode:
+
+        superuser_conn.notices.clear()
+
+        # the driver has already opened the transaction, so this is the way to
+        # set its isolation level; assert it took, or the test would pass for
+        # the wrong reason at READ COMMITTED
+        run_command(
+            f"SET TRANSACTION ISOLATION LEVEL {isolation_level}", superuser_conn
+        )
+        assert (
+            run_query("show transaction_isolation", superuser_conn)[0][0]
+            == isolation_level.lower()
+        )
+
+        stmt_cnt = 3
+        for _ in range(0, stmt_cnt):
+            res = run_query(
+                f"""
+                    SELECT * FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg";
+                     """,
+                superuser_conn,
+            )
+
+        # we executed 3 statements but only fetch once given
+        # the isolation levels
+        assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
+        superuser_conn.commit()
+
+    # The catalog's answer is held under the relation that asked, so a
+    # relation repointed at another table inside a REPEATABLE READ
+    # transaction keeps reading the table that transaction read, and the next
+    # transaction asks about the table it points at now.  Renaming moves no
+    # files, so both reads return the same rows, and the traffic is the
+    # observable here.
+    read_query = f"""SELECT * FROM "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg" """
+
+    superuser_conn.notices.clear()
+    run_command("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", superuser_conn)
+    assert len(run_query(read_query, superuser_conn)) == 5
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
+
+    renamed_table_name = f"{catalog_table_name}_repointed"
+    rename_rest_catalog_table(
+        pg_conn, catalog_namespace_name, catalog_table_name, renamed_table_name
+    )
+    pg_conn.commit()
+
+    run_command(
+        f"""ALTER FOREIGN TABLE "{catalog_namespace_name}_pg"."{catalog_namespace_name}_pg" OPTIONS (SET catalog_table_name '{renamed_table_name}') """,
+        superuser_conn,
+    )
+
+    superuser_conn.notices.clear()
+    assert len(run_query(read_query, superuser_conn)) == 5
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 0
+    superuser_conn.commit()
+
+    superuser_conn.notices.clear()
+    assert len(run_query(read_query, superuser_conn)) == 5
+    assert _count_catalog_fetches(superuser_conn, catalog_namespace_name) == 1
+    superuser_conn.commit()
+
+    run_command("reset pg_lake_iceberg.http_client_trace_traffic", superuser_conn)
+    superuser_conn.commit()
+
+    run_command(f"""DROP SCHEMA "{catalog_namespace_name}_pg" CASCADE""", pg_conn)
+    pg_conn.commit()
+    nuke_rest_catalog(rest_catalog, catalog_namespace_name)
+
+
 def rename_rest_catalog_table(pg_conn, catalog_namespace_name, old_name, new_name):
     if isinstance(catalog_namespace_name, str):
         ns_list = [p for p in catalog_namespace_name.split(".") if p]
