@@ -120,4 +120,6 @@ extern PGDLLEXPORT DataFileStats * CreateDataFileStatsForDataFile(char *dataFile
 																  int64 rowCount, int64 deletedRowCount,
 																  List *leafFields);
 extern PGDLLEXPORT void ApplyColumnStatsModeForAllFileStats(Oid relationId, List *dataFileStats);
+#ifdef USE_ASSERT_CHECKING
 extern PGDLLEXPORT List *GetRemoteParquetColumnStats(char *path, List *leafFields);
+#endif

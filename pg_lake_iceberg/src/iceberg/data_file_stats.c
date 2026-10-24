@@ -31,6 +31,8 @@ static void SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats
 											 ColumnBound * *upperBounds,
 											 size_t *nUpperBounds);
 static ColumnBound * CreateColumnBoundForLeafField(LeafField * leafField, char *columnBoundText);
+static ColumnBound * FindColumnBound(ColumnBound * bounds, size_t boundCount, int fieldId);
+static char *ColumnBoundText(ColumnBound * bound, LeafField * leafField);
 
 /*
  * SetIcebergDataFileStats sets the record count, file size, lower and upper bounds
@@ -214,4 +216,86 @@ ColumnBoundDatum(char *columnBoundText, PGType pgType)
 	Datum		boundDatum = OidInputFunctionCall(typoinput, columnBoundText, typioparam, pgType.postgresTypeMod);
 
 	return boundDatum;
+}
+
+
+/*
+ * GetIcebergDataFileColumnStats returns the column stats of a data file as the
+ * manifest entry records them: the lower and upper bounds, matched to the leaf
+ * fields by field id. The bounds are rendered with each type's output function,
+ * the same text form the Parquet footer path produced, so callers can use the
+ * result in its place.
+ *
+ * A field without both bounds, or one whose statistics are never used for
+ * pruning (ShouldSkipStatistics), gets no entry and is therefore unprunable.
+ */
+List *
+GetIcebergDataFileColumnStats(DataFile * dataFile, List *leafFields)
+{
+	List	   *columnStatsList = NIL;
+	ListCell   *leafFieldCell = NULL;
+
+	foreach(leafFieldCell, leafFields)
+	{
+		LeafField  *leafField = lfirst(leafFieldCell);
+
+		if (ShouldSkipStatistics(leafField))
+			continue;
+
+		ColumnBound *lowerBound = FindColumnBound(dataFile->lower_bounds,
+												  dataFile->lower_bounds_length,
+												  leafField->fieldId);
+		ColumnBound *upperBound = FindColumnBound(dataFile->upper_bounds,
+												  dataFile->upper_bounds_length,
+												  leafField->fieldId);
+
+		if (lowerBound == NULL || upperBound == NULL)
+			continue;
+
+		DataFileColumnStats *columnStats = palloc0(sizeof(DataFileColumnStats));
+
+		columnStats->leafField = *leafField;
+		columnStats->lowerBoundText = ColumnBoundText(lowerBound, leafField);
+		columnStats->upperBoundText = ColumnBoundText(upperBound, leafField);
+
+		columnStatsList = lappend(columnStatsList, columnStats);
+	}
+
+	return columnStatsList;
+}
+
+
+/*
+ * FindColumnBound returns the bound for the given field id, or NULL if the
+ * data file has none.
+ */
+static ColumnBound *
+FindColumnBound(ColumnBound * bounds, size_t boundCount, int fieldId)
+{
+	for (size_t boundIndex = 0; boundIndex < boundCount; boundIndex++)
+	{
+		if (bounds[boundIndex].column_id == fieldId)
+			return &bounds[boundIndex];
+	}
+
+	return NULL;
+}
+
+
+/*
+ * ColumnBoundText deserializes a binary column bound and returns it in the
+ * text form of the leaf field's type.
+ */
+static char *
+ColumnBoundText(ColumnBound * bound, LeafField * leafField)
+{
+	Datum		boundDatum = PGIcebergBinaryDeserialize(bound->value, bound->value_length,
+														leafField->field,
+														leafField->pgType);
+	Oid			typoutput;
+	bool		typIsVarlena;
+
+	getTypeOutputInfo(leafField->pgType.postgresTypeOid, &typoutput, &typIsVarlena);
+
+	return OidOutputFunctionCall(typoutput, boundDatum);
 }

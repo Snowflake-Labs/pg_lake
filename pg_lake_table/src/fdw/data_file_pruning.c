@@ -49,6 +49,7 @@
 #include "utils/date.h"
 #include "utils/datum.h"
 #include "utils/syscache.h"
+#include "utils/typcache.h"
 #include "utils/lsyscache.h"
 
 #include "pg_extension_base/pg_compat.h"
@@ -136,6 +137,10 @@ static Oid	GetOperatorByType(Oid typeId, Oid accessMethodId, int16 strategyNumbe
 static HTAB *TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol);
 static List *GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
 										  List *externalLeafFields, Partition * *partition);
+#ifdef USE_ASSERT_CHECKING
+static void AssertManifestBoundsCoverFooterBounds(DataFile * dataFile, List *leafFields,
+												  List *manifestColumnStats);
+#endif
 
 /* partition pruning functions */
 static Expr *PartitionFieldBoundConstraint(PartitionField * partitionField,
@@ -314,7 +319,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
  * The list elements have a different type per table type, so dataFile is
  * untyped: it points to a TableDataFile for internal Iceberg tables and to a
  * DataFile for external ones. externalLeafFields is only used for the latter,
- * where the stats are read from the remote Parquet footer.
+ * whose stats come from the bounds in their manifest entry.
  */
 static List *
 GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
@@ -333,10 +338,106 @@ GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
 		DataFile   *externalDataFile = (DataFile *) dataFile;
 
 		*partition = &(externalDataFile->partition);
-		return GetRemoteParquetColumnStats((char *) externalDataFile->file_path,
-										   externalLeafFields);
+
+		List	   *columnStats = GetIcebergDataFileColumnStats(externalDataFile,
+																externalLeafFields);
+
+#ifdef USE_ASSERT_CHECKING
+		if (EnableHeavyAsserts)
+			AssertManifestBoundsCoverFooterBounds(externalDataFile, externalLeafFields,
+												  columnStats);
+#endif
+
+		return columnStats;
 	}
 }
+
+
+#ifdef USE_ASSERT_CHECKING
+
+/*
+ * AssertManifestBoundsCoverFooterBounds checks the manifest bounds pruning uses
+ * against the min/max in the data file's Parquet footer. Pruning is only safe if
+ * every manifest range contains the footer's range; a writer may legitimately
+ * widen a bound (truncated strings, for one), so only a narrower bound is an
+ * error. Columns that are missing on either side are not compared.
+ */
+static void
+AssertManifestBoundsCoverFooterBounds(DataFile * dataFile, List *leafFields,
+									  List *manifestColumnStats)
+{
+	List	   *footerColumnStats =
+		GetRemoteParquetColumnStats((char *) dataFile->file_path, leafFields);
+	ListCell   *footerCell = NULL;
+
+	foreach(footerCell, footerColumnStats)
+	{
+		DataFileColumnStats *footerStats = lfirst(footerCell);
+		DataFileColumnStats *manifestStats = NULL;
+		ListCell   *manifestCell = NULL;
+
+		if (footerStats->lowerBoundText == NULL || footerStats->upperBoundText == NULL)
+			continue;
+
+		foreach(manifestCell, manifestColumnStats)
+		{
+			DataFileColumnStats *candidate = lfirst(manifestCell);
+
+			if (candidate->leafField.fieldId == footerStats->leafField.fieldId)
+			{
+				manifestStats = candidate;
+				break;
+			}
+		}
+
+		if (manifestStats == NULL)
+			continue;
+
+		PGType		pgType = footerStats->leafField.pgType;
+		char	   *footerLowerText = footerStats->lowerBoundText;
+		char	   *footerUpperText = footerStats->upperBoundText;
+
+		/* as in GetColumnBoundConstraintsFromColumnStats: TIMETZ is stored as UTC */
+		if (pgType.postgresTypeOid == TIMETZOID)
+		{
+			if (strchr(footerLowerText, '+') == NULL && strchr(footerLowerText, '-') == NULL)
+				footerLowerText = psprintf("%s+00", footerLowerText);
+			if (strchr(footerUpperText, '+') == NULL && strchr(footerUpperText, '-') == NULL)
+				footerUpperText = psprintf("%s+00", footerUpperText);
+		}
+
+		TypeCacheEntry *typeEntry = lookup_type_cache(pgType.postgresTypeOid,
+													  TYPECACHE_CMP_PROC_FINFO);
+
+		if (!OidIsValid(typeEntry->cmp_proc_finfo.fn_oid))
+			continue;
+
+		/* Iceberg and Parquet both order strings by their bytes */
+		Oid			collation = type_is_collatable(pgType.postgresTypeOid) ?
+			C_COLLATION_OID : InvalidOid;
+
+		int			lowerComparison =
+			DatumGetInt32(FunctionCall2Coll(&typeEntry->cmp_proc_finfo, collation,
+											ColumnBoundDatum(manifestStats->lowerBoundText, pgType),
+											ColumnBoundDatum(footerLowerText, pgType)));
+		int			upperComparison =
+			DatumGetInt32(FunctionCall2Coll(&typeEntry->cmp_proc_finfo, collation,
+											ColumnBoundDatum(manifestStats->upperBoundText, pgType),
+											ColumnBoundDatum(footerUpperText, pgType)));
+
+		if (lowerComparison > 0 || upperComparison < 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("manifest bounds of field %d in \"%s\" do not cover its "
+							"Parquet footer bounds",
+							footerStats->leafField.fieldId, dataFile->file_path),
+					 errdetail("manifest [%s, %s], footer [%s, %s]",
+							   manifestStats->lowerBoundText, manifestStats->upperBoundText,
+							   footerLowerText, footerUpperText)));
+	}
+}
+
+#endif
 
 /*
  * GetPartitionSpecFieldsUsedInQuery gets the partition spec fields that are

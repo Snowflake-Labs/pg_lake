@@ -25,6 +25,7 @@
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
@@ -163,7 +164,19 @@ GenerateMetadataOperationList(Oid relationId, List *fileList, char *fileType)
 		{
 			int64		rowCount = GetRemoteParquetFileRowCount(filePath);
 
-			DataFileStats *dataFileStats = CreateDataFileStatsForDataFile(filePath, rowCount, 0, NIL);
+			/*
+			 * Record the column bounds from the file's footer, as a writer
+			 * would in its manifest entry. Reading the footer is only built
+			 * into assert-enabled builds; elsewhere the file gets no bounds
+			 * and is never pruned.
+			 */
+#ifdef USE_ASSERT_CHECKING
+			List	   *leafFields = GetLeafFieldsForTable(relationId);
+#else
+			List	   *leafFields = NIL;
+#endif
+			DataFileStats *dataFileStats = CreateDataFileStatsForDataFile(filePath, rowCount, 0,
+																		  leafFields);
 
 			/* we don't support partitioned writes, and default spec id is 0 */
 			int32		partitionSpecId = 0;

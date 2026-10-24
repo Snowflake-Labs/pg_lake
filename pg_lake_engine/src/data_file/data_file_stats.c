@@ -41,11 +41,13 @@ static void ExtractMinMaxForColumn(Datum map, char *colName, List **names, List 
 static char *UnescapeDoubleQuotes(char *s);
 static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
 static int	FindIndexInStringList(List *names, const char *targetName);
+#ifdef USE_ASSERT_CHECKING
 static List *FetchRowGroupStats(PGDuckConnection * pgDuckConn, List *fieldIdList, char *path);
 static char *PrepareRowGroupStatsMinMaxQuery(List *rowGroupStatList);
 static char *SerializeTextArrayTypeToPgDuck(ArrayType *array);
 static ArrayType *ReadArrayFromText(char *arrayText);
 static List *GetFieldMinMaxStats(PGDuckConnection * pgDuckConn, List *rowGroupStatsList);
+#endif
 static ColumnStatsConfig GetColumnStatsConfig(Oid relationId);
 static void ApplyColumnStatsModeForType(ColumnStatsConfig columnStatsConfig,
 										PGType pgType, char **lowerBoundText,
@@ -552,6 +554,14 @@ ShouldSkipStatistics(LeafField * leafField)
 }
 
 
+#ifdef USE_ASSERT_CHECKING
+
+/*
+ * The functions below read column stats from a Parquet file's footer. Pruning
+ * takes them from the Iceberg manifest instead, so they are only built into
+ * assert-enabled builds, where heavy asserts compare the two.
+ */
+
 /*
   * GetRemoteParquetColumnStats gets the stats for each leaf field
   * in a remote Parquet file.
@@ -916,11 +926,14 @@ GetFieldMinMaxStats(PGDuckConnection * pgDuckConn, List *rowGroupStatList)
 	return columnStatsList;
 }
 
+#endif							/* USE_ASSERT_CHECKING */
+
 
 /*
  * CreateDataFileStatsForDataFile creates the data file stats for the given data file.
  * It uses already calculated file level stats. And sends remote queries
- * to the file to extract the column level stats if leafFields is not NIL.
+ * to the file to extract the column level stats if leafFields is not NIL,
+ * which only assert-enabled builds can do.
  */
 DataFileStats *
 CreateDataFileStatsForDataFile(char *dataFilePath, int64 rowCount, int64 deletedRowCount,
@@ -930,7 +943,13 @@ CreateDataFileStatsForDataFile(char *dataFilePath, int64 rowCount, int64 deleted
 	List	   *columnStats;
 
 	if (leafFields != NIL)
+	{
+#ifdef USE_ASSERT_CHECKING
 		columnStats = GetRemoteParquetColumnStats(dataFilePath, leafFields);
+#else
+		elog(ERROR, "reading column stats from a Parquet footer requires an assert-enabled build");
+#endif
+	}
 	else
 		columnStats = NIL;
 
