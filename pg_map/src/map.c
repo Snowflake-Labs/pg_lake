@@ -965,11 +965,18 @@ map_extract(PG_FUNCTION_ARGS)
 
 	while (array_iterate(arrayIterator, &elemDatum, &isNull))
 	{
+		/* a NULL entry or a NULL key cannot match */
+		if (isNull)
+		{
+			arrayPos++;
+			continue;
+		}
+
 		tupleHeader = DatumGetHeapTupleHeader(elemDatum);
 
 		keyDatum = GetAttributeByNum(tupleHeader, 1, &keysIsNull);
 
-		if (!isNull)
+		if (!keysIsNull)
 		{
 			int			cmp = DatumGetInt32(FunctionCall2Coll(
 															  keyCmpFmgrInfo,
@@ -1125,6 +1132,10 @@ map_entries(PG_FUNCTION_ARGS)
 
 	while (array_iterate(arrayIterator, &elemDatum, &isNull))
 	{
+		/* a NULL entry has no key or value to return */
+		if (isNull)
+			continue;
+
 		HeapTupleHeader tupleHeader = DatumGetHeapTupleHeader(elemDatum);
 		bool		keyIsNull = false;
 		bool		valIsNull = false;

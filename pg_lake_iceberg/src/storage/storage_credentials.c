@@ -340,9 +340,7 @@ MakeVendedSecret(const StorageCredential * sc)
 	secret.secretAccessKey = sc->secretAccessKey;
 	secret.sessionToken = sc->sessionToken;
 	secret.region = sc->region;
-	secret.endpoint = sc->endpoint;
 	secret.urlStyle = sc->urlStyle;
-	secret.useSsl = sc->useSsl;
 	secret.accountName = sc->accountName;
 	secret.sasToken = sc->sasToken;
 	secret.blobEndpoint = sc->blobEndpoint;

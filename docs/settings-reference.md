@@ -61,7 +61,7 @@ The query engine itself, pgduck_server, is configured with command-line options;
 | Parameter | Description |
 |:--|:--|
 | `pg_lake_table.enable_full_query_pushdown`<span class="pglake-meta">Default `on`, set by user</span> | Push whole queries down to DuckDB when every part of the query can run there. |
-| `pg_lake_table.enable_strict_pushdown`<span class="pglake-meta">Default `on`, set by user</span> | Only push down functions, operators and types whose DuckDB behavior is known to match PostgreSQL. |
+| `pg_lake_table.enable_strict_pushdown`<span class="pglake-meta">Default `on`, set by superuser</span> | Only push down functions, operators and types whose DuckDB behavior is known to match PostgreSQL. |
 | `pg_lake_table.enable_data_file_pruning`<span class="pglake-meta">Default `on`, set by superuser</span> | Skip Iceberg data files whose column statistics rule out a match. |
 | `pg_lake_table.enable_partition_pruning`<span class="pglake-meta">Default `on`, set by superuser</span> | Skip Iceberg data files whose partition values rule out a match. |
 

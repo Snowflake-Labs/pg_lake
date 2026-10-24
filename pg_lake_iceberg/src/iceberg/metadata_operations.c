@@ -966,11 +966,26 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 	 * Always create a new manifest file for the new data and positional
 	 * delete file(s) and append it to the existing data files in the current
 	 * snapshot.
+	 *
+	 * Read the manifest list once and split it by content type, rather than
+	 * fetching it once per content type: every fetch is a read of the same
+	 * immutable file.
 	 */
-	const List *existingDataManifests =
-		FetchManifestsFromSnapshot(currentSnapshot, IsManifestOfFileContentAdd);
-	const List *existingDeleteManifests =
-		FetchManifestsFromSnapshot(currentSnapshot, IsManifestOfFileContentDeletes);
+	List	   *existingDataManifests = NIL;
+	List	   *existingDeleteManifests = NIL;
+
+	List	   *existingManifests = FetchManifestsFromSnapshot(currentSnapshot, NULL);
+	ListCell   *existingManifestCell = NULL;
+
+	foreach(existingManifestCell, existingManifests)
+	{
+		IcebergManifest *manifest = lfirst(existingManifestCell);
+
+		if (IsManifestOfFileContentAdd(manifest))
+			existingDataManifests = lappend(existingDataManifests, manifest);
+		else if (IsManifestOfFileContentDeletes(manifest))
+			existingDeleteManifests = lappend(existingDeleteManifests, manifest);
+	}
 
 	/* do not modify existing manifests */
 	List	   *finalDataManifestList = list_copy(existingDataManifests);

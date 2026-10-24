@@ -21,6 +21,7 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "miscadmin.h"
+#include "utils/lsyscache.h"
 
 
 PG_MODULE_MAGIC;
@@ -45,9 +46,17 @@ _PG_init(void)
 /*
  * pg_lake_spatial_dummy_function is used to define PGDuck UDFs in
  * the spatial schema for deparsing purposes.
+ *
+ * It has no implementation in PostgreSQL. A NULL Datum is not a valid
+ * value of its return type, so it raises an error instead of returning.
  */
 Datum
 pg_lake_spatial_dummy_function(PG_FUNCTION_ARGS)
 {
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("%s can only be executed by the query engine",
+					get_func_name(fcinfo->flinfo->fn_oid))));
+
 	PG_RETURN_VOID();
 }

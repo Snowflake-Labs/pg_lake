@@ -59,6 +59,7 @@ extern bool HttpClientTraceTraffic;
  * than every request carrying them.
  */
 extern char *HttpClientTlsCaFile;
+extern char *HttpClientTlsCaPath;
 extern char *HttpClientTlsCertFile;
 extern char *HttpClientTlsKeyFile;
 
@@ -97,6 +98,7 @@ typedef enum HttpClientTlsMaterial
 
 extern PGDLLEXPORT HttpClientTlsMaterial GetHttpClientTlsMaterial(void);
 extern bool CheckHttpClientTlsFile(char **newval, void **extra, GucSource source);
+extern bool CheckHttpClientTlsDirectory(char **newval, void **extra, GucSource source);
 
 #define HTTP_STATUS_UNAUTHORIZED		401
 #define HTTP_STATUS_TOKEN_EXPIRED		419

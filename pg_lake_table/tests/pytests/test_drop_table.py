@@ -1219,3 +1219,37 @@ def create_test_helper_functions(superuser_conn, s3, extension):
     )
     superuser_conn.commit()
     yield
+
+
+def test_flush_deletion_queue_skips_local_paths(superuser_conn, extension, tmp_path):
+    """A queued path that is not an object store URL is never removed; it
+    stays queued like any path that cannot be removed. Queued paths can come
+    from table metadata or a REST catalog's metadata-location, and
+    pgduck_server would otherwise remove a local file with the same name."""
+    local_file = tmp_path / "must_survive.txt"
+    local_file.write_text("keep me")
+
+    for path in (str(local_file), f"file://{local_file}"):
+        run_command(
+            f"""
+            INSERT INTO lake_engine.deletion_queue (path, table_name, orphaned_at)
+            VALUES ('{path}', 0, now() - interval '1 day')
+            """,
+            superuser_conn,
+        )
+    superuser_conn.commit()
+
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SELECT lake_engine.flush_deletion_queue(0)",
+        ]
+    )
+
+    assert local_file.exists()
+
+    run_command(
+        f"DELETE FROM lake_engine.deletion_queue WHERE path LIKE '%{local_file}'",
+        superuser_conn,
+    )
+    superuser_conn.commit()

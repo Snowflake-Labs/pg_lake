@@ -97,7 +97,7 @@ _PG_init(void)
 							 NULL,
 							 &EnableStrictPushdown,
 							 true,
-							 PGC_USERSET,
+							 PGC_SUSET,
 							 GUC_STANDARD,
 							 NULL,
 							 NULL,

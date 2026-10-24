@@ -54,8 +54,8 @@ def _container_sas(signature_suffix=""):
     return sas + signature_suffix
 
 
-# The two ways a table's location names its storage account: not at all,
-# leaving it to adls.account-name, or in the host, as Polaris returns it.
+# The two ways a table's location names its storage account: in the host,
+# as Polaris returns it, or not at all, leaving it to adls.account-name.
 _ACCOUNT_HOST = f"{_ACCOUNT}.dfs.core.windows.net"
 _LOCATION_BASES = {
     "container": f"az://{TEST_BUCKET}",
@@ -63,7 +63,7 @@ _LOCATION_BASES = {
 }
 
 
-def _vended_config(sas, form="container"):
+def _vended_config(sas, form="abfss"):
     """What Polaris vends for a table on the emulator account."""
     expires_ms = int((datetime.now(timezone.utc) + timedelta(hours=1)).timestamp())
 
@@ -325,25 +325,24 @@ def _drop_schemas(superuser_conn, *schemas):
     superuser_conn.commit()
 
 
-@pytest.mark.parametrize("form", list(_LOCATION_BASES))
 def test_vended_azure_sas_reads_table(
-    superuser_conn, pgduck_conn, extension, installcheck, azure, form, monkeypatch
+    superuser_conn, pgduck_conn, extension, installcheck, azure, monkeypatch
 ):
     """The catalog's SAS token becomes a scoped Azure secret the scan reads with."""
     if installcheck:
         return
 
-    source, attached, table = f"vaz_src_ok_{form}", f"vaz_rest_ok_{form}", "vaz_ok"
+    source, attached, table = "vaz_src_ok", "vaz_rest_ok", "vaz_ok"
     catalog = None
     try:
         meta = _write_iceberg_table(
-            superuser_conn, pgduck_conn, source, table, 10, form, monkeypatch
+            superuser_conn, pgduck_conn, source, table, 10, "abfss", monkeypatch
         )
         catalog = _MockCatalog(
             {
                 table: {
                     "metadata_location": meta,
-                    "config": _vended_config(_container_sas(), form),
+                    "config": _vended_config(_container_sas()),
                 }
             },
             azure,
@@ -368,31 +367,29 @@ def test_vended_azure_sas_reads_table(
             catalog.stop()
 
 
-@pytest.mark.parametrize("form", list(_LOCATION_BASES))
 def test_vended_azure_sas_is_the_credential_used(
-    superuser_conn, pgduck_conn, extension, installcheck, azure, form, monkeypatch
+    superuser_conn, pgduck_conn, extension, installcheck, azure, monkeypatch
 ):
     """
     The static secret could read this table too, so only a failure proves
     which secret the scan went through: a vended SAS with a broken signature
     has to be refused by the store.  That also proves the secret's scope
-    matches the URLs the scan reads, whichever way the location names the
-    account.
+    matches the URLs the scan reads.
     """
     if installcheck:
         return
 
-    source, attached, table = f"vaz_src_bad_{form}", f"vaz_rest_bad_{form}", "vaz_bad"
+    source, attached, table = "vaz_src_bad", "vaz_rest_bad", "vaz_bad"
     catalog = None
     try:
         meta = _write_iceberg_table(
-            superuser_conn, pgduck_conn, source, table, 10, form, monkeypatch
+            superuser_conn, pgduck_conn, source, table, 10, "abfss", monkeypatch
         )
         catalog = _MockCatalog(
             {
                 table: {
                     "metadata_location": meta,
-                    "config": _vended_config(_container_sas("tampered"), form),
+                    "config": _vended_config(_container_sas("tampered")),
                 }
             },
             azure,
@@ -415,8 +412,65 @@ def test_vended_azure_sas_is_the_credential_used(
             catalog.stop()
 
 
-def test_vended_azure_sas_cannot_add_connection_string_fields(
+def test_vended_azure_sas_needs_the_account_in_the_location(
     superuser_conn, pgduck_conn, extension, installcheck, azure
+):
+    """
+    Regression test for: the catalog chose the storage account for a
+    location that names none.
+
+    az://<container>/<path> leaves the account to the secret, so a vended
+    secret would send every session's requests under the table's location
+    to the account adls.account-name states.  It is not used: the scan
+    reads with the static secret, where a vended SAS with a broken
+    signature would have failed it.
+    """
+    if installcheck:
+        return
+
+    source, attached, table = "vaz_src_noacct", "vaz_rest_noacct", "vaz_noacct"
+    catalog = None
+    try:
+        meta = _write_iceberg_table(
+            superuser_conn, pgduck_conn, source, table, 10, "container"
+        )
+        catalog = _MockCatalog(
+            {
+                table: {
+                    "metadata_location": meta,
+                    "config": _vended_config(_container_sas("tampered"), "container"),
+                }
+            },
+            azure,
+            superuser_conn,
+        )
+
+        superuser_conn.notices.clear()
+        _attach_rest_table(superuser_conn, attached, table)
+
+        result = run_query(f"SELECT count(*) FROM {attached}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 10
+
+        assert any(
+            "ignoring vended credentials for Azure Data Lake Storage" in n
+            for n in superuser_conn.notices
+        ), "\n".join(superuser_conn.notices)
+
+        location = meta.split("/metadata/", 1)[0]
+        assert not any(
+            location in str(s["scope"]) for s in _vended_azure_secrets(pgduck_conn)
+        )
+
+    finally:
+        superuser_conn.rollback()
+        _drop_schemas(superuser_conn, attached, source)
+        if catalog is not None:
+            catalog.stop()
+
+
+def test_vended_azure_sas_cannot_add_connection_string_fields(
+    superuser_conn, pgduck_conn, extension, installcheck, azure, monkeypatch
 ):
     """
     The SAS token is spliced into a connection string the Azure SDK splits
@@ -429,7 +483,9 @@ def test_vended_azure_sas_cannot_add_connection_string_fields(
     source, attached, table = "vaz_src_inj", "vaz_rest_inj", "vaz_inj"
     catalog = None
     try:
-        meta = _write_iceberg_table(superuser_conn, pgduck_conn, source, table, 10)
+        meta = _write_iceberg_table(
+            superuser_conn, pgduck_conn, source, table, 10, "abfss", monkeypatch
+        )
         sas = _container_sas() + ";BlobEndpoint=http://127.0.0.1:1/elsewhere"
         catalog = _MockCatalog(
             {table: {"metadata_location": meta, "config": _vended_config(sas)}},

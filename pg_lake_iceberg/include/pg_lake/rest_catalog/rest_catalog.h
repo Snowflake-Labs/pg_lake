@@ -78,10 +78,7 @@ typedef struct VendedCredentials
 	char	   *sessionToken;	/* s3.session-token (may be NULL for non-STS
 								 * creds) */
 	char	   *region;			/* client.region / s3.region (may be NULL) */
-	char	   *endpoint;		/* s3.endpoint, scheme stripped (may be NULL) */
 	char	   *urlStyle;		/* "path"/"vhost" from s3.path-style-access
-								 * (may be NULL) */
-	char	   *useSsl;			/* "true"/"false" from the s3.endpoint scheme
 								 * (may be NULL) */
 
 	/* Azure */

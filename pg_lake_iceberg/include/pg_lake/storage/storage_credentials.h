@@ -98,9 +98,7 @@ typedef struct StorageCredential
 	char	   *secretAccessKey;
 	char	   *sessionToken;	/* NULL for non-STS credentials */
 	char	   *region;			/* NULL when the catalog omits it */
-	char	   *endpoint;		/* catalog s3.endpoint; NULL -> inherit */
 	char	   *urlStyle;		/* "path"/"vhost"; NULL -> inherit */
-	char	   *useSsl;			/* "true"/"false"; NULL -> inherit */
 
 	/* Azure */
 	char	   *accountName;

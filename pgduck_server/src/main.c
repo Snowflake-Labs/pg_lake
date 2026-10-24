@@ -64,6 +64,16 @@ main(int argc, char *argv[])
 
 	oom_is_fatal = !options.continue_on_oom;
 
+	/*
+	 * Block the shutdown signals before anything creates a thread, so a
+	 * process-directed SIGINT/SIGTERM can only be delivered to this thread,
+	 * which is the only one that can act on it.  pgserver_run() unblocks them
+	 * once its handler is installed, so one sent during startup takes effect
+	 * there rather than being lost.
+	 */
+	if (pgserver_block_shutdown_signals() != STATUS_OK)
+		return STATUS_ERROR;
+
 	/* first, make sure duckdb is accessible */
 	DuckDBStatus duckDbStatus = duckdb_global_init(options.duckdb_database_file_path,
 												   options.cache_dir,

@@ -32,6 +32,7 @@
 #include "utils/memutils.h"
 #include "pg_lake/http/http_client.h"
 
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <stdlib.h>
@@ -52,13 +53,21 @@
  */
 #define MAX_REDIRECTS 5L
 
+/*
+ * The largest response body (or header block) we keep.  REST catalog
+ * responses also arrive after commit, where a palloc beyond MaxAllocSize
+ * would raise an ERROR and so a PANIC.  A larger response fails the
+ * request instead.
+ */
+#define MAX_RESPONSE_DATA_SIZE (256 * 1024 * 1024)
+
 
 static HttpResult HttpCommonNoThrows(HttpMethod method, const char *url, const char *postData,
 									 const List *headers, HttpTlsClientAuth clientAuth);
 static bool CheckMinCurlVersion(const curl_version_info_data *versionInfo);
 static size_t CurlResponseBodyWriteCallback(void *ptr, size_t size, size_t nmemb, void *userdata);
 static size_t CurlResponseHeaderWriteCallback(void *ptr, size_t size, size_t nmemb, void *userdata);
-static void GrowResponseData(char **data, size_t *dataLength, void *newData, size_t newDataBytes);
+static bool GrowResponseData(char **data, size_t *dataLength, void *newData, size_t newDataBytes);
 #if CURL_AT_LEAST_VERSION(7, 32, 0)
 static int	CurlProgressCallback(void *clientp, curl_off_t dltotal, curl_off_t dlnow,
 								 curl_off_t ultotal, curl_off_t ulnow);
@@ -95,6 +104,7 @@ static bool curlInitialized = false;
 bool		HttpClientTraceTraffic = false;
 
 char	   *HttpClientTlsCaFile = "";
+char	   *HttpClientTlsCaPath = "";
 char	   *HttpClientTlsCertFile = "";
 char	   *HttpClientTlsKeyFile = "";
 
@@ -148,6 +158,41 @@ CheckHttpClientTlsFile(char **newval, void **extra, GucSource source)
 	if (access(*newval, R_OK) != 0)
 	{
 		GUC_check_errdetail("Cannot read file \"%s\": %m.", *newval);
+		return false;
+	}
+
+	return true;
+}
+
+
+/*
+ * CheckHttpClientTlsDirectory rejects a CA path that is not a searchable
+ * directory.  A bundle file here is accepted by curl, but OpenSSL's hashed
+ * lookup then finds nothing and every handshake fails with a generic error.
+ */
+bool
+CheckHttpClientTlsDirectory(char **newval, void **extra, GucSource source)
+{
+	struct stat pathStatus;
+
+	if (*newval == NULL || **newval == '\0')
+		return true;
+
+	if (stat(*newval, &pathStatus) != 0)
+	{
+		GUC_check_errdetail("Cannot access directory \"%s\": %m.", *newval);
+		return false;
+	}
+
+	if (!S_ISDIR(pathStatus.st_mode))
+	{
+		GUC_check_errdetail("\"%s\" is not a directory.", *newval);
+		return false;
+	}
+
+	if (access(*newval, R_OK | X_OK) != 0)
+	{
+		GUC_check_errdetail("Cannot search directory \"%s\": %m.", *newval);
 		return false;
 	}
 
@@ -239,6 +284,15 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 		GetHttpClientTlsMaterial() == HTTP_TLS_MATERIAL_COMPLETE)
 	{
 		CURL_SETOPT(curl, CURLOPT_CAINFO, HttpClientTlsCaFile);
+
+		/*
+		 * CAINFO replaces the system store, so a copy of the public roots in
+		 * it goes stale.  A hashed directory is read at verification time and
+		 * is consulted alongside CAINFO.
+		 */
+		if (HttpClientTlsCaPath != NULL && HttpClientTlsCaPath[0] != '\0')
+			CURL_SETOPT(curl, CURLOPT_CAPATH, HttpClientTlsCaPath);
+
 		CURL_SETOPT(curl, CURLOPT_SSLCERT, HttpClientTlsCertFile);
 		CURL_SETOPT(curl, CURLOPT_SSLKEY, HttpClientTlsKeyFile);
 	}
@@ -484,7 +538,9 @@ CurlResponseBodyWriteCallback(void *ptr, size_t size, size_t nmemb, void *userda
 
 	HttpResult *res = (HttpResult *) userdata;
 
-	GrowResponseData(&res->body, &res->bodyLength, ptr, bytes);
+	/* returning anything other than bytes makes curl fail the request */
+	if (!GrowResponseData(&res->body, &res->bodyLength, ptr, bytes))
+		return 0;
 
 	/* success: tell curl we consumed all */
 	return bytes;
@@ -502,7 +558,9 @@ CurlResponseHeaderWriteCallback(void *ptr, size_t size, size_t nmemb, void *user
 
 	HttpResult *res = (HttpResult *) userdata;
 
-	GrowResponseData(&res->headers, &res->headersLength, ptr, bytes);
+	/* returning anything other than bytes makes curl fail the request */
+	if (!GrowResponseData(&res->headers, &res->headersLength, ptr, bytes))
+		return 0;
 
 	/* success: tell curl we consumed all */
 	return bytes;
@@ -510,33 +568,33 @@ CurlResponseHeaderWriteCallback(void *ptr, size_t size, size_t nmemb, void *user
 
 
 /*
- * GrowResponseData grows the response data buffers.
+ * GrowResponseData grows the response data buffers, and returns false when
+ * the data would exceed MAX_RESPONSE_DATA_SIZE or memory runs out.
  */
-static void
+static bool
 GrowResponseData(char **data, size_t *dataLength, void *newData, size_t newDataBytes)
 {
+	char	   *newBuffer = NULL;
+
+	if (newDataBytes > MAX_RESPONSE_DATA_SIZE - *dataLength)
+		return false;
+
 	/* ensure null terminated */
 	if (*data == NULL)
-		*data = palloc_extended(newDataBytes + 1, MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
+		newBuffer = palloc_extended(newDataBytes + 1, MCXT_ALLOC_NO_OOM | MCXT_ALLOC_ZERO);
 	else
-	{
-		*data = repalloc_extended(*data, *dataLength + newDataBytes + 1, MCXT_ALLOC_NO_OOM);
-		memset(*data + *dataLength, 0, newDataBytes + 1);	/* zero out new space */
-	}
+		newBuffer = repalloc_extended(*data, *dataLength + newDataBytes + 1, MCXT_ALLOC_NO_OOM);
 
-	if (*data == NULL)
-	{
-		/*
-		 * signals an error to curl when return value is different than the
-		 * amount passed to callback
-		 */
-		*dataLength = 0;
-		return;
-	}
+	if (newBuffer == NULL)
+		return false;
 
+	*data = newBuffer;
+	memset(*data + *dataLength, 0, newDataBytes + 1);	/* zero out new space */
 	memcpy(*data + *dataLength, newData, newDataBytes);
 
 	*dataLength += newDataBytes;
+
+	return true;
 }
 
 /*
