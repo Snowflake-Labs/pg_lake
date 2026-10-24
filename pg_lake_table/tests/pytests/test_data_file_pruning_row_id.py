@@ -3,8 +3,10 @@ from utils_pytest import *
 
 SCHEMA = "test_data_file_pruning_row_id"
 
-# Iceberg's reserved field id for the row lineage column _row_id.
+# Iceberg's reserved field ids for the row lineage columns _row_id and
+# _last_updated_sequence_number.
 ROW_ID_FIELD_ID = 2147483540
+LAST_UPDATED_SEQUENCE_NUMBER_FIELD_ID = 2147483539
 
 EXPLAIN = "EXPLAIN (analyze, verbose, format json) "
 
@@ -76,6 +78,43 @@ def test_row_id_between_columns(
         pg_conn,
     )
     assert fetch_data_files_used(results) == "0"
+
+
+def test_row_lineage_columns_as_a_compaction_writes_them(
+    pg_conn, pgduck_conn, add_files_procedure, with_default_location
+):
+    """
+    A compaction that keeps row lineage materializes both lineage columns:
+    _row_id lands between the columns and _last_updated_sequence_number after
+    them. Every column must keep its own bounds, whatever its type; given its
+    neighbour's, the boolean and timestamptz columns fail to cast and the text
+    column is pruned on a number.
+    """
+    create_external_table(
+        pg_conn,
+        pgduck_conn,
+        "row_lineage_compacted",
+        "kind text, a bigint, flag boolean, ts timestamptz",
+        "SELECT CASE WHEN i % 2 = 0 THEN 'I' ELSE 'D' END AS kind, "
+        "1000 + i AS _row_id, i AS a, i % 3 = 0 AS flag, "
+        "TIMESTAMPTZ '2026-01-01 00:00:00+00' + to_days(CAST(i AS INTEGER)) AS ts, "
+        "2 AS _last_updated_sequence_number "
+        "FROM range(1, 11) t(i)",
+        f"'kind': 1, '_row_id': {ROW_ID_FIELD_ID}, 'a': 2, 'flag': 3, 'ts': 4, "
+        f"'_last_updated_sequence_number': {LAST_UPDATED_SEQUENCE_NUMBER_FIELD_ID}",
+    )
+
+    for predicate, expected in [
+        ("kind = 'I'", 5),
+        ("a = 5", 1),
+        ("flag", 3),
+        ("ts >= '2026-01-06 00:00:00+00'", 6),
+    ]:
+        result = run_query(
+            f"SELECT count(*) FROM {SCHEMA}.row_lineage_compacted WHERE {predicate}",
+            pg_conn,
+        )
+        assert result[0][0] == expected, predicate
 
 
 def create_external_table(pg_conn, pgduck_conn, name, columns, file_query, field_ids):
