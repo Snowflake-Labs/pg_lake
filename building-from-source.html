@@ -1,0 +1,483 @@
+<!DOCTYPE html> <html lang="en-US"> <head> <meta charset="UTF-8"> <meta http-equiv="X-UA-Compatible" content="IE=Edge"> <link rel="stylesheet" href="/pg_lake/assets/css/just-the-docs-default.css"> <link rel="stylesheet" href="/pg_lake/assets/css/just-the-docs-head-nav.css" id="jtd-head-nav-stylesheet"> <style id="jtd-nav-activation"> .site-nav > ul.nav-list:first-child > li > a, .site-nav > ul.nav-list:first-child > li > ul > li:not(:nth-child(1)) > a, .site-nav > ul.nav-list:first-child > li > ul > li > ul > li a { background-image: none; } .site-nav > ul.nav-list:not(:first-child) a, .site-nav li.external a { background-image: none; } .site-nav > ul.nav-list:first-child > li:nth-child(2) > ul > li:nth-child(1) > a { font-weight: 600; text-decoration: none; }.site-nav > ul.nav-list:first-child > li:nth-child(2) > button svg, .site-nav > ul.nav-list:first-child > li:nth-child(2) > ul > li:nth-child(1) > button svg { transform: rotate(-90deg); }.site-nav > ul.nav-list:first-child > li.nav-list-item:nth-child(2) > ul.nav-list, .site-nav > ul.nav-list:first-child > li.nav-list-item:nth-child(2) > ul.nav-list > li.nav-list-item:nth-child(1) > ul.nav-list { display: block; } </style> <script src="/pg_lake/assets/js/vendor/lunr.min.js"></script> <script src="/pg_lake/assets/js/just-the-docs.js"></script> <meta name="viewport" content="width=device-width, initial-scale=1"> <!-- Begin Jekyll SEO tag v2.8.0 --> <title>Building from source | pg_lake</title> <meta name="generator" content="Jekyll v3.10.0" /> <meta property="og:title" content="Building from source" /> <meta property="og:locale" content="en_US" /> <meta name="description" content="Create and query Iceberg tables, read and write Parquet, CSV and JSON files in object storage — all from PostgreSQL, with queries running on DuckDB." /> <meta property="og:description" content="Create and query Iceberg tables, read and write Parquet, CSV and JSON files in object storage — all from PostgreSQL, with queries running on DuckDB." /> <link rel="canonical" href="https://snowflake-labs.github.io/pg_lake/building-from-source.html" /> <meta property="og:url" content="https://snowflake-labs.github.io/pg_lake/building-from-source.html" /> <meta property="og:site_name" content="pg_lake" /> <meta property="og:type" content="website" /> <meta name="twitter:card" content="summary" /> <meta property="twitter:title" content="Building from source" /> <script type="application/ld+json"> {"@context":"https://schema.org","@type":"WebPage","description":"Create and query Iceberg tables, read and write Parquet, CSV and JSON files in object storage — all from PostgreSQL, with queries running on DuckDB.","headline":"Building from source","url":"https://snowflake-labs.github.io/pg_lake/building-from-source.html"}</script> <!-- End Jekyll SEO tag --> <link rel="icon" href="/pg_lake/assets/images/favicon.svg" type="image/svg+xml"> <link rel="stylesheet" href="/pg_lake/assets/css/just-the-docs-pglake-dark.css" media="(prefers-color-scheme: dark)"> </head> <body> <a class="skip-to-main" href="#main-content">Skip to main content</a> <svg xmlns="http://www.w3.org/2000/svg" class="d-none"> <symbol id="svg-link" viewBox="0 0 24 24"> <title>Link</title> <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-link"> <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"></path><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"></path> </svg> </symbol> <symbol id="svg-menu" viewBox="0 0 24 24"> <title>Menu</title> <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-menu"> <line x1="3" y1="12" x2="21" y2="12"></line><line x1="3" y1="6" x2="21" y2="6"></line><line x1="3" y1="18" x2="21" y2="18"></line> </svg> </symbol> <symbol id="svg-arrow-right" viewBox="0 0 24 24"> <title>Expand</title> <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-chevron-right"> <polyline points="9 18 15 12 9 6"></polyline> </svg> </symbol> <!-- Feather. MIT License: https://github.com/feathericons/feather/blob/master/LICENSE --> <symbol id="svg-external-link" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-external-link"> <title id="svg-external-link-title">(external link)</title> <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"></path><polyline points="15 3 21 3 21 9"></polyline><line x1="10" y1="14" x2="21" y2="3"></line> </symbol> <symbol id="svg-doc" viewBox="0 0 24 24"> <title>Document</title> <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-file"> <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path><polyline points="13 2 13 9 20 9"></polyline> </svg> </symbol> <symbol id="svg-search" viewBox="0 0 24 24"> <title>Search</title> <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="feather feather-search"> <circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line> </svg> </symbol> <!-- Bootstrap Icons. MIT License: https://github.com/twbs/icons/blob/main/LICENSE.md --> <symbol id="svg-copy" viewBox="0 0 16 16"> <title>Copy</title> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-clipboard" viewBox="0 0 16 16"> <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1h1a1 1 0 0 1 1 1V14a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V3.5a1 1 0 0 1 1-1h1v-1z"/> <path d="M9.5 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3zm-3-1A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3z"/> </svg> </symbol> <symbol id="svg-copied" viewBox="0 0 16 16"> <title>Copied</title> <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" class="bi bi-clipboard-check-fill" viewBox="0 0 16 16"> <path d="M6.5 0A1.5 1.5 0 0 0 5 1.5v1A1.5 1.5 0 0 0 6.5 4h3A1.5 1.5 0 0 0 11 2.5v-1A1.5 1.5 0 0 0 9.5 0h-3Zm3 1a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5h-3a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5h3Z"/> <path d="M4 1.5H3a2 2 0 0 0-2 2V14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V3.5a2 2 0 0 0-2-2h-1v1A2.5 2.5 0 0 1 9.5 5h-3A2.5 2.5 0 0 1 4 2.5v-1Zm6.854 7.354-3 3a.5.5 0 0 1-.708 0l-1.5-1.5a.5.5 0 0 1 .708-.708L7.5 10.793l2.646-2.647a.5.5 0 0 1 .708.708Z"/> </svg> </symbol> </svg> <header class="side-bar"> <div class="site-header"> <a href="/pg_lake/" class="site-title lh-tight"><img class="site-logo-mark" src="/pg_lake/assets/images/favicon.svg" alt="" width="28" height="28"> <span class="site-title-text">pg_lake</span> </a> <button id="menu-button" class="site-button btn-reset" aria-label="Menu" aria-expanded="false"> <svg viewBox="0 0 24 24" class="icon" aria-hidden="true"><use xlink:href="#svg-menu"></use></svg> </button> </div> <nav aria-label="Main" id="site-nav" class="site-nav"> <ul class="nav-list"><li class="nav-list-item"><a href="/pg_lake/" class="nav-list-link">Home</a></li><li class="nav-list-item"><button class="nav-list-expander btn-reset" aria-label="Get started submenu" aria-expanded="false"> <svg viewBox="0 0 24 24" aria-hidden="true"><use xlink:href="#svg-arrow-right"></use></svg> </button><a href="/pg_lake/get-started.html" class="nav-list-link">Get started</a><ul class="nav-list"><li class="nav-list-item"><a href="/pg_lake/building-from-source.html" class="nav-list-link">Building from source</a></li><li class="nav-list-item"><a href="/pg_lake/configuration.html" class="nav-list-link">Configuration</a></li></ul></li><li class="nav-list-item"><a href="/pg_lake/concepts.html" class="nav-list-link">How pg_lake works</a></li><li class="nav-list-item"><button class="nav-list-expander btn-reset" aria-label="User guide submenu" aria-expanded="false"> <svg viewBox="0 0 24 24" aria-hidden="true"><use xlink:href="#svg-arrow-right"></use></svg> </button><a href="/pg_lake/guides.html" class="nav-list-link">User guide</a><ul class="nav-list"><li class="nav-list-item"><button class="nav-list-expander btn-reset" aria-label="Iceberg tables submenu" aria-expanded="false"> <svg viewBox="0 0 24 24" aria-hidden="true"><use xlink:href="#svg-arrow-right"></use></svg> </button><a href="/pg_lake/iceberg-tables.html" class="nav-list-link">Iceberg tables</a><ul class="nav-list"><li class="nav-list-item"><a href="/pg_lake/iceberg-partitioning.html" class="nav-list-link">Partitioning</a></li><li class="nav-list-item"><a href="/pg_lake/iceberg-modifying.html" class="nav-list-link">Modifying tables</a></li><li class="nav-list-item"><a href="/pg_lake/iceberg-catalogs.html" class="nav-list-link">Catalogs and interoperability</a></li><li class="nav-list-item"><a href="/pg_lake/iceberg-maintenance.html" class="nav-list-link">Maintenance</a></li></ul></li><li class="nav-list-item"><a href="/pg_lake/query-data-lake-files.html" class="nav-list-link">Query data lake files</a></li><li class="nav-list-item"><a href="/pg_lake/data-lake-import-export.html" class="nav-list-link">Import and export</a></li><li class="nav-list-item"><a href="/pg_lake/spatial.html" class="nav-list-link">Geospatial</a></li><li class="nav-list-item"><a href="/pg_lake/performance.html" class="nav-list-link">Performance</a></li><li class="nav-list-item"><a href="/pg_lake/dbt.html" class="nav-list-link">dbt</a></li></ul></li><li class="nav-list-item"><button class="nav-list-expander btn-reset" aria-label="Use cases submenu" aria-expanded="false"> <svg viewBox="0 0 24 24" aria-hidden="true"><use xlink:href="#svg-arrow-right"></use></svg> </button><a href="/pg_lake/use-cases.html" class="nav-list-link">Use cases</a><ul class="nav-list"><li class="nav-list-item"><a href="/pg_lake/use-case-iceberg-sync.html" class="nav-list-link">Sync Postgres tables to Iceberg</a></li><li class="nav-list-item"><a href="/pg_lake/use-case-log-management.html" class="nav-list-link">Log management</a></li><li class="nav-list-item"><a href="/pg_lake/use-case-archiving.html" class="nav-list-link">Archive partitions to Iceberg</a></li><li class="nav-list-item"><a href="/pg_lake/use-case-dashboards.html" class="nav-list-link">Fast analytics dashboards</a></li><li class="nav-list-item"><a href="/pg_lake/use-case-geospatial.html" class="nav-list-link">Geospatial analytics</a></li></ul></li><li class="nav-list-item"><button class="nav-list-expander btn-reset" aria-label="Reference submenu" aria-expanded="false"> <svg viewBox="0 0 24 24" aria-hidden="true"><use xlink:href="#svg-arrow-right"></use></svg> </button><a href="/pg_lake/reference.html" class="nav-list-link">Reference</a><ul class="nav-list"><li class="nav-list-item"><a href="/pg_lake/sql-reference.html" class="nav-list-link">SQL functions and views</a></li><li class="nav-list-item"><a href="/pg_lake/table-options.html" class="nav-list-link">Table options</a></li><li class="nav-list-item"><a href="/pg_lake/settings-reference.html" class="nav-list-link">Configuration parameters</a></li><li class="nav-list-item"><a href="/pg_lake/data-types.html" class="nav-list-link">Data types</a></li><li class="nav-list-item"><a href="/pg_lake/file-formats-reference.html" class="nav-list-link">File formats</a></li></ul></li></ul> <ul class="nav-list"><li class="nav-list-item external"> <a href="https://github.com/Snowflake-Labs/pg_lake/blob/main/docker/README.md" class="nav-list-link external" > Docker setup <svg viewBox="0 0 24 24" aria-labelledby="svg-external-link-title"><use xlink:href="#svg-external-link"></use></svg> </a> </li><li class="nav-list-item external"> <a href="https://github.com/Snowflake-Labs/pg_lake/blob/main/pg_map/README.md" class="nav-list-link external" > Map type (pg_map) <svg viewBox="0 0 24 24" aria-labelledby="svg-external-link-title"><use xlink:href="#svg-external-link"></use></svg> </a> </li></ul> </nav> <div class="d-md-block d-none site-footer"> This site uses <a href="https://github.com/just-the-docs/just-the-docs">Just the Docs</a>, a documentation theme for Jekyll. </div> </header> <div class="main" id="top"> <div id="main-header" class="main-header"> <div class="search" role="search"> <div class="search-input-wrap"> <input type="text" id="search-input" class="search-input" tabindex="0" placeholder="Search pg_lake" autocomplete="off"> <label for="search-input" class="search-label"> <span class="sr-only">Search pg_lake</span> <svg viewBox="0 0 24 24" class="search-icon" aria-hidden="true"><use xlink:href="#svg-search"></use></svg> </label> </div> <div id="search-results" class="search-results"></div> </div> <nav aria-label="Auxiliary" class="aux-nav"> <ul class="aux-nav-list"> <li class="aux-nav-list-item"> <a href="https://github.com/Snowflake-Labs/pg_lake" class="site-button" > GitHub </a> </li> </ul> </nav> </div> <div class="main-content-wrap"> <nav aria-label="Breadcrumb" class="breadcrumb-nav"> <ol class="breadcrumb-nav-list"> <li class="breadcrumb-nav-list-item"><a href="/pg_lake/get-started.html">Get started</a></li> <li class="breadcrumb-nav-list-item"><span>Building from source</span></li> </ol> </nav> <div id="main-content" class="main-content"> <main> <h1 id="building-from-source"> <a href="#building-from-source" class="anchor-heading" aria-labelledby="building-from-source"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Building from source </h1> <p>This guide covers installing pg_lake from source. For Docker-based setup, see <a href="https://github.com/Snowflake-Labs/pg_lake/blob/main/docker/LOCAL_DEV.md">docker/LOCAL_DEV.md</a>.</p> <h2 id="add-pg_lake-to-an-existing-postgresql-installation"> <a href="#add-pg_lake-to-an-existing-postgresql-installation" class="anchor-heading" aria-labelledby="add-pg_lake-to-an-existing-postgresql-installation"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Add pg_lake to an Existing PostgreSQL Installation </h2> <p>If you already have PostgreSQL 16, 17, 18, or 19 installed, you can add pg_lake extensions using the automated installation script:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Clone the repository</span>
+git clone <span class="nt">--recurse-submodules</span> https://github.com/snowflake-labs/pg_lake.git
+<span class="nb">cd </span>pg_lake
+
+<span class="c"># Install pg_lake to your existing PostgreSQL</span>
+<span class="c"># Or see "Manual Installation to Existing PostgreSQL" section below</span>
+./install.sh
+
+<span class="c"># Start pgduck_server (required for pg_lake)</span>
+pgduck_server <span class="nt">--cache_dir</span> /tmp/pg_lake_cache/
+
+<span class="c"># In another terminal, create the extensions</span>
+psql <span class="nt">-c</span> <span class="s2">"CREATE EXTENSION pg_lake CASCADE;"</span>
+</code></pre></div></div> <p><strong>What this does:</strong></p> <ol> <li>Detects your existing PostgreSQL installation via <code class="language-plaintext highlighter-rouge">pg_config</code></li> <li>Installs vcpkg and Azure SDK dependencies</li> <li>Builds and installs pg_lake extensions to your PostgreSQL installation</li> <li>Prints next steps for configuring and using pg_lake</li> </ol> <p><strong>Note:</strong> System build dependencies are skipped by default (assuming they’re installed if PostgreSQL exists). Use <code class="language-plaintext highlighter-rouge">--with-system-deps</code> if needed.</p> <p><strong>Prerequisites:</strong></p> <ul> <li>PostgreSQL 16, 17, 18, or 19 installed with <code class="language-plaintext highlighter-rouge">pg_config</code> in your PATH</li> <li><code class="language-plaintext highlighter-rouge">shared_preload_libraries = 'pg_extension_base'</code> in postgresql.conf (<a href="#configure-postgresql">see setup</a>)</li> </ul> <p>For manual installation steps, see <a href="#manual-installation-to-existing-postgresql">Manual Installation to Existing PostgreSQL</a>.</p> <h2 id="full-development-environment-setup"> <a href="#full-development-environment-setup" class="anchor-heading" aria-labelledby="full-development-environment-setup"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Full Development Environment Setup </h2> <p>For pg_lake development (includes building PostgreSQL from source with debug symbols and test dependencies):</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Clone the repository</span>
+git clone <span class="nt">--recurse-submodules</span> https://github.com/snowflake-labs/pg_lake.git
+<span class="nb">cd </span>pg_lake
+
+<span class="c"># Build complete development environment (PostgreSQL 18 from source, vcpkg, pg_lake, test deps)</span>
+./install.sh <span class="nt">--build-postgres</span> <span class="nt">--with-test-deps</span>
+
+<span class="c"># Add PostgreSQL to your PATH</span>
+<span class="nb">export </span><span class="nv">PATH</span><span class="o">=</span><span class="nv">$HOME</span>/pgsql/18/bin:<span class="nv">$PATH</span>
+
+<span class="c"># Start PostgreSQL</span>
+pg_ctl <span class="nt">-D</span> <span class="nv">$HOME</span>/pgsql/18/data <span class="nt">-l</span> <span class="nv">$HOME</span>/pgsql/18/data/logfile start
+
+<span class="c"># Start pgduck_server (required for pg_lake)</span>
+pgduck_server <span class="nt">--cache_dir</span> /tmp/pg_lake_cache/
+
+<span class="c"># In another terminal, create the extensions</span>
+psql postgres <span class="nt">-c</span> <span class="s2">"CREATE EXTENSION pg_lake CASCADE;"</span>
+</code></pre></div></div> <p>For more options and control, see <a href="#development-environment-options">Development Environment Options</a> below.</p> <h2 id="prerequisites"> <a href="#prerequisites" class="anchor-heading" aria-labelledby="prerequisites"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Prerequisites </h2> <p><strong>For adding to existing PostgreSQL:</strong></p> <ul> <li>PostgreSQL 16, 17, 18, or 19 with <code class="language-plaintext highlighter-rouge">pg_config</code> in PATH</li> <li>Git, C/C++ compiler, CMake, Ninja</li> <li>Internet connection</li> </ul> <p><strong>For full development environment:</strong></p> <ul> <li>All of the above</li> <li>Python 3.11+ (for tests)</li> <li>Additional system packages (automatically installed by installation script)</li> </ul> <p>The installation script will install all required build dependencies automatically. If you prefer to install dependencies manually, see the <a href="#manual-development-environment-setup">Manual Development Environment Setup</a> section.</p> <h2 id="configure-postgresql"> <a href="#configure-postgresql" class="anchor-heading" aria-labelledby="configure-postgresql"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Configure PostgreSQL </h2> <p>Before using pg_lake, you need to add <code class="language-plaintext highlighter-rouge">pg_extension_base</code> to PostgreSQL’s <code class="language-plaintext highlighter-rouge">shared_preload_libraries</code>:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Add to postgresql.conf</span>
+<span class="nb">echo</span> <span class="s2">"shared_preload_libraries = 'pg_extension_base'"</span> <span class="o">&gt;&gt;</span> <span class="nv">$PGDATA</span>/postgresql.conf
+
+<span class="c"># Or edit postgresql.conf manually to add:</span>
+<span class="c"># shared_preload_libraries = 'pg_extension_base'</span>
+
+<span class="c"># Restart PostgreSQL for the change to take effect</span>
+pg_ctl restart <span class="nt">-D</span> <span class="nv">$PGDATA</span>
+</code></pre></div></div> <h2 id="manual-installation-to-existing-postgresql"> <a href="#manual-installation-to-existing-postgresql" class="anchor-heading" aria-labelledby="manual-installation-to-existing-postgresql"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Manual Installation to Existing PostgreSQL </h2> <p>If you prefer to install pg_lake manually to your existing PostgreSQL installation:</p> <h3 id="install-build-dependencies"> <a href="#install-build-dependencies" class="anchor-heading" aria-labelledby="install-build-dependencies"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Install Build Dependencies </h3> <p>First, ensure you have the necessary build tools. For detailed system dependencies by platform, see the <a href="#manual-development-environment-setup">Manual Development Environment Setup</a> section.</p> <p><strong>Minimum requirements:</strong></p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Debian/Ubuntu</span>
+<span class="nb">sudo </span>apt-get <span class="nb">install</span> <span class="nt">-y</span> build-essential cmake ninja-build git pkg-config curl python3-dev
+
+<span class="c"># RHEL/AlmaLinux</span>
+<span class="nb">sudo </span>dnf <span class="nb">install</span> <span class="nt">-y</span> cmake ninja-build git pkgconfig curl gcc-c++ python3-devel
+
+<span class="c"># macOS</span>
+brew <span class="nb">install </span>cmake ninja git pkg-config curl python@3
+
+<span class="c"># Note: For macOS, vcpkg requires cmake 3.31.1 (not the latest version)</span>
+<span class="c"># See Manual Development Environment Setup for installation instructions</span>
+</code></pre></div></div> <p><strong>Note for macOS users:</strong> vcpkg has compatibility issues with the latest cmake. You need cmake 3.31.1. See the <a href="#macos">macOS section</a> in Manual Development Environment Setup for installation instructions.</p> <h3 id="install-vcpkg-and-azure-sdk"> <a href="#install-vcpkg-and-azure-sdk" class="anchor-heading" aria-labelledby="install-vcpkg-and-azure-sdk"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Install vcpkg and Azure SDK </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Install vcpkg</span>
+<span class="nb">export </span><span class="nv">VCPKG_VERSION</span><span class="o">=</span>2025.10.17
+git clone <span class="nt">--recurse-submodules</span> <span class="nt">--branch</span> <span class="nv">$VCPKG_VERSION</span> https://github.com/Microsoft/vcpkg.git
+./vcpkg/bootstrap-vcpkg.sh
+
+<span class="c"># Install Azure SDK packages (this may take a while)</span>
+./vcpkg/vcpkg <span class="nb">install </span>azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl
+
+<span class="c"># Set environment variable</span>
+<span class="nb">export </span><span class="nv">VCPKG_TOOLCHAIN_PATH</span><span class="o">=</span><span class="s2">"</span><span class="si">$(</span><span class="nb">pwd</span><span class="si">)</span><span class="s2">/vcpkg/scripts/buildsystems/vcpkg.cmake"</span>
+</code></pre></div></div> <h3 id="build-and-install-pg_lake"> <a href="#build-and-install-pg_lake" class="anchor-heading" aria-labelledby="build-and-install-pg_lake"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Build and Install pg_lake </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Clone pg_lake</span>
+git clone <span class="nt">--recurse-submodules</span> https://github.com/snowflake-labs/pg_lake.git
+<span class="nb">cd </span>pg_lake
+
+<span class="c"># Ensure pg_config is in PATH</span>
+which pg_config
+
+<span class="c"># Build and install (first build will be slow due to DuckDB compilation)</span>
+make <span class="nb">install</span>
+
+<span class="c"># For subsequent builds, use install-fast to skip rebuilding DuckDB</span>
+make install-fast
+</code></pre></div></div> <h3 id="start-pgduck_server-and-use-pg_lake"> <a href="#start-pgduck_server-and-use-pg_lake" class="anchor-heading" aria-labelledby="start-pgduck_server-and-use-pg_lake"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Start pgduck_server and Use pg_lake </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Set up AWS credentials (recommended)</span>
+aws configure
+
+<span class="c"># Start pgduck_server (required for pg_lake)</span>
+pgduck_server <span class="nt">--cache_dir</span> /tmp/pg_lake_cache/
+
+<span class="c"># In another terminal, create extensions</span>
+psql <span class="nt">-c</span> <span class="s2">"CREATE EXTENSION pg_lake CASCADE;"</span>
+psql <span class="nt">-c</span> <span class="s2">"SET pg_lake_iceberg.default_location_prefix TO 's3://your-bucket/pglake';"</span>
+</code></pre></div></div> <h2 id="development-environment-options"> <a href="#development-environment-options" class="anchor-heading" aria-labelledby="development-environment-options"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Development Environment Options </h2> <p>The <code class="language-plaintext highlighter-rouge">install.sh</code> script provides flexible installation options:</p> <p><strong>Default behavior:</strong> Installs pg_lake to an existing PostgreSQL installation (detects via <code class="language-plaintext highlighter-rouge">pg_config</code>)</p> <p><strong>With <code class="language-plaintext highlighter-rouge">--build-postgres</code>:</strong> Builds PostgreSQL from source with debug symbols and initializes a database cluster</p> <h3 id="basic-usage"> <a href="#basic-usage" class="anchor-heading" aria-labelledby="basic-usage"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Basic Usage </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Install to existing PostgreSQL (default)</span>
+./install.sh
+
+<span class="c"># Install with test dependencies</span>
+./install.sh <span class="nt">--with-test-deps</span>
+
+<span class="c"># Build PostgreSQL 18 from source + pg_lake</span>
+./install.sh <span class="nt">--build-postgres</span>
+
+<span class="c"># Build PostgreSQL 17 from source with test dependencies</span>
+./install.sh <span class="nt">--build-postgres</span> <span class="nt">--pg-version</span> 17 <span class="nt">--with-test-deps</span>
+
+<span class="c"># Set the number of parallel build jobs explicitly</span>
+./install.sh <span class="nt">--jobs</span> 16
+
+<span class="c"># Low-memory machine: linking DuckDB needs roughly 3 GB of RAM per job,</span>
+<span class="c"># so install.sh caps the default job count at total RAM / 3 GB.</span>
+<span class="c"># Lower it further if the linker is killed ("ld terminated with signal 9").</span>
+./install.sh <span class="nt">--jobs</span> 2
+</code></pre></div></div> <h3 id="common-scenarios"> <a href="#common-scenarios" class="anchor-heading" aria-labelledby="common-scenarios"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Common Scenarios </h3> <p><strong>Install only pg_lake (skip dependency installation):</strong></p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Assumes vcpkg already installed</span>
+./install.sh <span class="nt">--skip-vcpkg</span>
+</code></pre></div></div> <p><strong>Install with system dependencies:</strong></p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># If you need to install system build tools (cmake, ninja, etc.)</span>
+./install.sh <span class="nt">--with-system-deps</span>
+</code></pre></div></div> <p><strong>Custom PostgreSQL installation prefix:</strong></p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># When building PostgreSQL from source</span>
+./install.sh <span class="nt">--build-postgres</span> <span class="nt">--prefix</span> /opt/pgsql
+</code></pre></div></div> <h3 id="all-options"> <a href="#all-options" class="anchor-heading" aria-labelledby="all-options"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> All Options </h3> <p>Run <code class="language-plaintext highlighter-rouge">./install.sh --help</code> to see all available options:</p> <div class="language-plaintext highlighter-rouge"><div class="highlight"><pre class="highlight"><code>--build-postgres            Build PostgreSQL from source and initialize database
+--pg-version VERSION        PostgreSQL version to build (16, 17, 18, or 19) [default: 18]
+--prefix DIR                PostgreSQL installation prefix [default: auto-detect or $HOME/pgsql]
+--deps-dir DIR              Directory for dependencies [default: $HOME/pg_lake-deps]
+-j, --jobs N                Number of parallel build jobs [default: auto based on CPUs and RAM]
+
+--with-system-deps          Install system build dependencies (auto-enabled with --build-postgres)
+--skip-vcpkg                Skip vcpkg and Azure SDK installation
+--skip-pg-lake              Skip building pg_lake extensions
+
+--with-test-deps            Install optional test dependencies (PostGIS, pgAudit, pg_cron, azurite)
+</code></pre></div></div> <h2 id="manual-development-environment-setup"> <a href="#manual-development-environment-setup" class="anchor-heading" aria-labelledby="manual-development-environment-setup"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Manual Development Environment Setup </h2> <p>If you prefer to set up a complete development environment manually (including building PostgreSQL from source), follow these steps.</p> <h3 id="install-system-build-dependencies"> <a href="#install-system-build-dependencies" class="anchor-heading" aria-labelledby="install-system-build-dependencies"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Install System Build Dependencies </h3> <h4 id="debianubuntu"> <a href="#debianubuntu" class="anchor-heading" aria-labelledby="debianubuntu"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Debian/Ubuntu </h4> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>apt-get update <span class="o">&amp;&amp;</span> <span class="se">\</span>
+apt-get <span class="nb">install</span> <span class="nt">-y</span> <span class="se">\</span>
+    build-essential <span class="se">\</span>
+    cmake <span class="se">\</span>
+    ninja-build <span class="se">\</span>
+    libreadline-dev <span class="se">\</span>
+    zlib1g-dev <span class="se">\</span>
+    flex <span class="se">\</span>
+    bison <span class="se">\</span>
+    libxml2-dev <span class="se">\</span>
+    libxslt1-dev <span class="se">\</span>
+    libicu-dev <span class="se">\</span>
+    libssl-dev <span class="se">\</span>
+    libgeos-dev <span class="se">\</span>
+    libproj-dev <span class="se">\</span>
+    libgdal-dev <span class="se">\</span>
+    libjson-c-dev <span class="se">\</span>
+    libprotobuf-c-dev <span class="se">\</span>
+    protobuf-c-compiler <span class="se">\</span>
+    diffutils <span class="se">\</span>
+    uuid-dev <span class="se">\</span>
+    libossp-uuid-dev <span class="se">\</span>
+    liblz4-dev <span class="se">\</span>
+    liblzma-dev <span class="se">\</span>
+    libsnappy-dev <span class="se">\</span>
+    perl <span class="se">\</span>
+    libtool <span class="se">\</span>
+    libjansson-dev <span class="se">\</span>
+    libcurl4-openssl-dev <span class="se">\</span>
+    libpam0g-dev <span class="se">\</span>
+    curl <span class="se">\</span>
+    patch <span class="se">\</span>
+    g++ <span class="se">\</span>
+    libipc-run-perl <span class="se">\</span>
+    jq <span class="se">\</span>
+    git <span class="se">\</span>
+    pkg-config <span class="se">\</span>
+    python3-dev <span class="se">\</span>
+    libkrb5-dev <span class="se">\</span>
+    libnuma-dev
+</code></pre></div></div> <h4 id="rhelalmalinuxrocky-linux"> <a href="#rhelalmalinuxrocky-linux" class="anchor-heading" aria-labelledby="rhelalmalinuxrocky-linux"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> RHEL/AlmaLinux/Rocky Linux </h4> <p>On Fedora, use the same packages but leave out the <code class="language-plaintext highlighter-rouge">epel-release</code> and <code class="language-plaintext highlighter-rouge">crb</code> steps: Fedora has these packages in its own repositories.</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>dnf <span class="nt">-y</span> update <span class="o">&amp;&amp;</span> <span class="se">\</span>
+dnf <span class="nt">-y</span> <span class="nb">install </span>epel-release <span class="o">&amp;&amp;</span> <span class="se">\</span>
+dnf config-manager <span class="nt">--enable</span> crb <span class="o">&amp;&amp;</span> <span class="se">\</span>
+dnf <span class="nt">-y</span> <span class="nb">install</span> <span class="se">\</span>
+    cmake <span class="se">\</span>
+    ninja-build <span class="se">\</span>
+    readline-devel <span class="se">\</span>
+    zlib-devel <span class="se">\</span>
+    flex <span class="se">\</span>
+    bison <span class="se">\</span>
+    libxml2-devel <span class="se">\</span>
+    libxslt-devel <span class="se">\</span>
+    libicu-devel <span class="se">\</span>
+    openssl-devel <span class="se">\</span>
+    geos-devel <span class="se">\</span>
+    proj-devel <span class="se">\</span>
+    gdal-devel <span class="se">\</span>
+    json-c-devel <span class="se">\</span>
+    protobuf-c-devel <span class="se">\</span>
+    uuid-devel <span class="se">\</span>
+    lz4-devel <span class="se">\</span>
+    xz-devel <span class="se">\</span>
+    snappy-devel <span class="se">\</span>
+    perl <span class="se">\</span>
+    perl-IPC-Run <span class="se">\</span>
+    perl-IPC-Cmd <span class="se">\</span>
+    libtool <span class="se">\</span>
+    jansson-devel <span class="se">\</span>
+    jq <span class="se">\</span>
+    libcurl-devel <span class="se">\</span>
+    pam-devel <span class="se">\</span>
+    patch <span class="se">\</span>
+    which <span class="se">\</span>
+    gcc-c++ <span class="se">\</span>
+    git <span class="se">\</span>
+    pkgconfig <span class="se">\</span>
+    python3-devel <span class="se">\</span>
+    krb5-devel <span class="se">\</span>
+    numactl-devel
+</code></pre></div></div> <h4 id="macos"> <a href="#macos" class="anchor-heading" aria-labelledby="macos"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> macOS </h4> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Install Xcode Command Line Tools</span>
+xcode-select <span class="nt">--install</span>
+
+<span class="c"># Install Homebrew packages</span>
+brew update
+brew <span class="nb">install</span> <span class="se">\</span>
+    cmake <span class="se">\</span>
+    ninja <span class="se">\</span>
+    readline <span class="se">\</span>
+    zlib <span class="se">\</span>
+    libxml2 <span class="se">\</span>
+    libxslt <span class="se">\</span>
+    icu4c <span class="se">\</span>
+    openssl@3 <span class="se">\</span>
+    geos <span class="se">\</span>
+    proj <span class="se">\</span>
+    gdal <span class="se">\</span>
+    json-c <span class="se">\</span>
+    protobuf-c <span class="se">\</span>
+    lz4 <span class="se">\</span>
+    xz <span class="se">\</span>
+    snappy <span class="se">\</span>
+    jansson <span class="se">\</span>
+    curl <span class="se">\</span>
+    libtool <span class="se">\</span>
+    flex <span class="se">\</span>
+    bison <span class="se">\</span>
+    diffutils <span class="se">\</span>
+    jq <span class="se">\</span>
+    ossp-uuid <span class="se">\</span>
+    perl <span class="se">\</span>
+    pkg-config <span class="se">\</span>
+    python@3
+
+<span class="c"># Install cmake 3.31.1 for vcpkg compatibility</span>
+brew tap-new <span class="nv">$USER</span>/local-cmake
+brew tap homebrew/core <span class="nt">--force</span>
+brew extract <span class="nt">--version</span><span class="o">=</span>3.31.1 cmake <span class="nv">$USER</span>/local-cmake
+brew <span class="nb">install</span> <span class="nv">$USER</span>/local-cmake/cmake@3.31.1
+
+<span class="c"># Configure environment variables for compilers</span>
+<span class="nb">export </span><span class="nv">PATH</span><span class="o">=</span><span class="s2">"/opt/homebrew/opt/bison/bin:/opt/homebrew/opt/flex/bin:</span><span class="nv">$PATH</span><span class="s2">"</span>
+<span class="nb">export </span><span class="nv">LDFLAGS</span><span class="o">=</span><span class="s2">"-L/opt/homebrew/opt/icu4c/lib -L/opt/homebrew/opt/openssl@3/lib"</span>
+<span class="nb">export </span><span class="nv">CPPFLAGS</span><span class="o">=</span><span class="s2">"-I/opt/homebrew/opt/icu4c/include -I/opt/homebrew/opt/openssl@3/include"</span>
+<span class="nb">export </span><span class="nv">PKG_CONFIG_PATH</span><span class="o">=</span><span class="s2">"/opt/homebrew/opt/icu4c/lib/pkgconfig:/opt/homebrew/opt/openssl@3/lib/pkgconfig"</span>
+</code></pre></div></div> <p><strong>Note for macOS:</strong> For vcpkg to work correctly with DuckDB plugins, you cannot use the latest version of CMake. The commands above install a known-working version (3.31.1).</p> <h3 id="build-postgresql-from-source"> <a href="#build-postgresql-from-source" class="anchor-heading" aria-labelledby="build-postgresql-from-source"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Build PostgreSQL from Source </h3> <p>pg_lake is supported with PostgreSQL 16, 17, 18, and 19. For development, we recommend building PostgreSQL from source to get debug symbols and assertions.</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Clone PostgreSQL (version 18 example)</span>
+git clone https://github.com/postgres/postgres.git <span class="nt">-b</span> REL_18_STABLE
+<span class="nb">cd </span>postgres
+
+<span class="c"># Configure (Linux example)</span>
+./configure <span class="se">\</span>
+    <span class="nt">--prefix</span><span class="o">=</span><span class="nv">$HOME</span>/pgsql/18 <span class="se">\</span>
+    <span class="nt">--enable-injection-points</span> <span class="se">\</span>
+    <span class="nt">--enable-tap-tests</span> <span class="se">\</span>
+    <span class="nt">--enable-debug</span> <span class="se">\</span>
+    <span class="nt">--enable-cassert</span> <span class="se">\</span>
+    <span class="nt">--enable-depend</span> <span class="se">\</span>
+    <span class="nv">CFLAGS</span><span class="o">=</span><span class="s2">"-ggdb -Og -g3 -fno-omit-frame-pointer"</span> <span class="se">\</span>
+    <span class="nt">--with-openssl</span> <span class="se">\</span>
+    <span class="nt">--with-libxml</span> <span class="se">\</span>
+    <span class="nt">--with-libxslt</span> <span class="se">\</span>
+    <span class="nt">--with-icu</span> <span class="se">\</span>
+    <span class="nt">--with-lz4</span> <span class="se">\</span>
+    <span class="nt">--with-pam</span> <span class="se">\</span>
+    <span class="nt">--with-python</span>
+
+<span class="c"># Configure (macOS example)</span>
+./configure <span class="se">\</span>
+    <span class="nt">--prefix</span><span class="o">=</span><span class="nv">$HOME</span>/pgsql/18 <span class="se">\</span>
+    <span class="nt">--enable-injection-points</span> <span class="se">\</span>
+    <span class="nt">--enable-tap-tests</span> <span class="se">\</span>
+    <span class="nt">--enable-debug</span> <span class="se">\</span>
+    <span class="nt">--enable-cassert</span> <span class="se">\</span>
+    <span class="nt">--enable-depend</span> <span class="se">\</span>
+    <span class="nv">CFLAGS</span><span class="o">=</span><span class="s2">"-ggdb -Og -g3 -fno-omit-frame-pointer"</span> <span class="se">\</span>
+    <span class="nt">--with-openssl</span> <span class="se">\</span>
+    <span class="nt">--with-libxml</span> <span class="se">\</span>
+    <span class="nt">--with-libxslt</span> <span class="se">\</span>
+    <span class="nt">--with-icu</span> <span class="se">\</span>
+    <span class="nt">--with-lz4</span> <span class="se">\</span>
+    <span class="nt">--with-python</span> <span class="se">\</span>
+    <span class="nt">--with-readline</span> <span class="se">\</span>
+    <span class="nt">--with-includes</span><span class="o">=</span>/opt/homebrew/include/ <span class="se">\</span>
+    <span class="nt">--with-libraries</span><span class="o">=</span>/opt/homebrew/lib <span class="se">\</span>
+    <span class="nv">PG_SYSROOT</span><span class="o">=</span>/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk
+
+<span class="c"># Build and install</span>
+make <span class="nt">-j</span> 16 <span class="o">&amp;&amp;</span> make <span class="nb">install</span>
+
+<span class="c"># Install all contrib modules (includes auto_explain, pg_stat_statements, btree_gist, etc.)</span>
+make <span class="nt">-C</span> contrib <span class="nb">install</span>
+
+<span class="c"># Install test modules (optional, for test suite)</span>
+make <span class="nt">-C</span> src/test/modules/injection_points <span class="nb">install
+</span>make <span class="nt">-C</span> src/test/isolation <span class="nb">install</span>
+
+<span class="c"># Add PostgreSQL to PATH</span>
+<span class="nb">export </span><span class="nv">PATH</span><span class="o">=</span><span class="nv">$HOME</span>/pgsql/18/bin:<span class="nv">$PATH</span>
+</code></pre></div></div> <h3 id="install-vcpkg-and-azure-sdk-dependencies"> <a href="#install-vcpkg-and-azure-sdk-dependencies" class="anchor-heading" aria-labelledby="install-vcpkg-and-azure-sdk-dependencies"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Install vcpkg and Azure SDK Dependencies </h3> <p>pg_lake requires vcpkg for managing Azure SDK dependencies:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Install vcpkg</span>
+<span class="nb">export </span><span class="nv">VCPKG_VERSION</span><span class="o">=</span>2025.10.17
+git clone <span class="nt">--recurse-submodules</span> <span class="nt">--branch</span> <span class="nv">$VCPKG_VERSION</span> https://github.com/Microsoft/vcpkg.git
+./vcpkg/bootstrap-vcpkg.sh
+
+<span class="c"># Install Azure SDK packages (this may take a while)</span>
+./vcpkg/vcpkg <span class="nb">install </span>azure-identity-cpp azure-storage-blobs-cpp azure-storage-files-datalake-cpp openssl
+
+<span class="c"># Set environment variable for pg_lake build</span>
+<span class="nb">export </span><span class="nv">VCPKG_TOOLCHAIN_PATH</span><span class="o">=</span><span class="s2">"</span><span class="si">$(</span><span class="nb">pwd</span><span class="si">)</span><span class="s2">/vcpkg/scripts/buildsystems/vcpkg.cmake"</span>
+</code></pre></div></div> <h3 id="build-and-install-pg_lake-1"> <a href="#build-and-install-pg_lake-1" class="anchor-heading" aria-labelledby="build-and-install-pg_lake-1"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Build and Install pg_lake </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Clone pg_lake repository</span>
+git clone <span class="nt">--recurse-submodules</span> https://github.com/snowflake-labs/pg_lake.git
+<span class="nb">cd </span>pg_lake
+
+<span class="c"># Make sure pg_config is in your PATH</span>
+<span class="nb">export </span><span class="nv">PATH</span><span class="o">=</span><span class="nv">$HOME</span>/pgsql/18/bin:<span class="nv">$PATH</span>
+
+<span class="c"># Build and install pg_lake</span>
+<span class="c"># First build will be slow due to DuckDB compilation</span>
+make <span class="nb">install</span>
+
+<span class="c"># For subsequent builds, use install-fast to skip rebuilding DuckDB</span>
+make install-fast
+</code></pre></div></div> <p><strong>Note:</strong> The first <code class="language-plaintext highlighter-rouge">make install</code> will take a while because it needs to build DuckDB. Subsequent builds can use <code class="language-plaintext highlighter-rouge">make install-fast</code> to skip rebuilding DuckDB if it hasn’t changed.</p> <h3 id="initialize-postgresql-database"> <a href="#initialize-postgresql-database" class="anchor-heading" aria-labelledby="initialize-postgresql-database"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Initialize PostgreSQL Database </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Create a new database cluster</span>
+initdb <span class="nt">-k</span> <span class="nt">-D</span> <span class="nv">$HOME</span>/pgsql/18/data <span class="nt">--locale</span><span class="o">=</span>C.UTF-8
+
+<span class="c"># Configure shared_preload_libraries</span>
+<span class="nb">echo</span> <span class="s2">"shared_preload_libraries = 'pg_extension_base'"</span> <span class="o">&gt;&gt;</span> <span class="nv">$HOME</span>/pgsql/18/data/postgresql.conf
+
+<span class="c"># Start PostgreSQL</span>
+pg_ctl <span class="nt">-D</span> <span class="nv">$HOME</span>/pgsql/18/data <span class="nt">-l</span> <span class="nv">$HOME</span>/pgsql/18/data/logfile start
+</code></pre></div></div> <h3 id="start-pgduck_server-and-use-pg_lake-1"> <a href="#start-pgduck_server-and-use-pg_lake-1" class="anchor-heading" aria-labelledby="start-pgduck_server-and-use-pg_lake-1"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Start pgduck_server and Use pg_lake </h3> <p>To use pg_lake, you need to have <code class="language-plaintext highlighter-rouge">pgduck_server</code> running:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># (Recommended) Set up AWS credentials first</span>
+aws configure
+
+<span class="c"># Start pgduck_server</span>
+pgduck_server <span class="nt">--cache_dir</span> /tmp/pg_lake_cache/
+</code></pre></div></div> <p>Unless you are making changes to <code class="language-plaintext highlighter-rouge">pgduck_server</code>, it is generally ok to keep an unrelated instance running.</p> <p>Connect to PostgreSQL and create the pg_lake extensions:</p> <div class="language-sql highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">CREATE</span> <span class="n">EXTENSION</span> <span class="n">pg_lake</span> <span class="k">CASCADE</span><span class="p">;</span>
+
+<span class="c1">-- Set S3 location for Iceberg tables</span>
+<span class="k">SET</span> <span class="n">pg_lake_iceberg</span><span class="p">.</span><span class="n">default_location_prefix</span> <span class="k">TO</span> <span class="s1">'s3://your-bucket/pglake'</span><span class="p">;</span>
+
+<span class="c1">-- Test with a simple Iceberg table</span>
+<span class="k">CREATE</span> <span class="k">TABLE</span> <span class="n">test</span><span class="p">(</span><span class="n">id</span> <span class="nb">int</span><span class="p">,</span> <span class="n">name</span> <span class="nb">text</span><span class="p">)</span> <span class="k">USING</span> <span class="n">iceberg</span><span class="p">;</span>
+<span class="k">INSERT</span> <span class="k">INTO</span> <span class="n">test</span> <span class="k">VALUES</span> <span class="p">(</span><span class="mi">1</span><span class="p">,</span> <span class="s1">'Alice'</span><span class="p">),</span> <span class="p">(</span><span class="mi">2</span><span class="p">,</span> <span class="s1">'Bob'</span><span class="p">);</span>
+<span class="k">SELECT</span> <span class="o">*</span> <span class="k">FROM</span> <span class="n">test</span><span class="p">;</span>
+
+<span class="c1">-- Test COPY to Parquet</span>
+<span class="err">\</span><span class="k">copy</span> <span class="p">(</span><span class="k">select</span> <span class="n">s</span> <span class="n">x</span><span class="p">,</span> <span class="n">s</span> <span class="n">y</span> <span class="k">from</span> <span class="n">generate_series</span><span class="p">(</span><span class="mi">1</span><span class="p">,</span><span class="mi">10</span><span class="p">)</span> <span class="n">s</span><span class="p">)</span> <span class="k">to</span> <span class="s1">'/tmp/xy.parquet'</span> <span class="k">with</span> <span class="p">(</span><span class="n">format</span> <span class="s1">'parquet'</span><span class="p">)</span>
+</code></pre></div></div> <h3 id="running-pgduck_server-under-a-separate-linux-user"> <a href="#running-pgduck_server-under-a-separate-linux-user" class="anchor-heading" aria-labelledby="running-pgduck_server-under-a-separate-linux-user"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Running pgduck_server under a Separate Linux User </h3> <p>It is possible to run <code class="language-plaintext highlighter-rouge">pgduck_server</code> under a separate Linux user by setting permissions on the database directory. If postgres is running under the <code class="language-plaintext highlighter-rouge">postgres</code> user, the simplest approach is to add the pgduck user to the postgres group.</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Create pgduck user and add it to the postgres group</span>
+<span class="nb">sudo </span>adduser pgduck
+<span class="nb">sudo </span>usermod <span class="nt">-a</span> <span class="nt">-G</span> postgres pgduck
+
+<span class="nb">export </span><span class="nv">PGDATA</span><span class="o">=</span>/home/postgres/18/
+
+<span class="c"># Make the database directory accessible by group</span>
+initdb <span class="nt">-D</span> <span class="nv">$PGDATA</span> <span class="nt">-g</span> <span class="nt">--locale</span><span class="o">=</span>C.UTF-8
+<span class="c"># or: chmod 750 $PGDATA $PGDATA/base</span>
+
+<span class="c"># Make sure pgsql_tmp directory exists</span>
+<span class="nb">mkdir</span> <span class="nt">-p</span> <span class="nv">$PGDATA</span>/base/pgsql_tmp
+
+<span class="c"># Allow group to read and write pgsql_tmp</span>
+<span class="nb">chmod </span>2770 <span class="nv">$PGDATA</span>/base/pgsql_tmp
+
+<span class="c"># Run pgduck_server as pgduck user with postgres as unix socket group</span>
+<span class="nb">sudo </span>su pgduck <span class="nt">-c</span> <span class="s2">"pgduck_server --unix_socket_group postgres --duckdb_database_file_path /cache/duckdb.db --cache_dir /cache/files"</span>
+</code></pre></div></div> <p>Verify that COPY in Parquet format to/from stdout/stdin and S3 all work.</p> <h2 id="test-environment-setup"> <a href="#test-environment-setup" class="anchor-heading" aria-labelledby="test-environment-setup"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Test Environment Setup </h2> <p>To run the full test suite, you need to install additional dependencies. These are optional if you only want to use pg_lake.</p> <h3 id="test-dependencies"> <a href="#test-dependencies" class="anchor-heading" aria-labelledby="test-dependencies"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Test Dependencies </h3> <ul> <li><strong>Python 3.11+</strong> with pipenv</li> <li><strong>PostGIS</strong> (dependency of pg_lake_spatial)</li> <li><strong>pgAudit</strong> (used in test suite)</li> <li><strong>pg_cron</strong> (used in test suite)</li> <li><strong>Java 21+</strong> (for Spark verification tests and Polaris catalog tests)</li> <li><strong>PostgreSQL JDBC driver</strong> (for Spark tests)</li> <li><strong>azurite</strong> (for Azure storage tests)</li> </ul> <p>The automated installation script can install these for you:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>./install.sh <span class="nt">--with-test-deps</span>
+</code></pre></div></div> <p>Or install them manually:</p> <h3 id="install-python-dependencies"> <a href="#install-python-dependencies" class="anchor-heading" aria-labelledby="install-python-dependencies"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Install Python Dependencies </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Install pipenv (if not already installed)</span>
+pip3 <span class="nb">install</span> <span class="nt">--user</span> pipenv
+
+<span class="c"># Install test dependencies</span>
+pipenv <span class="nb">install</span> <span class="nt">--dev</span>
+</code></pre></div></div> <h3 id="build-postgis"> <a href="#build-postgis" class="anchor-heading" aria-labelledby="build-postgis"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Build PostGIS </h3> <p>PostGIS is required for pg_lake_spatial extension:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>git clone https://github.com/postgis/postgis.git
+<span class="nb">cd </span>postgis
+./autogen.sh
+./configure <span class="nt">--prefix</span><span class="o">=</span><span class="nv">$HOME</span>/pgsql/18/
+make <span class="nt">-j</span> 16
+make <span class="nb">install</span>
+</code></pre></div></div> <h3 id="build-pgaudit"> <a href="#build-pgaudit" class="anchor-heading" aria-labelledby="build-pgaudit"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Build pgAudit </h3> <p>pgAudit is used in the test suite:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>git clone https://github.com/pgaudit/pgaudit.git
+<span class="nb">cd </span>pgaudit
+make <span class="nv">USE_PGXS</span><span class="o">=</span>1 <span class="nb">install</span>
+</code></pre></div></div> <h3 id="build-pg_cron"> <a href="#build-pg_cron" class="anchor-heading" aria-labelledby="build-pg_cron"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Build pg_cron </h3> <p>pg_cron is used in the test suite:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>git clone https://github.com/citusdata/pg_cron.git
+<span class="nb">cd </span>pg_cron
+make <span class="nb">install</span>
+</code></pre></div></div> <h3 id="install-azurite-for-azure-tests"> <a href="#install-azurite-for-azure-tests" class="anchor-heading" aria-labelledby="install-azurite-for-azure-tests"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Install azurite (for Azure Tests) </h3> <p>Azure tests use azurite, which requires Node.js and npm:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Ubuntu/Debian</span>
+<span class="nb">sudo </span>apt-get <span class="nb">install</span> <span class="nt">-y</span> nodejs npm
+
+<span class="c"># RHEL/AlmaLinux</span>
+<span class="nb">sudo </span>dnf <span class="nb">install</span> <span class="nt">-y</span> nodejs npm
+
+<span class="c"># macOS</span>
+brew <span class="nb">install </span>node
+
+<span class="c"># Install azurite</span>
+npm <span class="nb">install</span> <span class="nt">-g</span> azurite
+</code></pre></div></div> <h3 id="java-and-jdbc-driver"> <a href="#java-and-jdbc-driver" class="anchor-heading" aria-labelledby="java-and-jdbc-driver"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Java and JDBC Driver </h3> <p>Some tests verify pg_lake_iceberg table results using Apache Spark, which requires Java 21+ and the PostgreSQL JDBC driver.</p> <p><strong>Note:</strong> <code class="language-plaintext highlighter-rouge">./install.sh --with-test-deps</code> automatically installs Java 21+ and downloads the JDBC driver for you.</p> <p>To install manually:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Install Java 21 or higher</span>
+<span class="c"># Ubuntu/Debian</span>
+<span class="nb">sudo </span>apt-get <span class="nb">install</span> <span class="nt">-y</span> openjdk-21-jdk
+
+<span class="c"># RHEL/AlmaLinux (install -devel package for full JDK including javac)</span>
+<span class="nb">sudo </span>dnf <span class="nb">install</span> <span class="nt">-y</span> java-21-openjdk-devel
+
+<span class="c"># macOS</span>
+brew <span class="nb">install </span>openjdk@21
+
+<span class="c"># Download PostgreSQL JDBC driver (version 42.7.10)</span>
+<span class="nb">mkdir</span> <span class="nt">-p</span> ~/pg_lake-deps/jdbc
+curl <span class="nt">-L</span> <span class="nt">-o</span> ~/pg_lake-deps/jdbc/postgresql-42.7.10.jar <span class="se">\</span>
+  https://jdbc.postgresql.org/download/postgresql-42.7.10.jar
+
+<span class="c"># Set environment variable (add to ~/.bashrc or ~/.zshrc):</span>
+<span class="nb">export </span><span class="nv">JDBC_DRIVER_PATH</span><span class="o">=</span>~/pg_lake-deps/jdbc/postgresql-42.7.10.jar
+</code></pre></div></div> <h2 id="running-tests"> <a href="#running-tests" class="anchor-heading" aria-labelledby="running-tests"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Running Tests </h2> <p>We primarily use pytest for regression tests.</p> <h3 id="run-all-tests"> <a href="#run-all-tests" class="anchor-heading" aria-labelledby="run-all-tests"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Run All Tests </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Run all local tests</span>
+make check
+
+<span class="c"># Run end-to-end tests (requires S3/cloud access)</span>
+make check-e2e
+
+<span class="c"># Run upgrade tests</span>
+make check-upgrade
+</code></pre></div></div> <h3 id="run-component-specific-tests"> <a href="#run-component-specific-tests" class="anchor-heading" aria-labelledby="run-component-specific-tests"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Run Component-Specific Tests </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Test specific extensions</span>
+make check-pg_lake_table
+make check-pg_lake_iceberg
+make check-pgduck_server
+
+<span class="c"># Run isolation tests</span>
+make check-isolation_pg_lake_table
+</code></pre></div></div> <h3 id="run-individual-pytest-tests"> <a href="#run-individual-pytest-tests" class="anchor-heading" aria-labelledby="run-individual-pytest-tests"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Run Individual Pytest Tests </h3> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nb">cd </span>pg_lake_table
+<span class="nv">PYTHONPATH</span><span class="o">=</span>../test_common pipenv run pytest <span class="nt">-v</span> tests/pytests/test_specific.py
+<span class="nv">PYTHONPATH</span><span class="o">=</span>../test_common pipenv run pytest <span class="nt">-v</span> tests/pytests/test_specific.py::test_function_name
+</code></pre></div></div> <h3 id="run-installcheck-tests"> <a href="#run-installcheck-tests" class="anchor-heading" aria-labelledby="run-installcheck-tests"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Run installcheck Tests </h3> <p>installcheck tests run against installed extensions in a running PostgreSQL instance:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Start pgduck_server with test configuration</span>
+pgduck_server <span class="nt">--init_file_path</span> pgduck_server/tests/test_secrets.sql <span class="nt">--cache_dir</span> /tmp/cache &amp;
+
+<span class="c"># Run installcheck</span>
+make installcheck
+
+<span class="c"># Run installcheck for specific component</span>
+make installcheck-pg_lake_table
+</code></pre></div></div> <p><strong>Note:</strong> There are several PostgreSQL settings that may affect the installcheck result (e.g., timezone, <code class="language-plaintext highlighter-rouge">pg_lake_iceberg.default_location_prefix</code>).</p> <h3 id="running-postgresql-tests-with-pg_lake-extensions"> <a href="#running-postgresql-tests-with-pg_lake-extensions" class="anchor-heading" aria-labelledby="running-postgresql-tests-with-pg_lake-extensions"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Running PostgreSQL Tests with pg_lake Extensions </h3> <p>We also run PostgreSQL’s own regression tests with pg_lake extensions loaded to ensure we don’t break regular PostgreSQL behavior:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Set PostgreSQL source directory</span>
+<span class="nb">export </span><span class="nv">PG_REGRESS_DIR</span><span class="o">=</span>/path/to/postgres/src/test/regress
+
+<span class="c"># Configure PostgreSQL for testing</span>
+psql postgres <span class="o">&lt;&lt;</span> <span class="no">EOF</span><span class="sh">
+ALTER SYSTEM SET compute_query_id='regress';
+ALTER SYSTEM SET pg_lake_table.hide_objects_created_by_lake=true;
+SELECT pg_reload_conf();
+</span><span class="no">EOF
+
+</span><span class="c"># Run PostgreSQL tests with pg_lake in shared_preload_libraries</span>
+make installcheck-postgres <span class="nv">PG_REGRESS_DIR</span><span class="o">=</span><span class="nv">$PG_REGRESS_DIR</span>
+
+<span class="c"># Run PostgreSQL tests with pg_lake extensions created</span>
+make installcheck-postgres-with_extensions_created <span class="nv">PG_REGRESS_DIR</span><span class="o">=</span><span class="nv">$PG_REGRESS_DIR</span>
+</code></pre></div></div> <h3 id="why-pytest"> <a href="#why-pytest" class="anchor-heading" aria-labelledby="why-pytest"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Why pytest? </h3> <p>We have avoided traditional SQL regression tests because:</p> <ul> <li>They lack programmatic testing capabilities</li> <li>They require repetitive patterns that are hard to maintain</li> <li>They often have non-deterministic output (e.g., unordered SELECT results)</li> <li>They’re sensitive to small implementation details</li> <li>pytest is widely used and well-supported by AI tools for test generation</li> </ul> <h2 id="running-s3-compatible-service-minio-locally"> <a href="#running-s3-compatible-service-minio-locally" class="anchor-heading" aria-labelledby="running-s3-compatible-service-minio-locally"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Running S3-Compatible Service (MinIO) Locally </h2> <p>pg_lake heavily relies on S3 storage. However, using real S3 can introduce significant latency during local testing. You can use MinIO for local S3-compatible storage.</p> <h3 id="installation-and-setup-of-minio"> <a href="#installation-and-setup-of-minio" class="anchor-heading" aria-labelledby="installation-and-setup-of-minio"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Installation and Setup of MinIO </h3> <p><strong>1. Install MinIO:</strong></p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># macOS</span>
+brew <span class="nb">install </span>minio
+
+<span class="c"># Linux - download from https://min.io/download (linux-arm64 on ARM machines)</span>
+wget https://dl.min.io/server/minio/release/linux-amd64/minio
+<span class="nb">chmod</span> +x minio
+<span class="nb">sudo mv </span>minio /usr/local/bin/
+</code></pre></div></div> <p><strong>2. Start MinIO Server:</strong></p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="c"># Remove leftovers from previous run if needed</span>
+<span class="nb">rm</span> <span class="nt">-rf</span> /tmp/data
+
+<span class="c"># Start server</span>
+minio server /tmp/data
+</code></pre></div></div> <p><strong>3. Access MinIO UI:</strong></p> <p>Open your browser and go to http://localhost:9000/</p> <p><strong>4. Create Access and Secret Keys:</strong></p> <p>From the MinIO UI, create access credentials. For simplicity, use:</p> <ul> <li>Access Key: <code class="language-plaintext highlighter-rouge">testkey</code></li> <li>Secret Key: <code class="language-plaintext highlighter-rouge">testpassword</code></li> </ul> <p><strong>5. Add MinIO Profile to ~/.aws/config:</strong></p> <div class="language-ini highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="nn">[services testing-minio]</span>
+<span class="py">s3</span> <span class="p">=</span>
+   <span class="py">endpoint_url</span> <span class="p">=</span> <span class="s">http://localhost:9000</span>
+
+<span class="nn">[profile minio]</span>
+<span class="py">region</span> <span class="p">=</span> <span class="s">us-east-1</span>
+<span class="py">services</span> <span class="p">=</span> <span class="s">testing-minio</span>
+<span class="py">aws_access_key_id</span> <span class="p">=</span> <span class="s">testkey</span>
+<span class="py">aws_secret_access_key</span> <span class="p">=</span> <span class="s">testpassword</span>
+</code></pre></div></div> <p><strong>6. Create a Bucket:</strong></p> <p>From the MinIO UI, create a bucket named <code class="language-plaintext highlighter-rouge">localbucket</code>.</p> <p><strong>7. Configure DuckDB Secret in pgduck_server:</strong></p> <p>Connect to pgduck_server and create the S3 secret:</p> <div class="language-sql highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="n">psql</span> <span class="o">-</span><span class="n">p</span> <span class="mi">5332</span> <span class="o">-</span><span class="n">h</span> <span class="o">/</span><span class="n">tmp</span>
+
+<span class="k">CREATE</span> <span class="n">SECRET</span> <span class="n">s3testMinio</span> <span class="p">(</span>
+    <span class="k">TYPE</span> <span class="n">S3</span><span class="p">,</span>
+    <span class="n">KEY_ID</span> <span class="s1">'testkey'</span><span class="p">,</span>
+    <span class="n">SECRET</span> <span class="s1">'testpassword'</span><span class="p">,</span>
+    <span class="n">ENDPOINT</span> <span class="s1">'localhost:9000'</span><span class="p">,</span>
+    <span class="k">SCOPE</span> <span class="s1">'s3://localbucket'</span><span class="p">,</span>
+    <span class="n">URL_STYLE</span> <span class="s1">'path'</span><span class="p">,</span>
+    <span class="n">USE_SSL</span> <span class="k">false</span>
+<span class="p">);</span>
+</code></pre></div></div> <p><strong>8. Create an Iceberg Table Using MinIO:</strong></p> <div class="language-sql highlighter-rouge"><div class="highlight"><pre class="highlight"><code><span class="k">SET</span> <span class="n">pg_lake_iceberg</span><span class="p">.</span><span class="n">default_location_prefix</span> <span class="k">TO</span> <span class="s1">'s3://localbucket'</span><span class="p">;</span>
+<span class="k">CREATE</span> <span class="k">TABLE</span> <span class="n">t_iceberg</span><span class="p">(</span><span class="n">a</span> <span class="nb">int</span><span class="p">)</span> <span class="k">USING</span> <span class="n">iceberg</span><span class="p">;</span>
+</code></pre></div></div> <h2 id="automatically-bumping-extension-versions"> <a href="#automatically-bumping-extension-versions" class="anchor-heading" aria-labelledby="automatically-bumping-extension-versions"><svg viewBox="0 0 16 16" aria-hidden="true"><use xlink:href="#svg-link"></use></svg></a> Automatically Bumping Extension Versions </h2> <p>To bump all PostgreSQL extensions in the repo to a new version:</p> <div class="language-bash highlighter-rouge"><div class="highlight"><pre class="highlight"><code>python tools/bump_extension_versions.py 3.0
+</code></pre></div></div> <p>What it does:</p> <ul> <li>Finds all folders containing a <code class="language-plaintext highlighter-rouge">.control</code> file</li> <li>Updates the <code class="language-plaintext highlighter-rouge">default_version</code> field in each control file</li> <li>Creates a new SQL stub for version upgrade (e.g., <code class="language-plaintext highlighter-rouge">pg_lake_engine--2.4--3.0.sql</code>)</li> </ul> </main> <hr> <footer> <p><a href="#top" id="back-to-top">Back to top</a></p> <p class="text-small mb-0"> pg_lake is open source under the <a href="https://github.com/Snowflake-Labs/pg_lake/blob/main/LICENSE">Apache License 2.0</a>. Found a problem in the docs? <a href="https://github.com/Snowflake-Labs/pg_lake/issues">Open an issue</a>. </p> <div class="d-flex mt-2"> <p class="text-small mb-0"> <a href="https://github.com/Snowflake-Labs/pg_lake/edit/main/docs/building-from-source.md" id="edit-this-page">Edit this page on GitHub</a> </p> </div> <div class="d-md-none mt-4 fs-2"> This site uses <a href="https://github.com/just-the-docs/just-the-docs">Just the Docs</a>, a documentation theme for Jekyll. </div> </footer> </div> </div> <div class="search-overlay"></div> </div> </body> </html>
