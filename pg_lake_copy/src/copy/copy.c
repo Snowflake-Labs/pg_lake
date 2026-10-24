@@ -34,6 +34,7 @@
 #include "catalog/pg_type.h"
 #include "commands/copy.h"
 #include "commands/defrem.h"
+#include "mb/pg_wchar.h"
 #include "common/string.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/copy/copy_io.h"
@@ -143,6 +144,9 @@ static TupleDesc RemoveSkippedColumnsFromTupleDesc(TupleDesc tupleDesc);
 static void VerifyNoDuplicateNames(TupleDesc tupleDesc);
 static int	CopyReceivedTransmitDataToBuffer(void *outbuf, int minread, int maxread);
 static bool ReceiveCopyData(PGDuckConnection * pgDuckConn, StringInfo buffer);
+static bool CanUseBinaryTransmit(void);
+static List *TransmitFormatOptions(bool isBinaryTransmit);
+static char *AddBinaryTransmitTypes(char *transmitQuery, TupleDesc tupleDesc);
 
 PG_FUNCTION_INFO_V1(pg_lake_last_copy_pushed_down_test);
 
@@ -152,6 +156,7 @@ bool		EnablePgLakeCopy = true;
 bool		EnablePgLakeCopyJson = true;
 int			JsonCopyMode = JSON_COPY_MODE_AUTO;
 bool		IncludeGeneratedColumnsInCopyTo = false;
+bool		EnableBinaryTransmit = true;
 
 /* allowed values for the pg_lake_copy.json_copy_mode enum GUC */
 const struct config_enum_entry json_copy_mode_options[] = {
@@ -560,14 +565,6 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	List	   *writeOptions = FindCopyFromWriteOptions(sourceFormat, copyStmt->options);
 
 	/*
-	 * Always include standard CSV file options that correspond to the
-	 * transmit stream.
-	 */
-	bool		includeHeader = false;
-
-	writeOptions = list_concat(writeOptions, InternalCSVOptions(includeHeader));
-
-	/*
 	 * Describe the expected input columns using a TupleDesc.
 	 */
 	TupleDesc	tupleDesc = BuildTupleDescriptorForRelation(relation, copyStmt->attlist);
@@ -668,6 +665,14 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
 
+	/*
+	 * Ask for the binary COPY format when we can. pgduck_server decides per
+	 * query whether all columns can be sent in binary, and otherwise falls
+	 * back to CSV, so we check the format of the response below.
+	 */
+	if (CanUseBinaryTransmit())
+		readQuery = AddBinaryTransmitTypes(readQuery, tupleDesc);
+
 	/* start the transmit command */
 	SendQueryToPGDuck(pgDuckConn, readQuery);
 
@@ -678,11 +683,23 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	{
 		CheckPGDuckResult(pgDuckConn, result);
 	}
+
+	bool		isBinaryTransmit = PQbinaryTuples(result) == 1;
+
 	PQclear(result);
+
+	if (isBinaryTransmit)
+		ereport(DEBUG1, (errmsg("pg_lake_copy: receiving rows in binary format")));
+
+	/*
+	 * Include the format options that correspond to the transmit stream.
+	 */
+	List	   *copyFromOptions =
+		list_concat(writeOptions, TransmitFormatOptions(isBinaryTransmit));
 
 	/*
 	 * Initialize the buffer into which CopyReceivedTransmitDataToBuffer
-	 * writes CSV-formatted lines.
+	 * writes the received CSV or binary COPY data.
 	 */
 	initStringInfo(&CopyFromBuffer);
 
@@ -699,7 +716,7 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 * Some compilers get confused by using writeOptions after PG_TRY, even
 	 * though it's not modified.
 	 */
-	volatile List *writeOptionsVolatile = writeOptions;
+	volatile List *writeOptionsVolatile = copyFromOptions;
 
 	/*
 	 * Do an internal COPY .. FROM <CopyReceivedTransmitDataToBuffer()>
@@ -1742,6 +1759,84 @@ ReceiveCopyData(PGDuckConnection * pgDuckConnection, StringInfo buffer)
 	Assert(bytesReceived != 0);
 
 	return true;
+}
+
+
+/*
+ * CanUseBinaryTransmit returns whether we can ask pgduck_server to send rows
+ * in the binary COPY format.
+ */
+static bool
+CanUseBinaryTransmit(void)
+{
+	if (!EnableBinaryTransmit)
+		return false;
+
+	/*
+	 * pgduck_server sends strings as UTF-8. The CSV path converts them via
+	 * COPY's ENCODING option, but binary receive functions like textrecv
+	 * convert from the client encoding, so we require both to be UTF-8.
+	 */
+	return GetDatabaseEncoding() == PG_UTF8 && pg_get_client_encoding() == PG_UTF8;
+}
+
+
+/*
+ * TransmitFormatOptions returns the COPY options for reading the transmit
+ * stream in the given format.
+ */
+static List *
+TransmitFormatOptions(bool isBinaryTransmit)
+{
+	if (isBinaryTransmit)
+		return list_make1(makeDefElem("format", (Node *) makeString("binary"), -1));
+
+	bool		includeHeader = false;
+
+	return InternalCSVOptions(includeHeader);
+}
+
+
+/*
+ * AddBinaryTransmitTypes turns a "TRANSMIT <query>" string into
+ * "TRANSMIT BINARY (<type oids>) <query>", where the type oids are the types
+ * into which COPY will read each result column.
+ *
+ * We pass the base type of domains, since that determines the binary
+ * format, and COPY applies the domain's receive function, which checks its
+ * constraints.
+ */
+static char *
+AddBinaryTransmitTypes(char *transmitQuery, TupleDesc tupleDesc)
+{
+	const char *transmitPrefix = "TRANSMIT ";
+	int			transmitPrefixLength = strlen(transmitPrefix);
+
+	if (strncmp(transmitQuery, transmitPrefix, transmitPrefixLength) != 0)
+		return transmitQuery;
+
+	StringInfoData query;
+
+	initStringInfo(&query);
+	appendStringInfoString(&query, "TRANSMIT BINARY (");
+
+	bool		isFirst = true;
+
+	for (int attrIndex = 0; attrIndex < tupleDesc->natts; attrIndex++)
+	{
+		Form_pg_attribute column = TupleDescAttr(tupleDesc, attrIndex);
+
+		if (column->attisdropped)
+			continue;
+
+		appendStringInfo(&query, "%s%u", isFirst ? "" : ",",
+						 getBaseType(column->atttypid));
+		isFirst = false;
+	}
+
+	appendStringInfo(&query, ") %s", transmitQuery + transmitPrefixLength);
+
+	return query.data;
 }
 
 
