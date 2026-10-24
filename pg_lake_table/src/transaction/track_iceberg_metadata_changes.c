@@ -374,6 +374,17 @@ GetTrackedIcebergMetadataOperations(void)
 	return TrackedIcebergMetadataOperationsHash;
 }
 
+void
+RecordRestCatalogStagedTable(Oid relationId, const char *uuid)
+{
+	TableMetadataOperationTracker *tracker =
+		hash_search(TrackedIcebergMetadataOperationsHash, &relationId, HASH_FIND, NULL);
+
+	if (tracker == NULL || !tracker->relationCreated)
+		elog(ERROR, "no tracked CREATE TABLE for relation %u", relationId);
+	tracker->stagedTableUuid = MemoryContextStrdup(TopTransactionContext, uuid);
+}
+
 
 /*
  * HasAnyTrackedIcebergMetadataChanges checks if there are any tracked
@@ -1214,7 +1225,8 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 				char	   *body =
 					FinishStageRestCatalogIcebergTableCreateRestRequest(relationId,
 																		createOp->newSchema,
-																		createOp->partitionSpecs);
+																		createOp->partitionSpecs,
+																		opTracker->stagedTableUuid);
 
 				RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, body);
 			}
