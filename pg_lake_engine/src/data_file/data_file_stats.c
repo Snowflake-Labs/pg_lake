@@ -622,11 +622,18 @@ FetchRowGroupStats(PGDuckConnection * pgDuckConn, List *fieldIdList, char *path)
 	 * column_id_field_id_mapping: maps the column_id to the field_id for all
 	 * the leaf fields. We come up with this mapping by checking the DuckDB
 	 * source code, we should be careful if they ever break this assumption.
+	 *
+	 * parquet_metadata() numbers every leaf, including the row lineage _row_id
+	 * column, so number the leaves first and only then drop _row_id. Dropping
+	 * it first shifts every later column onto its neighbour's stats whenever
+	 * _row_id is not the last leaf, as in files other engines rewrite.
 	 */
 					 "WITH column_id_field_id_mapping AS ( "
-					 "	SELECT row_number() OVER () - 1 AS column_id, field_id "
-					 "	FROM parquet_schema(%s)   "
-					 "	WHERE num_children IS NULL and field_id <> "
+					 "  SELECT column_id, field_id FROM ( "
+					 "    SELECT row_number() OVER () - 1 AS column_id, field_id "
+					 "    FROM parquet_schema(%s)   "
+					 "    WHERE num_children IS NULL) "
+					 "  WHERE field_id IS DISTINCT FROM "
 					 PG_LAKE_TOSTRING(ICEBERG_ROWID_FIELD_ID)
 					 "), "
 
