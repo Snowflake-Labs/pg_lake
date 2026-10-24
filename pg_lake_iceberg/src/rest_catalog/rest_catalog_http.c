@@ -46,6 +46,7 @@
 
 #include "pg_extension_base/base_workers.h"
 #include "pg_lake/http/http_client.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 /* error bodies are small; anything larger or deeper is not worth parsing */
@@ -146,15 +147,20 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo,
  * canRefreshCredential is false only for the credential request itself
  * (see SendCredentialRequestToRestCatalog), both to avoid recursion and so
  * that its own 401 is reported as the authentication failure it is.
+ *
+ * The outcome is recorded under op once retries are over; recording must not
+ * throw, for the same post-commit reason.
  */
 static HttpResult
-SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
-					   HttpMethod method, const char *url,
-					   const char *body, List *headers)
+SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
+					   bool canRefreshCredential, HttpMethod method,
+					   const char *url, const char *body, List *headers)
 {
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
 
 	bool		authAlreadyRefreshed = false;
+	int			attempts = 0;
+	TimestampTz startTime = GetCurrentTimestamp();
 
 	/*
 	 * Only the built-in catalog, reached through the deployment's own edge,
@@ -170,10 +176,12 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
 		HTTP_TLS_DEPLOYMENT_CLIENT_CERT : HTTP_TLS_NO_CLIENT_CERT;
 
 	HttpResult	result;
+	bool		done = false;
 
-	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG; retryNo++)
+	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG && !done; retryNo++)
 	{
 		result = SendHttpRequest(method, url, body, headers, clientAuth);
+		attempts = retryNo;
 
 		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG,
 												retryNo, canRefreshCredential, authAlreadyRefreshed))
@@ -202,9 +210,13 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
 				}
 
 			case REST_CATALOG_RETRY_STOP:
-				return result;
+				done = true;
+				break;
 		}
 	}
+
+	LogCatalogRequest(opts, op, &result, attempts, authAlreadyRefreshed,
+					  TimestampDifferenceMilliseconds(startTime, GetCurrentTimestamp()));
 
 	return result;
 }
@@ -221,12 +233,14 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
  * forced false for it, same as the credential request itself below.
  */
 HttpResult
-SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
+SendRequestToRestCatalog(RestCatalogOptions * opts, RestCatalogOp op,
+						 HttpMethod method, const char *url,
 						 const char *body, List *headers)
 {
 	bool		canRefreshCredential = (opts->authType != REST_CATALOG_AUTH_TYPE_NONE);
 
-	return SendRestCatalogRequest(opts, canRefreshCredential, method, url, body, headers);
+	return SendRestCatalogRequest(opts, op, canRefreshCredential, method, url,
+								  body, headers);
 }
 
 
@@ -240,7 +254,8 @@ SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
 {
 	bool		canRefreshCredential = false;
 
-	return SendRestCatalogRequest(opts, canRefreshCredential, HTTP_POST, url, body, headers);
+	return SendRestCatalogRequest(opts, REST_CATALOG_OP_TOKEN, canRefreshCredential,
+								  HTTP_POST, url, body, headers);
 }
 
 
