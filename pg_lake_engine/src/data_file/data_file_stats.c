@@ -581,7 +581,26 @@ GetRemoteParquetColumnStats(char *path, List *leafFields)
 	 * Sort the leaf fields by fieldId, and then use ORDER BY in the query to
 	 * ensure that the results are in the same order as the input list.
 	 */
-	List	   *leafFieldsCopy = list_copy(leafFields);
+	List	   *leafFieldsCopy = NIL;
+	ListCell   *leafFieldCell = NULL;
+
+	foreach(leafFieldCell, leafFields)
+	{
+		LeafField  *leafField = lfirst(leafFieldCell);
+
+		/*
+		 * A footer's min and max leave out NaN, which Postgres orders above
+		 * every other value, and the footer does not say whether the column
+		 * has one, so its float bounds cannot be trusted.
+		 */
+		if (LeafFieldIsFloatingPoint(leafField))
+			continue;
+
+		leafFieldsCopy = lappend(leafFieldsCopy, leafField);
+	}
+
+	if (leafFieldsCopy == NIL)
+		return NIL;
 
 	list_sort(leafFieldsCopy, LeafFieldCompare);
 

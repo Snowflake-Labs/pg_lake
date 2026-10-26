@@ -2,7 +2,9 @@
 
 DuckDB's min and max leave NaN out, and Postgres orders it above every other
 value. A file that has one must not be pruned on the min and max of its other
-values. A file that does not have one still gets bounds.
+values, read as a pg_lake table or through its Iceberg metadata. A file that
+does not have one is still pruned both ways; through the metadata that needs
+the NaN count of zero the manifest records next to its float bounds.
 """
 
 import pytest
@@ -57,21 +59,26 @@ def test_nan_in_pg_lake_table(pg_conn, extension, with_default_location, column_
     )
     pg_conn.commit()
     try:
-        table = f"{schema}.t"
-        # only the file with the NaN can match
-        assert scanned_files(pg_conn, "f > 5", table) == ("1", 1)
-        assert scanned_files(pg_conn, "f = 'NaN'", table) == ("1", 1)
-        # neither file can be pruned: [1, 2] holds values other than 1 and 2
-        assert scanned_files(pg_conn, "f NOT IN (1, 2)", table) == ("2", 1)
-        # 2 is only in the file without NaN, and the other cannot be pruned
-        assert scanned_files(pg_conn, "f = 2", table) == ("2", 1)
-        assert scanned_files(pg_conn, "f < 0", table) == ("1", 0)
-
         metadata = run_query(
             f"SELECT metadata_location FROM iceberg_tables "
             f"WHERE table_namespace = '{schema}' AND table_name = 't'",
             pg_conn,
         )[0][0]
+        run_command(
+            f"CREATE FOREIGN TABLE {schema}.t_external () SERVER pg_lake "
+            f"OPTIONS (path '{metadata}', format 'iceberg')",
+            pg_conn,
+        )
+        for table in (f"{schema}.t", f"{schema}.t_external"):
+            # only the file with the NaN can match
+            assert scanned_files(pg_conn, "f > 5", table) == ("1", 1), table
+            assert scanned_files(pg_conn, "f = 'NaN'", table) == ("1", 1), table
+            # neither file can be pruned: [1, 2] holds values other than 1 and 2
+            assert scanned_files(pg_conn, "f NOT IN (1, 2)", table) == ("2", 1), table
+            # 2 is only in the file without NaN, and the other cannot be pruned
+            assert scanned_files(pg_conn, "f = 2", table) == ("2", 1), table
+            assert scanned_files(pg_conn, "f < 0", table) == ("1", 0), table
+
         bounds = run_query(
             "SELECT lower_bounds, upper_bounds "
             f"FROM lake_iceberg.data_file_stats('{metadata}')",

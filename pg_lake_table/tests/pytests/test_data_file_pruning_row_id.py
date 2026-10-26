@@ -155,11 +155,87 @@ def test_row_lineage_columns_as_a_compaction_writes_them(
         assert result[0][0] == expected, predicate
 
 
+def test_columns_in_a_different_order_than_the_table(
+    pg_conn, pgduck_conn, add_files_procedure, with_default_location, pruning_mode
+):
+    """
+    The file lays out b before a, the reverse of the table. Bounds are matched
+    by field id, so each column must still be pruned on its own bounds.
+    """
+    create_external_table(
+        pg_conn,
+        pgduck_conn,
+        f"reordered_{pruning_mode}",
+        "a bigint, b text",
+        "SELECT 'v' || (100 + i) AS b, i AS a FROM range(1, 11) t(i)",
+        "'b': 2, 'a': 1",
+    )
+
+    for predicate, expected in [("a = 5", 1), ("b = 'v105'", 1), ("a > 5", 5)]:
+        result = run_query(
+            f"SELECT count(*) FROM {SCHEMA}.reordered_{pruning_mode} WHERE {predicate}",
+            pg_conn,
+        )
+        assert result[0][0] == expected, predicate
+
+    results = run_query(
+        f"{EXPLAIN} SELECT * FROM {SCHEMA}.reordered_{pruning_mode} WHERE a = 50",
+        pg_conn,
+    )
+    assert fetch_data_files_used(results) == expected_files_scanned(pruning_mode)
+
+
+def test_columns_without_bounds_in_the_manifest(
+    pg_conn, add_files_procedure, with_default_location, pruning_mode
+):
+    """
+    With column_stats_mode 'none' the manifest has no bounds for any column, so
+    an external table over it cannot prune, and must still return every match.
+    """
+    run_command(
+        f"""
+        CREATE TABLE {SCHEMA}.no_bounds_internal_{pruning_mode} (a bigint, b text)
+        USING iceberg WITH (autovacuum_enabled = 'false', column_stats_mode = 'none');
+        INSERT INTO {SCHEMA}.no_bounds_internal_{pruning_mode}
+          SELECT i, 'v' || i FROM generate_series(1, 10) i;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    metadata_location = run_query(
+        f"""
+        SELECT metadata_location FROM iceberg_tables
+        WHERE table_namespace = '{SCHEMA}'
+          AND table_name = 'no_bounds_internal_{pruning_mode}'
+        """,
+        pg_conn,
+    )[0][0]
+    run_command(
+        f"CREATE FOREIGN TABLE {SCHEMA}.no_bounds_{pruning_mode} () "
+        f"SERVER pg_lake OPTIONS (path '{metadata_location}')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"SELECT count(*) FROM {SCHEMA}.no_bounds_{pruning_mode} WHERE a = 5", pg_conn
+    )
+    assert result[0][0] == 1
+
+    results = run_query(
+        f"{EXPLAIN} SELECT * FROM {SCHEMA}.no_bounds_{pruning_mode} WHERE a = 50",
+        pg_conn,
+    )
+    assert fetch_data_files_used(results) == "1"
+
+
 def create_external_table(pg_conn, pgduck_conn, name, columns, file_query, field_ids):
     """
-    Write file_query to a Parquet file with the given field ids, and read it
-    through an external Iceberg table, whose pruning takes the bounds from the
-    file's footer.
+    Write file_query to a Parquet file with the given field ids, add it to an
+    Iceberg table, which records the file's footer bounds in its manifest entry,
+    and read it through an external table over that table's metadata, whose
+    pruning takes the bounds from the manifest.
     """
     url = f"s3://{TEST_BUCKET}/{SCHEMA}/{name}.parquet"
     run_command(

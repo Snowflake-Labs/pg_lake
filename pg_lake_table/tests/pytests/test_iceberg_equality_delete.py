@@ -67,7 +67,11 @@ AVRO_IDS = {
     "lower_bounds": 125,
     "key": 126,
     "value": 127,
+    "upper_bounds": 128,
+    "nan_value_counts": 137,
 }
+# key and value IDs of the upper_bounds and nan_value_counts maps
+MAP_IDS = {"upper_bound": (129, 130), "nan_count": (138, 139)}
 LIST_IDS = {
     "manifest_path": 500,
     "manifest_length": 501,
@@ -95,6 +99,29 @@ def avro_record(name, fields):
             for n, t in fields
         ],
     }
+
+
+def map_schema(name, value_type):
+    """An Iceberg int-keyed map, which Avro stores as an array of records."""
+    key_id, value_id = MAP_IDS[name]
+    return {
+        "type": "array",
+        "logicalType": "map",
+        "items": {
+            "type": "record",
+            "name": name,
+            "fields": [
+                {"name": "key", "type": "int", "field-id": key_id},
+                {"name": "value", "type": value_type, "field-id": value_id},
+            ],
+        },
+    }
+
+
+def map_entries(values):
+    if not values:
+        return None
+    return [{"key": key, "value": value} for key, value in values.items()]
 
 
 class DeleteTable:
@@ -164,7 +191,16 @@ class DeleteTable:
         file_format="PARQUET",
         lower_bound=None,
         v1=False,
+        lower_bounds=None,
+        upper_bounds=None,
+        nan_value_counts=None,
     ):
+        """
+        lower_bound is the int lower bound of field 1. lower_bounds and
+        upper_bounds map field IDs to serialized bound bytes, and
+        nan_value_counts maps field IDs to NaN counts, for entries that mimic
+        what another writer records.
+        """
         index = len(self.files)
         path = self.directory / f"file-{index}.parquet"
         ids = (
@@ -240,6 +276,8 @@ class DeleteTable:
                     ["null", {"type": "array", "items": "int", "element-id": 136}],
                 ),
                 ("lower_bounds", ["null", bounds_schema]),
+                ("upper_bounds", ["null", map_schema("upper_bound", "bytes")]),
+                ("nan_value_counts", ["null", map_schema("nan_count", "long")]),
             ],
         )
         entry_schema = avro_record(
@@ -269,13 +307,18 @@ class DeleteTable:
             record_count=len(rows),
             file_size_in_bytes=path.stat().st_size,
             equality_ids=equality_ids,
-            lower_bounds=(
-                None
-                if lower_bound is None
-                else [
-                    {"key": 1, "value": lower_bound.to_bytes(4, "little", signed=True)}
-                ]
+            lower_bounds=map_entries(
+                {
+                    **(
+                        {}
+                        if lower_bound is None
+                        else {1: lower_bound.to_bytes(4, "little", signed=True)}
+                    ),
+                    **(lower_bounds or {}),
+                }
             ),
+            upper_bounds=map_entries(upper_bounds),
+            nan_value_counts=map_entries(nan_value_counts),
         )
         manifest_path = self.directory / f"manifest-{index}.avro"
         with manifest_path.open("wb") as output:
@@ -1178,7 +1221,9 @@ def test_empty_and_existing_paths(s3, pg_conn, extension, delete_table, deletion
 
 
 def test_pruning_does_not_read_deletes(s3, pg_conn, extension, delete_table):
-    delete_table.add([(10, "x", "row", 1)], lower_bound=10)
+    delete_table.add(
+        [(10, "x", "row", 1)], lower_bound=10, upper_bounds={1: int_bound(10)}
+    )
     path = delete_table.add([(10,)], content=2, sequence=2, equality_ids=[1])
     attach(pg_conn, delete_table)
     delete_table.s3.delete_object(
@@ -1195,6 +1240,10 @@ def test_pruning_does_not_read_deletes(s3, pg_conn, extension, delete_table):
             == 0
         )
     pg_conn.rollback()
+
+
+def int_bound(value):
+    return value.to_bytes(4, "little", signed=True)
 
 
 def test_empty_snapshot(s3, pg_conn, extension, delete_table):

@@ -547,18 +547,21 @@ PGIcebergBinaryDeserialize(unsigned char *binaryValue, size_t binaryLen, Field *
 
 
 /*
- * ErrorIfUnexpectedBinaryLength rejects a fixed-width value that is not exactly
- * as wide as its type. The bytes are Avro "bytes" of arbitrary length taken from
- * a manifest we did not necessarily write, so without this every fixed-width
- * read in PGIcebergBinaryDeserialize is an out-of-bounds read waiting for a
- * short value.
+ * IcebergBinaryLengthIsValid returns whether a serialized value of the given
+ * length can be deserialized as pgType. The bytes are Avro "bytes" of arbitrary
+ * length taken from a manifest we did not necessarily write, so every
+ * fixed-width read in PGIcebergBinaryDeserialize depends on this check.
  */
-static void
-ErrorIfUnexpectedBinaryLength(size_t binaryLen, Field * field, PGType pgType)
+bool
+IcebergBinaryLengthIsValid(size_t binaryLen, Field * field, PGType pgType)
 {
 	/* string-encoded types carry a value of any length, e.g. geometry */
 	if (PGTypeRequiresConversionToIcebergString(field, pgType))
-		return;
+		return true;
+
+	/* the minimum number of two's complement bytes of a decimal(38,s) */
+	if (pgType.postgresTypeOid == NUMERICOID)
+		return binaryLen > 0 && binaryLen <= 16;
 
 	for (int i = 0; i < lengthof(FixedWidthBinaryLengths); i++)
 	{
@@ -568,9 +571,33 @@ ErrorIfUnexpectedBinaryLength(size_t binaryLen, Field * field, PGType pgType)
 		size_t		expectedLen = FixedWidthBinaryLengths[i].expectedLen;
 		size_t		promotedFromLen = FixedWidthBinaryLengths[i].promotedFromLen;
 
-		if (binaryLen == expectedLen ||
-			(promotedFromLen > 0 && binaryLen == promotedFromLen))
-			return;
+		return binaryLen == expectedLen ||
+			(promotedFromLen > 0 && binaryLen == promotedFromLen);
+	}
+
+	return true;
+}
+
+
+/*
+ * ErrorIfUnexpectedBinaryLength rejects a fixed-width value that is not exactly
+ * as wide as its type. See IcebergBinaryLengthIsValid.
+ */
+static void
+ErrorIfUnexpectedBinaryLength(size_t binaryLen, Field * field, PGType pgType)
+{
+	/* decimals report their own length error */
+	if (pgType.postgresTypeOid == NUMERICOID ||
+		IcebergBinaryLengthIsValid(binaryLen, field, pgType))
+		return;
+
+	for (int i = 0; i < lengthof(FixedWidthBinaryLengths); i++)
+	{
+		if (FixedWidthBinaryLengths[i].postgresTypeOid != pgType.postgresTypeOid)
+			continue;
+
+		size_t		expectedLen = FixedWidthBinaryLengths[i].expectedLen;
+		size_t		promotedFromLen = FixedWidthBinaryLengths[i].promotedFromLen;
 
 		char	   *expectedLengths = promotedFromLen > 0 ?
 			psprintf("%zu or %zu", promotedFromLen, expectedLen) :
