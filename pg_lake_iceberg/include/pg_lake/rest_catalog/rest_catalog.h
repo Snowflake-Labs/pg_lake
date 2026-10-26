@@ -399,9 +399,15 @@ List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 										const char *objectKey,
 										const char *elementStringKey);
 
-extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
-extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
-extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
+extern PGDLLEXPORT char *RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
+typedef struct RestCatalogStagedTable
+{
+	char	   *uuid;
+	char	   *location;
+}			RestCatalogStagedTable;
+
+extern PGDLLEXPORT RestCatalogStagedTable StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema, const char *requestedLocation);
+extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs, const char *stagedUuid);
 extern PGDLLEXPORT RestCatalogLoadTableResult ResolveReadOnlyRestCatalogTable(RestCatalogOptions * opts, char **catalogName,
 																			  char **namespaceName, char **tableName);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
