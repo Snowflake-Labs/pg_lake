@@ -470,12 +470,20 @@ BuildAndUploadObjectStoreCatalogFile(void)
 					 "		)");
 
 	/*
-	 * we don't use this param, but our SPI Apis rely on at least one arg, so
-	 * we do true=true
+	 * Push the latest snapshot so the catalog query always sees every
+	 * committed row in tables_internal, even when the caller is in REPEATABLE
+	 * READ (whose transaction snapshot would hide rows committed after the
+	 * transaction started).
+	 *
+	 * readOnly below must stay true: that is what makes SPI run the query
+	 * under this active snapshot instead of taking a fresh transaction
+	 * snapshot of its own.
 	 */
+	PushActiveSnapshot(GetLatestSnapshot());
+
 	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
-	bool		readOnly = false;
+	bool		readOnly = true;
 
 	SPI_execute(fetchObjectStoreMetadata->data, readOnly, 0);
 
@@ -526,6 +534,8 @@ BuildAndUploadObjectStoreCatalogFile(void)
 
 
 	SPI_END();
+
+	PopActiveSnapshot();
 
 	/* End JSON array and object */
 	appendStringInfoString(objectStoreCatalogFileContent, "]\n");
