@@ -1,11 +1,46 @@
+import json
+
 import pytest
 from utils_pytest import *
 
 # A pg_lake table with uppercase names stands in for one written by Snowflake,
 # which stores case-insensitive names in uppercase. The tests attach its
 # metadata.json the way a table from another engine would be attached.
+#
+# Colliding names are rejected at DDL, so fixtures rewrite metadata.json.
 
 SCHEMA = "lowercase_names"
+
+
+def _rename_iceberg_fields(fields, renames):
+    for field in fields:
+        old_name = field.get("name")
+        if old_name in renames:
+            field["name"] = renames[old_name]
+        field_type = field.get("type")
+        if isinstance(field_type, dict):
+            if field_type.get("type") == "struct":
+                _rename_iceberg_fields(field_type.get("fields", []), renames)
+            elif field_type.get("type") == "list":
+                element = field_type.get("element")
+                if isinstance(element, dict) and element.get("type") == "struct":
+                    _rename_iceberg_fields(element.get("fields", []), renames)
+            elif field_type.get("type") == "map":
+                for key in ("key", "value"):
+                    nested = field_type.get(key)
+                    if isinstance(nested, dict) and nested.get("type") == "struct":
+                        _rename_iceberg_fields(nested.get("fields", []), renames)
+
+
+def rewrite_iceberg_field_names(s3, metadata_location, renames, schema_ids=None):
+    """Rename fields in an already written metadata.json."""
+    metadata = json.loads(read_s3_operations(s3, metadata_location))
+    for schema in metadata.get("schemas", []):
+        if schema_ids is not None and schema.get("schema-id") not in schema_ids:
+            continue
+        _rename_iceberg_fields(schema.get("fields", []), renames)
+    bucket, key = parse_s3_path(metadata_location)
+    s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(metadata).encode("utf-8"))
 
 
 def create_copy_pushdown_probe(superuser_conn):
@@ -42,24 +77,39 @@ def uppercase_source(pg_conn, superuser_conn, s3, extension, with_default_locati
                ARRAY[ROW('old_' || i, -i)::{SCHEMA}.address]
         FROM generate_series(1,10) i;
 
-        CREATE TABLE {SCHEMA}.colliding ("ID" int, id int) USING iceberg;
+        CREATE TABLE {SCHEMA}.colliding ("ID" int, id_temp int) USING iceberg;
         CREATE TABLE {SCHEMA}.system_names ("XMIN" int, "XMAX" int) USING iceberg;
 
         -- only an older schema has a case collision
         CREATE TABLE {SCHEMA}.old_collision ("ID" int) USING iceberg;
-        ALTER TABLE {SCHEMA}.old_collision ADD COLUMN id int;
-        ALTER TABLE {SCHEMA}.old_collision DROP COLUMN id;
+        ALTER TABLE {SCHEMA}.old_collision ADD COLUMN id_temp int;
+        ALTER TABLE {SCHEMA}.old_collision DROP COLUMN id_temp;
         INSERT INTO {SCHEMA}.old_collision VALUES (1);
         """,
         pg_conn,
     )
     pg_conn.commit()
 
+    colliding_meta = metadata_location(pg_conn, "colliding")
+    rewrite_iceberg_field_names(s3, colliding_meta, {"id_temp": "id"})
+
+    old_collision_meta = metadata_location(pg_conn, "old_collision")
+    old_metadata = json.loads(read_s3_operations(s3, old_collision_meta))
+    current_schema_id = old_metadata["current-schema-id"]
+    historical_schema_ids = [
+        schema["schema-id"]
+        for schema in old_metadata.get("schemas", [])
+        if schema["schema-id"] != current_schema_id
+    ]
+    rewrite_iceberg_field_names(
+        s3, old_collision_meta, {"id_temp": "id"}, schema_ids=historical_schema_ids
+    )
+
     yield {
         "source": metadata_location(pg_conn, "source"),
-        "colliding": metadata_location(pg_conn, "colliding"),
+        "colliding": colliding_meta,
         "system_names": metadata_location(pg_conn, "system_names"),
-        "old_collision": metadata_location(pg_conn, "old_collision"),
+        "old_collision": old_collision_meta,
     }
 
     pg_conn.rollback()
@@ -469,8 +519,8 @@ def nested_source(pg_conn, superuser_conn, s3, extension, with_default_location)
         CREATE TYPE {NESTED_SCHEMA}.visit AS (
             "PLACE" {NESTED_SCHEMA}.address, "SCORES" int[]);
 
-        -- the collision is three levels down, in a struct inside a list
-        CREATE TYPE {NESTED_SCHEMA}.point AS ("X" int, x int);
+        -- rewritten to "x" in metadata so the attached schema collides
+        CREATE TYPE {NESTED_SCHEMA}.point AS ("X" int, x_temp int);
         CREATE TYPE {NESTED_SCHEMA}.shape AS ("POINTS" {NESTED_SCHEMA}.point[]);
         """,
         pg_conn,
@@ -517,9 +567,12 @@ def nested_source(pg_conn, superuser_conn, s3, extension, with_default_location)
             pg_conn,
         )[0][0]
 
+    colliding_meta = nested_location("colliding")
+    rewrite_iceberg_field_names(s3, colliding_meta, {"x_temp": "x"})
+
     yield {
         "source": nested_location("source"),
-        "colliding": nested_location("colliding"),
+        "colliding": colliding_meta,
     }
 
     pg_conn.rollback()

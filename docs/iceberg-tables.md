@@ -136,8 +136,12 @@ Iceberg tables work with most of the table features you already use:
   to less efficient query plans
 
 Indexes, unique constraints, foreign keys, and temporary or unlogged Iceberg tables are not
-supported. Some types are stored differently in Iceberg than in PostgreSQL, such as unbounded
-`numeric` and multidimensional arrays; [data types](data-types.md) describes the mapping.
+supported. Column names and nested composite field names that differ only in ASCII case
+(for example `"a"` and `"A"`) are also rejected: DuckDB treats those names as the same
+identifier, and other Iceberg engines commonly cannot read such schemas either. Non-ASCII
+letters such as `"é"` and `"É"` remain distinct. Some types are stored differently in
+Iceberg than in PostgreSQL, such as unbounded `numeric` and multidimensional arrays;
+[data types](data-types.md) describes the mapping.
 
 ## Loading data
 

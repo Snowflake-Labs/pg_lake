@@ -62,6 +62,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/util/case_insensitive_names.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/table_type.h"
 
@@ -348,6 +349,26 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	 * so PgLakeCommonProcessUtility would recurse back into this function.
 	 */
 	PgLakeCommonParentProcessUtility(processUtilityParams);
+
+	/*
+	 * Added column is already in the relation. DROP is left alone so a bad
+	 * table can be fixed.
+	 */
+	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
+	{
+		ListCell   *subcommandCell = NULL;
+
+		foreach(subcommandCell, alterStmt->cmds)
+		{
+			AlterTableCmd *subcommand = (AlterTableCmd *) lfirst(subcommandCell);
+
+			if (subcommand->subtype == AT_AddColumn)
+			{
+				ErrorIfCaseInsensitiveDuplicateNames(relationId);
+				break;
+			}
+		}
+	}
 
 	List	   *schemaDDLOperations = NIL;
 
@@ -809,6 +830,13 @@ PostProcessRenameWritablePgLakeTable(ProcessUtilityParams * params, void *arg)
 	ErrorIfUnsupportedRenameWritablePgLakeTableStmt(relationId, renameStmt, tableType);
 
 	bool		pgLakeTable = IsPgLakeIcebergForeignTableById(relationId);
+
+	/*
+	 * Rename is already applied. A rename that removes the clash still
+	 * passes.
+	 */
+	if (pgLakeTable && renameStmt->renameType == OBJECT_COLUMN)
+		ErrorIfCaseInsensitiveDuplicateNames(relationId);
 
 	if (pgLakeTable &&
 		!(renameStmt->renameType == OBJECT_TABLE ||

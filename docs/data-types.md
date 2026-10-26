@@ -35,7 +35,7 @@ what happens to values that do not fit.
 | `interval` | `struct<months, days, microseconds>` | Transparent in pg_lake; other engines see the struct. |
 | `json`, `jsonb` | `string` | Stored as JSON text. |
 | Arrays, e.g. `int[]` | `list` | One-dimensional values only. |
-| Composite types | `struct` | Nested composites, arrays of composites and composites of arrays are supported. |
+| Composite types | `struct` | Nested composites, arrays of composites and composites of arrays are supported. Sibling field names that differ only in ASCII case are rejected. |
 | [Map types](https://github.com/Snowflake-Labs/pg_lake/blob/main/pg_map/README.md) | `map` | Created with `map_type.create`. |
 | PostGIS `geometry` | `binary` (WKB) | Requires `pg_lake_spatial`. See [geospatial](spatial.md#geometry-in-iceberg-tables). |
 | Other types, such as `hstore` or enums | `string` | Stored in their text representation. |

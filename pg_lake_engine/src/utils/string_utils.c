@@ -263,6 +263,31 @@ PgStrcasecmpNullable(const char *a, const char *b)
 }
 
 
+/* Fold A-Z only, matching DuckDB identifier comparison. */
+int
+PgLakeAsciiStrcasecmp(const char *s1, const char *s2)
+{
+	Assert(s1 != NULL);
+	Assert(s2 != NULL);
+
+	while (*s1 != '\0' && *s2 != '\0')
+	{
+		unsigned char c1 = (unsigned char) *s1++;
+		unsigned char c2 = (unsigned char) *s2++;
+
+		if (c1 >= 'A' && c1 <= 'Z')
+			c1 += 'a' - 'A';
+		if (c2 >= 'A' && c2 <= 'Z')
+			c2 += 'a' - 'A';
+
+		if (c1 != c2)
+			return (int) c1 - (int) c2;
+	}
+
+	return (int) (unsigned char) *s1 - (int) (unsigned char) *s2;
+}
+
+
 /*
  * StripTrailingSlash removes a trailing '/' from the input string.
  *

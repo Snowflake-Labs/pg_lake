@@ -65,8 +65,10 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
+#include "pg_lake/util/case_insensitive_names.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/string_utils.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
@@ -167,6 +169,19 @@ CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * para
 
 	/* cannot use geometry without pg_lake_spatial */
 	ErrorIfUsingGeometryWithoutSpatialAnalytics(createStmt->base.tableElts);
+
+	/*
+	 * Same DuckDB name rule as Iceberg; the relation now has its real
+	 * columns.
+	 */
+	if (GetBoolOption(createStmt->options, "writable", false))
+	{
+		Oid			relationId =
+			RangeVarGetRelid(createStmt->base.relation, NoLock, true);
+
+		if (OidIsValid(relationId))
+			ErrorIfCaseInsensitiveDuplicateNames(relationId);
+	}
 }
 
 
@@ -1045,6 +1060,8 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 			Oid			readOnlyRelId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
 
+			ErrorIfCaseInsensitiveDuplicateNames(readOnlyRelId);
+
 			/* Keep in sync with the writable-table call below. */
 			RecordIcebergCatalogServerDependency(readOnlyRelId, createStmt->options);
 
@@ -1157,6 +1174,9 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 	/* the table is now created, get its OID */
 	Oid			relationId = RangeVarGetRelid(createStmt->base.relation, NoLock, false);
+
+	/* Before any catalog call. Covers LIKE, INHERITS and PARTITION OF. */
+	ErrorIfCaseInsensitiveDuplicateNames(relationId);
 
 	/* Keep in sync with the read-only-table call above. */
 	RecordIcebergCatalogServerDependency(relationId, createStmt->options);

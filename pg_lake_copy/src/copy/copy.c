@@ -65,6 +65,7 @@
 #include "pg_lake/storage/local_storage.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/string_utils.h"
 #include "executor/executor.h"
 #include "optimizer/optimizer.h"
 #include "parser/analyze.h"
@@ -1641,7 +1642,7 @@ VerifyNoDuplicateNames(TupleDesc tupleDesc)
 			char	   *outerName = NameStr(outerColumn->attname);
 			char	   *innerName = NameStr(innerColumn->attname);
 
-			if (strcasecmp(outerName, innerName) == 0)
+			if (PgLakeAsciiStrcasecmp(outerName, innerName) == 0)
 			{
 				ereport(ERROR, (errcode(ERRCODE_DUPLICATE_COLUMN),
 								errmsg("pg_lake_copy: column \"%s\" specified more than "
