@@ -37,3 +37,8 @@ AS 'MODULE_PATHNAME', 'pg_lake_catalog_export_worker'
 LANGUAGE C STRICT;
 
 SELECT extension_base.register_worker('pg_lake catalog export worker', 'lake_iceberg.catalog_export');
+
+-- Number of NULL values of the column in the file, NULL when unknown. Lets
+-- full-match data file pruning use the bounds of nullable columns when a file
+-- has no NULLs. Bounds can be NULL for a column that only contains NULLs.
+ALTER TABLE lake_table.data_file_column_stats ADD COLUMN null_count bigint;

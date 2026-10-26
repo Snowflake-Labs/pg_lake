@@ -228,6 +228,20 @@ def test_pg_lake_iceberg_table_read_data_file_stats_from_catalog(
         # [3, 17, "1", "4"],
         [3, 21, "01:30:00", "21:30:00"],
         [4, 2, "37.77397", "53.11254"],
+        # the other columns are all NULL in the new file, so they only have
+        # a null count
+        [4, 3, None, None],
+        [4, 4, None, None],
+        [4, 5, None, None],
+        [4, 6, None, None],
+        [4, 7, None, None],
+        [4, 8, None, None],
+        [4, 9, None, None],
+        [4, 10, None, None],
+        [4, 11, None, None],
+        [4, 12, None, None],
+        [4, 13, None, None],
+        [4, 21, None, None],
     ]
 
     # let vacuum see the new data

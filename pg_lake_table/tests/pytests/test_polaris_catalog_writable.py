@@ -4592,17 +4592,18 @@ def assert_data_files_match(namespace, table_name, superuser_conn, metadata):
                 jsonb_object_agg(
                   dfcs.field_id::text,
                   to_jsonb(dfcs.lower_bound)
-                ) FILTER (WHERE dfcs.field_id IS NOT NULL),
+                ) FILTER (WHERE dfcs.lower_bound IS NOT NULL),
                 '{{}}'::jsonb
               ) AS lower_bounds,
               COALESCE(
                 jsonb_object_agg(
                   dfcs.field_id::text,
                   to_jsonb(dfcs.upper_bound)
-                ) FILTER (WHERE dfcs.field_id IS NOT NULL),
+                ) FILTER (WHERE dfcs.lower_bound IS NOT NULL),
                 '{{}}'::jsonb
               ) AS upper_bounds
             FROM lake_table.files f
+            -- rows with only a null count have no bounds in the manifest
             LEFT JOIN lake_table.data_file_column_stats dfcs
               ON dfcs.table_name = f.table_name
              AND dfcs.path = f.path
