@@ -36,3 +36,4 @@ extern PGDLLEXPORT unsigned char *IcebergSerializeColumnBoundText(char *columnBo
 																  size_t *binaryLen);
 extern PGDLLEXPORT bool CanSerializeColumnBound(char *boundText, Field * field);
 extern PGDLLEXPORT Datum ColumnBoundDatum(char *columnBoundText, PGType pgType);
+extern PGDLLEXPORT List *GetIcebergDataFileColumnStats(DataFile * dataFile, List *leafFields);
