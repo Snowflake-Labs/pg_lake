@@ -87,7 +87,9 @@ static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
  * collision is a miss rather than the wrong table's credentials.
  *
  * Entries expire based on the REST catalog's credential TTL.  The cache
- * is invalidated on ALTER/DROP SERVER alongside the token cache.
+ * is invalidated on ALTER/DROP SERVER alongside the token cache, and a
+ * table's entry is evicted as soon as a loadTable for it comes back
+ * without credentials.
  */
 typedef struct VendedCredentialsCacheKey
 {
@@ -141,6 +143,12 @@ static List *LookupVendedCredentialsInCache(Oid serverOid,
 											const char *restCatalogName,
 											const char *namespaceName,
 											const char *tableName);
+static void ForgetVendedCredentialsInCache(Oid serverOid,
+										   Oid userMappingOid,
+										   const char *restCatalogName,
+										   const char *namespaceName,
+										   const char *tableName);
+static void RemoveVendedCredentialsCacheEntry(VendedCredentialsCacheEntry * entry);
 static char *BuildVendedCredentialsIdentity(const char *restCatalogName,
 											const char *namespaceName,
 											const char *tableName);
@@ -880,6 +888,7 @@ StoreVendedCredentialsInCache(List *credentials,
  * If vended credentials are obtained, they are also stored in the
  * vended credentials cache, so a resolve triggered later in the same
  * statement reuses them instead of issuing a second REST round-trip.
+ * A response without them evicts what the cache held for the table.
  */
 RestCatalogLoadTableResult
 LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
@@ -945,10 +954,16 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 															 namespaceName,
 															 relationName);
 
-		StoreVendedCredentialsInCache(result->vendedCredentials,
-									  opts->userMappingOid,
-									  restCatalogName, namespaceName,
-									  relationName);
+		if (result->vendedCredentials != NIL)
+			StoreVendedCredentialsInCache(result->vendedCredentials,
+										  opts->userMappingOid,
+										  restCatalogName, namespaceName,
+										  relationName);
+		else
+			ForgetVendedCredentialsInCache(opts->serverOid,
+										   opts->userMappingOid,
+										   restCatalogName, namespaceName,
+										   relationName);
 	}
 
 	return true;
@@ -2095,18 +2110,66 @@ LookupVendedCredentialsInCache(Oid serverOid,
 		/*
 		 * Evict the stale entry so a fresh loadTable can repopulate it and
 		 * the cache does not grow with dead entries in long-lived backends.
-		 * Removing the entry only recycles the entry itself, so release what
-		 * it owns first.
 		 */
-		FreeCachedVendedCredentialsList(entry->credentials);
-		entry->credentials = NIL;
-		pfree(entry->identity);
-		entry->identity = NULL;
-		hash_search(VendedCredsCache, &cacheKey, HASH_REMOVE, NULL);
+		RemoveVendedCredentialsCacheEntry(entry);
 		return NIL;
 	}
 
 	return entry->credentials;
+}
+
+
+/*
+ * ForgetVendedCredentialsInCache evicts the table's cached credentials once
+ * the catalog answers a loadTable for it without any.  Credentials vended
+ * earlier may still work until they expire, but the catalog no longer
+ * delegates access to the table (say, because it now has a row filter or
+ * column mask that a client reading its files directly would bypass), so
+ * they must not serve another scan.
+ */
+static void
+ForgetVendedCredentialsInCache(Oid serverOid,
+							   Oid userMappingOid,
+							   const char *restCatalogName,
+							   const char *namespaceName,
+							   const char *tableName)
+{
+	if (VendedCredsCache == NULL)
+		return;
+
+	char	   *identity = BuildVendedCredentialsIdentity(restCatalogName,
+														  namespaceName,
+														  tableName);
+	VendedCredentialsCacheKey cacheKey =
+		BuildVendedCredentialsCacheKey(serverOid, userMappingOid, identity);
+	bool		found = false;
+	VendedCredentialsCacheEntry *entry =
+		hash_search(VendedCredsCache, &cacheKey, HASH_FIND, &found);
+
+	if (found && entry->identity != NULL &&
+		strcmp(entry->identity, identity) == 0)
+		RemoveVendedCredentialsCacheEntry(entry);
+
+	pfree(identity);
+}
+
+
+/*
+ * RemoveVendedCredentialsCacheEntry removes an entry from the vended
+ * credentials cache.  Removing it only recycles the entry itself, so what
+ * it owns is released first.
+ */
+static void
+RemoveVendedCredentialsCacheEntry(VendedCredentialsCacheEntry * entry)
+{
+	VendedCredentialsCacheKey cacheKey = entry->key;
+
+	FreeCachedVendedCredentialsList(entry->credentials);
+	entry->credentials = NIL;
+	if (entry->identity != NULL)
+		pfree(entry->identity);
+	entry->identity = NULL;
+	hash_search(VendedCredsCache, &cacheKey, HASH_REMOVE, NULL);
 }
 
 

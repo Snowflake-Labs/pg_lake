@@ -39,7 +39,7 @@
  * Only read-only REST tables are served; see
  * IcebergProvideStorageCredentials for why writable tables wait.
  *
- * Two limitations are inherent to a shared pgduck_server holding global,
+ * Three limitations are inherent to a shared pgduck_server holding global,
  * in-memory secrets:
  *
  *  1. pgduck_server restart.  A backend tracks the secrets it pushed and
@@ -56,6 +56,11 @@
  *     stop one backend from clobbering another's secret, but two secrets
  *     with the *same* scope and different credentials (two roles, one S3
  *     prefix) are ambiguous to DuckDB's tie-break.
+ *
+ *  3. Another backend's secret.  A backend only drops the secrets it
+ *     pushed itself.  Once a catalog stops vending for a table, a secret
+ *     another backend pushed for it keeps serving scans of its prefix
+ *     until that backend scans the table again or the credential expires.
  */
 
 #ifndef PG_LAKE_STORAGE_CREDENTIALS_H

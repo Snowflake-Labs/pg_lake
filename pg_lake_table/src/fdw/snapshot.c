@@ -274,18 +274,20 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 	}
 	else if (IsExternalIcebergTable(relationId))
 	{
+		char	   *path = GetIcebergMetadataLocation(relationId, false);
+
 		/*
 		 * Single choke point for storage credentials on the read path: both
 		 * the plain FDW scan path and the query-pushdown path funnel through
 		 * CreatePgLakeScanSnapshot -> here, and a table pg_lake did not
 		 * create is the only kind whose files a catalog vends credentials
 		 * for.  It has to happen before the metadata read just below, which
-		 * is itself a read of that storage.  The resolver no-ops for
-		 * everything but a read-only REST-catalog table.
+		 * is itself a read of that storage, and after the catalog lookup
+		 * above, whose answer decides whether credentials vended earlier
+		 * still stand.  The resolver no-ops for everything but a read-only
+		 * REST-catalog table.
 		 */
 		EnsureStorageCredentialsForRelation(relationId);
-
-		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
 		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(path);
 

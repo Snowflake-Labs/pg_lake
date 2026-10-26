@@ -598,6 +598,89 @@ def test_vended_secret_dropped_when_revoked(
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
+def test_vended_secret_dropped_when_catalog_stops_vending(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """A catalog that stops vending for a table denies the very next scan.
+
+    A catalog can keep serving a table while it stops delegating access to
+    it, for instance once a policy it cannot enforce in the client applies.
+    Vending stays on in pg_lake here, and the credentials vended for the
+    first scan are still valid and cached in this backend, so the second
+    scan is only denied if the catalog's latest answer wins over the cache.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_withdrawn"
+    table = "vc_withdrawn"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    meta_key, meta_secret = server.create_scoped_user(
+        "mv_meta_wd",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    data_key, data_secret = server.create_scoped_user("mv_data_wd", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {
+                "prefix": location + "/",
+                "config": {
+                    "s3.access-key-id": data_key,
+                    "s3.secret-access-key": data_secret,
+                    "client.region": server.region,
+                },
+            },
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, meta_key, meta_secret)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        result = run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.commit()
+        assert result[0][0] == 10
+
+        tables[table]["vended"] = None
+
+        err = run_query(
+            f"SELECT count(*) FROM {schema}.{table}",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.rollback()
+        assert _denied(
+            err
+        ), f"scan still read with the credentials vended before, got: {err!r}"
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
 def test_two_principals_get_their_own_credentials(
     superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
 ):
