@@ -53,6 +53,37 @@ SetIcebergDataFileStats(const DataFileStats * dataFileStats,
 
 
 /*
+ * SetIcebergNullValueCounts sets the null value counts for each leaf field
+ * in the given data file stats that has a known null count.
+ */
+void
+SetIcebergNullValueCounts(const DataFileStats * dataFileStats,
+						  ColumnStat * *nullValueCounts,
+						  size_t *nNullValueCounts)
+{
+	List	   *columnStats = dataFileStats->columnStats;
+	ColumnStat *counts = palloc0(sizeof(ColumnStat) * list_length(columnStats));
+	size_t		totalCounts = 0;
+	ListCell   *columnStatCell = NULL;
+
+	foreach(columnStatCell, columnStats)
+	{
+		DataFileColumnStats *columnStat = lfirst(columnStatCell);
+
+		if (!columnStat->hasNullCount)
+			continue;
+
+		counts[totalCounts].column_id = columnStat->leafField.fieldId;
+		counts[totalCounts].value = columnStat->nullCount;
+		totalCounts++;
+	}
+
+	*nullValueCounts = counts;
+	*nNullValueCounts = totalCounts;
+}
+
+
+/*
  * SetColumnBoundsFromDataFileStats sets the lower and upper bounds for each leaf field
  * in the given data file stats.
  */

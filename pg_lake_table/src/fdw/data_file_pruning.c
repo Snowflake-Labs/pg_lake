@@ -115,9 +115,12 @@ static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
 static List *GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds);
 static List *GetExternalIcebergFieldsForAttributes(Oid relationId, List *attrNos);
 static List *GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
-									   HTAB *fieldIdCache, List *columnStats,
+									   HTAB *fieldIdCache, List *columnStats, int64 rowCount,
 									   List *partitionTransformsUsedInQuery, Partition * partition);
 static bool ColumnIsNotNull(Oid relationId, AttrNumber attrNo);
+static bool FileColumnHasNoNulls(List *columnStats, int fieldId);
+static Expr *GetAllNullConstraintFromColumnStats(List *columnStats, int64 rowCount,
+												 ColumnToFieldIdMapping * entry);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 													  ColumnToFieldIdMapping * entry);
 static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
@@ -135,7 +138,8 @@ static NullTest *MakeIsNullExpression(Var *variable);
 static Oid	GetOperatorByType(Oid typeId, Oid accessMethodId, int16 strategyNumber);
 static HTAB *TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol);
 static List *GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
-										  List *externalLeafFields, Partition * *partition);
+										  List *externalLeafFields, Partition * *partition,
+										  int64 *rowCount);
 
 /* partition pruning functions */
 static Expr *PartitionFieldBoundConstraint(PartitionField * partitionField,
@@ -271,15 +275,16 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	{
 		List	   *columnBoundConstraints = NIL;
 		Partition  *partition = NULL;
+		int64		rowCount = -1;
 		List	   *columnStats =
 			GetDataFileStatsAndPartition(isInternalIcebergTable,
 										 list_nth(dataFiles, dataFileIndex),
-										 externalLeafFields, &partition);
+										 externalLeafFields, &partition, &rowCount);
 
 		/* calculate bound constraints */
 		columnBoundConstraints =
 			GetColumnBoundConstraints(relationId, pruneType, fieldIdsUsedInQuery, columnStats,
-									  partitionTransformsUsedInQuery, partition);
+									  rowCount, partitionTransformsUsedInQuery, partition);
 
 		bool		includeDataFile = false;
 
@@ -309,7 +314,8 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 /*
  * GetDataFileStatsAndPartition returns the column stats of a single data file
- * and sets *partition to that file's partition.
+ * and sets *partition to that file's partition and *rowCount to its number of
+ * rows (-1 if unknown).
  *
  * The list elements have a different type per table type, so dataFile is
  * untyped: it points to a TableDataFile for internal Iceberg tables and to a
@@ -318,7 +324,8 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
  */
 static List *
 GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
-							 List *externalLeafFields, Partition * *partition)
+							 List *externalLeafFields, Partition * *partition,
+							 int64 *rowCount)
 {
 	if (isInternalIcebergTable)
 	{
@@ -326,6 +333,7 @@ GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
 
 		Assert(tableDataFile->content == CONTENT_DATA);
 		*partition = tableDataFile->partition;
+		*rowCount = tableDataFile->stats.rowCount;
 		return tableDataFile->stats.columnStats;
 	}
 	else
@@ -333,6 +341,7 @@ GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
 		DataFile   *externalDataFile = (DataFile *) dataFile;
 
 		*partition = &(externalDataFile->partition);
+		*rowCount = externalDataFile->record_count;
 		return GetRemoteParquetColumnStats((char *) externalDataFile->file_path,
 										   externalLeafFields);
 	}
@@ -552,7 +561,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 */
 static List *
 GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
-						  HTAB *fieldIdMapping, List *columnStats,
+						  HTAB *fieldIdMapping, List *columnStats, int64 rowCount,
 						  List *partitionTransformsUsedInQuery, Partition * partition)
 {
 	List	   *constraintList = NIL;
@@ -578,10 +587,25 @@ GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
 		 * fine for refuting a filter (PARTIAL_MATCH), since NULLs never
 		 * satisfy a strict filter, but it cannot prove that every row in the
 		 * file matches (FULL_MATCH). Only use the stats for that when the
-		 * column cannot be NULL.
+		 * column cannot be NULL, or the file is known to have no NULLs in it.
 		 */
 		bool		useColumnStats = EnableDataFilePruning &&
-			(pruneType != FULL_MATCH || ColumnIsNotNull(relationId, entry->attrNo));
+			(pruneType != FULL_MATCH ||
+			 FileColumnHasNoNulls(columnStats, entry->fieldId) ||
+			 ColumnIsNotNull(relationId, entry->attrNo));
+
+		if (EnableDataFilePruning)
+		{
+			/*
+			 * A file whose null count equals its row count only has NULLs in
+			 * the column, which holds for full matches as well.
+			 */
+			Expr	   *allNullConstraint =
+				GetAllNullConstraintFromColumnStats(columnStats, rowCount, entry);
+
+			if (allNullConstraint != NULL)
+				constraintList = lappend(constraintList, allNullConstraint);
+		}
 
 		if (useColumnStats)
 		{
@@ -606,6 +630,71 @@ GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
 	}
 
 	return constraintList;
+}
+
+
+/*
+ * FileColumnHasNoNulls returns whether the column stats of a file show that
+ * the bounds of the given field cover every row, because the file has no
+ * NULL values in it. A missing null count means the file may contain NULLs.
+ *
+ * Bounds of floating point columns also leave out NaN, which the stats do
+ * not count, so those never qualify.
+ */
+static bool
+FileColumnHasNoNulls(List *columnStats, int fieldId)
+{
+	ListCell   *columnStatCell = NULL;
+
+	foreach(columnStatCell, columnStats)
+	{
+		DataFileColumnStats *columnStat = lfirst(columnStatCell);
+
+		if (columnStat->leafField.fieldId != fieldId)
+			continue;
+
+		Field	   *field = columnStat->leafField.field;
+
+		if (field == NULL || field->type != FIELD_TYPE_SCALAR ||
+			strcmp(field->field.scalar.typeName, "float") == 0 ||
+			strcmp(field->field.scalar.typeName, "double") == 0)
+			return false;
+
+		return columnStat->hasNullCount && columnStat->nullCount == 0;
+	}
+
+	return false;
+}
+
+
+/*
+ * GetAllNullConstraintFromColumnStats returns an IS NULL constraint for the
+ * column when the column stats of a file show that all its values are NULL,
+ * and NULL otherwise.
+ */
+static Expr *
+GetAllNullConstraintFromColumnStats(List *columnStats, int64 rowCount,
+									ColumnToFieldIdMapping * entry)
+{
+	if (rowCount < 0 || entry->isNullExpression == NULL)
+		return NULL;
+
+	ListCell   *columnStatCell = NULL;
+
+	foreach(columnStatCell, columnStats)
+	{
+		DataFileColumnStats *columnStat = lfirst(columnStatCell);
+
+		if (columnStat->leafField.fieldId != entry->fieldId)
+			continue;
+
+		if (columnStat->hasNullCount && columnStat->nullCount == rowCount)
+			return (Expr *) copyObject(entry->isNullExpression);
+
+		return NULL;
+	}
+
+	return NULL;
 }
 
 

@@ -559,25 +559,24 @@ def test_pruning_for_null_values(s3, pg_conn, extension, with_default_location):
     create_external_iceberg_table_cmd = f"SELECT create_external_iceberg_table('nulls', 'nulls_external', 'test_pruning_for_null_values', 'test_pruning_for_null_values')"
     run_command(create_external_iceberg_table_cmd, pg_conn)
 
-    # when a file only consists of NULL values, we do not keep stats for that
-    # so we read that file in any case
+    # when a file only consists of NULL values, its null count equals its
+    # row count, so a strict filter skips it
     for tbl_name in ["nulls", "nulls_external"]:
         results = run_query(
             f"{explain_prefix} SELECT * FROM test_pruning_for_null_values.{tbl_name} WHERE col1 = 1",
             pg_conn,
         )
-        assert fetch_data_files_used(results) == "1"
+        assert fetch_data_files_used(results) == "0"
 
-    # now, similar to the above, read all files because this time the filter
-    # matches all
+    # read the files that have 100, skip the file that only has NULLs
     for tbl_name in ["nulls", "nulls_external"]:
         results = run_query(
             f"{explain_prefix} SELECT * FROM test_pruning_for_null_values.{tbl_name} WHERE col1 = 100",
             pg_conn,
         )
-        assert fetch_data_files_used(results) == "3"
+        assert fetch_data_files_used(results) == "2"
 
-    # IS [NOT] NULL doesn't have impact on the pruning
+    # IS NULL does not use null counts to skip files without NULLs
     for tbl_name in ["nulls", "nulls_external"]:
         results = run_query(
             f"{explain_prefix} SELECT * FROM test_pruning_for_null_values.{tbl_name} WHERE col1 IS NULL",
@@ -585,13 +584,13 @@ def test_pruning_for_null_values(s3, pg_conn, extension, with_default_location):
         )
         assert fetch_data_files_used(results) == "3"
 
-    # IS [NOT] NULL doesn't have impact on the pruning
+    # IS NOT NULL skips the file that only has NULLs
     for tbl_name in ["nulls", "nulls_external"]:
         results = run_query(
             f"{explain_prefix} SELECT * FROM test_pruning_for_null_values.{tbl_name} WHERE col1 IS NOT NULL",
             pg_conn,
         )
-        assert fetch_data_files_used(results) == "3"
+        assert fetch_data_files_used(results) == "2"
 
     run_command("DROP SCHEMA test_pruning_for_null_values CASCADE", pg_conn)
     pg_conn.commit()
@@ -1176,14 +1175,14 @@ def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_locatio
     assert results[0][0] == 2
     assert results[0][1] == 0
 
-    # the remaining files are all NULL, but nullable columns never use stats
-    # for a full match, so IS NULL also has to scan the files
+    # the null counts of the remaining files show that they are all NULL,
+    # so IS NULL fully matches them without a scan
     results = run_query(
         f"{explain_prefix} delete from test_pruning_deletes_nulls.tbl where col1 is null",
         pg_conn,
     )
-    assert int(fetch_data_files_used(results)) == 2
-    assert int(fetch_data_files_skipped(results)) == 0
+    assert int(fetch_data_files_used(results)) == 0
+    assert int(fetch_data_files_skipped(results)) == 2
 
     run_command(
         "delete from test_pruning_deletes_nulls.tbl where col1 is null", pg_conn
@@ -1194,6 +1193,168 @@ def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_locatio
     assert results[0][0] == 0
 
     run_command("DROP SCHEMA test_pruning_deletes_nulls CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_pruning_deletes_with_null_counts(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    import fastavro
+
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_null_counts;
+        CREATE TABLE test_pruning_null_counts.tbl (
+            col1 INT
+        ) USING iceberg WITH (autovacuum_enabled='False');
+
+        INSERT INTO test_pruning_null_counts.tbl VALUES (1), (1);
+        INSERT INTO test_pruning_null_counts.tbl VALUES (1), (NULL);
+        INSERT INTO test_pruning_null_counts.tbl VALUES (NULL), (NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # every file records its null count, including the file that only has
+    # NULLs and therefore no bounds
+    results = run_query(
+        """
+        SELECT f.row_count, s.lower_bound, s.upper_bound, s.null_count
+        FROM lake_table.files f
+        JOIN lake_table.data_file_column_stats s USING (table_name, path)
+        WHERE table_name = 'test_pruning_null_counts.tbl'::regclass
+        ORDER BY f.id
+        """,
+        superuser_conn,
+    )
+    assert results == [
+        [2, "1", "1", 0],
+        [2, "1", "1", 1],
+        [2, None, None, 2],
+    ]
+
+    # the null counts are also written to the manifest
+    metadata_location = run_query(
+        "SELECT metadata_location FROM iceberg_tables "
+        "WHERE table_name = 'tbl' AND table_namespace = 'test_pruning_null_counts'",
+        pg_conn,
+    )[0][0]
+    manifest_list = run_query(
+        f"SELECT manifest_list FROM lake_iceberg.snapshots('{metadata_location}') "
+        "ORDER BY sequence_number DESC LIMIT 1",
+        pg_conn,
+    )[0][0]
+
+    null_value_counts = []
+    for manifest in fastavro.reader(
+        io.BytesIO(read_s3_operations(s3, manifest_list, is_text=False))
+    ):
+        body = read_s3_operations(s3, manifest["manifest_path"], is_text=False)
+        for entry in fastavro.reader(io.BytesIO(body)):
+            counts = entry["data_file"]["null_value_counts"]
+            null_value_counts.append([(c["key"], c["value"]) for c in counts])
+
+    assert sorted(null_value_counts) == [[(1, 0)], [(1, 1)], [(1, 2)]]
+
+    # the file without NULLs fully matches, the file with a NULL is scanned,
+    # and the all-NULL file is refuted
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_null_counts.tbl where col1 = 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+    assert int(fetch_data_files_skipped(results)) == 1
+
+    run_command("delete from test_pruning_null_counts.tbl where col1 = 1", pg_conn)
+    pg_conn.commit()
+
+    results = run_query(
+        "select count(*), count(col1) from test_pruning_null_counts.tbl", pg_conn
+    )
+    assert results[0][0] == 3
+    assert results[0][1] == 0
+
+    run_command("DROP SCHEMA test_pruning_null_counts CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_pruning_deletes_with_nan(s3, pg_conn, extension, with_default_location):
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_deletes_nan;
+        CREATE TABLE test_pruning_deletes_nan.tbl (
+            col1 double precision
+        ) USING iceberg WITH (autovacuum_enabled='False');
+
+        INSERT INTO test_pruning_deletes_nan.tbl VALUES (1), ('NaN');
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # the file has no NULLs, but its bounds leave out NaN, so it has to be
+    # scanned
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_nan.tbl where col1 = 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+    assert int(fetch_data_files_skipped(results)) == 0
+
+    run_command("delete from test_pruning_deletes_nan.tbl where col1 = 1", pg_conn)
+    pg_conn.commit()
+
+    # only the NaN row is left
+    results = run_query(
+        "select count(*), count(*) filter (where col1 = 1) from test_pruning_deletes_nan.tbl",
+        pg_conn,
+    )
+    assert results[0][0] == 1
+    assert results[0][1] == 0
+
+    run_command("DROP SCHEMA test_pruning_deletes_nan CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_pruning_deletes_without_column_stats(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_no_stats;
+        CREATE TABLE test_pruning_no_stats.tbl (
+            col1 INT
+        ) USING iceberg WITH (autovacuum_enabled='False', column_stats_mode='none');
+
+        INSERT INTO test_pruning_no_stats.tbl VALUES (1), (1);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # column_stats_mode 'none' does not record null counts either
+    results = run_query(
+        "SELECT count(*) FROM lake_table.data_file_column_stats "
+        "WHERE table_name = 'test_pruning_no_stats.tbl'::regclass",
+        superuser_conn,
+    )
+    assert results[0][0] == 0
+
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_no_stats.tbl where col1 = 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+    assert int(fetch_data_files_skipped(results)) == 0
+
+    run_command("DROP SCHEMA test_pruning_no_stats CASCADE", pg_conn)
     pg_conn.commit()
 
 

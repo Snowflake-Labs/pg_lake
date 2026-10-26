@@ -700,8 +700,9 @@ def test_clamped_nan_numeric_column_stats(
     with_default_location,
     stats_catalog_permission,
 ):
-    """Verify data_file_column_stats has no stats row when a NaN numeric
-    value is clamped to NULL (all-NULL columns produce no min/max stats)."""
+    """Verify data_file_column_stats has no bounds when a NaN numeric
+    value is clamped to NULL (all-NULL columns produce no min/max stats),
+    only a null count."""
     table_name = "test_nan_numeric_stats"
     run_command(
         f"CREATE TABLE {table_name} (col numeric(10,2)) "
@@ -715,12 +716,12 @@ def test_clamped_nan_numeric_column_stats(
     )
 
     result = run_query(
-        f"SELECT lower_bound, upper_bound FROM lake_table.data_file_column_stats "
+        f"SELECT lower_bound, upper_bound, null_count FROM lake_table.data_file_column_stats "
         f"WHERE table_name = '{table_name}'::regclass ORDER BY field_id",
         pg_conn,
     )
 
-    assert len(result) == 0
+    assert result == [[None, None, 1]]
 
     pg_conn.rollback()
 
@@ -741,7 +742,7 @@ def test_nan_double_converted_numeric_column_stats(
 ):
     """Unbounded numeric and numeric with precision > 38 are stored as double.
     NaN is not clamped, but Parquet excludes NaN from min/max stats, so
-    an all-NaN column produces no stats row."""
+    an all-NaN column produces no bounds, only a null count."""
     table_name = "test_nan_double_numeric_stats"
     run_command(
         f"CREATE TABLE {table_name} (col {col_type}) USING iceberg;",
@@ -754,12 +755,12 @@ def test_nan_double_converted_numeric_column_stats(
     )
 
     result = run_query(
-        f"SELECT lower_bound, upper_bound FROM lake_table.data_file_column_stats "
+        f"SELECT lower_bound, upper_bound, null_count FROM lake_table.data_file_column_stats "
         f"WHERE table_name = '{table_name}'::regclass ORDER BY field_id",
         pg_conn,
     )
 
-    assert len(result) == 0
+    assert result == [[None, None, 0]]
 
     pg_conn.rollback()
 
