@@ -193,7 +193,7 @@ CREATE SERVER polaris TYPE 'rest'
 | Option | Where | Description |
 |:--|:--|:--|
 | `rest_endpoint` | server | Base URL of the REST catalog API. |
-| `location_prefix` | server | Storage location for tables pg_lake creates in this catalog. pg_lake adds the database, schema and table name to it. |
+| `location_prefix` | server | Storage location pg_lake requests for new writable tables in this catalog. pg_lake adds the database, schema, table name and table OID to it; the catalog may assign a different location. |
 | `catalog_name` | server | Catalog (warehouse) that tables use. Without it, pg_lake uses the prefix the catalog advertises, or the database name. A table created by pg_lake keeps the catalog it was created in, even if this option changes later, see [below](#create-tables-in-an-external-catalog). |
 | `warehouse` | server | Warehouse to name when pg_lake asks the catalog for its prefix (`GET /v1/config?warehouse=...`). Polaris and Lakekeeper need it to advertise a prefix: use the catalog name on Polaris and the warehouse name on Lakekeeper, which returns the warehouse ID. `catalog_name` still wins if set. |
 | `oauth_endpoint` | server | OAuth2 token endpoint URL, if the catalog does not serve it at `<rest_endpoint>/v1/oauth/tokens`. |
@@ -257,6 +257,15 @@ uppercase letters, and names set later with `ALTER`, are used as given.
 
 An attached table always reads the catalog's current version, so queries see new commits from
 other engines without any changes in PostgreSQL. Dropping it only removes it from PostgreSQL.
+
+A statement reads one version of the catalog: every reference to a table, every table of one
+`object_store` catalog, and every query the statement runs in functions, `DO` blocks, procedures
+and triggers reads the same version. Under `READ COMMITTED`, the next statement reads the version
+that stands by then, and a cursor, including the one a PL/pgSQL `FOR` loop opens, reads the
+version that stands when it opens. A procedure that commits reads the catalog anew after each
+commit, so a procedure that polls an attached table for new commits should commit between polls.
+`REPEATABLE READ` and `SERIALIZABLE` hold a transaction to the version its first read of an
+attached table used.
 
 To attach many tables from one catalog, set `catalog_name` on the server and mirror the
 namespaces as schemas. The other catalog options then follow from the names you use:
@@ -335,10 +344,31 @@ accept `catalog_namespace` or `catalog_table_name` overrides and cannot be renam
 moved to another schema. One transaction may modify only one REST server and prefix;
 rolling back a savepoint discards its pending catalog work and restores the prior binding.
 
-pg_lake creates the namespace if it does not exist. Storage paths still use the PostgreSQL
-database name, not the REST prefix. The catalog must accept these paths under the server's
-`location_prefix`; catalog and namespace storage roots must match that layout. Prefix
-selection alone does not provide writable interoperability with every REST catalog.
+pg_lake creates the namespace if it does not exist, then stages table creation with its
+schema. When `location_prefix` (or `pg_lake_iceberg.default_location_prefix`) is set,
+the staging request asks for pg_lake's usual location, the prefix followed by the
+database, schema and table name and the table OID. The OID keeps a re-created table
+off a dropped table's files. If the namespace reports a `location` and that path is not
+under it (Polaris names namespace locations after the raw schema name, so a schema name
+that needs URL-encoding falls outside), the same database/schema/table/OID tail is
+requested under the namespace location instead. The catalog must return a table UUID and storage location,
+and pg_lake uses the returned location for both data and metadata. Polaris and
+Lakekeeper keep the requested location; Nessie assigns its own; a catalog that rejects
+the location fails the
+`CREATE TABLE`. Without a prefix, the catalog chooses the location. An explicit
+`location` option, including one in replayed DDL, is requested as given; if the
+catalog assigns a different location, pg_lake reports it with a NOTICE and uses the
+catalog's. As for other Iceberg tables, the chosen location must be empty, so
+replaying DDL whose old location still holds files fails. Existing tables retain their
+storage locations.
+
+Storage access for writable tables must be configured directly in pgduck_server: pg_lake
+does not use catalog-vended credentials for writable REST tables, because their files
+(including queued deletions) outlive any vended credential. The chosen
+location must be empty and satisfy the configured managed-storage-region restriction.
+New writable tables request Iceberg format version 2 and uncompressed metadata JSON,
+which the current metadata-file reader requires. The catalog must support staged creation
+and the commit operations used by pg_lake; REST catalog support alone is not sufficient.
 
 {: .warning }
 pg_lake sends its changes to the catalog after the PostgreSQL transaction commits. If the

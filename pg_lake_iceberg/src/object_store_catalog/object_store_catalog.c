@@ -75,6 +75,7 @@ static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName);
 static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
 static bool CheckIfExternalObjectStoreCatalogExists(const char *catalogName);
 static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogNamespace, char **catalogTableName);
+static char *GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent, const char *catalogNamespace, const char *catalogTableName);
 static void FormatCurrentTimestampUTC(char *buf, size_t bufsize);
 static bool IsBlankCatalogField(const char *value);
 
@@ -352,12 +353,29 @@ GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **
 
 
 /*
-* GetMetadataLocationFromExternalObjectStoreCatalogForTable returns the metadata location
-* for the given relationId by looking up the object store catalog using the catalog
-* information from the foreign table options.
+* GetExternalObjectStoreCatalogFilePathForTable returns the path of the
+* catalog file that lists the given read-only object store catalog table.
 */
 char *
-GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId)
+GetExternalObjectStoreCatalogFilePathForTable(Oid relationId)
+{
+	char	   *catalogName = NULL;
+	char	   *catalogNamespace = NULL;
+	char	   *catalogTableName = NULL;
+
+	GetObjectStoreCatalogInfoFromCatalog(relationId, &catalogName, &catalogNamespace, &catalogTableName);
+
+	return GetExternalObjectStoreCatalogFilePath(catalogName);
+}
+
+
+/*
+* GetMetadataLocationFromExternalObjectStoreCatalogForTable returns the metadata location
+* for the given relationId by looking it up in the given contents of its object store
+* catalog, using the catalog information from the foreign table options.
+*/
+char *
+GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId, const char *catalogContent)
 {
 	char	   *catalogName = NULL;
 	char	   *catalogNamespace = NULL;
@@ -368,7 +386,7 @@ GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId)
 	/* otherwise we should have thrown an error */
 	Assert(catalogName != NULL && catalogNamespace != NULL && catalogTableName != NULL);
 
-	return GetTableMetadataLocationFromExternalObjectStoreCatalog(catalogName, catalogNamespace, catalogTableName);
+	return GetTableMetadataLocationFromObjectStoreCatalogContent(catalogContent, catalogNamespace, catalogTableName);
 }
 
 
@@ -452,12 +470,20 @@ BuildAndUploadObjectStoreCatalogFile(void)
 					 "		)");
 
 	/*
-	 * we don't use this param, but our SPI Apis rely on at least one arg, so
-	 * we do true=true
+	 * Push the latest snapshot so the catalog query always sees every
+	 * committed row in tables_internal, even when the caller is in REPEATABLE
+	 * READ (whose transaction snapshot would hide rows committed after the
+	 * transaction started).
+	 *
+	 * readOnly below must stay true: that is what makes SPI run the query
+	 * under this active snapshot instead of taking a fresh transaction
+	 * snapshot of its own.
 	 */
+	PushActiveSnapshot(GetLatestSnapshot());
+
 	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
-	bool		readOnly = false;
+	bool		readOnly = true;
 
 	SPI_execute(fetchObjectStoreMetadata->data, readOnly, 0);
 
@@ -509,6 +535,8 @@ BuildAndUploadObjectStoreCatalogFile(void)
 
 	SPI_END();
 
+	PopActiveSnapshot();
+
 	/* End JSON array and object */
 	appendStringInfoString(objectStoreCatalogFileContent, "]\n");
 	appendStringInfoString(objectStoreCatalogFileContent, "}");
@@ -541,6 +569,18 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	/* catalog.json is a fixed path that may change out of band; read fresh. */
 	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
 
+	return GetTableMetadataLocationFromObjectStoreCatalogContent(catalogContent, catalogNamespace, catalogTableName);
+}
+
+
+/*
+* GetTableMetadataLocationFromObjectStoreCatalogContent returns the metadata location
+* for the table with the given catalog namespace and catalog table name by looking it
+* up in the given contents of an object store catalog file.
+*/
+static char *
+GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent, const char *catalogNamespace, const char *catalogTableName)
+{
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
 	StringInfo	getMetadataLocation = makeStringInfo();
 

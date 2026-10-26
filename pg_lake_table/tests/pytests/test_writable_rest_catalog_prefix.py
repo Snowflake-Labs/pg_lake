@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import threading
+import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -32,7 +33,19 @@ def _find_free_port():
 class _MockCatalog:
     """Just enough of the Iceberg REST API for a writable CREATE/DROP TABLE."""
 
-    def __init__(self, config_status=400, config_body=None):
+    def __init__(
+        self,
+        config_status=400,
+        config_body=None,
+        stage_status=200,
+        stage_body=None,
+        honor_location=False,
+        namespace_location=None,
+    ):
+        self.stage_status = stage_status
+        self.stage_body = stage_body
+        self.honor_location = honor_location
+        self.namespace_location = namespace_location
         self.config_status = config_status
         self.config_body = config_body or {
             "error": {"message": "Please specify a warehouse", "code": 400}
@@ -50,7 +63,9 @@ class _MockCatalog:
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 if body is not None:
-                    self.wfile.write(json.dumps(body).encode())
+                    self.wfile.write(
+                        (body if isinstance(body, str) else json.dumps(body)).encode()
+                    )
 
             def _handle(self):
                 mock.requests.append((self.command, self.path))
@@ -70,11 +85,31 @@ class _MockCatalog:
                     return self._reply(200, {"namespaces": []})
                 m = re.search(r"/namespaces/([^/]+)$", path)
                 if self.command == "GET" and m:
+                    properties = {}
+                    if mock.namespace_location is not None:
+                        properties["location"] = mock.namespace_location
                     return self._reply(
-                        200, {"namespace": [m.group(1)], "properties": {}}
+                        200, {"namespace": [m.group(1)], "properties": properties}
                     )
                 if self.command == "POST" and "/tables" in path:
-                    # stage-create and the finish-create both expect 200
+                    if path.endswith("/tables"):
+                        assert mock.bodies[-1]["stage-create"] is True
+                        if mock.stage_body is not None:
+                            return self._reply(mock.stage_status, mock.stage_body)
+                        requested = mock.bodies[-1].get("location")
+                        return self._reply(
+                            200,
+                            {
+                                "metadata": {
+                                    "table-uuid": str(uuid.uuid4()),
+                                    "location": (
+                                        requested
+                                        if mock.honor_location and requested
+                                        else f"s3://{TEST_BUCKET}/staged-prefix/{uuid.uuid4()}"
+                                    ),
+                                }
+                            },
+                        )
                     return self._reply(200, {})
                 return self._reply(404, {"error": {"message": "not mocked"}})
 
@@ -557,3 +592,212 @@ def test_mixed_prefix_alter_rejected_at_statement_time(
     for table in ("t1", "t2"):
         run_command(f"DROP TABLE {SCHEMA}.{table}", superuser_conn)
         superuser_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "status,body,message",
+    [
+        (200, {}, "must include a table UUID and location"),
+        (422, "stage-create must be a boolean", "HTTP request failed (HTTP 422)"),
+    ],
+)
+def test_invalid_stage_response_aborts_create(
+    installcheck, superuser_conn, writable_schema, mock_catalog, status, body, message
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog(stage_status=status, stage_body=body)
+    writable_schema.append("wp_bad_stage")
+    _create_server(superuser_conn, "wp_bad_stage", mock.endpoint, "first")
+    err = run_command(
+        f"CREATE TABLE {SCHEMA}.bad_stage (id int) USING iceberg WITH (catalog='wp_bad_stage')",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert message in str(err), err
+    superuser_conn.rollback()
+    assert (
+        run_query(f"SELECT to_regclass('{SCHEMA}.bad_stage')", superuser_conn)[0][0]
+        is None
+    )
+
+
+def test_catalog_location_uuid_and_schema_used_for_create(
+    installcheck, superuser_conn, writable_schema, mock_catalog
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    table_uuid = str(uuid.uuid4())
+    location = f"s3://{TEST_BUCKET}/catalog-chosen/{table_uuid}"
+    mock = mock_catalog(
+        stage_body={
+            "metadata": {
+                "table-uuid": table_uuid,
+                "location": location,
+            }
+        }
+    )
+    writable_schema.append("wp_stage")
+    _create_server(superuser_conn, "wp_stage", mock.endpoint, "first")
+    run_command("ALTER SERVER wp_stage OPTIONS (DROP location_prefix)", superuser_conn)
+    superuser_conn.commit()
+    requested = f"s3://{TEST_BUCKET}/client-location"
+    run_command(
+        f"CREATE TABLE {SCHEMA}.staged (id int, labels text[]) USING iceberg "
+        f"WITH (catalog='wp_stage', location='{requested}')",
+        superuser_conn,
+    )
+    # The mock assigns its own location, so the user is told.
+    assert any(
+        "instead of the requested" in notice and requested in notice
+        for notice in superuser_conn.notices
+    )
+    superuser_conn.commit()
+    assert _table_option(superuser_conn, "staged", "location") == location
+    stage = next(
+        body
+        for (_, path), body in zip(mock.requests, mock.bodies)
+        if path.endswith("/tables")
+    )
+    assert stage["stage-create"] is True
+    assert stage["location"] == requested
+    assert [field["name"] for field in stage["schema"]["fields"]] == ["id", "labels"]
+    assert stage["schema"]["fields"][1]["type"]["type"] == "list"
+    final = next(
+        body
+        for (method, path), body in zip(mock.requests, mock.bodies)
+        if method == "POST" and path.endswith("/tables/staged")
+    )
+    updates = {update["action"]: update for update in final["updates"]}
+    assert updates["assign-uuid"]["uuid"] == table_uuid
+    assert updates["set-location"]["location"] == location
+    assert updates["upgrade-format-version"]["format-version"] == 2
+    # Lakekeeper keeps the staged schema with its own field IDs; the schema
+    # pg_lake adds must become current.
+    assert updates["set-current-schema"]["schema-id"] == -1
+    actions = [update["action"] for update in final["updates"]]
+    assert actions.index("set-current-schema") == actions.index("add-schema") + 1
+
+
+@pytest.mark.parametrize("honor", [True, False], ids=["honored", "replaced"])
+def test_stage_requests_pg_lake_location(
+    installcheck, superuser_conn, writable_schema, mock_catalog, honor
+):
+    """
+    With a location_prefix, stage-create asks for pg_lake's per-relation
+    location, so a re-created table cannot land on a dropped table's files
+    (Polaris otherwise assigns <namespace>/<table>).  Whatever the catalog
+    returns is the table's location.
+    """
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog(honor_location=honor)
+    writable_schema.append("wp_reqloc")
+    _create_server(superuser_conn, "wp_reqloc", mock.endpoint, "first")
+    superuser_conn.commit()
+    run_command(
+        f"CREATE TABLE {SCHEMA}.reqloc (id int) USING iceberg WITH (catalog='wp_reqloc')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    relid = run_query(f"SELECT '{SCHEMA}.reqloc'::regclass::oid", superuser_conn)[0][0]
+    expected = f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}/{SCHEMA}/reqloc/{relid}"
+    stage = next(
+        body
+        for (_, path), body in zip(mock.requests, mock.bodies)
+        if path.endswith("/tables")
+    )
+    assert stage["location"] == expected
+
+    location = _table_option(superuser_conn, "reqloc", "location")
+    if honor:
+        assert location == expected
+    else:
+        assert location.startswith(f"s3://{TEST_BUCKET}/staged-prefix/")
+    final = next(
+        body
+        for (method, path), body in zip(mock.requests, mock.bodies)
+        if method == "POST" and path.endswith("/tables/reqloc")
+    )
+    updates = {update["action"]: update for update in final["updates"]}
+    assert updates["set-location"]["location"] == location
+
+
+@pytest.mark.parametrize(
+    "namespace_location, under",
+    [
+        (f"s3://{TEST_BUCKET}/{server_params.PG_DATABASE}/{SCHEMA}", True),
+        (f"s3://{TEST_BUCKET}/catalog-root/{SCHEMA}/", False),
+    ],
+    ids=["path-under-namespace", "path-outside-namespace"],
+)
+def test_requested_location_stays_under_namespace_location(
+    installcheck,
+    superuser_conn,
+    writable_schema,
+    mock_catalog,
+    namespace_location,
+    under,
+):
+    """
+    A catalog may only accept tables under the namespace's location (Polaris
+    names it after the raw schema name, so an encoded schema in pg_lake's
+    path falls outside it).  When pg_lake's path is not under the reported
+    namespace location, the same unique tail is requested under it instead.
+    """
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog(honor_location=True, namespace_location=namespace_location)
+    writable_schema.append("wp_nsloc")
+    _create_server(superuser_conn, "wp_nsloc", mock.endpoint, "first")
+    superuser_conn.commit()
+    run_command(
+        f"CREATE TABLE {SCHEMA}.nsloc (id int) USING iceberg WITH (catalog='wp_nsloc')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    relid = run_query(f"SELECT '{SCHEMA}.nsloc'::regclass::oid", superuser_conn)[0][0]
+    tail = f"{server_params.PG_DATABASE}/{SCHEMA}/nsloc/{relid}"
+    expected = (
+        f"s3://{TEST_BUCKET}/{tail}"
+        if under
+        else f"{namespace_location.rstrip('/')}/{tail}"
+    )
+    stage = next(
+        body
+        for (_, path), body in zip(mock.requests, mock.bodies)
+        if path.endswith("/tables")
+    )
+    assert stage["location"] == expected
+    assert _table_option(superuser_conn, "nsloc", "location") == expected
+
+
+def test_explicit_location_is_requested_and_kept(
+    installcheck, superuser_conn, writable_schema, mock_catalog
+):
+    """An explicit location is requested as given, as on main; a catalog that
+    honors it keeps it, with no NOTICE."""
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    mock = mock_catalog(honor_location=True)
+    writable_schema.append("wp_explicit")
+    _create_server(superuser_conn, "wp_explicit", mock.endpoint, "first")
+    superuser_conn.commit()
+    requested = f"s3://{TEST_BUCKET}/explicit/{uuid.uuid4()}"
+    del superuser_conn.notices[:]
+    run_command(
+        f"CREATE TABLE {SCHEMA}.explicit (id int) USING iceberg "
+        f"WITH (catalog='wp_explicit', location='{requested}/')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    assert not any("instead of the requested" in n for n in superuser_conn.notices)
+    stage = next(
+        body
+        for (_, path), body in zip(mock.requests, mock.bodies)
+        if path.endswith("/tables")
+    )
+    assert stage["location"] == requested
+    assert _table_option(superuser_conn, "explicit", "location") == requested
