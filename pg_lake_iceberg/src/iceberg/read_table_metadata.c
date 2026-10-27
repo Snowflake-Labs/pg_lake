@@ -24,6 +24,7 @@
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_reader.h"
+#include "pg_lake/permissions/roles.h"
 #include "pg_lake/util/s3_reader_utils.h"
 
 #include "utils/json.h"
@@ -35,6 +36,8 @@ static const char *SnapshotReferenceTypeName[] = {
 };
 
 
+static IcebergTableMetadata * ParseIcebergTableMetadataReadFrom(Jsonb *tableMetadataJson,
+																const char *sourcePath);
 static void ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * metadata);
 static void ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema * schema);
 static void ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field);
@@ -59,16 +62,19 @@ static bool JsonExtractField(JsonbContainer *topLevelJsonContainer,
 
 /*
  * ReadIcebergTableMetadata reads the Iceberg table metadata from the given URI.
- * The URI is validated by GetTextFromURI.
+ * The URI can come from a catalog, so it is held to ValidateStorageURL like
+ * the manifest paths read out of the metadata.
  */
 IcebergTableMetadata *
 ReadIcebergTableMetadata(const char *tableMetadataPath)
 {
+	ValidateStorageURL(tableMetadataPath);
+
 	char	   *tableMetadataText = GetTextFromURI(tableMetadataPath);
 	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, PointerGetDatum(tableMetadataText));
 	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
 
-	return ParseIcebergTableMetadata(jsonb);
+	return ParseIcebergTableMetadataReadFrom(jsonb, tableMetadataPath);
 }
 
 
@@ -80,9 +86,28 @@ ReadIcebergTableMetadata(const char *tableMetadataPath)
 IcebergTableMetadata *
 ParseIcebergTableMetadata(Jsonb *tableMetadataJson)
 {
+	return ParseIcebergTableMetadataReadFrom(tableMetadataJson, NULL);
+}
+
+
+/*
+ * ParseIcebergTableMetadataReadFrom reads a metadata document that was read
+ * from sourcePath, or that a catalog sent when sourcePath is NULL.
+ *
+ * Of the paths in the document, only the manifest lists are ever fetched, so
+ * only they are checked: pg_lake never reads the files that metadata-log,
+ * statistics or partition-statistics point to.
+ */
+static IcebergTableMetadata *
+ParseIcebergTableMetadataReadFrom(Jsonb *tableMetadataJson, const char *sourcePath)
+{
 	IcebergTableMetadata *metadata = palloc0(sizeof(IcebergTableMetadata));
 
 	ReadIcebergTableMetadataFromJson(&tableMetadataJson->root, metadata);
+
+	for (size_t i = 0; i < metadata->snapshots_length; i++)
+		ErrorIfURLLeavesObjectStorage(metadata->snapshots[i].manifest_list,
+									  sourcePath);
 
 	return metadata;
 }
