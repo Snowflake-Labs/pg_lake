@@ -112,16 +112,18 @@ find_all_referenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 	Oid			relationId = PG_GETARG_OID(0);
 	ArrayType  *snapshotIds = PG_GETARG_ARRAYTYPE_P(1);
 
+	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
+
 	/*
 	 * Reading the metadata and manifests below goes through object storage,
 	 * so a REST-catalog table that is only reachable with vended credentials
-	 * needs them resolved first.  No-op for every other kind of table.
+	 * needs them resolved first, after the catalog lookup above has said
+	 * whether it still vends them.  No-op for every other kind of table.
 	 */
 	EnsureStorageCredentialsForRelation(relationId);
 
 	HTAB	   *fileHash = CreateFilesHash();
 
-	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(currentMetadataPath);
 
 	ListCell   *snapshotIdCell = NULL;
@@ -214,10 +216,11 @@ find_unreferenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 	List	   *prevSnapshotIdList = Int64ArrayToList(prevSnapshotIds);
 	List	   *currentSnapshotIdList = Int64ArrayToList(currentSnapshotIds);
 
+	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
+
 	/* see find_all_referenced_files_via_snapshot_ids */
 	EnsureStorageCredentialsForRelation(relationId);
 
-	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(currentMetadataPath);
 
 	IcebergSnapshot *prevSnapshots = GetIcebergSnapshotsViaSnapshotIdList(metadata, prevSnapshotIdList);
