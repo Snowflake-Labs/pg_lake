@@ -681,6 +681,93 @@ def test_vended_secret_dropped_when_catalog_stops_vending(
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
+def test_vended_secret_dropped_by_another_backend_when_catalog_stops_vending(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """A backend that never pushed a table's secret drops it all the same.
+
+    Secrets live in the pgduck_server every backend shares, and every
+    backend of a principal names a table's secret alike.  Once the catalog
+    stops vending, the secret a since-closed backend pushed is still there
+    and still valid, so a fresh backend's scan is only denied if that
+    backend drops it.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_withdrawn_other"
+    table = "vc_withdrawn_other"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    meta_key, meta_secret = server.create_scoped_user(
+        "mv_meta_wdo",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    data_key, data_secret = server.create_scoped_user("mv_data_wdo", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {
+                "prefix": location + "/",
+                "config": {
+                    "s3.access-key-id": data_key,
+                    "s3.secret-access-key": data_secret,
+                    "client.region": server.region,
+                },
+            },
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, meta_key, meta_secret)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        pusher = open_pg_conn()
+        try:
+            result = run_query(f"SELECT count(*) FROM {schema}.{table}", pusher)
+            assert result[0][0] == 10
+        finally:
+            pusher.close()
+
+        tables[table]["vended"] = None
+
+        reader = open_pg_conn()
+        try:
+            err = run_query(
+                f"SELECT count(*) FROM {schema}.{table}", reader, raise_error=False
+            )
+        finally:
+            reader.close()
+        assert _denied(
+            err
+        ), f"scan read with the secret another backend pushed, got: {err!r}"
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
 def test_two_principals_get_their_own_credentials(
     superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
 ):

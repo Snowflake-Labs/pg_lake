@@ -67,8 +67,10 @@ static MemoryContext PushedSecretsContext = NULL;
 
 static void InitPushedSecretsIfNeeded(void);
 static List *ResolveStorageCredentials(Oid relationId);
-static void BestEffortReconcile(Oid relationId, List *toPush, List *toDrop);
-static void ReconcileSecrets(Oid relationId, List *toPush, List *toDrop);
+static void BestEffortReconcile(Oid relationId, List *toPush, List *toDrop,
+								List *toForget);
+static void ReconcileSecrets(Oid relationId, List *toPush, List *toDrop,
+							 List *toForget);
 static VendedSecret MakeVendedSecret(const StorageCredential * sc);
 static void ReportOrRethrowBestEffortError(ErrorData *edata, const char *what,
 										   Oid relationId);
@@ -86,6 +88,11 @@ static void ReportOrRethrowBestEffortError(ErrorData *edata, const char *what,
  * to do does the reconcile reach pgduck_server, so a warm scan -- the
  * common case, since a vended credential outlives many statements --
  * costs nothing beyond the catalog's own answer.
+ *
+ * A credential the catalog withdrew is dropped by name instead, since
+ * the backend that pushed its secret need not be this one.  That costs a
+ * DROP SECRET IF EXISTS on every resolution for as long as the catalog
+ * vends nothing for the table.
  */
 void
 EnsureStorageCredentialsForRelation(Oid relationId)
@@ -94,6 +101,7 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 	List	   *desiredNames = NIL;
 	List	   *toPush = NIL;
 	List	   *toDrop = NIL;
+	List	   *toForget = NIL;
 	ListCell   *lc;
 	TimestampTz now;
 	HASH_SEQ_STATUS seq;
@@ -123,10 +131,22 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 		char		key[SECRET_NAME_MAXLEN];
 		bool		found = false;
 
-		desiredNames = lappend(desiredNames, name);
-
 		strlcpy(key, name, SECRET_NAME_MAXLEN);
 		entry = hash_search(PushedSecrets, key, HASH_FIND, &found);
+
+		/*
+		 * A withdrawn credential is dropped by name, unless this backend
+		 * pushed it for this relation: that one is dropped below with the
+		 * rest the catalog no longer vends.
+		 */
+		if (sc->withdrawn)
+		{
+			if (!found || entry->relationId != relationId)
+				toForget = lappend(toForget, sc);
+			continue;
+		}
+
+		desiredNames = lappend(desiredNames, name);
 
 		/* Skip a secret we already pushed whose expiry is still safe. */
 		if (found && entry->expiresAt > 0 &&
@@ -163,8 +183,8 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 			toDrop = lappend(toDrop, entry);
 	}
 
-	if (toPush != NIL || toDrop != NIL)
-		BestEffortReconcile(relationId, toPush, toDrop);
+	if (toPush != NIL || toDrop != NIL || toForget != NIL)
+		BestEffortReconcile(relationId, toPush, toDrop, toForget);
 }
 
 
@@ -191,7 +211,7 @@ ForgetStorageCredentials(Oid relationId)
 	}
 
 	if (toDrop != NIL)
-		BestEffortReconcile(relationId, NIL, toDrop);
+		BestEffortReconcile(relationId, NIL, toDrop, NIL);
 }
 
 
@@ -349,7 +369,8 @@ MakeVendedSecret(const StorageCredential * sc)
 /*
  * ReconcileSecrets performs the actual pgduck work for one relation:
  * (re)push every credential in toPush, then drop every stale secret in
- * toDrop, updating the per-backend registry to match.
+ * toDrop and every withdrawn one in toForget, updating the per-backend
+ * registry to match.
  *
  * The secrets themselves are pgduck_server-wide, not per connection; a
  * single connection is taken out here only so that a relation with
@@ -360,7 +381,7 @@ MakeVendedSecret(const StorageCredential * sc)
  * best-effort swallow lives in the caller.
  */
 static void
-ReconcileSecrets(Oid relationId, List *toPush, List *toDrop)
+ReconcileSecrets(Oid relationId, List *toPush, List *toDrop, List *toForget)
 {
 	PGDuckConnection *conn = GetPGDuckConnection();
 
@@ -416,6 +437,27 @@ ReconcileSecrets(Oid relationId, List *toPush, List *toDrop)
 			pfree(entry->secretId);
 			hash_search(PushedSecrets, key, HASH_REMOVE, NULL);
 		}
+
+		foreach(lc, toForget)
+		{
+			StorageCredential *sc = (StorageCredential *) lfirst(lc);
+			char	   *name = GenerateVendedSecretName(sc->serverOid,
+														sc->secretId);
+			char		key[SECRET_NAME_MAXLEN];
+			bool		found = false;
+			PushedSecretEntry *entry;
+
+			DropVendedSecretFromPGDuck(conn, sc->serverOid, sc->secretId);
+
+			/* this backend may have pushed it for another relation */
+			strlcpy(key, name, SECRET_NAME_MAXLEN);
+			entry = hash_search(PushedSecrets, key, HASH_FIND, &found);
+			if (found)
+			{
+				pfree(entry->secretId);
+				hash_search(PushedSecrets, key, HASH_REMOVE, NULL);
+			}
+		}
 	}
 	PG_FINALLY();
 	{
@@ -434,19 +476,20 @@ ReconcileSecrets(Oid relationId, List *toPush, List *toDrop)
  * ResolveStorageCredentials.
  */
 static void
-BestEffortReconcile(Oid relationId, List *toPush, List *toDrop)
+BestEffortReconcile(Oid relationId, List *toPush, List *toDrop,
+					List *toForget)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 	ResourceOwner callerOwner = CurrentResourceOwner;
 
-	Assert(toPush != NIL || toDrop != NIL);
+	Assert(toPush != NIL || toDrop != NIL || toForget != NIL);
 
 	BeginInternalSubTransaction(NULL);
 	MemoryContextSwitchTo(callerContext);
 
 	PG_TRY();
 	{
-		ReconcileSecrets(relationId, toPush, toDrop);
+		ReconcileSecrets(relationId, toPush, toDrop, toForget);
 
 		ReleaseCurrentSubTransaction();
 		MemoryContextSwitchTo(callerContext);
