@@ -1656,3 +1656,37 @@ def test_external_write_data_file_outside_table_rejected(
 
     assert run_query(f"SELECT count(*) FROM {tbl}", pg_conn)[0][0] == 5
     pg_conn.rollback()
+
+
+def test_external_write_row_ids_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Tables with row_ids reject external writes, since the writer cannot
+    preserve row IDs.
+    """
+    name = f"{TABLE_NAME}_row_ids"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    run_command(
+        f"CREATE TABLE {tbl} (a int, b text) USING iceberg WITH (row_ids = 'true')",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, 'row' || i FROM generate_series(1,5) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+    location = _metadata_location(pg_conn, name)
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pytest.raises(Exception, match="not supported on tables with row_ids"):
+        pyiceberg_table.append(_rows([6]))
+
+    assert _metadata_location(pg_conn, name) == location
+    assert run_query(f"SELECT count(*) FROM {tbl}", pg_conn)[0][0] == 5
+    pg_conn.rollback()

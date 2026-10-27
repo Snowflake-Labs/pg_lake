@@ -35,6 +35,7 @@
 #include "catalog/namespace.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
+#include "foreign/foreign.h"
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/rel.h"
@@ -57,6 +58,7 @@
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
+#include "pg_lake/parsetree/options.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/read_data.h"
@@ -133,6 +135,15 @@ SyncIcebergMetadataFromExternalWrite(Oid relationId, const char *metadataLocatio
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("cannot update metadata_location of a table that was "
 						"modified in the same transaction")));
+
+	/*
+	 * External writers do not carry _row_id through file rewrites, and the
+	 * resync would drop the row ID mappings of every file.
+	 */
+	if (GetBoolOption(GetForeignTable(relationId)->options, "row_ids", false))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("external writes are not supported on tables with row_ids")));
 
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
 
