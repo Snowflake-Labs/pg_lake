@@ -389,8 +389,10 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 		renamedFields = lappend(renamedFields, icebergField);
 	}
 
-	foreach_ptr(DataFileSchemaField, icebergField, renamedFields)
+	foreach(mappingCell, renamedFields)
 	{
+		DataFileSchemaField *icebergField = lfirst(mappingCell);
+
 		ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s RENAME COLUMN %s TO %s",
 										 qualifiedName,
 										 quote_identifier(psprintf("pg_lake_rename_%d",
