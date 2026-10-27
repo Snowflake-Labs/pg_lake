@@ -443,6 +443,29 @@ def test_invalid_utf8_string_bound(tmp_path, s3, pg_conn, extension):
     assert scanned_files(pg_conn, "v = 'b'") == ("1", 1)
 
 
+def test_multibyte_string_bounds(tmp_path, s3, pg_conn, extension):
+    """
+    Iceberg orders string bounds by UTF-8 bytes, so 'z' < 'é'. Pruning compares
+    them in the column's collation, which agrees only when the collation
+    orders by bytes as well, as the C.UTF-8 test cluster does. Under a
+    linguistic collation, 'é' < 'z', and a filter on 'é' is refuted by the
+    bounds ['z', 'é'] of a file that has it.
+    """
+    if not run_query("SELECT 'é' > 'z'", pg_conn)[0][0]:
+        pytest.skip("the default collation does not order strings by bytes")
+
+    table = one_column_table(
+        tmp_path, s3, "string", [(1, "z"), (2, "é")], b"z", "é".encode()
+    )
+    attach(pg_conn, table)
+    assert scanned_files(pg_conn, "v = 'é'") == ("1", 1)
+    assert scanned_files(pg_conn, "v = 'z'") == ("1", 1)
+    # 'ä' sorts between 'z' and 'é' by bytes
+    assert scanned_files(pg_conn, "v = 'ä'") == ("1", 0)
+    assert scanned_files(pg_conn, "v < 'z'") == ("0", 0)
+    assert scanned_files(pg_conn, "v > 'é'") == ("0", 0)
+
+
 def test_string_bound_with_nul_byte(tmp_path, s3, pg_conn, extension):
     """Postgres text cannot hold NUL; cutting the bound there would shrink it."""
     table = one_column_table(
