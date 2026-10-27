@@ -56,3 +56,24 @@ Granting catalog privileges...
 ✅ Granted CATALOG_MANAGE_CONTENT
 🎉 Polaris setup complete.
 ```
+
+# Lakekeeper server for testing
+
+[Lakekeeper](https://github.com/lakekeeper/lakekeeper) is a second REST catalog the tests run against, so behaviour that differs from Polaris is caught in CI: its prefix is a warehouse ID that `/v1/config` only returns when given the warehouse, and it keeps the staged metadata of a staged create. `make install-rest_catalog` installs a pinned release binary as `$(pg_config --bindir)/lakekeeper`; to upgrade it, change `LAKEKEEPER_VERSION` and the SHA-256 values in the `Makefile` together.
+
+Tests that do `from helpers.lakekeeper import *` start it on port 8282 with authentication disabled and create a warehouse named `pglake` on the moto S3 server (`s3://testbucketcdw/lakekeeper`). pg_lake reaches it through a server with `rest_auth_type 'none'`, see `test_lakekeeper_catalog.py`.
+
+## How to run locally
+
+Lakekeeper keeps its metadata in its own database (`lakekeeper` by default) on the Postgres server given by the `PG*` variables, and needs an S3 endpoint for the warehouse. `--purge` drops that database first; without it, an existing bootstrap and warehouse are reused. Logs go to `/tmp/lakekeeper.log`, and the fixture's output to `/tmp/lakekeeper_startup.log`.
+
+```bash
+export PGHOST=localhost PGPORT=5432 PGUSER=postgres PGPASSWORD= PGDATABASE=postgres
+export S3_ENDPOINT=http://localhost:5999 S3_BUCKET=testbucketcdw S3_REGION=us-west-1
+export S3_ACCESS_KEY_ID=testing S3_SECRET_ACCESS_KEY=testing
+bash ./lakekeeper_server.sh --purge
+✅ Lakekeeper is healthy
+✅ Bootstrapped Lakekeeper
+✅ Created warehouse pglake
+🎉 Lakekeeper setup complete (warehouse 01a17c31-642e-7873-9d2c-5f7e2211adfc).
+```

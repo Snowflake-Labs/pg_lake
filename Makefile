@@ -276,7 +276,12 @@ REST_INSTALL_FILE := $(PG_BINDIR)/polaris-admin.jar
 $(REST_INSTALL_FILE): rest_submodule
 	$(MAKE) -C test_common/rest_catalog install
 
-install-rest_catalog: $(REST_INSTALL_FILE)
+LAKEKEEPER_INSTALL_FILE := $(PG_BINDIR)/lakekeeper
+
+$(LAKEKEEPER_INSTALL_FILE):
+	$(MAKE) -C test_common/rest_catalog install-lakekeeper
+
+install-rest_catalog: $(REST_INSTALL_FILE) $(LAKEKEEPER_INSTALL_FILE)
 
 rest_submodule:
 	git submodule init test_common/rest_catalog/polaris

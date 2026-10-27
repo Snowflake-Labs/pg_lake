@@ -26,6 +26,11 @@ POLARIS_PRINCIPAL_CREDS_FILE = "/tmp/regress-principal-credentials.txt"
 POLARIS_PYICEBERG_SAMPLE = "/tmp/regress-pyiceberg.sample"
 POLARIS_PID_FILE = "/tmp/regress-polaris.pid"
 
+LAKEKEEPER_PORT = 8282
+LAKEKEEPER_WAREHOUSE = "pglake"
+LAKEKEEPER_PID_FILE = "/tmp/regress-lakekeeper.pid"
+LAKEKEEPER_WAREHOUSE_FILE = "/tmp/regress-lakekeeper-warehouse.txt"
+
 # isolation test params
 PG_ISOLATION_HOST = "/tmp"
 PG_ISOLATION_DATABASE = "isolation_regression"
