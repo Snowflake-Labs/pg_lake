@@ -551,3 +551,67 @@ DropVendedSecretsUnderScopeFromPGDuck(PGDuckConnection * conn, Oid serverOid,
 
 	return names;
 }
+
+
+void
+EvictCachedFilesUnderScopeFromPGDuck(PGDuckConnection * conn,
+									 const char *scopePrefix)
+{
+	List	   *urls = NIL;
+
+	/* An empty prefix would cover the whole cache. */
+	if (scopePrefix == NULL || scopePrefix[0] == '\0')
+		return;
+
+	char	   *escapedScope = EscapeSingleQuotes(scopePrefix);
+	char	   *query =
+		psprintf("SELECT url FROM pg_lake_list_cache() "
+				 "WHERE starts_with(url, '%s')",
+				 escapedScope);
+
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, query);
+
+	PG_TRY();
+	{
+		/* the cache-manager worker recognizes a disabled cache the same way */
+		bool		cachingDisabled =
+			PQresultStatus(result) != PGRES_TUPLES_OK &&
+			strstr(PQresultErrorMessage(result),
+				   "caching is currently disabled") != NULL;
+
+		if (!cachingDisabled)
+		{
+			ThrowIfPGDuckResultHasError(conn, result);
+
+			for (int row = 0; row < PQntuples(result); row++)
+				urls = lappend(urls, pstrdup(PQgetvalue(result, row, 0)));
+		}
+	}
+	PG_FINALLY();
+	{
+		PQclear(result);
+	}
+	PG_END_TRY();
+
+	ListCell   *urlCell;
+
+	foreach(urlCell, urls)
+	{
+		char	   *escapedUrl = EscapeSingleQuotes(lfirst(urlCell));
+		char	   *sql = psprintf("SELECT removed FROM pg_lake_uncache_file('%s')",
+								   escapedUrl);
+		PGresult   *uncacheResult = ExecuteQueryOnPGDuckConnection(conn, sql);
+
+		CheckPGDuckResult(conn, uncacheResult);
+		PQclear(uncacheResult);
+
+		pfree(sql);
+		pfree(escapedUrl);
+	}
+
+	elog(DEBUG2, "evicted %d cached files under \"%s\" from pgduck_server",
+		 list_length(urls), scopePrefix);
+
+	pfree(query);
+	pfree(escapedScope);
+}

@@ -49,7 +49,9 @@
  *     the next reconcile that has other work -- bounded by the credential
  *     TTL (<=1h for STS).  Closing this needs either a pgduck boot-id
  *     handshake (free on connect) or treating a storage 403 as a signal to
- *     re-push.
+ *     re-push.  The file cache survives a restart while the secrets do
+ *     not, so a later withdrawal that finds no secret to drop leaves files
+ *     cached before the restart in place.
  *
  *  2. Same-scope, multi-principal selection.  DuckDB selects a secret by
  *     longest-matching SCOPE, not by name.  Principal-scoped secret names

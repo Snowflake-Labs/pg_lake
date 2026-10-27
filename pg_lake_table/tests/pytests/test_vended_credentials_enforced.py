@@ -350,6 +350,23 @@ def _denied(text):
     return "Access Denied" in text or "AccessDenied" in text or "HTTP 403" in text
 
 
+def _cached_under(pgduck_conn, location):
+    """Whether pgduck_server's file cache holds any file under location."""
+    rows = run_query(
+        "SELECT count(*) FROM pg_lake_list_cache() "
+        f"WHERE starts_with(url, '{location}/')",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
+    return rows[0][0] > 0
+
+
+def _cache_what_was_read(pgduck_conn):
+    """Run the cache manager now rather than waiting for its worker."""
+    run_query("CALL pg_lake_manage_cache(21474836480)", pgduck_conn)
+    pgduck_conn.commit()
+
+
 @pytest.fixture(scope="module", autouse=True)
 def _cache_manager_off(postgres):
     """Keep pgduck_server's file cache out of these tests.
@@ -1210,6 +1227,166 @@ def test_withdrawal_applies_from_the_next_repeatable_read_transaction(
         finally:
             reader.close()
         assert _denied(err), f"the next transaction still read, got: {err!r}"
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+@pytest.mark.parametrize("resolver", ["same backend", "another backend"])
+def test_cached_files_evicted_when_catalog_stops_vending(
+    resolver, superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """Files cached through a vended secret go with the secret.
+
+    A cached file is opened locally, with no request to storage, so a table
+    the catalog stopped vending for would stay readable from the cache.  The
+    withdrawal that drops the table's secret evicts its cached files too,
+    whether the backend that resolves it pushed the secret or not.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    tag = "same" if resolver == "same backend" else "other"
+    schema = f"mv_withdrawn_cache_{tag}"
+    table = f"vc_withdrawn_cache_{tag}"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    meta_key, meta_secret = server.create_scoped_user(
+        f"mv_meta_wc_{tag}",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    data_key, data_secret = server.create_scoped_user(f"mv_data_wc_{tag}", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {
+                "prefix": location + "/",
+                "config": {
+                    "s3.access-key-id": data_key,
+                    "s3.secret-access-key": data_secret,
+                    "client.region": server.region,
+                },
+            },
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, meta_key, meta_secret)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+    scan = f"SELECT count(*) FROM {schema}.{table}"
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        pusher = open_pg_conn()
+        try:
+            assert run_query(scan, pusher)[0][0] == 10
+            pusher.commit()
+            _cache_what_was_read(pgduck_conn)
+            assert _cached_under(
+                pgduck_conn, location
+            ), "the scan's files were not cached"
+
+            tables[table]["vended"] = None
+
+            if resolver == "same backend":
+                err = run_query(scan, pusher, raise_error=False)
+                pusher.rollback()
+        finally:
+            pusher.close()
+
+        if resolver == "another backend":
+            reader = open_pg_conn()
+            try:
+                err = run_query(scan, reader, raise_error=False)
+            finally:
+                reader.close()
+
+        assert _denied(err), f"scan read the table from the cache, got: {err!r}"
+        assert not _cached_under(
+            pgduck_conn, location
+        ), "the table's files are still cached"
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+def test_cache_kept_for_a_table_the_catalog_never_vended_for(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """A table the catalog vends nothing for keeps its cached files.
+
+    With vending on, every resolution of such a table looks for secrets to
+    drop.  Finding none, it must leave the cache alone, or a table read
+    through a static secret would lose its cached files on every scan.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_never_vended_cache"
+    table = "vc_never_vended_cache"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    # Nothing is vended for the table, so the static secret reads all of it.
+    static_key, static_secret = server.create_scoped_user("mv_static_nvc", [prefix])
+
+    tables = {
+        table: {"metadata_location": meta_loc, "location": location, "vended": None}
+    }
+
+    _create_static_secret(pgduck_conn, server, static_key, static_secret)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+    scan = f"SELECT count(*) FROM {schema}.{table}"
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        assert run_query(scan, superuser_conn)[0][0] == 10
+        superuser_conn.commit()
+        _cache_what_was_read(pgduck_conn)
+        assert _cached_under(pgduck_conn, location), "the scan's files were not cached"
+
+        assert run_query(scan, superuser_conn)[0][0] == 10
+        superuser_conn.commit()
+        assert _cached_under(
+            pgduck_conn, location
+        ), "a scan of a table never vended for evicted its cached files"
 
     finally:
         server.relax()

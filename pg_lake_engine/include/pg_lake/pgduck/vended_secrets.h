@@ -110,6 +110,14 @@ extern PGDLLEXPORT List *DropVendedSecretsUnderScopeFromPGDuck(PGDuckConnection 
 															   const char *scopePrefix);
 
 /*
+ * EvictCachedFilesUnderScopeFromPGDuck removes every file at or below
+ * scopePrefix from pgduck_server's file cache.  A no-op when caching is
+ * disabled.
+ */
+extern PGDLLEXPORT void EvictCachedFilesUnderScopeFromPGDuck(PGDuckConnection * conn,
+															 const char *scopePrefix);
+
+/*
  * GenerateVendedSecretName produces the deterministic secret name for
  * the given server OID and stable per-table secret identity.  The name
  * is scoped to the current database so secrets pushed by backends of

@@ -92,8 +92,10 @@ static void ReportOrRethrowBestEffortError(ErrorData *edata, const char *what,
  * A credential the catalog withdrew is not looked up in the registry:
  * every secret of the server at or below the table root is dropped
  * instead, since neither the backend nor the principal that pushed one
- * need be this one.  That costs a round trip to pgduck_server on every
- * resolution for as long as the catalog vends nothing for the table.
+ * need be this one, and when that takes a secret away, the files
+ * pgduck_server cached under the root are evicted with it.  That costs a
+ * round trip to pgduck_server on every resolution for as long as the
+ * catalog vends nothing for the table.
  */
 void
 EnsureStorageCredentialsForRelation(Oid relationId)
@@ -366,8 +368,8 @@ MakeVendedSecret(const StorageCredential * sc)
  * ReconcileSecrets performs the actual pgduck work for one relation:
  * (re)push every credential in toPush, drop every stale secret in toDrop,
  * then for every withdrawn credential in toForget drop each secret of its
- * server at or below its scope, updating the per-backend registry to
- * match.
+ * server at or below its scope, and the cached files under it, updating
+ * the per-backend registry to match.
  *
  * The secrets themselves are pgduck_server-wide, not per connection; a
  * single connection is taken out here only so that a relation with
@@ -458,6 +460,15 @@ ReconcileSecrets(Oid relationId, List *toPush, List *toDrop, List *toForget)
 					hash_search(PushedSecrets, key, HASH_REMOVE, NULL);
 				}
 			}
+
+			/*
+			 * A cached file is read with no credential check, so the files
+			 * cached under the root go too.  Only when this withdrawal took a
+			 * secret away, though: a table the catalog never vended for keeps
+			 * its cache.
+			 */
+			if (dropped != NIL || toDrop != NIL)
+				EvictCachedFilesUnderScopeFromPGDuck(conn, sc->scopePrefix);
 		}
 	}
 	PG_FINALLY();
