@@ -356,11 +356,37 @@ DataFileHasNoNaN(DataFile * dataFile, int fieldId)
 
 
 /*
- * ColumnBoundText deserializes a binary column bound and returns it in the
- * text form of the leaf field's type, or NULL if the bound cannot be used:
- * its length does not fit the type, it is outside the range of the Postgres
- * type, it is NaN, or it is a string Postgres cannot hold. Using such a bound
- * would either fail the query or, worse, prune a file that has matching rows.
+ * ColumnBoundText turns a manifest bound into the text form the pruning code
+ * expects, or returns NULL when we would rather not use it.
+ *
+ * These bounds may come from any writer, not only pg_lake, so we treat them
+ * as untrusted input. Most of the checks below guard against bounds we have
+ * not actually seen a real writer produce. They are here because pruning is
+ * only an optimization: skipping a bad bound costs a file read, while trusting
+ * it can fail the query or, worse, silently skip a file that has matching
+ * rows. So whenever a bound looks off, we skip it rather than error.
+ *
+ * - Length: bounds are raw bytes of any length, while we read fixed widths.
+ *   A length that does not fit the type, allowing for the narrower width of
+ *   an int->long or float->double promotion, is skipped instead of reading
+ *   past the value.
+ *
+ * - NUL bytes and invalid UTF-8 in strings: Postgres text cannot hold them,
+ *   and a string cut at a NUL would make the upper bound too small.
+ *
+ * - Decimals that do not fit the column's precision: numeric_in would raise
+ *   an overflow error during planning, failing every query on the table, so
+ *   we parse softly and skip.
+ *
+ * - NaN: Postgres orders NaN above every other value, but Iceberg bounds
+ *   leave it out, so a NaN bound tells us nothing.
+ *
+ * - Floats are printed with all their digits, since extra_float_digits could
+ *   otherwise round a bound past the values it covers.
+ *
+ * - Dates, times and timestamps outside the Postgres range are skipped. For
+ *   timestamps we also check before shifting to the Postgres epoch, since the
+ *   earliest Iceberg timestamps wrap around to a valid looking far-future one.
  */
 static char *
 ColumnBoundText(ColumnBound * bound, LeafField * leafField)
