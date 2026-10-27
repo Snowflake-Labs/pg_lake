@@ -30,7 +30,13 @@ def _drop_namespace(catalog, namespace):
 
 
 @pytest.fixture
-def lk_schema(superuser_conn, s3, extension, lakekeeper_server, lakekeeper_catalog):
+def lk_schema(
+    installcheck, superuser_conn, s3, extension, lakekeeper_server, lakekeeper_catalog
+):
+    # Lakekeeper is only started for an isolated test cluster.
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+
     # Start every test from an empty schema and namespace, so a test can be
     # rerun in the same session.
     superuser_conn.rollback()
