@@ -19,4 +19,7 @@
 
 #include "postgres.h"
 
+#include "utils/jsonb.h"
+
 extern PGDLLEXPORT char *ResolveIcebergExternalMetadataLocation(Oid relationId);
+extern PGDLLEXPORT Jsonb *FindHeldRestCatalogMetadata(const char *metadataLocation);
