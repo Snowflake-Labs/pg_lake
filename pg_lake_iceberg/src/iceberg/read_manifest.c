@@ -125,6 +125,7 @@ ReadIcebergManifests(const char *manifestListPath)
 								(AvroParseFunction) ReadIcebergManifestFromAvro,
 								manifest, context))
 	{
+		ErrorIfURLLeavesObjectStorage(manifest->manifest_path, manifestListPath);
 		manifests = lappend(manifests, manifest);
 		manifest = palloc0(sizeof(IcebergManifest));
 	}
@@ -177,6 +178,7 @@ ReadManifestEntries(const char *manifestPath)
 								(AvroParseFunction) ReadIcebergManifestEntryFromAvro,
 								manifestEntry, context))
 	{
+		ErrorIfURLLeavesObjectStorage(manifestEntry->data_file.file_path, manifestPath);
 		manifestEntries = lappend(manifestEntries, manifestEntry);
 		manifestEntry = palloc0(sizeof(IcebergManifestEntry));
 	}

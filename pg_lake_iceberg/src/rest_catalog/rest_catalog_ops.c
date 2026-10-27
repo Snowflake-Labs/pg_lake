@@ -234,6 +234,9 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFil
 	/* Validate before saving the UUID for the post-commit create request. */
 	(void) DirectFunctionCall1(uuid_in, CStringGetDatum(staged.uuid));
 
+	ValidateStorageURL(staged.location);
+	ErrorIfURLLeavesObjectStorage(staged.location, NULL);
+
 	/*
 	 * If the stage-create response includes vended credentials, cache them
 	 * for subsequent writes to this table's storage prefix.
@@ -937,6 +940,8 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 	if (result->metadataLocation == NULL)
 		ereport(ERROR,
 				(errmsg("key \"metadata-location\" missing in json response")));
+
+	ErrorIfURLLeavesObjectStorage(result->metadataLocation, NULL);
 
 	/*
 	 * A loadTable response carries the table's whole metadata document, and

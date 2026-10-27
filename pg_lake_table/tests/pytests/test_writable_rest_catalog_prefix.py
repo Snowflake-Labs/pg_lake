@@ -599,6 +599,26 @@ def test_mixed_prefix_alter_rejected_at_statement_time(
     [
         (200, {}, "must include a table UUID and location"),
         (422, "stage-create must be a boolean", "HTTP request failed (HTTP 422)"),
+        (
+            200,
+            {
+                "metadata": {
+                    "table-uuid": str(uuid.uuid4()),
+                    "location": "http://127.0.0.1:1/staged",
+                }
+            },
+            'Iceberg file URL "http://127.0.0.1:1/staged" does not point to object storage',
+        ),
+        (
+            200,
+            {
+                "metadata": {
+                    "table-uuid": str(uuid.uuid4()),
+                    "location": f"s3://{TEST_BUCKET}/staged?s3_endpoint=127.0.0.1:1",
+                }
+            },
+            'query parameter "s3_endpoint" is not permitted',
+        ),
     ],
 )
 def test_invalid_stage_response_aborts_create(
