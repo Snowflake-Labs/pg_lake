@@ -284,7 +284,10 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 * for.  It has to happen before the metadata read just below, which
 		 * is itself a read of that storage, and after the catalog lookup
 		 * above, whose answer decides whether credentials vended earlier
-		 * still stand.  The resolver no-ops for everything but a read-only
+		 * still stand.  Under REPEATABLE READ and SERIALIZABLE that lookup is
+		 * answered once per transaction, so the answer its first statement
+		 * got stands until the transaction ends, or until those credentials
+		 * near expiry.  The resolver no-ops for everything but a read-only
 		 * REST-catalog table.
 		 */
 		EnsureStorageCredentialsForRelation(relationId);

@@ -59,9 +59,9 @@
  *
  *  3. Secrets other backends pushed.  A secret outlives the backend that
  *     pushed it and serves every scan of its scope, whatever the
- *     principal, so once a catalog stops vending for a table, the first
- *     backend to resolve it drops every secret that catalog's server
- *     vended at or below the table root, whoever pushed it.  Should the
+ *     principal, so while a catalog vends nothing for a table, each
+ *     resolution of the table drops all the secrets that catalog's server
+ *     vended at or below the table root, whoever pushed them.  Should the
  *     catalog vend again, the backends that pushed them still believe
  *     them present, as in 1; a table whose root lies under the withdrawn
  *     one loses its secrets too; and secrets another server vended for the

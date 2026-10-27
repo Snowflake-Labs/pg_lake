@@ -1128,6 +1128,97 @@ def test_withdrawal_leaves_a_sibling_tables_secret(
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
 
 
+def test_withdrawal_applies_from_the_next_repeatable_read_transaction(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """A REPEATABLE READ transaction keeps the catalog's first answer.
+
+    It asks the catalog for the table once, along with the table version it
+    reads, so a catalog that stops vending in the middle of it changes nothing
+    until it ends.  The next transaction's scan is denied.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_withdrawn_rr"
+    table = "vc_withdrawn_rr"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    meta_key, meta_secret = server.create_scoped_user(
+        "mv_meta_wrr",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    data_key, data_secret = server.create_scoped_user("mv_data_wrr", [prefix])
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {
+                "prefix": location + "/",
+                "config": {
+                    "s3.access-key-id": data_key,
+                    "s3.secret-access-key": data_secret,
+                    "client.region": server.region,
+                },
+            },
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, meta_key, meta_secret)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        reader = open_pg_conn()
+        try:
+            # the driver has already opened the transaction, so this is the
+            # way to set its isolation level
+            run_command("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", reader)
+            assert (
+                run_query("SHOW transaction_isolation", reader)[0][0]
+                == "repeatable read"
+            )
+            result = run_query(f"SELECT count(*) FROM {schema}.{table}", reader)
+            assert result[0][0] == 10
+
+            tables[table]["vended"] = None
+
+            result = run_query(f"SELECT count(*) FROM {schema}.{table}", reader)
+            assert result[0][0] == 10, "the transaction lost the catalog's first answer"
+            reader.commit()
+
+            err = run_query(
+                f"SELECT count(*) FROM {schema}.{table}", reader, raise_error=False
+            )
+            reader.rollback()
+        finally:
+            reader.close()
+        assert _denied(err), f"the next transaction still read, got: {err!r}"
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
 def test_two_principals_get_their_own_credentials(
     superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
 ):
