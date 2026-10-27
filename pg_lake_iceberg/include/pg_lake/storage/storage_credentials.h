@@ -39,7 +39,7 @@
  * Only read-only REST tables are served; see
  * IcebergProvideStorageCredentials for why writable tables wait.
  *
- * Two limitations are inherent to a shared pgduck_server holding global,
+ * Three limitations are inherent to a shared pgduck_server holding global,
  * in-memory secrets:
  *
  *  1. pgduck_server restart.  A backend tracks the secrets it pushed and
@@ -49,13 +49,25 @@
  *     the next reconcile that has other work -- bounded by the credential
  *     TTL (<=1h for STS).  Closing this needs either a pgduck boot-id
  *     handshake (free on connect) or treating a storage 403 as a signal to
- *     re-push.
+ *     re-push.  The file cache survives a restart while the secrets do
+ *     not, so a later withdrawal that finds no secret to drop leaves files
+ *     cached before the restart in place.
  *
  *  2. Same-scope, multi-principal selection.  DuckDB selects a secret by
  *     longest-matching SCOPE, not by name.  Principal-scoped secret names
  *     stop one backend from clobbering another's secret, but two secrets
  *     with the *same* scope and different credentials (two roles, one S3
  *     prefix) are ambiguous to DuckDB's tie-break.
+ *
+ *  3. Secrets other backends pushed.  A secret outlives the backend that
+ *     pushed it and serves every scan of its scope, whatever the
+ *     principal, so while a catalog vends nothing for a table, each
+ *     resolution of the table drops all the secrets that catalog's server
+ *     vended at or below the table root, whoever pushed them.  Should the
+ *     catalog vend again, the backends that pushed them still believe
+ *     them present, as in 1; a table whose root lies under the withdrawn
+ *     one loses its secrets too; and secrets another server vended for the
+ *     same storage are left alone.
  */
 
 #ifndef PG_LAKE_STORAGE_CREDENTIALS_H
@@ -107,6 +119,13 @@ typedef struct StorageCredential
 	char	   *dfsEndpoint;	/* NULL -> public cloud for accountName */
 
 	TimestampTz expiresAt;		/* 0 when the catalog gave no expiry */
+
+	/*
+	 * The catalog vends nothing for the table any more, so every secret of
+	 * the server at or below scopePrefix is dropped, whoever pushed it.  Only
+	 * serverOid and scopePrefix are set.
+	 */
+	bool		withdrawn;
 }			StorageCredential;
 
 /*

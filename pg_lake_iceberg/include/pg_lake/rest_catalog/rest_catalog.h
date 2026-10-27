@@ -101,6 +101,13 @@ typedef struct RestCatalogLoadTableResult
 	 * files and the metadata directory.
 	 */
 	List	   *vendedCredentials;
+
+	/*
+	 * The table's base directory, the scope of a credential vended for the
+	 * whole table; set when credentials were requested, NULL when the
+	 * response yields none.
+	 */
+	char	   *tableRoot;
 }			RestCatalogLoadTableResult;
 
 
