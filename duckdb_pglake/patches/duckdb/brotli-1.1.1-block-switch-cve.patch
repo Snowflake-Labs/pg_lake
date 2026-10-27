@@ -1,3 +1,51 @@
+diff --git a/test/common/CMakeLists.txt b/test/common/CMakeLists.txt
+index a1a16318949..62252f08624 100644
+--- a/test/common/CMakeLists.txt
++++ b/test/common/CMakeLists.txt
+@@ -3,6 +3,7 @@ add_library_unity(
+   OBJECT
+   test_cast.cpp
+   test_checksum.cpp
++  test_brotli_invalid_block_switch.cpp
+   test_file_system.cpp
+   test_caching_file_system_wrapper.cpp
+   test_external_file_cache.cpp
+diff --git a/test/common/test_brotli_invalid_block_switch.cpp b/test/common/test_brotli_invalid_block_switch.cpp
+new file mode 100644
+index 00000000000..08067b0fba3
+--- /dev/null
++++ b/test/common/test_brotli_invalid_block_switch.cpp
+@@ -0,0 +1,30 @@
++#include "catch.hpp"
++
++#include <brotli/decode.h>
++
++#include <memory>
++#include <vector>
++
++using namespace duckdb_brotli;
++using namespace std;
++
++TEST_CASE("Brotli rejects an invalid block switch", "[brotli]") {
++	const uint8_t encoded[] = {0x20, 0x00, 0x10, 0x41, 0x41, 0x41, 0xfc, 0xff, 0xff, 0x07, 0x00,
++	                           0x22, 0x28, 0xf0, 0x0b, 0x60, 0xf7, 0xf4, 0x1f, 0x00, 0x00, 0x00};
++	vector<uint8_t> decoded(1U << 24);
++	auto decoder = unique_ptr<BrotliDecoderState, decltype(&BrotliDecoderDestroyInstance)>(
++	    BrotliDecoderCreateInstance(nullptr, nullptr, nullptr), BrotliDecoderDestroyInstance);
++	REQUIRE(decoder != nullptr);
++
++	const uint8_t *nextInput = encoded;
++	uint8_t *nextOutput = decoded.data();
++	size_t availableInput = sizeof(encoded);
++	size_t availableOutput = decoded.size();
++	size_t totalOutput = 0;
++	BrotliDecoderResult result = BrotliDecoderDecompressStream(decoder.get(), &availableInput, &nextInput,
++	                                                           &availableOutput, &nextOutput, &totalOutput);
++
++	REQUIRE(result == BROTLI_DECODER_RESULT_ERROR);
++	REQUIRE(BrotliDecoderGetErrorCode(decoder.get()) == BROTLI_DECODER_ERROR_FORMAT_BLOCK_SWITCH);
++	REQUIRE(totalOutput == decoded.size());
++}
 diff --git a/third_party/brotli/VERSION b/third_party/brotli/VERSION
 index 1cc5f657e05..524cb55242b 100644
 --- a/third_party/brotli/VERSION
