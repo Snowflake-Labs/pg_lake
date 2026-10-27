@@ -100,6 +100,16 @@ extern PGDLLEXPORT void DropVendedSecretFromPGDuck(PGDuckConnection * conn,
 												   const char *secretId);
 
 /*
+ * DropVendedSecretsUnderScopeFromPGDuck removes every vended secret of
+ * the given server in the current database whose scope lies at or below
+ * scopePrefix, whichever backend pushed it, and returns the names of
+ * those it dropped.
+ */
+extern PGDLLEXPORT List *DropVendedSecretsUnderScopeFromPGDuck(PGDuckConnection * conn,
+															   Oid serverOid,
+															   const char *scopePrefix);
+
+/*
  * GenerateVendedSecretName produces the deterministic secret name for
  * the given server OID and stable per-table secret identity.  The name
  * is scoped to the current database so secrets pushed by backends of

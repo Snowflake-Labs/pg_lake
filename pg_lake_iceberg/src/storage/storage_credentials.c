@@ -89,10 +89,11 @@ static void ReportOrRethrowBestEffortError(ErrorData *edata, const char *what,
  * common case, since a vended credential outlives many statements --
  * costs nothing beyond the catalog's own answer.
  *
- * A credential the catalog withdrew is dropped by name instead, since
- * the backend that pushed its secret need not be this one.  That costs a
- * DROP SECRET IF EXISTS on every resolution for as long as the catalog
- * vends nothing for the table.
+ * A credential the catalog withdrew is not looked up in the registry:
+ * every secret of the server at or below the table root is dropped
+ * instead, since neither the backend nor the principal that pushed one
+ * need be this one.  That costs a round trip to pgduck_server on every
+ * resolution for as long as the catalog vends nothing for the table.
  */
 void
 EnsureStorageCredentialsForRelation(Oid relationId)
@@ -127,26 +128,21 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 	foreach(lc, creds)
 	{
 		StorageCredential *sc = (StorageCredential *) lfirst(lc);
+
+		if (sc->withdrawn)
+		{
+			toForget = lappend(toForget, sc);
+			continue;
+		}
+
 		char	   *name = GenerateVendedSecretName(sc->serverOid, sc->secretId);
 		char		key[SECRET_NAME_MAXLEN];
 		bool		found = false;
 
+		desiredNames = lappend(desiredNames, name);
+
 		strlcpy(key, name, SECRET_NAME_MAXLEN);
 		entry = hash_search(PushedSecrets, key, HASH_FIND, &found);
-
-		/*
-		 * A withdrawn credential is dropped by name, unless this backend
-		 * pushed it for this relation: that one is dropped below with the
-		 * rest the catalog no longer vends.
-		 */
-		if (sc->withdrawn)
-		{
-			if (!found || entry->relationId != relationId)
-				toForget = lappend(toForget, sc);
-			continue;
-		}
-
-		desiredNames = lappend(desiredNames, name);
 
 		/* Skip a secret we already pushed whose expiry is still safe. */
 		if (found && entry->expiresAt > 0 &&
@@ -368,9 +364,10 @@ MakeVendedSecret(const StorageCredential * sc)
 
 /*
  * ReconcileSecrets performs the actual pgduck work for one relation:
- * (re)push every credential in toPush, then drop every stale secret in
- * toDrop and every withdrawn one in toForget, updating the per-backend
- * registry to match.
+ * (re)push every credential in toPush, drop every stale secret in toDrop,
+ * then for every withdrawn credential in toForget drop each secret of its
+ * server at or below its scope, updating the per-backend registry to
+ * match.
  *
  * The secrets themselves are pgduck_server-wide, not per connection; a
  * single connection is taken out here only so that a relation with
@@ -441,21 +438,25 @@ ReconcileSecrets(Oid relationId, List *toPush, List *toDrop, List *toForget)
 		foreach(lc, toForget)
 		{
 			StorageCredential *sc = (StorageCredential *) lfirst(lc);
-			char	   *name = GenerateVendedSecretName(sc->serverOid,
-														sc->secretId);
-			char		key[SECRET_NAME_MAXLEN];
-			bool		found = false;
-			PushedSecretEntry *entry;
+			List	   *dropped =
+				DropVendedSecretsUnderScopeFromPGDuck(conn, sc->serverOid,
+													  sc->scopePrefix);
+			ListCell   *nameCell;
 
-			DropVendedSecretFromPGDuck(conn, sc->serverOid, sc->secretId);
-
-			/* this backend may have pushed it for another relation */
-			strlcpy(key, name, SECRET_NAME_MAXLEN);
-			entry = hash_search(PushedSecrets, key, HASH_FIND, &found);
-			if (found)
+			/* this backend may have pushed some of them, for any relation */
+			foreach(nameCell, dropped)
 			{
-				pfree(entry->secretId);
-				hash_search(PushedSecrets, key, HASH_REMOVE, NULL);
+				char		key[SECRET_NAME_MAXLEN];
+				bool		found = false;
+				PushedSecretEntry *entry;
+
+				strlcpy(key, (char *) lfirst(nameCell), SECRET_NAME_MAXLEN);
+				entry = hash_search(PushedSecrets, key, HASH_FIND, &found);
+				if (found)
+				{
+					pfree(entry->secretId);
+					hash_search(PushedSecrets, key, HASH_REMOVE, NULL);
+				}
 			}
 		}
 	}

@@ -2176,22 +2176,6 @@ RemoveVendedCredentialsCacheEntry(VendedCredentialsCacheEntry * entry)
 
 
 /*
- * StorageSecretId returns the identity a vended secret is named after; see
- * GenerateVendedSecretName.  The scope is part of it because one table can
- * be vended several credentials -- data and metadata, say -- and each needs
- * a secret of its own rather than overwriting the last.
- */
-static char *
-StorageSecretId(RestCatalogOptions * opts, const char *restCatalogName,
-				const char *namespaceName, const char *tableName,
-				const char *scope)
-{
-	return psprintf("%u/%s/%s/%s/%s", opts->userMappingOid, restCatalogName,
-					namespaceName, tableName, scope);
-}
-
-
-/*
  * IcebergProvideStorageCredentials is the pg_lake_iceberg implementation
  * of the engine's storage-credential provider hook (installed at
  * _PG_init).  Given a relation, it resolves the vended credentials
@@ -2222,8 +2206,8 @@ StorageSecretId(RestCatalogOptions * opts, const char *restCatalogName,
  *
  * Returns NIL for non-REST tables, writable REST tables, or when vending
  * is disabled.  When the catalog answers with no credentials, it returns
- * a single withdrawn entry naming the secret bound to the table root, for
- * the resolver to drop.
+ * a single withdrawn entry scoped to the table root, for the resolver to
+ * drop every secret under it.
  */
 List *
 IcebergProvideStorageCredentials(Oid relationId)
@@ -2278,18 +2262,13 @@ IcebergProvideStorageCredentials(Oid relationId)
 		credentials = result.vendedCredentials;
 
 		/*
-		 * The catalog no longer vends for the table, but a secret any backend
-		 * of this principal pushed for it may still be in pgduck_server. Only
-		 * the one bound to the table root can be named without the credential
-		 * that came with it.
+		 * The catalog no longer vends for the table, but secrets any backend
+		 * pushed for it, for any principal, may still be in pgduck_server.
 		 */
 		if (credentials == NIL && result.tableRoot != NULL)
 		{
 			sc = palloc0(sizeof(StorageCredential));
 			sc->serverOid = opts->serverOid;
-			sc->secretId = StorageSecretId(opts, restCatalogName,
-										   namespaceName, tableName,
-										   result.tableRoot);
 			sc->scopePrefix = result.tableRoot;
 			sc->withdrawn = true;
 
@@ -2319,8 +2298,15 @@ IcebergProvideStorageCredentials(Oid relationId)
 		sc = palloc0(sizeof(StorageCredential));
 		sc->provider = creds->provider;
 		sc->serverOid = opts->serverOid;
-		sc->secretId = StorageSecretId(opts, restCatalogName, namespaceName,
-									   tableName, creds->scope);
+
+		/*
+		 * The scope is part of the identity because one table can be vended
+		 * several credentials -- data and metadata, say -- and each needs a
+		 * secret of its own rather than overwriting the last.
+		 */
+		sc->secretId = psprintf("%u/%s/%s/%s/%s",
+								opts->userMappingOid, restCatalogName,
+								namespaceName, tableName, creds->scope);
 		sc->scopePrefix = pstrdup(creds->scope);
 		sc->accessKeyId = creds->accessKeyId ? pstrdup(creds->accessKeyId) : NULL;
 		sc->secretAccessKey =

@@ -57,13 +57,15 @@
  *     with the *same* scope and different credentials (two roles, one S3
  *     prefix) are ambiguous to DuckDB's tie-break.
  *
- *  3. Another backend's secret.  Every backend of a principal names a
- *     table's secrets alike, so once a catalog stops vending for a table,
- *     the first backend to resolve it drops the secret bound to the table
- *     root, whoever pushed it.  A secret the catalog scoped below the table
- *     root cannot be named without the credential that came with it, so one
- *     another backend pushed keeps serving scans of its prefix until that
- *     backend resolves the table again or the credential expires.
+ *  3. Secrets other backends pushed.  A secret outlives the backend that
+ *     pushed it and serves every scan of its scope, whatever the
+ *     principal, so once a catalog stops vending for a table, the first
+ *     backend to resolve it drops every secret that catalog's server
+ *     vended at or below the table root, whoever pushed it.  Should the
+ *     catalog vend again, the backends that pushed them still believe
+ *     them present, as in 1; a table whose root lies under the withdrawn
+ *     one loses its secrets too; and secrets another server vended for the
+ *     same storage are left alone.
  */
 
 #ifndef PG_LAKE_STORAGE_CREDENTIALS_H
@@ -117,9 +119,9 @@ typedef struct StorageCredential
 	TimestampTz expiresAt;		/* 0 when the catalog gave no expiry */
 
 	/*
-	 * The catalog vends nothing for the table any more, so the secret this
-	 * identity names is dropped, whoever pushed it.  Only serverOid, secretId
-	 * and scopePrefix are set.
+	 * The catalog vends nothing for the table any more, so every secret of
+	 * the server at or below scopePrefix is dropped, whoever pushed it.  Only
+	 * serverOid and scopePrefix are set.
 	 */
 	bool		withdrawn;
 }			StorageCredential;

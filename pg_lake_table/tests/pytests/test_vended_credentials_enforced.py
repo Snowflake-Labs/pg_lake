@@ -350,6 +350,30 @@ def _denied(text):
     return "Access Denied" in text or "AccessDenied" in text or "HTTP 403" in text
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _cache_manager_off(postgres):
+    """Keep pgduck_server's file cache out of these tests.
+
+    The cache manager fetches the files scans read from storage, and a
+    cached file is read locally with no request to storage, so a scan the
+    store must deny would succeed if a cache run fell between the scan that
+    read the files and the one that has to be denied.
+    """
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM SET pg_lake_engine.enable_cache_manager TO off",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+    yield
+    run_command_outside_tx(
+        [
+            "ALTER SYSTEM RESET pg_lake_engine.enable_cache_manager",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
@@ -686,11 +710,10 @@ def test_vended_secret_dropped_by_another_backend_when_catalog_stops_vending(
 ):
     """A backend that never pushed a table's secret drops it all the same.
 
-    Secrets live in the pgduck_server every backend shares, and every
-    backend of a principal names a table's secret alike.  Once the catalog
-    stops vending, the secret a since-closed backend pushed is still there
-    and still valid, so a fresh backend's scan is only denied if that
-    backend drops it.
+    Secrets live in the pgduck_server every backend shares.  Once the
+    catalog stops vending, the secret a since-closed backend pushed is
+    still there and still valid, so a fresh backend's scan is only denied
+    if that backend drops it.
     """
     if installcheck or not _HAVE_PYICEBERG:
         return
@@ -763,6 +786,343 @@ def test_vended_secret_dropped_by_another_backend_when_catalog_stops_vending(
     finally:
         server.relax()
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+def test_vended_secret_of_another_principal_dropped_when_catalog_stops_vending(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """A secret another principal pushed for the table is dropped too.
+
+    DuckDB picks a secret by scope, not by principal, so a principal left
+    without credentials of its own reads with any other principal's secret
+    for the same table.  Once the catalog stops vending, the secret each
+    role's since-closed backend pushed is still there and still valid, so a
+    fresh backend's scan is only denied if it drops them all.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_withdrawn_princ"
+    table = "vc_withdrawn_princ"
+    fdw_server = "mv_withdrawn_princ_srv"
+    role_a = "mv_wdp_a"
+    role_b = "mv_wdp_b"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    meta_key, meta_secret = server.create_scoped_user(
+        "mv_meta_wdp",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    data_key, data_secret = server.create_scoped_user("mv_data_wdp", [prefix])
+    vended = {
+        "prefix": location + "/",
+        "config": {
+            "s3.access-key-id": data_key,
+            "s3.secret-access-key": data_secret,
+            "client.region": server.region,
+        },
+    }
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended_by_client": {
+                "wdp_root": vended,
+                "wdp_a": vended,
+                "wdp_b": vended,
+            },
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, meta_key, meta_secret)
+    httpd, thread, port = _start_mock_catalog(tables, server)
+
+    try:
+        run_command(f"DROP SERVER IF EXISTS {fdw_server} CASCADE", superuser_conn)
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        run_command(
+            f"""CREATE SERVER {fdw_server} TYPE 'rest'
+                    FOREIGN DATA WRAPPER iceberg_catalog
+                    OPTIONS (rest_endpoint 'http://127.0.0.1:{port}',
+                             enable_vended_credentials 'true',
+                             location_prefix 's3://{server.bucket}')""",
+            superuser_conn,
+        )
+        for role, client_id in (
+            (None, "wdp_root"),
+            (role_a, "wdp_a"),
+            (role_b, "wdp_b"),
+        ):
+            target = "CURRENT_USER" if role is None else role
+            if role is not None:
+                run_command(f"DROP ROLE IF EXISTS {role}", superuser_conn)
+                run_command(f"CREATE ROLE {role}", superuser_conn)
+                run_command(f"GRANT lake_read TO {role}", superuser_conn)
+            run_command(
+                f"""CREATE USER MAPPING FOR {target} SERVER {fdw_server}
+                        OPTIONS (client_id '{client_id}',
+                                 client_secret '{client_id}_secret')""",
+                superuser_conn,
+            )
+        superuser_conn.commit()
+
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='{fdw_server}', read_only=True,
+                      catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        run_command(
+            f"GRANT USAGE ON SCHEMA {schema} TO {role_a}, {role_b}", superuser_conn
+        )
+        run_command(
+            f"GRANT SELECT ON {schema}.{table} TO {role_a}, {role_b}", superuser_conn
+        )
+        superuser_conn.commit()
+        server.enforce()
+
+        for role in (role_a, role_b):
+            conn = open_pg_conn()
+            try:
+                run_command(f"SET ROLE {role}", conn)
+                result = run_query(f"SELECT count(*) FROM {schema}.{table}", conn)
+                assert result[0][0] == 10, f"{role} could not read while vended"
+            finally:
+                conn.close()
+
+        tables[table]["vended_by_client"] = {}
+
+        reader = open_pg_conn()
+        try:
+            run_command(f"SET ROLE {role_b}", reader)
+            err = run_query(
+                f"SELECT count(*) FROM {schema}.{table}", reader, raise_error=False
+            )
+        finally:
+            reader.close()
+        assert _denied(
+            err
+        ), f"scan read with the secret another principal pushed, got: {err!r}"
+
+    finally:
+        server.relax()
+        superuser_conn.rollback()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        run_command(f"DROP SERVER IF EXISTS {fdw_server} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        for role in (role_a, role_b):
+            run_command(f"DROP OWNED BY {role}", superuser_conn)
+            run_command(f"DROP ROLE IF EXISTS {role}", superuser_conn)
+        superuser_conn.commit()
+        httpd.shutdown()
+        thread.join(timeout=5)
+
+
+def test_vended_secret_below_table_root_dropped_by_another_backend(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """A secret scoped below the table root is dropped by any backend.
+
+    The catalog vends here for the data directory alone, so the secret's
+    scope is narrower than the table root and only known from the
+    credential, which a backend that never received it does not have.  Once
+    the catalog stops vending, a fresh backend's scan is only denied if that
+    backend finds the secret by its scope.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_withdrawn_data"
+    table = "vc_withdrawn_data"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    meta_key, meta_secret = server.create_scoped_user(
+        "mv_meta_wbr",
+        [f"{prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    data_key, data_secret = server.create_scoped_user(
+        "mv_data_wbr",
+        [f"{prefix}/data"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {
+                "prefix": location + "/data/",
+                "config": {
+                    "s3.access-key-id": data_key,
+                    "s3.secret-access-key": data_secret,
+                    "client.region": server.region,
+                },
+            },
+        }
+    }
+
+    _create_static_secret(pgduck_conn, server, meta_key, meta_secret)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        pusher = open_pg_conn()
+        try:
+            result = run_query(f"SELECT count(*) FROM {schema}.{table}", pusher)
+            assert result[0][0] == 10
+        finally:
+            pusher.close()
+
+        tables[table]["vended"] = None
+
+        reader = open_pg_conn()
+        try:
+            err = run_query(
+                f"SELECT count(*) FROM {schema}.{table}", reader, raise_error=False
+            )
+        finally:
+            reader.close()
+        assert _denied(
+            err
+        ), f"scan read with the data secret another backend pushed, got: {err!r}"
+
+    finally:
+        server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+def test_withdrawal_leaves_a_sibling_tables_secret(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """Withdrawing one table leaves a sibling table's secret in place.
+
+    What a withdrawal drops is bounded by the table root.  The sibling here
+    is named so that its root extends the withdrawn table's root as a
+    string, which is where a scope compared without its trailing slash
+    would reach too far.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_withdrawn_sib"
+    table = "vc_sib"
+    sibling = "vc_sib_next"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+    sib_meta_loc, sib_location, sib_prefix = _materialize_iceberg_table(
+        server, schema, sibling, 10
+    )
+
+    meta_key, meta_secret = server.create_scoped_user(
+        "mv_meta_wsb",
+        [f"{prefix}/metadata", f"{sib_prefix}/metadata"],
+        actions=("s3:GetObject", "s3:ListBucket"),
+    )
+    data_key, data_secret = server.create_scoped_user(
+        "mv_data_wsb", [prefix, sib_prefix]
+    )
+    config = {
+        "s3.access-key-id": data_key,
+        "s3.secret-access-key": data_secret,
+        "client.region": server.region,
+    }
+
+    tables = {
+        table: {
+            "metadata_location": meta_loc,
+            "location": location,
+            "vended": {"prefix": location + "/", "config": config},
+        },
+        sibling: {
+            "metadata_location": sib_meta_loc,
+            "location": sib_location,
+            "vended": {"prefix": sib_location + "/", "config": config},
+        },
+    }
+
+    _create_static_secret(pgduck_conn, server, meta_key, meta_secret)
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        for name in (table, sibling):
+            run_command(
+                f"""CREATE TABLE {schema}.{name} ()
+                    USING iceberg
+                    WITH (catalog='rest', read_only=True, catalog_table_name='{name}')""",
+                superuser_conn,
+            )
+        superuser_conn.commit()
+
+        pusher = open_pg_conn()
+        try:
+            for name in (table, sibling):
+                result = run_query(f"SELECT count(*) FROM {schema}.{name}", pusher)
+                assert result[0][0] == 10, f"{name} could not read while vended"
+        finally:
+            pusher.close()
+
+        tables[table]["vended"] = None
+
+        reader = open_pg_conn()
+        try:
+            err = run_query(
+                f"SELECT count(*) FROM {schema}.{table}", reader, raise_error=False
+            )
+        finally:
+            reader.close()
+        assert _denied(err), f"withdrawn table still read, got: {err!r}"
+
+        scopes = [
+            s[1]
+            for s in run_query(
+                "SELECT name, scope FROM duckdb_secrets() "
+                "WHERE name LIKE 'pglake_vended_%'",
+                pgduck_conn,
+            )
+            if s[1]
+        ]
+        pgduck_conn.commit()
+        assert any(
+            sib_location + "/" in s for s in scopes
+        ), f"the sibling's secret was dropped with the withdrawn table's: {scopes}"
+
+    finally:
+        server.relax()
+        for name in (table, sibling):
+            run_command(f"DROP TABLE IF EXISTS {schema}.{name}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()
         _stop_mock_catalog(httpd, thread, conn=superuser_conn)
