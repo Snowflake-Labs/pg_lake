@@ -16,6 +16,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/permissions/roles.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/client.h"
@@ -543,6 +544,8 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	}
 
 	SPI_END();
+
+	ErrorIfURLLeavesObjectStorage(metadataLocationStrInfo->data, NULL);
 
 	return metadataLocationStrInfo->data;
 }
