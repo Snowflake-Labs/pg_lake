@@ -72,6 +72,10 @@ api_post() {
 wait_for_lakekeeper() {
   echo "Waiting for Lakekeeper to be healthy..."
   for i in {1..30}; do
+    if ! kill -0 "$LAKEKEEPER_PID" 2> /dev/null; then
+      echo "❌ Lakekeeper exited during startup, see $LAKEKEEPER_LOG"
+      exit 1
+    fi
     if curl -sf "$LAKEKEEPER_HOST/health" > /dev/null; then
       echo "✅ Lakekeeper is healthy"
       return
@@ -140,6 +144,12 @@ create_warehouse() {
 }
 
 main() {
+  # Otherwise the health check below would pass against that other server.
+  if curl -sf "$LAKEKEEPER_HOST/health" > /dev/null; then
+    echo "❌ Something already serves $LAKEKEEPER_HOST; stop it first"
+    exit 1
+  fi
+
   echo "Migrating Lakekeeper database..."
   "$LAKEKEEPER_BIN" migrate > "$LAKEKEEPER_LOG" 2>&1
 
@@ -157,8 +167,13 @@ main() {
   wait_for_lakekeeper
   bootstrap
   create_warehouse
-  warehouse_id > "$LAKEKEEPER_WAREHOUSE_FILE"
-  echo "🎉 Lakekeeper setup complete (warehouse $(cat "$LAKEKEEPER_WAREHOUSE_FILE"))."
+  WAREHOUSE_ID=$(warehouse_id)
+  if [[ -z "$WAREHOUSE_ID" ]]; then
+    echo "❌ Could not find the id of warehouse $LAKEKEEPER_WAREHOUSE"
+    exit 1
+  fi
+  echo "$WAREHOUSE_ID" > "$LAKEKEEPER_WAREHOUSE_FILE"
+  echo "🎉 Lakekeeper setup complete (warehouse $WAREHOUSE_ID)."
 
   if [[ "$NOWAIT" == "false" ]]; then
     trap 'echo "Stopping Lakekeeper..."; kill "$LAKEKEEPER_PID"; wait "$LAKEKEEPER_PID"' TERM INT

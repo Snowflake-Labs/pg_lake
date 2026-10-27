@@ -60,6 +60,9 @@ LAKEKEEPER_SHA256_aarch64-apple-darwin = 427a06636f229841a4f5c13d30c4c41f160e426
 UNAME_S := $(shell uname -s)
 UNAME_M := $(shell uname -m)
 ifeq ($(UNAME_S),Darwin)
+ifneq ($(UNAME_M),arm64)
+LAKEKEEPER_UNSUPPORTED = Lakekeeper publishes no $(UNAME_M) macOS build
+endif
 LAKEKEEPER_TARGET = aarch64-apple-darwin
 SHA256_CHECK = shasum -a 256 -c -
 else ifeq ($(UNAME_M),aarch64)
@@ -75,13 +78,15 @@ LAKEKEEPER_URL = https://github.com/lakekeeper/lakekeeper/releases/download/v$(L
 # travels in the CI build artifact.
 .PHONY: install-lakekeeper
 install-lakekeeper:
-	tmp=$$(mktemp -d) && \
+ifdef LAKEKEEPER_UNSUPPORTED
+	$(error $(LAKEKEEPER_UNSUPPORTED))
+endif
+	tmp=$$(mktemp -d) && trap 'rm -rf "$$tmp"' EXIT && \
 	curl -fsSL --retry 5 -o $$tmp/$(LAKEKEEPER_TARBALL) $(LAKEKEEPER_URL) && \
 	echo "$(LAKEKEEPER_SHA256_$(LAKEKEEPER_TARGET))  $$tmp/$(LAKEKEEPER_TARBALL)" | $(SHA256_CHECK) && \
 	tar -xzf $$tmp/$(LAKEKEEPER_TARBALL) -C $$tmp lakekeeper && \
 	if [ "$(UNAME_S)" = Linux ]; then strip $$tmp/lakekeeper; fi && \
-	install -m 755 $$tmp/lakekeeper $(PG_BINDIR)/lakekeeper && \
-	rm -rf $$tmp
+	install -m 755 $$tmp/lakekeeper $(PG_BINDIR)/lakekeeper
 
 clean:
 	cd polaris && ./gradlew clean

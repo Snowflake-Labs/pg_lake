@@ -6,9 +6,10 @@ that /v1/config only returns when given the warehouse, it keeps the staged
 metadata of a staged create (#745), and it runs without authentication here.
 """
 
+import psycopg2
 import pyarrow
 import pytest
-from pyiceberg.exceptions import NoSuchTableError
+from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
 
 from utils_pytest import *
 from helpers.lakekeeper import *
@@ -16,18 +17,32 @@ from helpers.lakekeeper import *
 SCHEMA = "lk_tests"
 
 
+def _drop_namespace(catalog, namespace):
+    """Drop a namespace and whatever tables pyiceberg (or a failed test) left
+    in it. Dropping the PostgreSQL schema only drops pg_lake's writable tables
+    from the catalog, never read-only ones or the namespace itself."""
+    try:
+        for identifier in catalog.list_tables(namespace):
+            catalog.drop_table(identifier)
+        catalog.drop_namespace(namespace)
+    except NoSuchNamespaceError:
+        pass
+
+
 @pytest.fixture
-def lk_schema(superuser_conn, s3, extension, lakekeeper_server):
-    # Start every test from an empty schema; dropping it also drops the
-    # writable tables, and with them their catalog entries.
+def lk_schema(superuser_conn, s3, extension, lakekeeper_server, lakekeeper_catalog):
+    # Start every test from an empty schema and namespace, so a test can be
+    # rerun in the same session.
     superuser_conn.rollback()
     run_command(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE", superuser_conn)
     run_command(f"CREATE SCHEMA {SCHEMA}", superuser_conn)
     superuser_conn.commit()
+    _drop_namespace(lakekeeper_catalog, SCHEMA)
     yield SCHEMA
     superuser_conn.rollback()
     run_command(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE", superuser_conn)
     superuser_conn.commit()
+    _drop_namespace(lakekeeper_catalog, SCHEMA)
 
 
 def _table_option(conn, table, option, schema=SCHEMA):
@@ -75,7 +90,7 @@ def test_config_prefix_is_the_warehouse_id(installcheck, superuser_conn, lk_sche
     )
 
 
-def _attach_external_table(conn, catalog, name, properties):
+def _create_external_table(catalog, name, properties):
     catalog.create_namespace_if_not_exists(SCHEMA)
     assert (SCHEMA,) in catalog.list_namespaces()
 
@@ -85,15 +100,19 @@ def _attach_external_table(conn, catalog, name, properties):
         properties=properties,
     )
     table.append(pyarrow.table({"id": [1, 2, 3], "name": ["a", "b", "c"]}))
+    return table
 
+
+def _attach_and_read(conn, name):
     run_command(
         f"""CREATE TABLE {SCHEMA}.{name} () USING iceberg
             WITH (catalog = 'lakekeeper', read_only = true)""",
         conn,
     )
-    rows = run_query(f"SELECT id, name FROM {SCHEMA}.{name} ORDER BY id", conn)
-    assert [tuple(r) for r in rows] == [(1, "a"), (2, "b"), (3, "c")]
-    conn.commit()
+    return [
+        tuple(r)
+        for r in run_query(f"SELECT id, name FROM {SCHEMA}.{name} ORDER BY id", conn)
+    ]
 
 
 def test_read_only_table_created_outside_pg_lake(
@@ -103,29 +122,32 @@ def test_read_only_table_created_outside_pg_lake(
         pytest.skip("Requires an isolated test cluster")
 
     # pg_lake reads only uncompressed metadata JSON, see the test below.
-    _attach_external_table(
-        superuser_conn,
-        lakekeeper_catalog,
-        "external",
-        {"write.metadata.compression-codec": "none"},
+    _create_external_table(
+        lakekeeper_catalog, "external", {"write.metadata.compression-codec": "none"}
     )
+    assert _attach_and_read(superuser_conn, "external") == [
+        (1, "a"),
+        (2, "b"),
+        (3, "c"),
+    ]
+    superuser_conn.commit()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="pg_lake cannot read gzip-compressed metadata.json, "
-    "which Lakekeeper writes by default",
-)
-def test_read_only_table_with_gzip_metadata(
+def test_read_only_table_with_gzip_metadata_is_not_readable_yet(
     installcheck, superuser_conn, lk_schema, lakekeeper_catalog
 ):
+    """Lakekeeper writes gzip-compressed metadata JSON by default, which
+    pg_lake cannot read yet. When it can, this test fails: replace the
+    pytest.raises with the read-back assertion from the test above."""
     if installcheck:
         pytest.skip("Requires an isolated test cluster")
 
-    try:
-        _attach_external_table(superuser_conn, lakekeeper_catalog, "external_gz", {})
-    finally:
-        superuser_conn.rollback()
+    table = _create_external_table(lakekeeper_catalog, "external_gz", {})
+    assert table.metadata_location.endswith(".gz.metadata.json")
+
+    with pytest.raises(psycopg2.Error, match="valid UTF-8"):
+        _attach_and_read(superuser_conn, "external_gz")
+    superuser_conn.rollback()
 
 
 def test_nested_types_round_trip_through_the_catalog(
@@ -215,7 +237,7 @@ def test_create_in_a_namespace_the_catalog_has_not_seen(
         pytest.skip("Requires an isolated test cluster")
 
     schema = "lk_new_namespace"
-    assert (schema,) not in lakekeeper_catalog.list_namespaces()
+    _drop_namespace(lakekeeper_catalog, schema)
     try:
         run_command(
             f"""CREATE SCHEMA {schema};
@@ -230,6 +252,7 @@ def test_create_in_a_namespace_the_catalog_has_not_seen(
         superuser_conn.rollback()
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()
+        _drop_namespace(lakekeeper_catalog, schema)
 
 
 def test_server_without_location_prefix_uses_catalog_location(
