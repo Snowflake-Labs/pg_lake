@@ -237,6 +237,7 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 
 	char	   *minText = NULL;
 	char	   *maxText = NULL;
+	bool		hasNaN = false;
 
 	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
 	Datum		elemDatum;
@@ -270,9 +271,17 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 			Assert(maxText == NULL);
 			maxText = TextDatumGetCString(statsValDatum);
 		}
+		else if (strcmp(statsKey, "has_nan") == 0)
+		{
+			hasNaN = strcmp(TextDatumGetCString(statsValDatum), "true") == 0;
+		}
 	}
 
-	if (minText != NULL && maxText != NULL)
+	/*
+	 * The min and max leave out NaN, which Postgres orders above every other
+	 * value, so they do not bound a column that has one.
+	 */
+	if (minText != NULL && maxText != NULL && !hasNaN)
 	{
 		*names = lappend(*names, colName);
 		*mins = lappend(*mins, minText);
