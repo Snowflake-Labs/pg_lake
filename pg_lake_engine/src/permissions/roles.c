@@ -34,6 +34,7 @@
 
 
 static void CheckUserSuppliedURL(const char *url);
+static bool IsWebURL(const char *url);
 static bool IsAllowedQueryParamKey(const char *param, size_t paramLen);
 static void CheckAzureURLHost(const char *url);
 static const char *AzureURLPrefix(const char *url);
@@ -169,6 +170,45 @@ ValidateStorageURL(const char *url)
 						errmsg("pg_lake: unsupported URL: \"%s\"", url)));
 
 	CheckUserSuppliedURL(url);
+}
+
+
+/*
+ * ErrorIfURLLeavesObjectStorage refuses an http(s):// URL that pg_lake read
+ * out of the file at referrerUrl, or out of a catalog response when
+ * referrerUrl is NULL, unless that file was itself read from a web server.
+ *
+ * Catalogs and Iceberg files in object storage only ever point to object
+ * storage.  A web URL there would have the server request a host chosen by
+ * whoever runs the catalog or wrote the file, whenever the table is attached
+ * or scanned, while creating a catalog server takes only lake_write and
+ * reading from web servers takes lake_read.  A table that a user named by an
+ * http(s):// URL stays readable, since naming the URL already took lake_read.
+ */
+void
+ErrorIfURLLeavesObjectStorage(const char *url, const char *referrerUrl)
+{
+	if (!IsWebURL(url) || (referrerUrl != NULL && IsWebURL(referrerUrl)))
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("pg_lake: Iceberg URL \"%s\" does not point to object storage", url),
+			 referrerUrl != NULL ?
+			 errdetail("The URL is referenced by \"%s\".", referrerUrl) :
+			 errdetail("The URL was returned by the Iceberg catalog."),
+			 errhint("Iceberg table files have to be in object storage, such as s3://, gs:// or az://.")));
+}
+
+
+/*
+ * IsWebURL returns whether url is an http:// or https:// URL.
+ */
+static bool
+IsWebURL(const char *url)
+{
+	return strncmp(url, HTTP_URL_PREFIX, strlen(HTTP_URL_PREFIX)) == 0 ||
+		strncmp(url, HTTPS_URL_PREFIX, strlen(HTTPS_URL_PREFIX)) == 0;
 }
 
 
