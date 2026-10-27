@@ -869,7 +869,7 @@ def _load_table_response(table_uuid, location):
     [
         (
             "http://127.0.0.1:1/loaded",
-            'Iceberg URL "http://127.0.0.1:1/loaded" does not point to object storage',
+            'Iceberg file URL "http://127.0.0.1:1/loaded" does not point to object storage',
         ),
         (
             f"s3://{TEST_BUCKET}/loaded?s3_endpoint=127.0.0.1:1",
