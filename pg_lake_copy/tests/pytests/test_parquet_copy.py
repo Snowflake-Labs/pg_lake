@@ -1820,6 +1820,8 @@ def test_copy_to_multidim_array_json_errors(pg_conn, tmp_path):
         pg_conn,
     )
 
+    # From PG19 core handles local JSON COPY TO, and accepts these arrays.
+    run_command("SET LOCAL pg_lake_copy.json_copy_mode TO 'pglake'", pg_conn)
     error = run_command(
         f"COPY test_multidim_json TO '{json_path}' WITH (format 'json')",
         pg_conn,
@@ -1853,6 +1855,8 @@ def test_copy_to_nested_multidim_array_json_errors(pg_conn, tmp_path):
         pg_conn,
     )
 
+    # From PG19 core handles local JSON COPY TO, and accepts these arrays.
+    run_command("SET LOCAL pg_lake_copy.json_copy_mode TO 'pglake'", pg_conn)
     error = run_command(
         f"COPY test_nested_multidim_json TO '{json_path}' WITH (format 'json')",
         pg_conn,
