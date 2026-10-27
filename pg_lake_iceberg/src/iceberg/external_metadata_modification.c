@@ -34,9 +34,14 @@
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/extensions/pg_lake_iceberg.h"
+#include "pg_lake/util/catalog_type.h"
+#include "pg_lake/util/rel_utils.h"
+#include "pg_lake/util/table_type.h"
 #include "pg_extension_base/spi_helpers.h"
 
 PG_FUNCTION_INFO_V1(external_catalog_modification);
+
+IcebergExternalWriteCallback PgLake_IcebergExternalWriteCallback = NULL;
 
 static void HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 										char *metadataLocation, char *prevMetadataLocation);
@@ -126,6 +131,22 @@ external_catalog_modification(PG_FUNCTION_ARGS)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("modifying the internal catalog is currently only supported via pg_lake_iceberg tables")));
+		}
+
+		/* renaming goes through ALTER TABLE, not the catalog */
+		if (isInternalCatalog)
+		{
+			Datum		oldNamespaceDatum = heap_getattr(trigdata->tg_trigtuple, 2,
+														 trigdata->tg_relation->rd_att, &isnull);
+			Datum		oldTableNameDatum = heap_getattr(trigdata->tg_trigtuple, 3,
+														 trigdata->tg_relation->rd_att, &isnull);
+
+			if (strcmp(TextDatumGetCString(oldNamespaceDatum), namespaceName) != 0 ||
+				strcmp(TextDatumGetCString(oldTableNameDatum), tableName) != 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot change table_namespace or table_name of a table in the %s catalog",
+								databaseName)));
 		}
 	}
 
@@ -223,11 +244,28 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 	Oid			namespaceOid = get_namespace_oid(namespaceName, missingOk);
 	Oid			relationId = get_relname_relid(tableName, namespaceOid);
 
-	if (!OidIsValid(relationId))
+	if (!OidIsValid(relationId) || !IsIcebergTable(relationId) ||
+		IsExternalIcebergTable(relationId))
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_TABLE),
 				 errmsg("table \"%s.%s\" does not exist",
 						namespaceName, tableName)));
+
+	if (GetIcebergCatalogType(relationId) != POSTGRES_CATALOG)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("external writes are only supported for tables in the %s catalog",
+						get_database_name(MyDatabaseId))));
+
+	ErrorIfReadOnlyIcebergTable(relationId);
+
+	/* the new metadata can rewrite all data and the schema */
+	EnsureTableOwner(relationId);
+
+	if (PgLake_IcebergExternalWriteCallback == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("external writes require the pg_lake_table library to be loaded")));
 
 	/*
 	 * Lock the row and get the current metadata_location for optimistic
@@ -248,25 +286,30 @@ HandleInternalCatalogUpdate(char *namespaceName, char *tableName,
 
 	/*
 	 * The new metadata is read with the extension's credentials during the
-	 * sync, so it must be inside the table's own metadata directory.
+	 * sync, so it must be directly inside the table's own metadata directory.
+	 * The sync checks the files it references against the table location.
 	 */
-	const char *metadataDirectory = strstr(currentMetadataLocation, "/metadata/");
+	const char *metadataDirectory = NULL;
+
+	for (const char *match = strstr(currentMetadataLocation, "/metadata/");
+		 match != NULL;
+		 match = strstr(match + 1, "/metadata/"))
+		metadataDirectory = match;
+
+	size_t		prefixLength = metadataDirectory == NULL ? 0 :
+		metadataDirectory - currentMetadataLocation + strlen("/metadata/");
 
 	if (!IsSupportedURL(metadataLocation) ||
 		metadataDirectory == NULL ||
-		strncmp(metadataLocation, currentMetadataLocation,
-				metadataDirectory - currentMetadataLocation + strlen("/metadata/")) != 0 ||
-		strstr(metadataLocation, "/../") != NULL)
+		strncmp(metadataLocation, currentMetadataLocation, prefixLength) != 0 ||
+		strchr(metadataLocation + prefixLength, '/') != NULL)
 		ereport(ERROR,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("metadata_location must be in the table's metadata directory")));
 
-	/*
-	 * Update the internal catalog with the new metadata location. If
-	 * pg_lake_table is installed, its AFTER UPDATE trigger on tables_internal
-	 * fires automatically and syncs the pg_lake catalog (data files, schema,
-	 * partition specs) from the new metadata.
-	 */
 	UpdateInternalCatalogMetadataLocation(relationId, metadataLocation,
 										  prevMetadataLocation);
+
+	/* sync data files, schema and partition specs from the new metadata */
+	PgLake_IcebergExternalWriteCallback(relationId, metadataLocation);
 }

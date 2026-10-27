@@ -2,6 +2,7 @@ import threading
 
 import pytest
 import pyarrow as pa
+import pyarrow.parquet
 from pyiceberg.catalog.sql import SqlCatalog
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import LongType
@@ -14,12 +15,15 @@ TABLE_NAMESPACE = "public"
 
 
 @pytest.fixture(scope="module")
-def iceberg_catalog(superuser_conn, s3):
+def iceberg_catalog(superuser_conn, app_user, s3):
     """
     Create a PyIceberg SqlCatalog whose catalog_name matches the current
     database name.  This way, PyIceberg commits (append, overwrite,
     schema evolution) go through the iceberg_tables INSTEAD OF trigger's
     internal-catalog path and automatically sync the pg_lake catalog.
+
+    External writes require table ownership, so the catalog user is a
+    member of app_user, which creates the tables.
     """
     catalog_user = "iceberg_ext_writer"
 
@@ -30,6 +34,7 @@ def iceberg_catalog(superuser_conn, s3):
         run_command(f"CREATE USER {catalog_user}", superuser_conn)
 
     run_command(f"GRANT iceberg_catalog TO {catalog_user}", superuser_conn)
+    run_command(f"GRANT {app_user} TO {catalog_user}", superuser_conn)
     superuser_conn.commit()
 
     db_name = run_query("SELECT current_database()", superuser_conn)[0][0]
@@ -1143,11 +1148,9 @@ def test_external_write_delete_rows(
     iceberg_catalog,
 ):
     """
-    External client deletes a subset of rows via PyIceberg's delete().
-    Whether pyiceberg uses copy-on-write or merge-on-read (position
-    deletes), the sync must end up serving the correct row set; this
-    exercises the CONTENT_POSITION_DELETES branch in SyncDataFiles when
-    pyiceberg writes delete files, and the COW path when it rewrites.
+    External client deletes a subset of rows via PyIceberg's delete(),
+    which rewrites the affected data files (copy-on-write). Position
+    deletes are covered by test_external_write_keeps_position_deletes.
     """
     tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_delete"
 
@@ -1348,45 +1351,308 @@ def test_external_write_catalog_name_change_rejected(
     pg_conn.rollback()
 
 
-def test_external_write_unknown_table_rejected(
+def _create_table(pg_conn, name, row_count=5):
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    run_command(f"CREATE TABLE {tbl} (a int, b text) USING iceberg", pg_conn)
+    run_command(
+        f"INSERT INTO {tbl} SELECT i, 'row' || i FROM generate_series(1,{row_count}) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+    return tbl
+
+
+def _metadata_location(conn, name):
+    return run_query(
+        f"SELECT metadata_location FROM iceberg_tables WHERE table_name = '{name}'",
+        conn,
+    )[0][0]
+
+
+def _rows(values):
+    return pa.table(
+        {"a": values, "b": [f"ext{value}" for value in values]},
+        schema=pa.schema([pa.field("a", pa.int32()), pa.field("b", pa.string())]),
+    )
+
+
+def _columns(conn, name):
+    return run_query(
+        f"""SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute
+            WHERE attrelid = '{TABLE_NAMESPACE}.{name}'::regclass
+              AND attnum > 0 AND NOT attisdropped ORDER BY attnum""",
+        conn,
+    )
+
+
+def test_external_write_keeps_position_deletes(
     s3,
     pg_conn,
     superuser_conn,
     extension,
     with_default_location,
-    grant_iceberg_tables_full_access,
+    iceberg_catalog,
 ):
     """
-    UPDATE on iceberg_tables for the internal catalog with a namespace/table
-    that doesn't resolve to a real relation must raise an undefined-table
-    error rather than silently no-op'ing.
+    A pg_lake DELETE writes a position delete file. After an external
+    append, the resync must still apply it to the data file it deletes from.
     """
-    db_name = run_query("SELECT current_database()", pg_conn)[0][0]
+    name = f"{TABLE_NAME}_posdel"
+    tbl = _create_table(pg_conn, name, row_count=1000)
 
-    tbl = f"{TABLE_NAMESPACE}.{TABLE_NAME}_unknown"
-    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
-    run_command(f"INSERT INTO {tbl} VALUES (1)", pg_conn)
+    run_command(f"DELETE FROM {tbl} WHERE a = 7", pg_conn)
     pg_conn.commit()
 
-    error_raised = False
-    try:
-        run_command(
-            f"""
-            UPDATE iceberg_tables
-            SET table_name = 'definitely_not_a_real_table',
-                metadata_location = metadata_location,
-                previous_metadata_location = metadata_location
-            WHERE catalog_name = '{db_name}'
-              AND table_namespace = '{TABLE_NAMESPACE}'
-              AND table_name = '{TABLE_NAME}_unknown'
-            """,
-            pg_conn,
+    iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}").append(_rows([5000]))
+
+    result = run_query(
+        f"SELECT count(*), count(*) FILTER (WHERE a = 7) FROM {tbl}", pg_conn
+    )
+    assert result == [[1000, 0]]
+
+    result = run_query(
+        f"""SELECT sum(deleted_row_count) FROM lake_table.files
+            WHERE table_name = '{tbl}'::regclass""",
+        pg_conn,
+    )
+    assert result[0][0] == 1
+
+    pg_conn.rollback()
+
+
+def test_external_write_same_transaction_as_pglake_write(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+    grant_iceberg_tables_access,
+):
+    """
+    A pg_lake write to another table in the same transaction does not stop
+    the sync, while a pg_lake write to the same table is rejected.
+    """
+    other_tbl = _create_table(pg_conn, f"{TABLE_NAME}_tx_other")
+    name = f"{TABLE_NAME}_tx_target"
+    tbl = _create_table(pg_conn, name)
+
+    old_location = _metadata_location(pg_conn, name)
+    iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}").append(_rows([6]))
+    new_location = _metadata_location(pg_conn, name)
+    pg_conn.commit()
+
+    # point the table back at the old metadata, so we can redo the write
+    run_command(
+        f"""UPDATE iceberg_tables
+            SET metadata_location = '{old_location}',
+                previous_metadata_location = '{new_location}'
+            WHERE table_name = '{name}'""",
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert run_query(f"SELECT count(*) FROM {tbl}", pg_conn)[0][0] == 5
+
+    run_command(f"INSERT INTO {other_tbl} VALUES (99, 'x')", pg_conn)
+    run_command(
+        f"""UPDATE iceberg_tables
+            SET metadata_location = '{new_location}',
+                previous_metadata_location = '{old_location}'
+            WHERE table_name = '{name}'""",
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert run_query(f"SELECT count(*) FROM {tbl}", pg_conn)[0][0] == 6
+    assert run_query(f"SELECT count(*) FROM {other_tbl}", pg_conn)[0][0] == 6
+
+    run_command(f"INSERT INTO {tbl} VALUES (100, 'x')", pg_conn)
+    error = run_command(
+        f"""UPDATE iceberg_tables
+            SET metadata_location = '{old_location}',
+                previous_metadata_location = '{new_location}'
+            WHERE table_name = '{name}'""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "modified in the same transaction" in str(error)
+    pg_conn.rollback()
+
+
+def test_external_write_drop_and_readd_column(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """Dropping a column and adding it back with another type in one commit."""
+    name = f"{TABLE_NAME}_readd"
+    tbl = _create_table(pg_conn, name)
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pyiceberg_table.update_schema() as update:
+        update.delete_column("b")
+        update.add_column("b", LongType())
+
+    assert _columns(pg_conn, name) == [["a", "integer"], ["b", "bigint"]]
+    result = run_query(f"SELECT count(*), count(b) FROM {tbl}", pg_conn)
+    assert result == [[5, 0]]
+
+    pg_conn.rollback()
+
+
+def test_external_write_swap_column_names(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """Two columns swap names in one commit."""
+    name = f"{TABLE_NAME}_swap"
+    tbl = _create_table(pg_conn, name)
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pyiceberg_table.update_schema() as update:
+        update.rename_column("a", "b")
+        update.rename_column("b", "a")
+
+    assert _columns(pg_conn, name) == [["b", "integer"], ["a", "text"]]
+    result = run_query(f"SELECT b, a FROM {tbl} ORDER BY b LIMIT 1", pg_conn)
+    assert result == [[1, "row1"]]
+
+    pg_conn.rollback()
+
+
+def test_external_write_type_promotion(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """An int -> long promotion widens the column."""
+    name = f"{TABLE_NAME}_promote"
+    tbl = _create_table(pg_conn, name)
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pyiceberg_table.update_schema() as update:
+        update.update_column("a", LongType())
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [5000000000], "b": ["big"]},
+            schema=pa.schema([pa.field("a", pa.int64()), pa.field("b", pa.string())]),
         )
-    except Exception as e:
-        error_raised = True
-        assert "does not exist" in str(e)
-        pg_conn.rollback()
+    )
 
-    assert error_raised
+    assert _columns(pg_conn, name) == [["a", "bigint"], ["b", "text"]]
+    result = run_query(f"SELECT max(a), count(*) FROM {tbl}", pg_conn)
+    assert result == [[5000000000, 6]]
+    result = run_query(f"SELECT count(*) FROM {tbl} WHERE a > 4000000000", pg_conn)
+    assert result[0][0] == 1
 
+    pg_conn.rollback()
+
+
+def test_external_write_table_name_change_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    grant_iceberg_tables_access,
+):
+    """
+    table_name and table_namespace cannot be changed through the view, also
+    not to point the row at another table.
+    """
+    name = f"{TABLE_NAME}_rename_row"
+    _create_table(pg_conn, name)
+    run_command(f"CREATE TABLE {TABLE_NAMESPACE}.{name}_heap (x int)", pg_conn)
+    pg_conn.commit()
+
+    location = _metadata_location(pg_conn, name)
+    error = run_command(
+        f"""UPDATE iceberg_tables
+            SET table_name = '{name}_heap',
+                metadata_location = '{location}',
+                previous_metadata_location = '{location}'
+            WHERE table_name = '{name}'""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "cannot change table_namespace or table_name" in str(error)
+    pg_conn.rollback()
+
+
+def test_external_write_requires_ownership(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+):
+    """Members of iceberg_catalog cannot write to tables they do not own."""
+    name = f"{TABLE_NAME}_not_owner"
+    _create_table(pg_conn, name)
+    location = _metadata_location(pg_conn, name)
+    pg_conn.commit()
+
+    run_command(
+        """
+        DROP ROLE IF EXISTS iceberg_not_owner;
+        CREATE ROLE iceberg_not_owner;
+        GRANT iceberg_catalog TO iceberg_not_owner;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command("SET ROLE iceberg_not_owner", superuser_conn)
+    error = run_command(
+        f"""UPDATE iceberg_tables
+            SET metadata_location = '{location}',
+                previous_metadata_location = '{location}'
+            WHERE table_name = '{name}'""",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert "must be owner" in str(error)
+    superuser_conn.rollback()
+
+    run_command("DROP ROLE iceberg_not_owner", superuser_conn)
+    superuser_conn.commit()
+
+
+def test_external_write_data_file_outside_table_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    Metadata that references a data file outside the table location is
+    rejected, since the sync would otherwise adopt, and later delete, a file
+    that belongs to someone else.
+    """
+    name = f"{TABLE_NAME}_foreign_file"
+    tbl = _create_table(pg_conn, name)
+
+    buffer = pa.BufferOutputStream()
+    pa.parquet.write_table(_rows([42]), buffer)
+    key = f"external_write_elsewhere/{name}.parquet"
+    s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=buffer.getvalue().to_pybytes())
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pytest.raises(Exception, match="is not in the table location"):
+        pyiceberg_table.add_files([f"s3://{TEST_BUCKET}/{key}"])
+
+    assert run_query(f"SELECT count(*) FROM {tbl}", pg_conn)[0][0] == 5
     pg_conn.rollback()

@@ -21,10 +21,9 @@
  * Syncs the internal pg_lake catalog state (schema, partition specs, data files)
  * from new Iceberg metadata written by an external client.
  *
- * Installed as an AFTER UPDATE trigger on lake_iceberg.tables_internal by
- * the pg_lake_table extension. Fires on every update to the catalog row, but
- * skips the sync when the current transaction has tracked iceberg metadata
- * operations (i.e. a normal pg_lake commit is in progress).
+ * pg_lake_iceberg calls SyncIcebergMetadataFromExternalWrite after an
+ * UPDATE on the iceberg_tables view moves metadata_location of a table in
+ * the current database's catalog.
  */
 
 #include "postgres.h"
@@ -59,27 +58,38 @@
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
+#include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/read_data.h"
+#include "pg_lake/sync/sync_external_metadata.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/path_hash.h"
+#include "pg_lake/util/string_utils.h"
 #include "utils/hsearch.h"
 
-PG_FUNCTION_INFO_V1(sync_iceberg_metadata_from_external_write);
-
-static void SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
 typedef struct FieldMapping
 {
 	int			fieldId;
 	AttrNumber	attnum;
 }			FieldMapping;
 
+static void SyncIcebergMetadataFromExternalWrite(Oid relationId,
+												 const char *metadataLocation);
+static char *GetTableLocationFromMetadataLocation(const char *metadataLocation);
+static void ErrorIfOutsideTableLocation(const char *path, const char *tableLocation);
+static void SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
 static List *FetchExistingFieldMappings(Oid relationId);
+static FieldMapping * FindFieldMapping(List *mappings, int fieldId);
+static char *GetLiveAttributeName(Oid relationId, AttrNumber attnum);
 static void ExecuteAlterTableViaSPI(const char *cmd);
 static void SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
 static void SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
-									  const char *metadataLocation);
+									  const char *metadataLocation,
+									  const char *tableLocation);
+static void SyncPositionDeleteMappings(Oid relationId, List *deleteFilePaths,
+									   HTAB *dataFilePaths);
 static char *ColumnBoundBinaryToText(ColumnBound * bound,
 									 Field * icebergType, PGType pgType);
 static List *BuildColumnStatsForManifestEntry(IcebergManifestEntry * manifestEntry,
@@ -91,67 +101,63 @@ static void InsertDataFilePartitionValues(Oid relationId, int32 partitionSpecId,
 
 
 /*
- * sync_iceberg_metadata_from_external_write syncs the pg_lake internal
- * catalog state from the current Iceberg metadata for the given table.
- *
- * This performs three sub-steps:
- * 1. Schema sync: add/drop columns on the foreign table to match the
+ * RegisterIcebergExternalWriteCallback makes pg_lake_iceberg call our sync
+ * after an external write.
+ */
+void
+RegisterIcebergExternalWriteCallback(void)
+{
+	PgLake_IcebergExternalWriteCallback = SyncIcebergMetadataFromExternalWrite;
+}
+
+
+/*
+ * SyncIcebergMetadataFromExternalWrite syncs the pg_lake catalog state of
+ * the table from the new metadata an external client (Spark, PyIceberg)
+ * wrote:
+ * 1. Schema sync: drop, rename, retype and add columns to match the
  *    Iceberg schema, and update field_id_mappings.
  * 2. Partition spec sync: register any new partition specs.
  * 3. Data file full resync: clear and repopulate lake_table.files and
  *    associated stats/partition values from the metadata snapshot.
  */
-/*
- * sync_iceberg_metadata_from_external_write is an AFTER UPDATE trigger on
- * lake_iceberg.tables_internal that syncs the pg_lake catalog state when
- * an external Iceberg client (Spark, PyIceberg) updates the metadata.
- *
- * Normal pg_lake commits also update tables_internal, so we skip the sync
- * when the current transaction has tracked iceberg metadata operations
- * (meaning pg_lake's DML path is handling the catalog itself).
- */
-Datum
-sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
+static void
+SyncIcebergMetadataFromExternalWrite(Oid relationId, const char *metadataLocation)
 {
-	TriggerData *trigdata = (TriggerData *) fcinfo->context;
-
-	if (!CALLED_AS_TRIGGER(fcinfo))
-		elog(ERROR, "sync_iceberg_metadata_from_external_write: not called as trigger");
-
-	HeapTuple	rettuple = trigdata->tg_newtuple;
-
 	/*
-	 * Normal pg_lake commits (INSERT/DELETE/ALTER on the iceberg table) also
-	 * update tables_internal.metadata_location. Those transactions have
-	 * tracked metadata operations and handle the catalog themselves. Only run
-	 * the sync for external writes, which have no tracked operations.
+	 * pg_lake would write its own metadata for this table at commit, based on
+	 * a catalog that no longer matches the external metadata.
 	 */
-	if (HasAnyTrackedIcebergMetadataChanges())
-		return PointerGetDatum(rettuple);
-
-	/* extract the table OID from the trigger tuple (table_name column) */
-	bool		isNull = false;
-	Datum		tableNameDatum = heap_getattr(trigdata->tg_newtuple, 1,
-											  trigdata->tg_relation->rd_att,
-											  &isNull);
-
-	if (isNull)
-		return PointerGetDatum(rettuple);
-
-	Oid			relationId = DatumGetObjectId(tableNameDatum);
-
-	/* read the new metadata from object storage */
-	bool		forUpdate = false;
-	char	   *metadataLocation = GetIcebergMetadataLocation(relationId, forUpdate);
+	if (HasTrackedIcebergMetadataChangesForRelation(relationId))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot update metadata_location of a table that was "
+						"modified in the same transaction")));
 
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
 
 	/*
+	 * We read and later delete the files the metadata points to with the
+	 * extension's credentials, so they must all belong to this table.
+	 */
+	char	   *tableLocation = GetTableLocationFromMetadataLocation(metadataLocation);
+
+	if (metadata->location == NULL ||
+		strcmp(StripTrailingSlash(pstrdup(metadata->location), true), tableLocation) != 0)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("cannot change the location of table \"%s\"",
+						get_rel_name(relationId))));
+
+	for (int snapshotIndex = 0; snapshotIndex < metadata->snapshots_length; snapshotIndex++)
+		ErrorIfOutsideTableLocation(metadata->snapshots[snapshotIndex].manifest_list,
+									tableLocation);
+
+	/*
 	 * Suppress the ProcessAlterTable / PostProcessRename hooks' Iceberg DDL
-	 * processing while we add/drop/rename columns. We manage
-	 * field_id_mappings ourselves and the metadata is already final on disk,
-	 * so we don't want the hooks to register duplicate mappings or schedule a
-	 * metadata write.
+	 * processing while we change columns. We manage field_id_mappings
+	 * ourselves and the metadata is already final on disk, so we don't want
+	 * the hooks to register duplicate mappings or schedule a metadata write.
 	 */
 	SkipIcebergDDLProcessing = true;
 
@@ -159,15 +165,57 @@ sync_iceberg_metadata_from_external_write(PG_FUNCTION_ARGS)
 	{
 		SyncSchemaFromMetadata(relationId, metadata);
 		SyncPartitionSpecsFromMetadata(relationId, metadata);
-		SyncDataFilesFromMetadata(relationId, metadata, metadataLocation);
+		SyncDataFilesFromMetadata(relationId, metadata, metadataLocation,
+								  tableLocation);
 	}
 	PG_FINALLY();
 	{
 		SkipIcebergDDLProcessing = false;
 	}
 	PG_END_TRY();
+}
 
-	return PointerGetDatum(rettuple);
+
+/*
+ * GetTableLocationFromMetadataLocation returns the table location, which is
+ * the directory that holds the metadata/ directory.
+ */
+static char *
+GetTableLocationFromMetadataLocation(const char *metadataLocation)
+{
+	const char *metadataDirectory = NULL;
+
+	for (const char *match = strstr(metadataLocation, "/metadata/");
+		 match != NULL;
+		 match = strstr(match + 1, "/metadata/"))
+		metadataDirectory = match;
+
+	if (metadataDirectory == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("metadata_location must be in the table's metadata directory")));
+
+	return pnstrdup(metadataLocation, metadataDirectory - metadataLocation);
+}
+
+
+/*
+ * ErrorIfOutsideTableLocation throws an error if the path is not under the
+ * table location.
+ */
+static void
+ErrorIfOutsideTableLocation(const char *path, const char *tableLocation)
+{
+	size_t		locationLength = strlen(tableLocation);
+
+	if (path == NULL ||
+		strncmp(path, tableLocation, locationLength) != 0 ||
+		path[locationLength] != '/' ||
+		strstr(path, "/../") != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("file \"%s\" is not in the table location \"%s\"",
+						path ? path : "(null)", tableLocation)));
 }
 
 
@@ -216,6 +264,47 @@ FetchExistingFieldMappings(Oid relationId)
 
 
 /*
+ * FindFieldMapping returns the mapping for the given field ID, or NULL.
+ */
+static FieldMapping *
+FindFieldMapping(List *mappings, int fieldId)
+{
+	ListCell   *mappingCell = NULL;
+
+	foreach(mappingCell, mappings)
+	{
+		FieldMapping *mapping = lfirst(mappingCell);
+
+		if (mapping->fieldId == fieldId)
+			return mapping;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * GetLiveAttributeName returns the name of a column, or NULL if the column
+ * is dropped or does not exist.
+ */
+static char *
+GetLiveAttributeName(Oid relationId, AttrNumber attnum)
+{
+	char	   *attributeName = NULL;
+	Relation	rel = RelationIdGetRelation(relationId);
+	TupleDesc	tupdesc = RelationGetDescr(rel);
+
+	if (attnum > 0 && attnum <= tupdesc->natts &&
+		!TupleDescAttr(tupdesc, attnum - 1)->attisdropped)
+		attributeName = pstrdup(NameStr(TupleDescAttr(tupdesc, attnum - 1)->attname));
+
+	RelationClose(rel);
+
+	return attributeName;
+}
+
+
+/*
  * ExecuteAlterTableViaSPI runs an ALTER TABLE DDL command via SPI as the
  * pg_lake_table extension owner.
  */
@@ -223,7 +312,10 @@ static void
 ExecuteAlterTableViaSPI(const char *cmd)
 {
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
-	SPI_execute(cmd, false, 0);
+
+	if (SPI_execute(cmd, false, 0) < 0)
+		elog(ERROR, "could not run \"%s\"", cmd);
+
 	SPI_END();
 }
 
@@ -232,220 +324,134 @@ ExecuteAlterTableViaSPI(const char *cmd)
  * SyncSchemaFromMetadata syncs the foreign table columns and field_id_mappings
  * with the current Iceberg schema from the metadata.
  *
- * For each field in the new Iceberg schema that doesn't have a mapping in
- * field_id_mappings, we ADD COLUMN and register the mapping.
- *
- * For each top-level mapping whose field_id is no longer in the current
- * Iceberg schema, we DROP COLUMN (but keep the mapping for reading old files).
+ * Drops run first and renames go through a temporary name, so that a column
+ * can be dropped and re-added under the same name, or two columns can swap
+ * names, in one commit. Dropped columns keep their mapping for reading old
+ * files.
  */
 static void
 SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 {
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
-
 	List	   *existingMappings = FetchExistingFieldMappings(relationId);
+	char	   *qualifiedName =
+		quote_qualified_identifier(get_namespace_name(get_rel_namespace(relationId)),
+								   get_rel_name(relationId));
+	ListCell   *mappingCell = NULL;
 
-	/* get relation's schema and namespace names for ALTER TABLE */
-	char	   *schemaName = get_namespace_name(get_rel_namespace(relationId));
-	char	   *tableName = get_rel_name(relationId);
-
-	/*
-	 * Step 1: Add new columns. For each field in the Iceberg schema that
-	 * doesn't have a mapping, add it.
-	 */
-	for (size_t fieldIdx = 0; fieldIdx < icebergSchema->fields_length; fieldIdx++)
+	/* drop columns whose field ID is no longer in the schema */
+	foreach(mappingCell, existingMappings)
 	{
-		DataFileSchemaField *icebergField = &icebergSchema->fields[fieldIdx];
-		int			fieldId = icebergField->id;
-
-		/* check if this field_id already has a mapping */
-		bool		found = false;
-		AttrNumber	existingAttnum = InvalidAttrNumber;
-		ListCell   *mappingCell = NULL;
-
-		foreach(mappingCell, existingMappings)
-		{
-			FieldMapping *mapping = lfirst(mappingCell);
-
-			if (mapping->fieldId == fieldId)
-			{
-				found = true;
-				existingAttnum = mapping->attnum;
-				break;
-			}
-		}
-
-		if (found)
-		{
-			/*
-			 * Field is already mapped — but the new schema may have renamed
-			 * it. Compare names and issue RENAME COLUMN if so. Iceberg field
-			 * IDs are stable across rename, so this is the only signal we
-			 * have that a rename happened.
-			 */
-			Relation	rel = RelationIdGetRelation(relationId);
-			TupleDesc	tupdesc = RelationGetDescr(rel);
-
-			if (existingAttnum <= 0 || existingAttnum > tupdesc->natts)
-			{
-				RelationClose(rel);
-				continue;
-			}
-
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, existingAttnum - 1);
-
-			if (attr->attisdropped)
-			{
-				RelationClose(rel);
-				continue;
-			}
-
-			if (strcmp(NameStr(attr->attname), icebergField->name) == 0)
-			{
-				RelationClose(rel);
-				continue;
-			}
-
-			char	   *currentName = pstrdup(NameStr(attr->attname));
-
-			RelationClose(rel);
-
-			StringInfo	renameCmd = makeStringInfo();
-
-			appendStringInfo(renameCmd,
-							 "ALTER FOREIGN TABLE %s.%s RENAME COLUMN %s TO %s",
-							 quote_identifier(schemaName),
-							 quote_identifier(tableName),
-							 quote_identifier(currentName),
-							 quote_identifier(icebergField->name));
-
-			ExecuteAlterTableViaSPI(renameCmd->data);
-
-			continue;
-		}
-
-		/* new field: convert Iceberg type to Postgres type */
-		PGType		pgType = IcebergFieldToPostgresType(icebergField->type);
-
-		char	   *pgTypeName = format_type_with_typemod(pgType.postgresTypeOid,
-														  pgType.postgresTypeMod);
-
-		/* execute ALTER FOREIGN TABLE ... ADD COLUMN via SPI */
-		StringInfo	alterCmd = makeStringInfo();
-
-		appendStringInfo(alterCmd,
-						 "ALTER FOREIGN TABLE %s.%s ADD COLUMN %s %s",
-						 quote_identifier(schemaName),
-						 quote_identifier(tableName),
-						 quote_identifier(icebergField->name),
-						 pgTypeName);
-
-		ExecuteAlterTableViaSPI(alterCmd->data);
-
-		/*
-		 * After ADD COLUMN, look up the new attnum from pg_attribute.
-		 */
-		Relation	rel = RelationIdGetRelation(relationId);
-		TupleDesc	tupdesc = RelationGetDescr(rel);
-		AttrNumber	newAttNum = InvalidAttrNumber;
-
-		for (int attIdx = 0; attIdx < tupdesc->natts; attIdx++)
-		{
-			Form_pg_attribute attr = TupleDescAttr(tupdesc, attIdx);
-
-			if (!attr->attisdropped &&
-				strcmp(NameStr(attr->attname), icebergField->name) == 0)
-			{
-				newAttNum = attr->attnum;
-				break;
-			}
-		}
-
-		RelationClose(rel);
-
-		if (newAttNum == InvalidAttrNumber)
-			elog(ERROR, "could not find column \"%s\" after ADD COLUMN",
-				 icebergField->name);
-
-		/* register the field mapping */
-		int			parentFieldId = INVALID_FIELD_ID;
-		const char *writeDefault = icebergField->writeDefault;
-		const char *initialDefault = icebergField->initialDefault;
-
-		RegisterIcebergColumnMapping(relationId, icebergField->type,
-									 newAttNum, parentFieldId, pgType,
-									 fieldId, writeDefault, initialDefault,
-									 NIL);
-	}
-
-	/*
-	 * Step 2: Drop removed columns. For each existing mapping whose field_id
-	 * is not in the current Iceberg schema, drop the column from the foreign
-	 * table.
-	 */
-	ListCell   *dropCell = NULL;
-
-	foreach(dropCell, existingMappings)
-	{
-		FieldMapping *mapping = lfirst(dropCell);
-		int			mappedFieldId = mapping->fieldId;
-		AttrNumber	mappedAttnum = mapping->attnum;
-
-		/* check if this field_id still exists in the Iceberg schema */
+		FieldMapping *mapping = lfirst(mappingCell);
 		bool		stillExists = false;
 
 		for (size_t fieldIdx = 0; fieldIdx < icebergSchema->fields_length; fieldIdx++)
 		{
-			if (icebergSchema->fields[fieldIdx].id == mappedFieldId)
+			if (icebergSchema->fields[fieldIdx].id == mapping->fieldId)
 			{
 				stillExists = true;
 				break;
 			}
 		}
 
-		if (stillExists)
+		char	   *columnName = GetLiveAttributeName(relationId, mapping->attnum);
+
+		if (stillExists || columnName == NULL)
 			continue;
 
-		/*
-		 * Check if the column is already dropped in pg_attribute (could
-		 * happen if this sync runs multiple times).
-		 */
-		Relation	rel = RelationIdGetRelation(relationId);
-		TupleDesc	tupdesc = RelationGetDescr(rel);
+		ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s DROP COLUMN %s",
+										 qualifiedName,
+										 quote_identifier(columnName)));
+	}
 
-		if (mappedAttnum <= 0 || mappedAttnum > tupdesc->natts)
+	/* move renamed columns to a temporary name first */
+	List	   *renamedFields = NIL;
+
+	for (size_t fieldIdx = 0; fieldIdx < icebergSchema->fields_length; fieldIdx++)
+	{
+		DataFileSchemaField *icebergField = &icebergSchema->fields[fieldIdx];
+		FieldMapping *mapping = FindFieldMapping(existingMappings, icebergField->id);
+
+		if (mapping == NULL)
+			continue;
+
+		char	   *columnName = GetLiveAttributeName(relationId, mapping->attnum);
+
+		if (columnName == NULL || strcmp(columnName, icebergField->name) == 0)
+			continue;
+
+		ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s RENAME COLUMN %s TO %s",
+										 qualifiedName,
+										 quote_identifier(columnName),
+										 quote_identifier(psprintf("pg_lake_rename_%d",
+																   icebergField->id))));
+
+		renamedFields = lappend(renamedFields, icebergField);
+	}
+
+	foreach_ptr(DataFileSchemaField, icebergField, renamedFields)
+	{
+		ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s RENAME COLUMN %s TO %s",
+										 qualifiedName,
+										 quote_identifier(psprintf("pg_lake_rename_%d",
+																   icebergField->id)),
+										 quote_identifier(icebergField->name)));
+	}
+
+	for (size_t fieldIdx = 0; fieldIdx < icebergSchema->fields_length; fieldIdx++)
+	{
+		DataFileSchemaField *icebergField = &icebergSchema->fields[fieldIdx];
+		FieldMapping *mapping = FindFieldMapping(existingMappings, icebergField->id);
+		PGType		pgType = IcebergFieldToPostgresType(icebergField->type);
+		char	   *pgTypeName = format_type_with_typemod(pgType.postgresTypeOid,
+														  pgType.postgresTypeMod);
+
+		if (mapping != NULL)
 		{
-			RelationClose(rel);
+			if (GetLiveAttributeName(relationId, mapping->attnum) == NULL)
+				continue;
+
+			/*
+			 * Promote the column when the Iceberg type changed (e.g. int ->
+			 * long). Postgres types that map to the same Iceberg type, like
+			 * smallint and integer, are left alone.
+			 */
+			DataFileSchemaField *registeredField =
+				GetRegisteredFieldForAttribute(relationId, mapping->attnum);
+
+			if (registeredField->type->type != FIELD_TYPE_SCALAR ||
+				icebergField->type->type != FIELD_TYPE_SCALAR ||
+				strcmp(registeredField->type->field.scalar.typeName,
+					   icebergField->type->field.scalar.typeName) == 0)
+				continue;
+
+			ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s ALTER COLUMN %s TYPE %s",
+											 qualifiedName,
+											 quote_identifier(icebergField->name),
+											 pgTypeName));
+
+			UpdateRegisteredFieldTypeForAttribute(relationId, mapping->attnum, pgType);
 			continue;
 		}
 
-		Form_pg_attribute attr = TupleDescAttr(tupdesc, mappedAttnum - 1);
+		/* new field */
+		ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s ADD COLUMN %s %s",
+										 qualifiedName,
+										 quote_identifier(icebergField->name),
+										 pgTypeName));
 
-		if (attr->attisdropped)
-		{
-			RelationClose(rel);
-			continue;
-		}
+		AttrNumber	newAttNum = get_attnum(relationId, icebergField->name);
 
-		char	   *colName = pstrdup(NameStr(attr->attname));
+		if (newAttNum == InvalidAttrNumber)
+			elog(ERROR, "could not find column \"%s\" after ADD COLUMN",
+				 icebergField->name);
 
-		RelationClose(rel);
+		int			parentFieldId = INVALID_FIELD_ID;
 
-		/* execute ALTER FOREIGN TABLE ... DROP COLUMN via SPI */
-		StringInfo	dropCmd = makeStringInfo();
-
-		appendStringInfo(dropCmd,
-						 "ALTER FOREIGN TABLE %s.%s DROP COLUMN %s",
-						 quote_identifier(schemaName),
-						 quote_identifier(tableName),
-						 quote_identifier(colName));
-
-		ExecuteAlterTableViaSPI(dropCmd->data);
-
-		/*
-		 * We keep the field_id_mapping row: it is needed for reading older
-		 * data files that reference this field.
-		 */
+		RegisterIcebergColumnMapping(relationId, icebergField->type,
+									 newAttNum, parentFieldId, pgType,
+									 icebergField->id, icebergField->writeDefault,
+									 icebergField->initialDefault, NIL);
 	}
 }
 
@@ -493,10 +499,14 @@ SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
  * set of files referenced by ANY snapshot in the new metadata using
  * IcebergFindAllReferencedFiles, and only queue old cataloged files that
  * are absent from that set.
+ *
+ * The catalog changes are applied directly rather than through
+ * ApplyMetadataChanges, so pg_lake does not write metadata of its own for
+ * this table at commit.
  */
 static void
 SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
-						  const char *metadataLocation)
+						  const char *metadataLocation, const char *tableLocation)
 {
 	TimestampTz orphanedAt = GetCurrentTransactionStartTimestamp();
 
@@ -516,8 +526,7 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 	/*
 	 * Copy the paths into the current memory context. The TableDataFile
 	 * structs returned by GetTableDataFilesFromCatalog point into SPI memory
-	 * that gets freed when a later SPI_connect/SPI_finish cycle runs (e.g.
-	 * RemoveAllDataFilesFromPgLakeCatalogFromTable below).
+	 * that gets freed when a later SPI_connect/SPI_finish cycle runs.
 	 */
 	List	   *oldFilePaths = NIL;
 	ListCell   *cfCell = NULL;
@@ -551,11 +560,16 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 	}
 
 	/* clear all existing data files from the catalog */
-	RemoveAllDataFilesFromPgLakeCatalogFromTable(relationId);
+	TableMetadataOperation *removeAllOperation = palloc0(sizeof(TableMetadataOperation));
+
+	removeAllOperation->type = DATA_FILE_REMOVE_ALL;
+	ApplyDataFileCatalogChanges(relationId, list_make1(removeAllOperation));
 
 	/* repopulate the catalog from the current snapshot, if any */
 	bool		missingOk = true;
 	IcebergSnapshot *currentSnapshot = GetCurrentSnapshot(metadata, missingOk);
+	HTAB	   *dataFilePaths = CreateFilesHash();
+	List	   *deleteFilePaths = NIL;
 
 	if (currentSnapshot != NULL)
 	{
@@ -567,6 +581,8 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 		foreach(manifestCell, manifests)
 		{
 			IcebergManifest *manifest = lfirst(manifestCell);
+
+			ErrorIfOutsideTableLocation(manifest->manifest_path, tableLocation);
 
 			List	   *manifestEntries =
 				FetchManifestEntriesFromManifest(manifest,
@@ -580,6 +596,18 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 
 				DataFile   *dataFile = &entry->data_file;
 
+				ErrorIfOutsideTableLocation(dataFile->file_path, tableLocation);
+
+				/* deletion vectors are Puffin files, which we cannot read */
+				if (dataFile->file_format == NULL ||
+					pg_strcasecmp(dataFile->file_format, "parquet") != 0)
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("file \"%s\" has unsupported format \"%s\"",
+									dataFile->file_path,
+									dataFile->file_format ? dataFile->file_format : "(null)"),
+							 errdetail("Only Parquet data and position delete files are supported.")));
+
 				/* map Iceberg content type to pg_lake content type */
 				DataFileContent content;
 
@@ -587,16 +615,17 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 				{
 					case ICEBERG_DATA_FILE_CONTENT_DATA:
 						content = CONTENT_DATA;
+						AppendFileToHash(dataFile->file_path, dataFilePaths);
 						break;
 					case ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES:
 						content = CONTENT_POSITION_DELETES;
-						break;
-					case ICEBERG_DATA_FILE_CONTENT_EQUALITY_DELETES:
-						content = CONTENT_EQUALITY_DELETES;
+						deleteFilePaths = lappend(deleteFilePaths,
+												  pstrdup(dataFile->file_path));
 						break;
 					default:
-						elog(ERROR, "unsupported data file content type: %d",
-							 dataFile->content);
+						ereport(ERROR,
+								(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+								 errmsg("equality delete files are not supported in external writes")));
 				}
 
 				int64		fileId = AddDataFileToTable(relationId,
@@ -617,9 +646,7 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 												  columnStatsList);
 				}
 
-				if (dataFile->partition.fields_length > 0 &&
-					(content == CONTENT_DATA ||
-					 content == CONTENT_POSITION_DELETES))
+				if (dataFile->partition.fields_length > 0)
 				{
 					InsertDataFilePartitionValues(relationId,
 												  manifest->partition_spec_id,
@@ -629,6 +656,8 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 			}
 		}
 	}
+
+	SyncPositionDeleteMappings(relationId, deleteFilePaths, dataFilePaths);
 
 	/*
 	 * Queue any previously-cataloged file that is not referenced by any
@@ -647,6 +676,80 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 		if (!found)
 			InsertDeletionQueueRecord(oldPath, relationId, orphanedAt);
 	}
+}
+
+
+/*
+ * SyncPositionDeleteMappings reads the position delete files to find which
+ * data files they delete from, since reads only apply a delete file to the
+ * data files it is mapped to. It also sets the deleted row count of each data
+ * file.
+ */
+static void
+SyncPositionDeleteMappings(Oid relationId, List *deleteFilePaths, HTAB *dataFilePaths)
+{
+	if (deleteFilePaths == NIL)
+		return;
+
+	char	   *query =
+		psprintf("SELECT filename, file_path, "
+				 "sum(count(*)) OVER (PARTITION BY file_path) "
+				 "FROM read_parquet(%s, filename=true) "
+				 "GROUP BY filename, file_path ORDER BY file_path",
+				 PathListToString(deleteFilePaths));
+
+	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(pgDuckConn, query);
+
+	CheckPGDuckResult(pgDuckConn, result);
+
+	List	   *operations = NIL;
+
+	/* make sure we PQclear the result */
+	PG_TRY();
+	{
+		char	   *previousDataFilePath = NULL;
+
+		for (int rowIndex = 0; rowIndex < PQntuples(result); rowIndex++)
+		{
+			char	   *deleteFilePath = pstrdup(PQgetvalue(result, rowIndex, 0));
+			char	   *dataFilePath = pstrdup(PQgetvalue(result, rowIndex, 1));
+			bool		found = false;
+
+			/* rows of data files that are no longer in the table */
+			PathHashSearch(dataFilePaths, dataFilePath, HASH_FIND, &found);
+			if (!found)
+				continue;
+
+			operations = lappend(operations,
+								 AddDeleteMappingOperation(deleteFilePath, dataFilePath));
+
+			if (previousDataFilePath == NULL ||
+				strcmp(previousDataFilePath, dataFilePath) != 0)
+			{
+				int64		deletedRowCount =
+					pg_strtoint64(PQgetvalue(result, rowIndex, 2));
+
+				operations = lappend(operations,
+									 UpdateDeletedRowCountOperation(dataFilePath,
+																	deletedRowCount));
+			}
+
+			previousDataFilePath = dataFilePath;
+		}
+
+		PQclear(result);
+	}
+	PG_CATCH();
+	{
+		PQclear(result);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
+	ReleasePGDuckConnection(pgDuckConn);
+
+	ApplyDataFileCatalogChanges(relationId, operations);
 }
 
 

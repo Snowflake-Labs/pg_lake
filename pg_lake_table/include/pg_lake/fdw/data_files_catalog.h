@@ -65,7 +65,6 @@ bool		PartitionFieldsCatalogExists(void);
 
 /* functions to write to files catalog */
 extern PGDLLEXPORT void ApplyDataFileCatalogChanges(Oid relationId, List *metadataOperations);
-int64		GenerateDataFileId(void);
 int64		AddDataFileToTable(Oid relationId, const char *path, int64 rowCount,
 							   int64 fileSize, DataFileContent content, int64 rowIdStart);
 

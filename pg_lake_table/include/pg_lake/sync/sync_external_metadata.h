@@ -18,4 +18,5 @@
 #pragma once
 
 #include "postgres.h"
-#include "fmgr.h"
+
+extern void RegisterIcebergExternalWriteCallback(void);
