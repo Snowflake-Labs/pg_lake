@@ -29,12 +29,14 @@ static void SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats
 											 ColumnBound * *lowerBounds,
 											 size_t *nLowerBounds,
 											 ColumnBound * *upperBounds,
-											 size_t *nUpperBounds);
+											 size_t *nUpperBounds,
+											 ColumnStat * *nanValueCounts,
+											 size_t *nNanValueCounts);
 static ColumnBound * CreateColumnBoundForLeafField(LeafField * leafField, char *columnBoundText);
 
 /*
  * SetIcebergDataFileStats sets the record count, file size, lower and upper bounds
- * for the given data file stats.
+ * and NaN counts for the given data file stats.
  */
 void
 SetIcebergDataFileStats(const DataFileStats * dataFileStats,
@@ -43,25 +45,35 @@ SetIcebergDataFileStats(const DataFileStats * dataFileStats,
 						ColumnBound * *lowerBounds,
 						size_t *nLowerBounds,
 						ColumnBound * *upperBounds,
-						size_t *nUpperBounds)
+						size_t *nUpperBounds,
+						ColumnStat * *nanValueCounts,
+						size_t *nNanValueCounts)
 {
 	*recordCount = dataFileStats->rowCount;
 	*fileSizeInBytes = dataFileStats->fileSize;
 
-	SetColumnBoundsFromDataFileStats(dataFileStats, lowerBounds, nLowerBounds, upperBounds, nUpperBounds);
+	SetColumnBoundsFromDataFileStats(dataFileStats, lowerBounds, nLowerBounds,
+									 upperBounds, nUpperBounds,
+									 nanValueCounts, nNanValueCounts);
 }
 
 
 /*
  * SetColumnBoundsFromDataFileStats sets the lower and upper bounds for each leaf field
  * in the given data file stats.
+ *
+ * A float or double column only has bounds when the file has no NaN (see
+ * ExtractMinMaxForColumn), so it also gets a NaN count of zero. Readers need
+ * that count to trust its bounds, since Iceberg bounds leave out NaN.
  */
 static void
 SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 								 ColumnBound * *lowerBounds,
 								 size_t *nLowerBounds,
 								 ColumnBound * *upperBounds,
-								 size_t *nUpperBounds)
+								 size_t *nUpperBounds,
+								 ColumnStat * *nanValueCounts,
+								 size_t *nNanValueCounts)
 {
 	List	   *columnStats = dataFileStats->columnStats;
 
@@ -71,8 +83,11 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 	ColumnBound *uBounds = palloc0(sizeof(ColumnBound) * totalColumnStats);
 
+	ColumnStat *nanCounts = palloc0(sizeof(ColumnStat) * totalColumnStats);
+
 	int			totalLowerBounds = 0;
 	int			totalUpperBounds = 0;
+	int			totalNanCounts = 0;
 
 	for (int columnStatIdx = 0; columnStatIdx < totalColumnStats; columnStatIdx++)
 	{
@@ -116,6 +131,13 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 			uBounds[totalUpperBounds] = *upperBound;
 			totalUpperBounds++;
+
+			if (LeafFieldIsFloatingPoint(leafField))
+			{
+				nanCounts[totalNanCounts].column_id = leafField->fieldId;
+				nanCounts[totalNanCounts].value = 0;
+				totalNanCounts++;
+			}
 		}
 	}
 
@@ -124,6 +146,9 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 	*upperBounds = uBounds;
 	*nUpperBounds = totalUpperBounds;
+
+	*nanValueCounts = nanCounts;
+	*nNanValueCounts = totalNanCounts;
 }
 
 
