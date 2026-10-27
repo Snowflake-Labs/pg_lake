@@ -48,6 +48,41 @@ install:
 	cp polaris/runtime/admin/build/polaris-admin-$(JAR_VERSION)-runner.jar $(PG_BINDIR)/polaris-admin.jar && \
 	cp polaris/runtime/server/build/polaris-server-$(JAR_VERSION)-runner.jar $(PG_BINDIR)/polaris-server.jar
 
+# Lakekeeper, a second REST catalog for tests (#739). It is a single native
+# binary, so we install a pinned release instead of building it. GitHub
+# publishes no checksums for these assets; the SHA-256 values below were
+# computed from the v$(LAKEKEEPER_VERSION) release, so bump them together.
+LAKEKEEPER_VERSION = 0.14.2
+LAKEKEEPER_SHA256_x86_64-unknown-linux-gnu = e1eb2de75f95c1124f91ed32bfd14bcbddf906f91651bbd446ad9a0af99251b8
+LAKEKEEPER_SHA256_aarch64-unknown-linux-gnu = 501b946d53189ea75c8921f4d6b03501214ee830ec45a9fe25e32c826d1c6889
+LAKEKEEPER_SHA256_aarch64-apple-darwin = 427a06636f229841a4f5c13d30c4c41f160e426764c1fddaf7d8e89753211f07
+
+UNAME_S := $(shell uname -s)
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_S),Darwin)
+LAKEKEEPER_TARGET = aarch64-apple-darwin
+SHA256_CHECK = shasum -a 256 -c -
+else ifeq ($(UNAME_M),aarch64)
+LAKEKEEPER_TARGET = aarch64-unknown-linux-gnu
+else
+LAKEKEEPER_TARGET = x86_64-unknown-linux-gnu
+endif
+SHA256_CHECK ?= sha256sum -c -
+LAKEKEEPER_TARBALL = lakekeeper-$(LAKEKEEPER_TARGET).tar.gz
+LAKEKEEPER_URL = https://github.com/lakekeeper/lakekeeper/releases/download/v$(LAKEKEEPER_VERSION)/$(LAKEKEEPER_TARBALL)
+
+# The release binary is unstripped (~190MB); strip it on Linux, where it
+# travels in the CI build artifact.
+.PHONY: install-lakekeeper
+install-lakekeeper:
+	tmp=$$(mktemp -d) && \
+	curl -fsSL --retry 5 -o $$tmp/$(LAKEKEEPER_TARBALL) $(LAKEKEEPER_URL) && \
+	echo "$(LAKEKEEPER_SHA256_$(LAKEKEEPER_TARGET))  $$tmp/$(LAKEKEEPER_TARBALL)" | $(SHA256_CHECK) && \
+	tar -xzf $$tmp/$(LAKEKEEPER_TARBALL) -C $$tmp lakekeeper && \
+	if [ "$(UNAME_S)" = Linux ]; then strip $$tmp/lakekeeper; fi && \
+	install -m 755 $$tmp/lakekeeper $(PG_BINDIR)/lakekeeper && \
+	rm -rf $$tmp
+
 clean:
 	cd polaris && ./gradlew clean
 

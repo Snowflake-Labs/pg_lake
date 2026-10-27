@@ -84,6 +84,10 @@ runs:
       run: |
         chmod 755 /home/postgres/pgsql-${{ inputs.pg_version }}/bin/pgduck_server
         chmod 755 /home/postgres/pgsql-${{ inputs.pg_version }}/lib/*.so
+        # upgrade-from installs predate Lakekeeper, so it may be absent
+        if [ -f /home/postgres/pgsql-${{ inputs.pg_version }}/bin/lakekeeper ]; then
+          chmod 755 /home/postgres/pgsql-${{ inputs.pg_version }}/bin/lakekeeper
+        fi
 
         if [ ${{ inputs.upgrade }} == 'true' ]; then
           chmod 755 /home/postgres/pgsql-${{ inputs.from_pg_version }}/bin/pgduck_server
