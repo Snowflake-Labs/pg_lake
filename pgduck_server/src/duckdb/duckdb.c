@@ -156,6 +156,7 @@ static DuckDBStatus duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type d
 											 int row,
 											 ResponseFormat * responseFormat,
 											 StringInfo output);
+static DuckDBStatus result_row_too_large(void);
 static bool is_set_command(const char *command);
 static void append_escaped_csv(StringInfo buffer, char *value);
 static void append_completion_tag(char *buffer, duckdb_result duckResult, idx_t rowsReturned);
@@ -911,6 +912,26 @@ duckdb_vector_to_pg_wire(duckdb_vector vector, duckdb_type duckType,
 	if (status != DUCKDB_SUCCESS)
 		return status;
 
+	/*
+	 * The frontend enlargeStringInfo() calls exit() if the message buffer
+	 * would exceed MaxAllocSize, which would take down the server for every
+	 * client. Fail the query instead.
+	 */
+	size_t		maxAppendSize = responseFormat->isTransmit ?
+		MaxEscapedTextSize(toTextBuffer.buffer) :
+		strlen(toTextBuffer.buffer) + sizeof(int32);
+
+	if (!StringInfoHasRoomFor(output, maxAppendSize))
+	{
+		PGDUCK_SERVER_ERROR("result row exceeds the maximum message size of %zu bytes",
+							MAX_RESULT_BUFFER_SIZE - 1);
+
+		if (toTextBuffer.needsFree)
+			pg_free(toTextBuffer.buffer);
+
+		return DUCKDB_RESULT_TOO_LARGE_ERROR;
+	}
+
 	if (responseFormat->isTransmit)
 	{
 		append_escaped_csv(output, toTextBuffer.buffer);
@@ -970,14 +991,14 @@ duckdb_session_run_command(DuckDBSession * duckSession, const char *queryString,
 			 * server.
 			 */
 
-			PGDUCK_SERVER_ERROR("unrecoverable failure from duckdb; terminating: %s", duckdbError);
+			PGDUCK_SERVER_ERROR("unrecoverable failure from duckdb; terminating: %.4096s", duckdbError);
 			status = DUCKDB_FATAL_ERROR;
 		}
 		else
 		{
 			char		queryForLog[QUERY_LOG_BUF_SIZE];
 
-			PGDUCK_SERVER_WARN("query on duckdb failed: %s; query: %.500s",
+			PGDUCK_SERVER_WARN("query on duckdb failed: %.4096s; query: %.500s",
 							   duckdbError,
 							   QueryStringForLog(queryString, queryForLog,
 												 sizeof(queryForLog)));
@@ -1111,7 +1132,7 @@ duckdb_session_bind_varchar(DuckDBSession * duckSession,
 		if (errorMessage != NULL)
 			*errorMessage = pstrdup(duckdbError);
 
-		PGDUCK_SERVER_WARN("could not bind prepared statement: %s", duckdbError);
+		PGDUCK_SERVER_WARN("could not bind prepared statement: %.4096s", duckdbError);
 
 		return DUCKDB_QUERY_ERROR;
 	}
@@ -1149,7 +1170,7 @@ duckdb_session_execute_prepared(DuckDBSession * duckSession,
 			 * server.
 			 */
 
-			PGDUCK_SERVER_ERROR("unrecoverable failure from duckdb; terminating: %s", duckdbError);
+			PGDUCK_SERVER_ERROR("unrecoverable failure from duckdb; terminating: %.4096s", duckdbError);
 			status = DUCKDB_FATAL_ERROR;
 		}
 		else
@@ -1467,14 +1488,14 @@ process_and_send_data_chunks(DuckDBQueryResult * duckdb_query_result,
 					 * without restarting the whole server.
 					 */
 
-					PGDUCK_SERVER_ERROR("unrecoverable failure from duckdb; terminating: %s", duckdbError);
+					PGDUCK_SERVER_ERROR("unrecoverable failure from duckdb; terminating: %.4096s", duckdbError);
 					status = DUCKDB_FATAL_ERROR;
 				}
 				else
 				{
 					char		queryForLog[QUERY_LOG_BUF_SIZE];
 
-					PGDUCK_SERVER_WARN("query on duckdb failed during execution: %s; query: %.500s",
+					PGDUCK_SERVER_WARN("query on duckdb failed during execution: %.4096s; query: %.500s",
 									   duckdbError,
 									   QueryStringForLog(clientSession->pgSessionPreparedStmt.queryString,
 														 queryForLog, sizeof(queryForLog)));
@@ -1568,6 +1589,9 @@ process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf, PGSession * cli
 
 			if (isTransmit && columnIndex > 0)
 			{
+				if (!StringInfoHasRoomFor(buf, 1))
+					return result_row_too_large();
+
 				appendStringInfoCharMacro(buf, TRANSMIT_COLUMN_SEPARATOR_CHAR);
 			}
 
@@ -1578,6 +1602,9 @@ process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf, PGSession * cli
 			 */
 			if (validity != NULL && !duckdb_validity_row_is_valid(validity, rowInChunk))
 			{
+				if (!StringInfoHasRoomFor(buf, isTransmit ? strlen(TRANSMIT_NULL_STRING) : sizeof(int32)))
+					return result_row_too_large();
+
 				if (!isTransmit)
 				{
 					/* -1 indicates a NULL column value in PG protocol */
@@ -1591,7 +1618,13 @@ process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf, PGSession * cli
 				continue;
 			}
 
-			if (!IsOK(duckdb_vector_to_pg_wire(vector, duckType, logicalType, rowInChunk, responseFormat, buf)))
+			DuckDBStatus valueStatus = duckdb_vector_to_pg_wire(vector, duckType, logicalType,
+																rowInChunk, responseFormat, buf);
+
+			if (valueStatus == DUCKDB_RESULT_TOO_LARGE_ERROR)
+				return valueStatus;
+
+			if (!IsOK(valueStatus))
 			{
 				PGDUCK_SERVER_ERROR("could not convert column data type to PG wire format: %d", duckType);
 
@@ -1609,6 +1642,9 @@ process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf, PGSession * cli
 		}
 		else if (isTransmit)
 		{
+			if (!StringInfoHasRoomFor(buf, 1))
+				return result_row_too_large();
+
 			/* CSV end-of-line */
 			appendStringInfoCharMacro(buf, TRANSMIT_END_OF_LINE_CHAR);
 		}
@@ -1624,6 +1660,20 @@ process_data_chunk(duckdb_data_chunk chunk, StringInfoData *buf, PGSession * cli
 	}
 
 	return DUCKDB_SUCCESS;
+}
+
+
+/*
+ * result_row_too_large reports that a row's framing bytes would push the
+ * message past MAX_RESULT_BUFFER_SIZE, where enlargeStringInfo() would exit().
+ */
+static DuckDBStatus
+result_row_too_large(void)
+{
+	PGDUCK_SERVER_ERROR("result row exceeds the maximum message size of %zu bytes",
+						MAX_RESULT_BUFFER_SIZE - 1);
+
+	return DUCKDB_RESULT_TOO_LARGE_ERROR;
 }
 
 
