@@ -581,12 +581,16 @@ IcebergBinaryLengthIsValid(size_t binaryLen, Field * field, PGType pgType)
 
 
 /*
- * IcebergBinaryTimestampIsValid returns whether an 8-byte Iceberg timestamp or
- * timestamptz deserializes to a valid Postgres timestamp.
+ * IcebergBinaryTimestampIsValid returns whether an Iceberg timestamp or
+ * timestamptz deserializes to a valid Postgres timestamp. A value that is not
+ * 8 bytes long is not valid.
  */
 bool
-IcebergBinaryTimestampIsValid(const unsigned char *binaryValue)
+IcebergBinaryTimestampIsValid(const unsigned char *binaryValue, size_t binaryLen)
 {
+	if (binaryLen != sizeof(int64))
+		return false;
+
 	Timestamp	unixTimestamp = ReadLittleEndianInt64(binaryValue);
 
 	return UnixTimestampFitsPostgresEpoch(unixTimestamp) &&

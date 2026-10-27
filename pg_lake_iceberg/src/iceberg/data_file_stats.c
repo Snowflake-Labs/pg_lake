@@ -464,7 +464,7 @@ ColumnBoundText(ColumnBound * bound, LeafField * leafField)
 
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID:
-			if (!IcebergBinaryTimestampIsValid(bound->value))
+			if (!IcebergBinaryTimestampIsValid(bound->value, bound->value_length))
 				return NULL;
 			break;
 

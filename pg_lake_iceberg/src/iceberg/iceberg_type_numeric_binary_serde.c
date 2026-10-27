@@ -139,6 +139,7 @@ NumericBinaryToNumericStr(unsigned char *numericBinary, size_t binaryLen, PGType
 	int			precision;
 	int			scale;
 
+	/* only the scale is needed: numeric_in applies the column's precision */
 	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(pgType.postgresTypeMod,
 														 &precision, &scale);
 
