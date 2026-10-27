@@ -193,7 +193,7 @@ ErrorIfURLLeavesObjectStorage(const char *url, const char *referrerUrl)
 
 	ereport(ERROR,
 			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("pg_lake: Iceberg URL \"%s\" does not point to object storage", url),
+			 errmsg("pg_lake: Iceberg file URL \"%s\" does not point to object storage", url),
 			 referrerUrl != NULL ?
 			 errdetail("The URL is referenced by \"%s\".", referrerUrl) :
 			 errdetail("The URL was returned by the Iceberg catalog."),

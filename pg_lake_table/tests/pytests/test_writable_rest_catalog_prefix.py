@@ -607,7 +607,7 @@ def test_mixed_prefix_alter_rejected_at_statement_time(
                     "location": "http://127.0.0.1:1/staged",
                 }
             },
-            'Iceberg URL "http://127.0.0.1:1/staged" does not point to object storage',
+            'Iceberg file URL "http://127.0.0.1:1/staged" does not point to object storage',
         ),
         (
             200,

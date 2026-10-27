@@ -93,6 +93,10 @@ ParseIcebergTableMetadata(Jsonb *tableMetadataJson)
 /*
  * ParseIcebergTableMetadataReadFrom reads a metadata document that was read
  * from sourcePath, or that a catalog sent when sourcePath is NULL.
+ *
+ * Of the paths in the document, only the manifest lists are ever fetched, so
+ * only they are checked: pg_lake never reads the files that metadata-log,
+ * statistics or partition-statistics point to.
  */
 static IcebergTableMetadata *
 ParseIcebergTableMetadataReadFrom(Jsonb *tableMetadataJson, const char *sourcePath)

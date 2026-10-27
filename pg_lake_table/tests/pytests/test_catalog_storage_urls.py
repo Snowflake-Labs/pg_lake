@@ -316,11 +316,11 @@ def object_store_catalog(superuser_conn):
     [
         (
             "http://{host}/00001.metadata.json",
-            'Iceberg URL "http://{host}/00001.metadata.json" does not point to object storage',
+            'Iceberg file URL "http://{host}/00001.metadata.json" does not point to object storage',
         ),
         (
             "https://{host}/00001.metadata.json",
-            'Iceberg URL "https://{host}/00001.metadata.json" does not point to object storage',
+            'Iceberg file URL "https://{host}/00001.metadata.json" does not point to object storage',
         ),
         (
             "s3://{bucket}/00001.metadata.json"
@@ -356,7 +356,7 @@ def test_catalog_table_files_must_point_to_object_storage(
     url = f"http://{web_server.host}/{level}"
     load_table = _copy_table(s3, source_metadata, level, url)
     result = _attach_and_scan(superuser_conn, load_table, columns)
-    assert f'Iceberg URL "{url}" does not point to object storage' in str(
+    assert f'Iceberg file URL "{url}" does not point to object storage' in str(
         result
     ), result
     assert web_server.connections == 0
@@ -397,7 +397,7 @@ def test_object_store_catalog_metadata_location_must_be_object_storage(
         raise_error=False,
     )
     superuser_conn.rollback()
-    assert f'Iceberg URL "{location}" does not point to object storage' in str(
+    assert f'Iceberg file URL "{location}" does not point to object storage' in str(
         error
     ), error
     assert web_server.connections == 0
@@ -429,3 +429,63 @@ def test_table_named_by_web_url_may_point_to_web_server(
         superuser_conn.rollback()
     assert [row[0] for row in result] == [1, 2, 3]
     assert web_server.connections > 0
+
+
+def test_table_with_web_manifest_list_can_be_dropped(
+    superuser_conn, s3, with_default_location, web_server
+):
+    """A web manifest list in an old snapshot makes VACUUM and DROP TABLE warn
+    instead of fail, and VACUUM still removes the dropped table's files."""
+    run_command(
+        "CREATE TABLE catalog_urls_drop (id bigint) USING iceberg", superuser_conn
+    )
+    for value in (1, 2):
+        run_command(f"INSERT INTO catalog_urls_drop VALUES ({value})", superuser_conn)
+        superuser_conn.commit()
+    metadata_location = run_query(
+        "SELECT metadata_location FROM iceberg_tables "
+        "WHERE table_name = 'catalog_urls_drop'",
+        superuser_conn,
+    )[0][0]
+    metadata = json.loads(_read(s3, metadata_location))
+    old_snapshot = next(
+        snapshot
+        for snapshot in metadata["snapshots"]
+        if snapshot["snapshot-id"] != metadata["current-snapshot-id"]
+    )
+    url = f"http://{web_server.host}/snap.avro"
+    old_snapshot["manifest-list"] = url
+    location = metadata["location"].rstrip("/")
+    # A new file, since pgduck_server caches the metadata files it writes.
+    metadata_location = f"{location}/metadata/{uuid.uuid4()}.metadata.json"
+    _write(s3, metadata_location, json.dumps(metadata).encode())
+    run_command(
+        f"UPDATE lake_iceberg.tables_internal "
+        f"SET metadata_location = '{metadata_location}' "
+        f"WHERE table_name = 'catalog_urls_drop'::regclass",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command_outside_tx(["VACUUM catalog_urls_drop"])
+
+    superuser_conn.notices.clear()
+    run_command("DROP TABLE catalog_urls_drop", superuser_conn)
+    superuser_conn.commit()
+    error = f'Iceberg file URL "{url}" does not point to object storage'
+    assert any(
+        error in notice for notice in superuser_conn.notices
+    ), superuser_conn.notices
+
+    run_command_outside_tx(
+        [
+            "SET pg_lake_engine.orphaned_file_retention_period = 0",
+            "SET pg_lake_engine.vacuum_file_remove_retry_interval = 0",
+            "VACUUM (ICEBERG)",
+        ]
+    )
+    remaining = run_query(
+        f"SELECT count(*) FROM lake_file.list('{location}/**')", superuser_conn
+    )[0][0]
+    assert remaining == 0
+    assert web_server.connections == 0
