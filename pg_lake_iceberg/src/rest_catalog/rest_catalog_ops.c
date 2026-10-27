@@ -745,6 +745,8 @@ LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 		ereport(ERROR,
 				(errmsg("key \"metadata-location\" missing in json response")));
 
+	ErrorIfURLLeavesObjectStorage(result.metadataLocation, NULL);
+
 	/*
 	 * A loadTable response carries the table's whole metadata document, and
 	 * both the schema and a credential are read out of it a field at a time,
