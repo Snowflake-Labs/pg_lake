@@ -191,6 +191,8 @@ installcheck-pg_extension_updater:
 	# no tests yet
 
 check-duckdb_pglake:
+	# test jobs check out the repo without submodules
+	git submodule update --init --depth 1 duckdb_pglake/duckdb
 	git -C duckdb_pglake/duckdb checkout -f .
 	rm -f duckdb_pglake/duckdb/test/common/test_brotli_invalid_block_switch.cpp
 	git -C duckdb_pglake/duckdb apply --ignore-whitespace ../patches/duckdb/brotli-1.1.1-block-switch-cve.patch
