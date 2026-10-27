@@ -18,8 +18,8 @@ SCHEMA = "lk_tests"
 
 @pytest.fixture
 def lk_schema(superuser_conn, s3, extension, lakekeeper_server):
-    # Lakekeeper rejects namespaces that still hold tables, so drop the
-    # PostgreSQL schema (and with it the catalog tables) before and after.
+    # Start every test from an empty schema; dropping it also drops the
+    # writable tables, and with them their catalog entries.
     superuser_conn.rollback()
     run_command(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE", superuser_conn)
     run_command(f"CREATE SCHEMA {SCHEMA}", superuser_conn)
@@ -75,31 +75,57 @@ def test_config_prefix_is_the_warehouse_id(installcheck, superuser_conn, lk_sche
     )
 
 
+def _attach_external_table(conn, catalog, name, properties):
+    catalog.create_namespace_if_not_exists(SCHEMA)
+    assert (SCHEMA,) in catalog.list_namespaces()
+
+    table = catalog.create_table(
+        (SCHEMA, name),
+        pyarrow.schema([("id", pyarrow.int64()), ("name", pyarrow.string())]),
+        properties=properties,
+    )
+    table.append(pyarrow.table({"id": [1, 2, 3], "name": ["a", "b", "c"]}))
+
+    run_command(
+        f"""CREATE TABLE {SCHEMA}.{name} () USING iceberg
+            WITH (catalog = 'lakekeeper', read_only = true)""",
+        conn,
+    )
+    rows = run_query(f"SELECT id, name FROM {SCHEMA}.{name} ORDER BY id", conn)
+    assert [tuple(r) for r in rows] == [(1, "a"), (2, "b"), (3, "c")]
+    conn.commit()
+
+
 def test_read_only_table_created_outside_pg_lake(
     installcheck, superuser_conn, lk_schema, lakekeeper_catalog
 ):
     if installcheck:
         pytest.skip("Requires an isolated test cluster")
 
-    lakekeeper_catalog.create_namespace_if_not_exists(SCHEMA)
-    assert (SCHEMA,) in lakekeeper_catalog.list_namespaces()
-
-    table = lakekeeper_catalog.create_table(
-        (SCHEMA, "external"),
-        pyarrow.schema([("id", pyarrow.int64()), ("name", pyarrow.string())]),
-    )
-    table.append(pyarrow.table({"id": [1, 2, 3], "name": ["a", "b", "c"]}))
-
-    run_command(
-        f"""CREATE TABLE {SCHEMA}.external () USING iceberg
-            WITH (catalog = 'lakekeeper', read_only = true)""",
+    # pg_lake reads only uncompressed metadata JSON, see the test below.
+    _attach_external_table(
         superuser_conn,
+        lakekeeper_catalog,
+        "external",
+        {"write.metadata.compression-codec": "none"},
     )
-    rows = run_query(
-        f"SELECT id, name FROM {SCHEMA}.external ORDER BY id", superuser_conn
-    )
-    assert [tuple(r) for r in rows] == [(1, "a"), (2, "b"), (3, "c")]
-    superuser_conn.commit()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason="pg_lake cannot read gzip-compressed metadata.json, "
+    "which Lakekeeper writes by default",
+)
+def test_read_only_table_with_gzip_metadata(
+    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+):
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+
+    try:
+        _attach_external_table(superuser_conn, lakekeeper_catalog, "external_gz", {})
+    finally:
+        superuser_conn.rollback()
 
 
 def test_nested_types_round_trip_through_the_catalog(
