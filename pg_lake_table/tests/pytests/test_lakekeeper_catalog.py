@@ -143,7 +143,7 @@ def test_read_only_table_with_gzip_metadata_is_not_readable_yet(
     installcheck, superuser_conn, lk_schema, lakekeeper_catalog
 ):
     """Lakekeeper writes gzip-compressed metadata JSON by default, which
-    pg_lake cannot read yet. When it can, this test fails: replace the
+    pg_lake cannot read yet (#823). When it can, this test fails: replace the
     pytest.raises with the read-back assertion from the test above."""
     if installcheck:
         pytest.skip("Requires an isolated test cluster")
