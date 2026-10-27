@@ -30,6 +30,7 @@
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/permissions/roles.h"
+#include "pg_lake/test/fetch_parquet_stats.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
@@ -169,8 +170,9 @@ GenerateMetadataOperationList(Oid relationId, List *fileList, char *fileType)
 			 * would in its manifest entry, so pruning can use them.
 			 */
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
-			DataFileStats *dataFileStats = CreateDataFileStatsForDataFile(filePath, rowCount, 0,
-																		  leafFields);
+			DataFileStats *dataFileStats = CreateDataFileStatsForDataFile(filePath, rowCount, 0);
+
+			dataFileStats->columnStats = GetRemoteParquetColumnStats(filePath, leafFields);
 
 			/* we don't support partitioned writes, and default spec id is 0 */
 			int32		partitionSpecId = 0;
