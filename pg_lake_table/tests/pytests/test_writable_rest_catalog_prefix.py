@@ -41,7 +41,9 @@ class _MockCatalog:
         stage_body=None,
         honor_location=False,
         namespace_location=None,
+        load_table=None,
     ):
+        self.load_table = load_table
         self.stage_status = stage_status
         self.stage_body = stage_body
         self.honor_location = honor_location
@@ -111,6 +113,12 @@ class _MockCatalog:
                             },
                         )
                     return self._reply(200, {})
+                if (
+                    self.command == "GET"
+                    and "/tables/" in path
+                    and mock.load_table is not None
+                ):
+                    return self._reply(200, mock.load_table)
                 return self._reply(404, {"error": {"message": "not mocked"}})
 
             do_GET = _handle
@@ -821,3 +829,82 @@ def test_explicit_location_is_requested_and_kept(
     )
     assert stage["location"] == requested
     assert _table_option(superuser_conn, "explicit", "location") == requested
+
+
+def _load_table_response(table_uuid, location):
+    """A loadTable answer for an empty table with one int column `id`."""
+    return {
+        "metadata-location": f"s3://{TEST_BUCKET}/lt/{table_uuid}/00000.metadata.json",
+        "metadata": {
+            "format-version": 2,
+            "table-uuid": table_uuid,
+            "location": location,
+            "last-sequence-number": 0,
+            "last-updated-ms": 1,
+            "last-column-id": 1,
+            "current-schema-id": 0,
+            "schemas": [
+                {
+                    "type": "struct",
+                    "schema-id": 0,
+                    "fields": [
+                        {"id": 1, "name": "id", "type": "int", "required": False}
+                    ],
+                }
+            ],
+            "default-spec-id": 0,
+            "partition-specs": [{"spec-id": 0, "fields": []}],
+            "last-partition-id": 999,
+            "default-sort-order-id": 0,
+            "sort-orders": [{"order-id": 0, "fields": []}],
+            "snapshots": [],
+            "snapshot-log": [],
+            "metadata-log": [],
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "location,message",
+    [
+        (
+            "http://127.0.0.1:1/loaded",
+            'Iceberg file URL "http://127.0.0.1:1/loaded" does not point to object storage',
+        ),
+        (
+            f"s3://{TEST_BUCKET}/loaded?s3_endpoint=127.0.0.1:1",
+            'query parameter "s3_endpoint" is not permitted',
+        ),
+        (
+            "abfss://container@127.0.0.1:1/loaded",
+            'Azure storage host "127.0.0.1:1" is not permitted',
+        ),
+    ],
+)
+def test_loaded_table_location_must_be_object_storage(
+    installcheck, superuser_conn, writable_schema, mock_catalog, location, message
+):
+    """Writes to a writable REST table go under the location in the metadata
+    the catalog loads, so a catalog must not steer them to another host."""
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+    table_uuid = str(uuid.uuid4())
+    mock = mock_catalog(load_table=_load_table_response(table_uuid, location))
+    writable_schema.append("wp_bad_load")
+    _create_server(superuser_conn, "wp_bad_load", mock.endpoint, "first")
+    run_command(
+        f"CREATE TABLE {SCHEMA}.bad_load (id int) USING iceberg WITH (catalog='wp_bad_load')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # Metadata changes are applied, and the manifests written, at commit.
+    run_command(f"INSERT INTO {SCHEMA}.bad_load VALUES (1)", superuser_conn)
+    with pytest.raises(psycopg2.Error) as err:
+        superuser_conn.commit()
+    assert message in str(err.value), err.value
+    superuser_conn.rollback()
+
+    mock.load_table = None
+    run_command(f"DROP TABLE {SCHEMA}.bad_load", superuser_conn)
+    superuser_conn.commit()
