@@ -39,6 +39,11 @@ def double_bound(value):
     return struct.pack("<d", value)
 
 
+def decimal_bound(unscaled, length=16):
+    """A decimal bound: the unscaled value as big-endian two's complement."""
+    return unscaled.to_bytes(length, "big", signed=True)
+
+
 def scanned_files(pg_conn, where, table="equality_test"):
     """(data files scanned, rows returned) for a filter, with and without pushdown.
 
@@ -202,6 +207,62 @@ def test_out_of_range_bounds(
     assert scanned_files(pg_conn, f"v = '{value}'") == ("1", 1)
     assert scanned_files(pg_conn, f"v < '{value}'") == ("1", 0)
     assert scanned_files(pg_conn, f"v > '{value}'") == ("1", 0)
+
+
+@pytest.mark.parametrize(
+    "iceberg_type,lower,upper,where,expected",
+    [
+        # 16 bytes of 0x01 do not fit decimal(9,2): unprunable, not an error
+        ("decimal(9,2)", b"\x01" * 16, b"\x01" * 16, "v > 5", ("1", 0)),
+        ("decimal(9,2)", b"\x01" * 16, b"\x01" * 16, "v = 1.50", ("1", 1)),
+        ("decimal(9,2)", decimal_bound(1), b"\x01" * 16, "v < 0", ("1", 0)),
+        # all 0xFF is -0.01, sign-extended from any length
+        ("decimal(9,2)", b"\xff" * 16, decimal_bound(200), "v < -1", ("0", 0)),
+        ("decimal(9,2)", b"\xff", decimal_bound(200), "v > 2", ("0", 0)),
+        ("decimal(9,2)", b"\xff", decimal_bound(200), "v = 1.50", ("1", 1)),
+        # minimal-length negative bound: 0x80 is -1.28
+        ("decimal(9,2)", b"\x80", b"\x00\x96", "v < -1.28", ("0", 0)),
+        ("decimal(9,2)", b"\x80", b"\x00\x96", "v > 1.50", ("0", 0)),
+        ("decimal(9,2)", b"\x80", b"\x00\x96", "v = 1.50", ("1", 1)),
+        # the extremes of decimal(38,2)
+        (
+            "decimal(38,2)",
+            decimal_bound(-(10**38 - 1)),
+            decimal_bound(10**38 - 1),
+            "v > CAST(1e30 AS numeric(38, 2))",
+            ("1", 0),
+        ),
+        (
+            "decimal(38,2)",
+            decimal_bound(-(10**38 - 1)),
+            decimal_bound(10**38 - 1),
+            "v = 1.50",
+            ("1", 1),
+        ),
+        ("decimal(38,2)", decimal_bound(-150), decimal_bound(150), "v > 2", ("0", 0)),
+        # past the precision of decimal(38,2)
+        (
+            "decimal(38,2)",
+            decimal_bound(-(10**38)),
+            decimal_bound(150),
+            "v < 0",
+            ("1", 0),
+        ),
+    ],
+)
+def test_decimal_bounds(
+    tmp_path, s3, pg_conn, extension, iceberg_type, lower, upper, where, expected
+):
+    """
+    Decimal bounds are two's complement of any length up to 16 bytes. One that
+    does not fit the precision of the column is skipped instead of failing the
+    query.
+    """
+    table = one_column_table(
+        tmp_path, s3, iceberg_type, [(1, Decimal("1.50"))], lower, upper
+    )
+    attach(pg_conn, table)
+    assert scanned_files(pg_conn, where) == expected
 
 
 @pytest.mark.parametrize("nan_count", [None, 1])

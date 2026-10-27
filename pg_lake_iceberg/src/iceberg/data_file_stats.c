@@ -23,6 +23,7 @@
 #include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
+#include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
 #include "pg_lake/parquet/leaf_field.h"
 
 #include <math.h>
@@ -381,8 +382,21 @@ ColumnBoundText(ColumnBound * bound, LeafField * leafField)
 		 !pg_verifymbstr((char *) bound->value, bound->value_length, true)))
 		return NULL;
 
-	Datum		boundDatum = PGIcebergBinaryDeserialize(bound->value, bound->value_length,
-														leafField->field, pgType);
+	Datum		boundDatum;
+
+	/*
+	 * A decimal bound that does not fit the precision of the column would
+	 * fail the query while deserializing.
+	 */
+	if (typeOid == NUMERICOID)
+	{
+		if (!PGNumericIcebergBinaryDeserializeSafe(bound->value, bound->value_length,
+												   pgType, &boundDatum))
+			return NULL;
+	}
+	else
+		boundDatum = PGIcebergBinaryDeserialize(bound->value, bound->value_length,
+												leafField->field, pgType);
 
 	switch (typeOid)
 	{

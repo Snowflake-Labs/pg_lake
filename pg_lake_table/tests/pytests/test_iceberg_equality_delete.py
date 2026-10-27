@@ -43,9 +43,11 @@ ARROW_TYPES = {
     "float": pa.float32(),
     "boolean": pa.bool_(),
     "timestamp": pa.timestamp("us"),
+    "timestamptz": pa.timestamp("us", tz="UTC"),
     "time": pa.time64("us"),
     "decimal(9,2)": pa.decimal128(9, 2),
     "decimal(12,2)": pa.decimal128(12, 2),
+    "decimal(38,2)": pa.decimal128(38, 2),
     "uuid": pa.uuid(),
 }
 

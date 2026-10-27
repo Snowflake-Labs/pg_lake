@@ -16,6 +16,7 @@
  */
 
 #include "postgres.h"
+#include "nodes/miscnodes.h"
 #include "utils/builtins.h"
 #include "utils/numeric.h"
 
@@ -28,6 +29,7 @@ static unsigned char *NumericStrToBigEndianBinary(const char *numericStr);
 static char *BigEndianBinaryToNumericStr(unsigned char *numericBinary, int scale, bool isNegative);
 static char *NormalizeNumericStr(const char *numericStr, int targetScale);
 static void TwosComplement(unsigned char *numericBinary);
+static char *NumericBinaryToNumericStr(unsigned char *numericBinary, size_t binaryLen, PGType pgType);
 static unsigned char *StripLeadingBytes(const unsigned char *binaryValue, size_t *binaryLen, bool isNegative);
 static unsigned char *SignExtendNumericBinary(const unsigned char *numericBinary, size_t binaryLen);
 
@@ -84,12 +86,6 @@ PGNumericIcebergBinarySerialize(Datum numericDatum, int icebergScale,
 Datum
 PGNumericIcebergBinaryDeserialize(unsigned char *numericBinary, size_t binaryLen, PGType pgType)
 {
-	int			precision;
-	int			scale;
-
-	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(pgType.postgresTypeMod,
-														 &precision, &scale);
-
 	/*
 	 * Iceberg stores a decimal as the minimum number of two's complement
 	 * bytes, so any length up to the 16 bytes of a decimal(38,s) is valid.
@@ -103,6 +99,49 @@ PGNumericIcebergBinaryDeserialize(unsigned char *numericBinary, size_t binaryLen
 				 errmsg("Iceberg decimal has invalid serialized length %zu", binaryLen),
 				 errdetail("Expected 1 to 16 bytes.")));
 
+	char	   *numericStr = NumericBinaryToNumericStr(numericBinary, binaryLen, pgType);
+
+	return DirectFunctionCall3(numeric_in, CStringGetDatum(numericStr),
+							   ObjectIdGetDatum(InvalidOid),
+							   Int32GetDatum(pgType.postgresTypeMod));
+}
+
+
+/*
+ * PGNumericIcebergBinaryDeserializeSafe is PGNumericIcebergBinaryDeserialize
+ * for a value we did not write: it returns false instead of raising an error
+ * when the value has an invalid length or does not fit the precision of the
+ * type.
+ */
+bool
+PGNumericIcebergBinaryDeserializeSafe(unsigned char *numericBinary, size_t binaryLen,
+									  PGType pgType, Datum *result)
+{
+	if (binaryLen == 0 || binaryLen > 16)
+		return false;
+
+	char	   *numericStr = NumericBinaryToNumericStr(numericBinary, binaryLen, pgType);
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+
+	return DirectInputFunctionCallSafe(numeric_in, numericStr, InvalidOid,
+									   pgType.postgresTypeMod,
+									   (Node *) &escontext, result);
+}
+
+
+/*
+ * NumericBinaryToNumericStr converts a 1 to 16 byte big endian two's complement
+ * unscaled value to a numeric string with the scale of the type.
+ */
+static char *
+NumericBinaryToNumericStr(unsigned char *numericBinary, size_t binaryLen, PGType pgType)
+{
+	int			precision;
+	int			scale;
+
+	GetDuckdbAdjustedPrecisionAndScaleFromNumericTypeMod(pgType.postgresTypeMod,
+														 &precision, &scale);
+
 	bool		isNegative = (numericBinary[0] & 0x80) != 0;
 
 	unsigned char *adjustedNumericBinary = SignExtendNumericBinary(numericBinary, binaryLen);
@@ -112,11 +151,7 @@ PGNumericIcebergBinaryDeserialize(unsigned char *numericBinary, size_t binaryLen
 		TwosComplement(adjustedNumericBinary);
 	}
 
-	char	   *numericStr = BigEndianBinaryToNumericStr(adjustedNumericBinary, scale, isNegative);
-
-	return DirectFunctionCall3(numeric_in, CStringGetDatum(numericStr),
-							   ObjectIdGetDatum(InvalidOid),
-							   Int32GetDatum(pgType.postgresTypeMod));
+	return BigEndianBinaryToNumericStr(adjustedNumericBinary, scale, isNegative);
 }
 
 
