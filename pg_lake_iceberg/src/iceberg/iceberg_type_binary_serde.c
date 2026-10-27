@@ -31,6 +31,7 @@
 #include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
 #include "pg_lake/iceberg/utils.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/util/temporal_utils.h"
 #include "pg_lake/util/timetz.h"
 
 #include "port/pg_bswap.h"
@@ -580,15 +581,28 @@ IcebergBinaryLengthIsValid(size_t binaryLen, Field * field, PGType pgType)
 
 
 /*
+ * IcebergBinaryTimestampIsValid returns whether an 8-byte Iceberg timestamp or
+ * timestamptz deserializes to a valid Postgres timestamp.
+ */
+bool
+IcebergBinaryTimestampIsValid(const unsigned char *binaryValue)
+{
+	Timestamp	unixTimestamp = ReadLittleEndianInt64(binaryValue);
+
+	return UnixTimestampFitsPostgresEpoch(unixTimestamp) &&
+		IS_VALID_TIMESTAMP(AdjustTimestampFromUnixToPostgres(unixTimestamp));
+}
+
+
+/*
  * ErrorIfUnexpectedBinaryLength rejects a fixed-width value that is not exactly
- * as wide as its type. See IcebergBinaryLengthIsValid.
+ * as wide as its type. See IcebergBinaryLengthIsValid. Decimals are not in
+ * FixedWidthBinaryLengths, and their deserializer reports an invalid length.
  */
 static void
 ErrorIfUnexpectedBinaryLength(size_t binaryLen, Field * field, PGType pgType)
 {
-	/* decimals report their own length error */
-	if (pgType.postgresTypeOid == NUMERICOID ||
-		IcebergBinaryLengthIsValid(binaryLen, field, pgType))
+	if (IcebergBinaryLengthIsValid(binaryLen, field, pgType))
 		return;
 
 	for (int i = 0; i < lengthof(FixedWidthBinaryLengths); i++)

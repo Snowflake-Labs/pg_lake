@@ -12,7 +12,7 @@ well as on the files scanned.
 
 import struct
 import uuid
-from datetime import date, datetime, time as daytime
+from datetime import date, datetime, time as daytime, timezone
 from decimal import Decimal
 
 import pytest
@@ -147,6 +147,7 @@ def test_malformed_bounds_are_ignored(
         ("date", 8),
         ("time", 4),
         ("timestamp", 4),
+        ("timestamptz", 4),
         ("uuid", 15),
         ("decimal(9,2)", 17),
     ],
@@ -163,6 +164,7 @@ def test_wrong_bound_length_per_type(
         "date": date(2026, 1, 1),
         "time": daytime(12, 0),
         "timestamp": datetime(2026, 1, 1),
+        "timestamptz": datetime(2026, 1, 1, tzinfo=timezone.utc),
         "uuid": uuid.UUID(int=1).bytes,
         "decimal(9,2)": Decimal("1.50"),
     }

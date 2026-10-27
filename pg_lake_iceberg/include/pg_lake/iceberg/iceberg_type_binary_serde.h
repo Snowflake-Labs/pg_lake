@@ -25,3 +25,4 @@ extern PGDLLEXPORT unsigned char *PGIcebergBinarySerializeBoundValue(Datum datum
 extern PGDLLEXPORT unsigned char *PGIcebergBinarySerializePartitionFieldValue(Datum datum, Field * field, PGType pgType, size_t *binaryLen);
 extern PGDLLEXPORT Datum PGIcebergBinaryDeserialize(unsigned char *binaryVal, size_t binaryLen, Field * field, PGType pgType);
 extern PGDLLEXPORT bool IcebergBinaryLengthIsValid(size_t binaryLen, Field * field, PGType pgType);
+extern PGDLLEXPORT bool IcebergBinaryTimestampIsValid(const unsigned char *binaryValue);

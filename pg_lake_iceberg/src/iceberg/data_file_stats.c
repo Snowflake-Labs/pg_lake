@@ -438,24 +438,9 @@ ColumnBoundText(ColumnBound * bound, LeafField * leafField)
 
 		case TIMESTAMPOID:
 		case TIMESTAMPTZOID:
-			{
-				/*
-				 * Moving an Iceberg timestamp to the Postgres epoch wraps
-				 * around for the earliest ones, and the result can look like
-				 * a valid far-future timestamp, so check the value before the
-				 * shift too.
-				 */
-				int64		unixMicros = 0;
-
-				for (int byteIndex = sizeof(int64) - 1; byteIndex >= 0; byteIndex--)
-					unixMicros = (int64) (((uint64) unixMicros << 8) | bound->value[byteIndex]);
-
-				if (unixMicros < PG_INT64_MIN +
-					(int64) (POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE) * USECS_PER_DAY ||
-					!IS_VALID_TIMESTAMP(DatumGetTimestamp(boundDatum)))
-					return NULL;
-				break;
-			}
+			if (!IcebergBinaryTimestampIsValid(bound->value))
+				return NULL;
+			break;
 
 		case TIMEOID:
 			if (DatumGetTimeADT(boundDatum) < 0 ||
