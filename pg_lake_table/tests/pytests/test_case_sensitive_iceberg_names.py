@@ -53,7 +53,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        assert result == [(1, 100, 7), (1, 100, 7)]
+        assert result == [[1, 100, 7], [1, 100, 7]]
 
         other = run_query(
             """
@@ -62,7 +62,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        assert other == [(100,), (100,)]
+        assert other == [[100], [100]]
 
         aliased = run_query(
             """
@@ -73,7 +73,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        assert aliased == [(1, 100), (1, 100)]
+        assert aliased == [[1, 100], [1, 100]]
 
         nested = run_query(
             """
@@ -87,7 +87,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        assert nested == [(100,), (100,)]
+        assert nested == [[100], [100]]
 
         cte = run_query(
             """
@@ -99,7 +99,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        assert cte == [(100,), (100,)]
+        assert cte == [[100], [100]]
 
         swapped = run_query(
             """
@@ -109,7 +109,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        assert swapped == [(1, 100, 7), (1, 100, 7)]
+        assert swapped == [[1, 100, 7], [1, 100, 7]]
 
         partial = run_query(
             """
@@ -120,7 +120,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        assert partial == [(1, 100, 7), (1, 100, 7)]
+        assert partial == [[1, 100, 7], [1, 100, 7]]
 
         joined = run_query(
             """
@@ -132,7 +132,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        assert joined == [(100, 1), (100, 1), (100, 1), (100, 1)]
+        assert joined == [[100, 1], [100, 1], [100, 1], [100, 1]]
 
     run_command(
         """
@@ -151,7 +151,7 @@ def test_case_sensitive_iceberg_column_names(
             """,
             pg_conn,
         )
-        == [(2,)]
+        == [[2]]
     )
 
     run_command("RESET pg_lake_table.enable_full_query_pushdown", pg_conn)

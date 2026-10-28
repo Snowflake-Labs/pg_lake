@@ -573,7 +573,7 @@ def test_case_colliding_equality_key(s3, pg_conn, extension, tmp_path):
         )
         assert run_query(
             'SELECT "a", "A", b FROM equality_test ORDER BY b', pg_conn
-        ) == [(2, 100, 8)]
+        ) == [[2, 100, 8]]
     pg_conn.rollback()
 
 
@@ -603,7 +603,7 @@ def test_case_colliding_equality_keys(s3, pg_conn, extension, tmp_path):
         )
         assert run_query(
             'SELECT "a", "A", b FROM equality_test ORDER BY b', pg_conn
-        ) == [(2, 100, 8), (1, 200, 9)]
+        ) == [[2, 100, 8], [1, 200, 9]]
     pg_conn.rollback()
 
 
