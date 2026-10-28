@@ -361,9 +361,17 @@ typedef struct SchemaCacheEntry
 	DataFileSchema *schema;
 }			SchemaCacheEntry;
 
+typedef struct UsingNameOverride
+{
+	RangeTblEntry *rte;
+	AttrNumber	attnum;
+	char	   *name;
+}			UsingNameOverride;
+
 typedef struct RewriteState
 {
 	List	   *schemaCache;
+	List	   *usingOverrides;
 } RewriteState;
 
 typedef struct RewriteContext
@@ -642,8 +650,28 @@ ErefNeedsDuckRename(RangeTblEntry *rte)
 }
 
 
+static const char *
+UsingOverrideName(RewriteState *state, RangeTblEntry *rte, AttrNumber attnum)
+{
+	ListCell   *cell = NULL;
+
+	if (state == NULL)
+		return NULL;
+
+	foreach(cell, state->usingOverrides)
+	{
+		UsingNameOverride *override = lfirst(cell);
+
+		if (override->rte == rte && override->attnum == attnum)
+			return override->name;
+	}
+
+	return NULL;
+}
+
+
 static List *
-LakeScanNames(RangeTblEntry *rte, DataFileSchema * schema)
+LakeScanNames(RewriteContext * context, RangeTblEntry *rte, DataFileSchema * schema)
 {
 	List	   *erefNames = ErefColumnNames(rte);
 	Relation	rel = RelationIdGetRelation(rte->relid);
@@ -655,9 +683,12 @@ LakeScanNames(RangeTblEntry *rte, DataFileSchema * schema)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupdesc, attnum);
 		const char *current = strVal(list_nth(erefNames, attnum));
+		const char *override = NULL;
 
 		if (attr->attisdropped || current[0] == '\0')
 			names = lappend(names, makeString(pstrdup("")));
+		else if ((override = UsingOverrideName(context->state, rte, attnum + 1)) != NULL)
+			names = lappend(names, makeString(pstrdup(override)));
 		else
 			names = lappend(names,
 							makeString(DuckDBNameForColumnName(schema,
@@ -789,14 +820,146 @@ RteWillUseDuckNames(RewriteContext * context, RangeTblEntry *rte)
 }
 
 
-static void
-ExpandOneUsing(JoinExpr *join)
+static RangeTblEntry *
+JoinInputRte(Query *query, Node *input)
 {
-	if (join->usingClause == NIL || join->quals == NULL)
+	if (input == NULL)
+		return NULL;
+
+	if (IsA(input, RangeTblRef))
+		return rt_fetch(((RangeTblRef *) input)->rtindex, query->rtable);
+
+	if (IsA(input, JoinExpr) && ((JoinExpr *) input)->rtindex > 0)
+		return rt_fetch(((JoinExpr *) input)->rtindex, query->rtable);
+
+	return NULL;
+}
+
+
+static AttrNumber
+ErefAttnum(RangeTblEntry *rte, const char *name)
+{
+	ListCell   *cell = NULL;
+	AttrNumber	attnum = 1;
+
+	if (rte == NULL || name == NULL)
+		return InvalidAttrNumber;
+
+	foreach(cell, ErefColumnNames(rte))
+	{
+		if (strcmp(strVal(lfirst(cell)), name) == 0)
+			return attnum;
+
+		attnum++;
+	}
+
+	return InvalidAttrNumber;
+}
+
+
+static int
+FieldIdForName(DataFileSchema * schema, const char *name)
+{
+	if (schema == NULL || name == NULL)
+		return -1;
+
+	for (size_t fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
+	{
+		const		FieldStructElement *field = &schema->fields[fieldIndex];
+
+		if (field->name != NULL && strcmp(field->name, name) == 0)
+			return field->id;
+	}
+
+	return -1;
+}
+
+
+/*
+ * ruleutils still needs usingClause to describe columns merged by the join.
+ * Replace those names with the DuckDB names both inputs will emit.
+ */
+static void
+RewriteUsingNames(RewriteContext * context, JoinExpr *join)
+{
+	RangeTblEntry *leftRte = NULL;
+	RangeTblEntry *rightRte = NULL;
+	List	   *replacements = NIL;
+	List	   *pending = NIL;
+	ListCell   *cell = NULL;
+
+	if (join->usingClause == NIL)
 		return;
 
-	join->usingClause = NIL;
-	join->isNatural = false;
+	leftRte = JoinInputRte(context->query, join->larg);
+	rightRte = JoinInputRte(context->query, join->rarg);
+
+	if (leftRte == NULL || rightRte == NULL)
+		return;
+
+	if (!RteWillUseDuckNames(context, leftRte) ||
+		!RteWillUseDuckNames(context, rightRte))
+		return;
+
+	foreach(cell, join->usingClause)
+	{
+		const char *name = strVal(lfirst(cell));
+		AttrNumber	leftAtt = ErefAttnum(leftRte, name);
+		AttrNumber	rightAtt = ErefAttnum(rightRte, name);
+		char	   *leftCatalog = NULL;
+		char	   *rightCatalog = NULL;
+		DataFileSchema *leftSchema = NULL;
+		DataFileSchema *rightSchema = NULL;
+		char	   *leftDuck = NULL;
+		char	   *rightDuck = NULL;
+		char	   *replacement = NULL;
+		UsingNameOverride *leftOverride = NULL;
+		UsingNameOverride *rightOverride = NULL;
+
+		if (leftAtt == InvalidAttrNumber || rightAtt == InvalidAttrNumber ||
+			!OidIsValid(leftRte->relid) || !OidIsValid(rightRte->relid))
+			return;
+
+		leftCatalog = get_attname(leftRte->relid, leftAtt, true);
+		rightCatalog = get_attname(rightRte->relid, rightAtt, true);
+
+		if (leftCatalog == NULL || rightCatalog == NULL)
+			return;
+
+		leftSchema = SchemaForRelation(context->state, leftRte->relid);
+		rightSchema = SchemaForRelation(context->state, rightRte->relid);
+		leftDuck = DuckDBNameForColumnName(leftSchema, leftCatalog);
+		rightDuck = DuckDBNameForColumnName(rightSchema, rightCatalog);
+
+		if (strcmp(leftDuck, rightDuck) == 0)
+			replacement = leftDuck;
+		else
+		{
+			int			leftId = FieldIdForName(leftSchema, leftCatalog);
+			int			rightId = FieldIdForName(rightSchema, rightCatalog);
+
+			if (leftId < 0 || rightId < 0)
+				return;
+
+			replacement = psprintf("pg_lake_join_%d_%d", leftId, rightId);
+			leftOverride = palloc(sizeof(UsingNameOverride));
+			leftOverride->rte = leftRte;
+			leftOverride->attnum = leftAtt;
+			leftOverride->name = replacement;
+			rightOverride = palloc(sizeof(UsingNameOverride));
+			rightOverride->rte = rightRte;
+			rightOverride->attnum = rightAtt;
+			rightOverride->name = replacement;
+			pending = lappend(pending, leftOverride);
+			pending = lappend(pending, rightOverride);
+		}
+
+		replacements = lappend(replacements, makeString(replacement));
+	}
+
+	join->usingClause = replacements;
+	context->state->usingOverrides = list_concat(context->state->usingOverrides,
+												 pending);
 }
 
 
@@ -819,7 +982,7 @@ ExpandUsingClauses(RewriteContext * context, Node *node)
 
 		ExpandUsingClauses(context, join->larg);
 		ExpandUsingClauses(context, join->rarg);
-		ExpandOneUsing(join);
+		RewriteUsingNames(context, join);
 	}
 }
 
@@ -845,7 +1008,7 @@ ApplyDuckDBNames(RewriteContext * context)
 				schema = SchemaForRelation(context->state, rte->relid);
 
 			if (schema != NULL && DataFileSchemaHasCaseCollision(schema))
-				AssignErefNames(rte, LakeScanNames(rte, schema));
+				AssignErefNames(rte, LakeScanNames(context, rte, schema));
 		}
 		else if (rte->rtekind == RTE_SUBQUERY && rte->subquery != NULL &&
 				 ListHasAsciiCaseCollision(ErefColumnNames(rte)))
