@@ -89,6 +89,9 @@ static void SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metada
 static List *FetchExistingFieldMappings(Oid relationId);
 static FieldMapping * FindFieldMapping(List *mappings, int fieldId);
 static char *GetLiveAttributeName(Oid relationId, AttrNumber attnum);
+static bool IsAttributeNotNull(Oid relationId, AttrNumber attnum);
+static bool SameFieldType(Field * left, Field * right);
+static bool SameScalarTypeName(const char *left, const char *right);
 static void ExecuteAlterTableViaSPI(const char *cmd);
 static void SyncPartitionSpecsFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
 static void SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
@@ -392,6 +395,96 @@ GetLiveAttributeName(Oid relationId, AttrNumber attnum)
 
 
 /*
+ * IsAttributeNotNull returns whether a column is NOT NULL.
+ */
+static bool
+IsAttributeNotNull(Oid relationId, AttrNumber attnum)
+{
+	Relation	rel = RelationIdGetRelation(relationId);
+	bool		notNull = TupleDescAttr(RelationGetDescr(rel), attnum - 1)->attnotnull;
+
+	RelationClose(rel);
+
+	return notNull;
+}
+
+
+/*
+ * SameFieldType returns whether two Iceberg types are the same, including
+ * the IDs, names and types of nested fields. Whether a nested field is
+ * required is ignored, since Postgres cannot express it.
+ */
+static bool
+SameFieldType(Field * left, Field * right)
+{
+	if (left->type != right->type)
+		return false;
+
+	switch (left->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			return SameScalarTypeName(left->field.scalar.typeName,
+									  right->field.scalar.typeName);
+
+		case FIELD_TYPE_LIST:
+			return left->field.list.elementId == right->field.list.elementId &&
+				SameFieldType(left->field.list.element, right->field.list.element);
+
+		case FIELD_TYPE_MAP:
+			return left->field.map.keyId == right->field.map.keyId &&
+				left->field.map.valueId == right->field.map.valueId &&
+				SameFieldType(left->field.map.key, right->field.map.key) &&
+				SameFieldType(left->field.map.value, right->field.map.value);
+
+		case FIELD_TYPE_STRUCT:
+			{
+				FieldStruct *leftStruct = &left->field.structType;
+				FieldStruct *rightStruct = &right->field.structType;
+
+				if (leftStruct->nfields != rightStruct->nfields)
+					return false;
+
+				for (size_t fieldIdx = 0; fieldIdx < leftStruct->nfields; fieldIdx++)
+				{
+					FieldStructElement *leftField = &leftStruct->fields[fieldIdx];
+					FieldStructElement *rightField = &rightStruct->fields[fieldIdx];
+
+					if (leftField->id != rightField->id ||
+						strcmp(leftField->name, rightField->name) != 0 ||
+						!SameFieldType(leftField->type, rightField->type))
+						return false;
+				}
+
+				return true;
+			}
+	}
+
+	return false;
+}
+
+
+/*
+ * SameScalarTypeName compares Iceberg type names ignoring spaces, since
+ * writers format decimal(10, 2) differently.
+ */
+static bool
+SameScalarTypeName(const char *left, const char *right)
+{
+	while (*left != '\0' || *right != '\0')
+	{
+		if (*left == ' ')
+			left++;
+		else if (*right == ' ')
+			right++;
+		else if (*left++ != *right++)
+			return false;
+	}
+
+	return true;
+}
+
+
+/*
  * ExecuteAlterTableViaSPI runs an ALTER TABLE DDL command via SPI as the
  * pg_lake_table extension owner.
  */
@@ -500,18 +593,40 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 			if (GetLiveAttributeName(relationId, mapping->attnum) == NULL)
 				continue;
 
+			/* Iceberg allows required -> optional, but not the reverse */
+			bool		notNull = IsAttributeNotNull(relationId, mapping->attnum);
+
+			if (notNull && !icebergField->required)
+				ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s ALTER COLUMN %s DROP NOT NULL",
+												 qualifiedName,
+												 quote_identifier(icebergField->name)));
+			else if (!notNull && icebergField->required)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("cannot make column \"%s\" required in an external write",
+								icebergField->name)));
+
+			DataFileSchemaField *registeredField =
+				GetRegisteredFieldForAttribute(relationId, mapping->attnum);
+
+			if (registeredField->type->type != FIELD_TYPE_SCALAR ||
+				icebergField->type->type != FIELD_TYPE_SCALAR)
+			{
+				if (!SameFieldType(registeredField->type, icebergField->type))
+					ereport(ERROR,
+							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							 errmsg("cannot change the type of column \"%s\" in an external write",
+									icebergField->name),
+							 errdetail("Changes inside struct, list and map columns are not supported.")));
+				continue;
+			}
+
 			/*
 			 * Promote the column when the Iceberg type changed (e.g. int ->
 			 * long). Postgres types that map to the same Iceberg type, like
 			 * smallint and integer, are left alone.
 			 */
-			DataFileSchemaField *registeredField =
-				GetRegisteredFieldForAttribute(relationId, mapping->attnum);
-
-			if (registeredField->type->type != FIELD_TYPE_SCALAR ||
-				icebergField->type->type != FIELD_TYPE_SCALAR ||
-				strcmp(registeredField->type->field.scalar.typeName,
-					   icebergField->type->field.scalar.typeName) == 0)
+			if (SameFieldType(registeredField->type, icebergField->type))
 				continue;
 
 			ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s ALTER COLUMN %s TYPE %s",
@@ -522,6 +637,13 @@ SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata)
 			UpdateRegisteredFieldTypeForAttribute(relationId, mapping->attnum, pgType);
 			continue;
 		}
+
+		/* Postgres cannot add a NOT NULL column to a table with rows */
+		if (icebergField->required)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot add required column \"%s\" in an external write",
+							icebergField->name)));
 
 		/* new field */
 		ExecuteAlterTableViaSPI(psprintf("ALTER FOREIGN TABLE %s ADD COLUMN %s %s",

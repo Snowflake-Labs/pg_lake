@@ -1,4 +1,5 @@
 import threading
+from decimal import Decimal
 
 import pytest
 import pyarrow as pa
@@ -6,7 +7,7 @@ import pyarrow.parquet
 import pyiceberg.io.pyarrow
 from pyiceberg.catalog.sql import SqlCatalog
 from pyiceberg.transforms import IdentityTransform
-from pyiceberg.types import LongType
+from pyiceberg.types import IntegerType, LongType, NestedField, StructType
 
 from utils_pytest import *
 
@@ -1817,4 +1818,183 @@ def test_external_write_nulls_in_required_column_rejected(
         pyiceberg_table.add_files([f"s3://{TEST_BUCKET}/{key}"])
 
     assert run_query(f"SELECT count(*), count(a) FROM {tbl}", pg_conn) == [[1, 1]]
+    pg_conn.rollback()
+
+
+def test_external_write_column_becomes_optional(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """A required column that becomes optional drops NOT NULL in Postgres."""
+    name = f"{TABLE_NAME}_optional"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    run_command(f"CREATE TABLE {tbl} (a int NOT NULL, b text) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1, 'x')", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pyiceberg_table.update_schema() as update:
+        update.update_column("a", required=False)
+
+    run_command(f"INSERT INTO {tbl} VALUES (NULL, 'null')", pg_conn)
+    pg_conn.commit()
+    assert run_query(f"SELECT count(*), count(a) FROM {tbl}", pg_conn) == [[2, 1]]
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (
+            lambda update: update.update_column("b", required=True),
+            'cannot make column "b" required',
+        ),
+        (
+            lambda update: update.add_column("c", LongType(), required=True),
+            'cannot add required column "c"',
+        ),
+    ],
+    ids=["make_required", "add_required"],
+)
+def test_external_write_required_column_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+    change,
+    message,
+):
+    """Postgres cannot apply NOT NULL to rows that are already there."""
+    name = f"{TABLE_NAME}_{message.split()[1]}_required"
+    tbl = _create_table(pg_conn, name)
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pytest.raises(Exception, match=message):
+        with pyiceberg_table.update_schema(allow_incompatible_changes=True) as update:
+            change(update)
+
+    assert _columns(pg_conn, name) == [["a", "integer"], ["b", "text"]]
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "column_type, change",
+    [
+        (
+            "{name}_point",
+            lambda update: update.add_column(("p", "z"), LongType()),
+        ),
+        (
+            "{name}_point",
+            lambda update: update.rename_column("p.x", "x_renamed"),
+        ),
+        (
+            "int[]",
+            lambda update: update.update_column("p.element", LongType()),
+        ),
+    ],
+    ids=["struct_add_field", "struct_rename_field", "list_promote_element"],
+)
+def test_external_write_nested_change_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+    column_type,
+    change,
+    request,
+):
+    """Changes inside struct and list columns are rejected."""
+    name = f"{TABLE_NAME}_{request.node.callspec.id}"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    run_command(f"CREATE TYPE {name}_point AS (x int, y int)", pg_conn)
+    run_command(
+        f"CREATE TABLE {tbl} (a int, p {column_type.format(name=name)}) USING iceberg",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pytest.raises(Exception, match='cannot change the type of column "p"'):
+        with pyiceberg_table.update_schema() as update:
+            change(update)
+
+    pg_conn.rollback()
+
+
+def test_external_write_add_struct_column(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """A new struct column, and later appends that use it, sync."""
+    name = f"{TABLE_NAME}_add_struct"
+    tbl = _create_table(pg_conn, name)
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pyiceberg_table.update_schema() as update:
+        update.add_column(
+            "s",
+            StructType(
+                NestedField(field_id=1, name="x", field_type=IntegerType()),
+                NestedField(field_id=2, name="y", field_type=IntegerType()),
+            ),
+        )
+
+    # a second commit compares the registered struct against the metadata
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    pyiceberg_table.append(
+        pa.table(
+            {"a": [6], "b": ["ext6"], "s": [{"x": 1, "y": 2}]},
+            schema=pyiceberg_table.schema().as_arrow(),
+        )
+    )
+
+    result = run_query(
+        f"SELECT a, (s).x, (s).y FROM {tbl} WHERE s IS NOT NULL", pg_conn
+    )
+    assert result == [[6, 1, 2]]
+    pg_conn.rollback()
+
+
+def test_external_write_decimal_column_unchanged(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """
+    pyiceberg writes decimal(10, 2) with a space; that must not look like a
+    type change.
+    """
+    name = f"{TABLE_NAME}_decimal"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    run_command(f"CREATE TABLE {tbl} (a numeric(10,2)) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1.25)", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    pyiceberg_table.append(
+        pa.table({"a": [Decimal("2.5")]}, schema=pyiceberg_table.schema().as_arrow())
+    )
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    pyiceberg_table.append(
+        pa.table({"a": [Decimal("3.75")]}, schema=pyiceberg_table.schema().as_arrow())
+    )
+
+    assert _columns(pg_conn, name) == [["a", "numeric(10,2)"]]
+    assert run_query(f"SELECT sum(a) FROM {tbl}", pg_conn)[0][0] == Decimal("7.50")
     pg_conn.rollback()
