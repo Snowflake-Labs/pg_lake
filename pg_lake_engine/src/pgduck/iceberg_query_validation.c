@@ -46,6 +46,7 @@
 
 #include "access/tupdesc.h"
 #include "catalog/pg_type.h"
+#include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
 #include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/map.h"
@@ -415,7 +416,8 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 char *
 IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 									   IcebergOutOfRangePolicy policy,
-									   bool queryHasRowId)
+									   bool queryHasRowId,
+									   DataFileSchema * schema)
 {
 	if (policy == ICEBERG_OOR_NONE || tupleDesc == NULL ||
 		!TupleDescNeedsValidation(tupleDesc))
@@ -439,7 +441,9 @@ IcebergWrapQueryWithErrorOrClampChecks(char *query, TupleDesc tupleDesc,
 		if (!firstColumn)
 			appendStringInfoString(&wrapped, ", ");
 
-		const char *quotedName = duckdb_quote_identifier(NameStr(attr->attname));
+		const char *quotedName =
+			duckdb_quote_identifier(DuckDBNameForColumnName(schema,
+															NameStr(attr->attname)));
 
 		StringInfoData exprBuf;
 
@@ -989,7 +993,8 @@ char *
 IcebergWrapQueryWithSizeClampChecks(char *query, TupleDesc tupleDesc,
 									IcebergCompatibilityMode compatibilityMode,
 									IcebergOutOfRangePolicy policy,
-									bool queryHasRowId)
+									bool queryHasRowId,
+									DataFileSchema * schema)
 {
 	if (tupleDesc == NULL || policy == ICEBERG_OOR_NONE ||
 		compatibilityMode != ICEBERG_COMPAT_SNOWFLAKE)
@@ -1032,7 +1037,8 @@ IcebergWrapQueryWithSizeClampChecks(char *query, TupleDesc tupleDesc,
 			appendStringInfoString(&wrapped, ", ");
 
 		const char *quotedName =
-			duckdb_quote_identifier(NameStr(attr->attname));
+			duckdb_quote_identifier(DuckDBNameForColumnName(schema,
+															NameStr(attr->attname)));
 
 		StringInfoData exprBuf;
 
@@ -1473,10 +1479,12 @@ IcebergWrapQueryWithRewrites(char *query, TupleDesc tupleDesc,
 		if (!firstColumn)
 			appendStringInfoString(&wrapped, ", ");
 
-		const char *quotedName = duckdb_quote_identifier(NameStr(attr->attname));
+		const char *realName = NameStr(attr->attname);
+		const char *quotedName =
+			duckdb_quote_identifier(DuckDBNameForColumnName(storageSchema, realName));
 		Field	   *colStorage =
 			(rewriteKinds & ICEBERG_REWRITE_STORAGE_CAST) ?
-			StorageFieldForColumn(storageSchema, NameStr(attr->attname)) : NULL;
+			StorageFieldForColumn(storageSchema, realName) : NULL;
 
 		StringInfoData exprBuf;
 

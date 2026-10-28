@@ -19,5 +19,8 @@
 
 #include "access/tupdesc.h"
 
-extern PGDLLEXPORT char *GetGeoParquetMetadataForTupleDesc(TupleDesc tupleDesc);
+#include "pg_lake/parquet/field.h"
+
+extern PGDLLEXPORT char *GetGeoParquetMetadataForTupleDesc(TupleDesc tupleDesc,
+														   DataFileSchema * schema);
 extern PGDLLEXPORT bool TupleDescHasGeometryColumn(TupleDesc tupleDesc);

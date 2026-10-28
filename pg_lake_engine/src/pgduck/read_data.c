@@ -32,6 +32,7 @@
 #include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/struct_conversion.h"
 #include "pg_lake/pgduck/type.h"
@@ -53,6 +54,7 @@ static char *ReadDataSourceFunction(List *sourcePaths,
 									TupleDesc expectedDesc,
 									List *formatOptions,
 									DataFileSchema * schema,
+									DataFileSchema * scanNameSchema,
 									bool preferVarchar,
 									ReadRowLocationMode emitRowLocation,
 									bool emitRowId);
@@ -61,16 +63,27 @@ static char *GetSchemaType(Field * mapping);
 static const char *IcebergScalarTypeNameToDuckDBTypeName(const char *icebergTypeName);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
 								 bool preferVarchar,
-								 ReadRowLocationMode emitRowLocation);
+								 ReadRowLocationMode emitRowLocation,
+								 DataFileSchema * scanNameSchema);
 static char *TupleDescToDuckDBColumnsArray(TupleDesc tupleDesc, bool skipFilename);
-static char *TupleDescToAliasList(TupleDesc tupleDesc);
+static char *TupleDescToAliasList(TupleDesc tupleDesc, DataFileSchema * nameSchema);
+static char *JsonKeyPath(const char *key);
+static void AppendCaseSensitiveJsonScan(StringInfo command,
+										List *sourcePaths,
+										CopyDataCompression sourceCompression,
+										TupleDesc expectedDesc,
+										List *formatOptions,
+										DataFileSchema * scanNameSchema,
+										bool preferVarchar,
+										bool emitFilename);
 static DuckDBTypeInfo ChooseCompatibleDuckDBType(Oid postgresTypeId, int postgresTypeMod,
 												 CopyDataFormat sourceFormat,
 												 bool preferVarchar);
 static DuckDBTypeInfo GuessStorageType(DuckDBTypeInfo engineType,
 									   CopyDataFormat sourceFormat);
 static char *GetEmptyIcebergInputTypeName(Oid typeOid, int32 typmod);
-static char *BuildColumnProjection(char *expression,
+static char *BuildColumnProjection(char *sourceName,
+								   char *outputName,
 								   DuckDBTypeInfo engineType,
 								   CopyDataFormat sourceFormat,
 								   List *formatOptions,
@@ -78,7 +91,9 @@ static char *BuildColumnProjection(char *expression,
 static bool TypeNeedsIcebergReadConversion(Oid typeOid);
 static void AppendIcebergReadConversion(StringInfo buf, const char *expression,
 										Oid typeOid, int32 typmod, int depth);
-static char *BuildStorageToSurfaceProjection(const char *columnName,
+static char *BuildStorageToSurfaceProjection(const char *lookupName,
+											 const char *sourceName,
+											 const char *outputName,
 											 Oid columnTypeId, int32 columnTypeMod,
 											 DuckDBTypeInfo duckdbType,
 											 DataFileSchema * storageSchema);
@@ -104,11 +119,20 @@ ReadDataSourceQuery(List *sourcePaths,
 					TupleDesc expectedDesc,
 					List *formatOptions,
 					DataFileSchema * schema,
+					DataFileSchema * columnNameSchema,
 					ReadDataStats * stats,
 					int flags)
 {
 	/* whether to prepare output for TRANSMIT */
 	bool		isTransmit = (flags & READ_DATA_TRANSMIT) != 0;
+
+	/*
+	 * scanNameSchema names the columns the reader emits. outputNameSchema
+	 * names the SELECT outputs. A copy between Iceberg tables uses the source
+	 * field ids for the scan and the destination field ids for the outputs.
+	 */
+	DataFileSchema *scanNameSchema = schema != NULL ? schema : columnNameSchema;
+	DataFileSchema *outputNameSchema = columnNameSchema != NULL ? columnNameSchema : schema;
 
 	/* whether to read all types as varchar */
 	bool		preferVarchar = (flags & READ_DATA_PREFER_VARCHAR) != 0;
@@ -160,7 +184,9 @@ ReadDataSourceQuery(List *sourcePaths,
 														   readRowLocationMode,
 														   emitRowId,
 														   addCast,
-														   schema);
+														   schema,
+														   scanNameSchema,
+														   outputNameSchema);
 
 		appendStringInfo(&command, "%s ", projection);
 	}
@@ -188,6 +214,7 @@ ReadDataSourceQuery(List *sourcePaths,
 														  expectedDesc,
 														  formatOptions,
 														  schema,
+														  scanNameSchema,
 														  preferVarchar,
 														  readRowLocationMode,
 														  emitRowId);
@@ -196,7 +223,7 @@ ReadDataSourceQuery(List *sourcePaths,
 
 	if (expectedDesc != NULL)
 	{
-		char	   *aliasList = TupleDescToAliasList(expectedDesc);
+		char	   *aliasList = TupleDescToAliasList(expectedDesc, scanNameSchema);
 
 		appendStringInfo(&command, " res %s", aliasList);
 	}
@@ -230,6 +257,119 @@ ReadDataSourceQuery(List *sourcePaths,
 }
 
 
+static char *
+JsonKeyPath(const char *key)
+{
+	StringInfoData path;
+	const char *cursor = NULL;
+
+	initStringInfo(&path);
+	appendStringInfoString(&path, "$.\"");
+
+	for (cursor = key; *cursor != '\0'; cursor++)
+	{
+		if (*cursor == '"' || *cursor == '\\')
+			appendStringInfoChar(&path, '\\');
+
+		appendStringInfoChar(&path, *cursor);
+	}
+
+	appendStringInfoChar(&path, '"');
+
+	return path.data;
+}
+
+
+/*
+ * AppendCaseSensitiveJsonScan reads each object whole and projects its keys
+ * by name. DuckDB's columns map cannot hold two keys that differ only by
+ * case, and key order is not a safe substitute.
+ */
+static void
+AppendCaseSensitiveJsonScan(StringInfo command,
+							List *sourcePaths,
+							CopyDataCompression sourceCompression,
+							TupleDesc expectedDesc,
+							List *formatOptions,
+							DataFileSchema * scanNameSchema,
+							bool preferVarchar,
+							bool emitFilename)
+{
+	bool		hasColumns = false;
+	int			attnum = 0;
+
+	appendStringInfoString(command, "(SELECT ");
+
+	for (attnum = 1; attnum <= expectedDesc->natts; attnum++)
+	{
+		Form_pg_attribute column = TupleDescAttr(expectedDesc, attnum - 1);
+		char	   *realName = NULL;
+		char	   *outputName = NULL;
+		DuckDBTypeInfo duckdbType;
+
+		if (column->attisdropped)
+			continue;
+
+		realName = NameStr(column->attname);
+		outputName = DuckDBNameForColumnName(scanNameSchema, realName);
+
+		if (hasColumns)
+			appendStringInfoString(command, ", ");
+
+		if (emitFilename && strcmp(realName, "_filename") == 0)
+			appendStringInfoString(command, duckdb_quote_identifier(realName));
+		else
+		{
+			duckdbType = ChooseCompatibleDuckDBType(column->atttypid,
+													column->atttypmod,
+													DATA_FORMAT_JSON,
+													preferVarchar);
+			appendStringInfo(command, "CAST(json_extract_string(json, %s) AS %s) AS %s",
+							 quote_literal_cstr(JsonKeyPath(realName)),
+							 duckdbType.typeName,
+							 duckdb_quote_identifier(outputName));
+		}
+
+		hasColumns = true;
+	}
+
+	if (!hasColumns)
+		appendStringInfoString(command, "NULL");
+
+	appendStringInfo(command, " FROM read_json_objects(%s",
+					 PathListToString(sourcePaths));
+
+	if (sourceCompression != DATA_COMPRESSION_NONE)
+	{
+		appendStringInfo(command, ", compression=%s",
+						 quote_literal_cstr(CopyDataCompressionToName(sourceCompression)));
+	}
+
+	if (emitFilename)
+		appendStringInfoString(command, ", filename='_filename'");
+
+	if (formatOptions != NIL)
+	{
+		DefElem    *maximumObjectSizeOption = GetOption(formatOptions,
+														"maximum_object_size");
+
+		if (maximumObjectSizeOption != NULL)
+		{
+			int64		maximumObjectSize = defGetInt64(maximumObjectSizeOption);
+
+			if (maximumObjectSize < 0)
+				ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
+								errmsg("option value \"maximum_object_size\" must be non-negative")));
+
+			appendStringInfo(command, ", maximum_object_size=" INT64_FORMAT,
+							 maximumObjectSize);
+		}
+	}
+
+	appendStringInfoString(command, "))");
+}
+
+
 /*
  * ReadDataSourceFunction constructs a query to read_csv/parquet/json from an external data
  * source.
@@ -242,6 +382,7 @@ ReadDataSourceFunction(List *sourcePaths,
 					   TupleDesc expectedDesc,
 					   List *formatOptions,
 					   DataFileSchema * schema,
+					   DataFileSchema * scanNameSchema,
 					   bool preferVarchar,
 					   ReadRowLocationMode readRowLocationMode,
 					   bool emitRowId)
@@ -251,7 +392,7 @@ ReadDataSourceFunction(List *sourcePaths,
 	if (list_length(sourcePaths) == 0)
 	{
 		return ReadEmptyDataSource(expectedDesc, sourceFormat, preferVarchar,
-								   readRowLocationMode);
+								   readRowLocationMode, scanNameSchema);
 	}
 
 	StringInfoData command;
@@ -319,6 +460,16 @@ ReadDataSourceFunction(List *sourcePaths,
 										   "not supported for JSON format")));
 				}
 
+				if (expectedDesc != NULL && expectedDesc->natts > 0 &&
+					DataFileSchemaHasCaseCollision(scanNameSchema))
+				{
+					AppendCaseSensitiveJsonScan(&command, sourcePaths,
+												sourceCompression, expectedDesc,
+												formatOptions, scanNameSchema,
+												preferVarchar, emitFilename);
+					break;
+				}
+
 				appendStringInfo(&command,
 								 "read_json_auto(%s",
 								 PathListToString(sourcePaths));
@@ -348,13 +499,17 @@ ReadDataSourceFunction(List *sourcePaths,
 					 * text into an int column) happen in PostgreSQL when
 					 * parsing the intermediate CSV.
 					 *
+					 * JSON keys are matched by name. Colliding keys are
+					 * handled by AppendCaseSensitiveJsonScan.
+					 *
 					 * We should revise this if we stop using CSV as an
 					 * intermediate format.
 					 */
 					char	   *columnsMap = TupleDescToDuckDBColumnsMap(expectedDesc,
 																		 sourceFormat,
 																		 preferVarchar,
-																		 skipFilename);
+																		 skipFilename,
+																		 NULL);
 
 					appendStringInfo(&command, ", columns=%s", columnsMap);
 
@@ -436,7 +591,8 @@ ReadDataSourceFunction(List *sourcePaths,
 						char	   *columnsMap = TupleDescToDuckDBColumnsMap(expectedDesc,
 																			 sourceFormat,
 																			 preferVarchar,
-																			 skipFilename);
+																			 skipFilename,
+																			 scanNameSchema);
 
 						appendStringInfo(&command, ", columns=%s", columnsMap);
 					}
@@ -614,7 +770,7 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 		 */
 		appendStringInfo(&schemaString, "%d: {name: %s, type: %s, default_value: %s}",
 						 field->id,
-						 quote_literal_cstr(field->name),
+						 quote_literal_cstr(DuckDBNameForField(schema, field->name, field->id)),
 						 quote_literal_cstr(GetSchemaType(field->type)),
 						 defaultValue);
 
@@ -836,7 +992,7 @@ GetEmptyIcebergInputTypeName(Oid typeOid, int32 typmod)
  */
 static char *
 ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool preferVarchar,
-					ReadRowLocationMode readRowLocationMode)
+					ReadRowLocationMode readRowLocationMode, DataFileSchema * scanNameSchema)
 {
 	StringInfoData query;
 
@@ -854,7 +1010,8 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
 			continue;
 		}
 
-		char	   *columnName = NameStr(column->attname);
+		char	   *realName = NameStr(column->attname);
+		char	   *columnName = DuckDBNameForColumnName(scanNameSchema, realName);
 		Oid			columnTypeId = column->atttypid;
 		int			columnTypeMod = column->atttypmod;
 
@@ -905,7 +1062,7 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
  */
 char *
 TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool preferVarchar,
-							bool skipFilename)
+							bool skipFilename, DataFileSchema * nameSchema)
 {
 	StringInfoData map;
 
@@ -924,9 +1081,9 @@ TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bo
 			continue;
 		}
 
-		char	   *columnName = NameStr(column->attname);
+		char	   *realName = NameStr(column->attname);
 
-		if (skipFilename && strcmp(columnName, "_filename") == 0)
+		if (skipFilename && strcmp(realName, "_filename") == 0)
 		{
 			/*
 			 * We exit the loop because the only columns we expect after
@@ -935,6 +1092,8 @@ TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bo
 			 */
 			break;
 		}
+
+		char	   *columnName = DuckDBNameForColumnName(nameSchema, realName);
 
 		Oid			columnTypeId = column->atttypid;
 		int			columnTypeMod = column->atttypmod;
@@ -1015,7 +1174,7 @@ TupleDescToDuckDBColumnsArray(TupleDesc tupleDesc, bool skipFilename)
  * an alias list in string form.
  */
 static char *
-TupleDescToAliasList(TupleDesc tupleDesc)
+TupleDescToAliasList(TupleDesc tupleDesc, DataFileSchema * nameSchema)
 {
 	StringInfoData alias;
 
@@ -1030,7 +1189,8 @@ TupleDescToAliasList(TupleDesc tupleDesc)
 		if (column->attisdropped)
 			continue;
 
-		char	   *columnName = NameStr(column->attname);
+		char	   *columnName = DuckDBNameForColumnName(nameSchema,
+														 NameStr(column->attname));
 
 		appendStringInfo(&alias, "%s%s",
 						 hasColumns ? "," : "(",
@@ -1331,11 +1491,12 @@ BuildIcebergReadConversion(const char *expression, Oid typeOid, int32 typmod)
  * column through its normal projection).
  */
 static char *
-BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
+BuildStorageToSurfaceProjection(const char *lookupName, const char *sourceName,
+								const char *outputName, Oid columnTypeId,
 								int32 columnTypeMod, DuckDBTypeInfo duckdbType,
 								DataFileSchema * storageSchema)
 {
-	Field	   *storageField = StorageFieldForColumn(storageSchema, columnName);
+	Field	   *storageField = StorageFieldForColumn(storageSchema, lookupName);
 
 	if (!TypeHasStorageDivergentLeaf(columnTypeId, columnTypeMod, storageField))
 		return NULL;
@@ -1352,11 +1513,11 @@ BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
 	 * session-timezone parsing.
 	 */
 	reconstruction =
-		BuildIcebergReadConversion(duckdb_quote_identifier(columnName),
+		BuildIcebergReadConversion(duckdb_quote_identifier(sourceName),
 								   columnTypeId, columnTypeMod);
 
 	if (reconstruction == NULL)
-		reconstruction = duckdb_quote_identifier(columnName);
+		reconstruction = duckdb_quote_identifier(sourceName);
 	else
 	{
 		/*
@@ -1374,7 +1535,7 @@ BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
 	return psprintf("CAST(%s AS %s) AS %s",
 					reconstruction,
 					castTargetType,
-					duckdb_quote_identifier(columnName));
+					duckdb_quote_identifier(outputName));
 }
 
 
@@ -1389,13 +1550,19 @@ BuildStorageToSurfaceProjection(const char *columnName, Oid columnTypeId,
  * is used to detect columns whose physical storage diverges from the surface
  * type (e.g. a nested uuid stored as string under compatibility_mode), which
  * require an unconditional cast back to the surface type.
+ *
+ * scanNameSchema names columns in the scan. outputNameSchema names the
+ * SELECT aliases. They differ when copying between Iceberg tables whose
+ * field ids do not match.
  */
 char *
 TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 						  List *formatOptions,
 						  ReadRowLocationMode readRowLocationMode,
 						  bool emitRowId, bool addCast,
-						  DataFileSchema * storageSchema)
+						  DataFileSchema * storageSchema,
+						  DataFileSchema * scanNameSchema,
+						  DataFileSchema * outputNameSchema)
 {
 	StringInfoData projection;
 
@@ -1413,7 +1580,9 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 		/* we never want to read as varchar in the SELECT clause */
 		bool		preferVarchar = false;
 
-		char	   *columnName = NameStr(column->attname);
+		char	   *realName = NameStr(column->attname);
+		char	   *sourceName = DuckDBNameForColumnName(scanNameSchema, realName);
+		char	   *outputName = DuckDBNameForColumnName(outputNameSchema, realName);
 		Oid			columnTypeId = column->atttypid;
 		int			columnTypeMod = column->atttypmod;
 		DuckDBTypeInfo duckdbType = ChooseCompatibleDuckDBType(columnTypeId,
@@ -1431,7 +1600,8 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 		if (sourceFormat == DATA_FORMAT_ICEBERG)
 		{
 			char	   *divergentProjection =
-				BuildStorageToSurfaceProjection(columnName, columnTypeId,
+				BuildStorageToSurfaceProjection(realName, sourceName, outputName,
+												columnTypeId,
 												columnTypeMod, duckdbType,
 												storageSchema);
 
@@ -1456,7 +1626,7 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 		if (sourceFormat == DATA_FORMAT_ICEBERG)
 		{
 			char	   *nativeProjection =
-				BuildIcebergReadConversion(duckdb_quote_identifier(columnName),
+				BuildIcebergReadConversion(duckdb_quote_identifier(sourceName),
 										   columnTypeId, columnTypeMod);
 
 			if (nativeProjection != NULL)
@@ -1471,14 +1641,15 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 
 				appendStringInfo(&projection, "CAST(%s AS %s) AS %s",
 								 nativeProjection, castTargetType,
-								 duckdb_quote_identifier(columnName));
+								 duckdb_quote_identifier(outputName));
 
 				hasColumns = true;
 				continue;
 			}
 		}
 
-		char	   *columnProjection = BuildColumnProjection(columnName,
+		char	   *columnProjection = BuildColumnProjection(sourceName,
+															 outputName,
 															 duckdbType,
 															 sourceFormat,
 															 formatOptions,
@@ -1745,13 +1916,16 @@ GuessStorageType(DuckDBTypeInfo engineType, CopyDataFormat sourceFormat)
  * if we need to add our own column aliasing in this case.
  */
 static char *
-BuildColumnProjection(char *columnName,
+BuildColumnProjection(char *sourceName,
+					  char *outputName,
 					  DuckDBTypeInfo engineType,
 					  CopyDataFormat sourceFormat,
 					  List *formatOptions,
 					  bool addCast)
 {
-	char	   *columnAliasString = !addCast ? psprintf(" AS %s", duckdb_quote_identifier(columnName)) : "";
+	bool		sameName = strcmp(sourceName, outputName) == 0;
+	char	   *columnAliasString = (!addCast || !sameName) ?
+		psprintf(" AS %s", duckdb_quote_identifier(outputName)) : "";
 
 	if (engineType.typeId == DUCKDB_TYPE_GEOMETRY && !engineType.isArrayType)
 	{
@@ -1761,17 +1935,17 @@ BuildColumnProjection(char *columnName,
 		if (FormatUsesParquet(sourceFormat))
 			/* assume geometry in Parquet is stored as WKB blob */
 			return psprintf("ST_GeomFromWKB(%s::blob)%s",
-							duckdb_quote_identifier(columnName),
+							duckdb_quote_identifier(sourceName),
 							columnAliasString);
 
 		if (sourceFormat == DATA_FORMAT_CSV)
 			/* assume geometry in JSON is stored as WKT */
-			return psprintf("ST_GeomFromText(%s)%s", duckdb_quote_identifier(columnName),
+			return psprintf("ST_GeomFromText(%s)%s", duckdb_quote_identifier(sourceName),
 							columnAliasString);
 
 		if (sourceFormat == DATA_FORMAT_JSON)
 			/* assume geometry in JSON is stored as GeoJSON */
-			return psprintf("ST_GeomFromGeoJSON(%s)%s", duckdb_quote_identifier(columnName),
+			return psprintf("ST_GeomFromGeoJSON(%s)%s", duckdb_quote_identifier(sourceName),
 							columnAliasString);
 
 		/*
@@ -1790,8 +1964,8 @@ BuildColumnProjection(char *columnName,
 		 */
 		if (sourceFormat == DATA_FORMAT_GDAL)
 			return psprintf("COALESCE(hex(TRY_CAST(%s AS BLOB)), ST_AsHexWKB(TRY_CAST(%s AS GEOMETRY)))%s",
-							duckdb_quote_identifier(columnName),
-							duckdb_quote_identifier(columnName),
+							duckdb_quote_identifier(sourceName),
+							duckdb_quote_identifier(sourceName),
 							columnAliasString);
 	}
 
@@ -1804,14 +1978,14 @@ BuildColumnProjection(char *columnName,
 
 			if (timestampFormat != NULL)
 				return psprintf("strptime(%s, %s)%s",
-								duckdb_quote_identifier(columnName),
+								duckdb_quote_identifier(sourceName),
 								quote_literal_cstr(timestampFormat),
 								columnAliasString);
 		}
 
 		if (engineType.typeId != DUCKDB_TYPE_VARCHAR)
 			return psprintf("try_cast(%s AS %s)%s",
-							duckdb_quote_identifier(columnName),
+							duckdb_quote_identifier(sourceName),
 							engineType.typeName,
 							columnAliasString);
 	}
@@ -1825,15 +1999,19 @@ BuildColumnProjection(char *columnName,
 		 * the source file does not 100% match.
 		 */
 		return psprintf("%s::%s AS %s",
-						duckdb_quote_identifier(columnName),
+						duckdb_quote_identifier(sourceName),
 						engineType.typeName,
-						duckdb_quote_identifier(columnName));
+						duckdb_quote_identifier(outputName));
 
 	}
+	else if (!sameName)
+		return psprintf("%s AS %s",
+						duckdb_quote_identifier(sourceName),
+						duckdb_quote_identifier(outputName));
 	else
 	{
 		/* no cast needed */
-		return psprintf("%s", duckdb_quote_identifier(columnName));
+		return psprintf("%s", duckdb_quote_identifier(sourceName));
 	}
 }
 

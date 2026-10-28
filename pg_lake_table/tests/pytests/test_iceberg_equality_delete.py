@@ -547,6 +547,66 @@ def test_sequence_and_deleted_entries(s3, pg_conn, extension, delete_table):
     pg_conn.rollback()
 
 
+def test_case_colliding_equality_key(s3, pg_conn, extension, tmp_path):
+    fields = [(1, "a", "int"), (2, "A", "int"), (3, "b", "int")]
+    table = DeleteTable(tmp_path, s3, fields=fields)
+    table.add([(1, 100, 7), (2, 100, 8), (1, 200, 9)])
+    table.add([(1,)], content=2, sequence=2, equality_ids=[1])
+    path = table.finish()
+    for file in table.directory.iterdir():
+        table.s3.upload_file(str(file), TEST_BUCKET, f"{table.prefix}/{file.name}")
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE equality_test (
+            "a" int, "A" int, b int
+        ) SERVER pg_lake OPTIONS (
+            path '{table.file_url(path)}',
+            format 'iceberg'
+        )
+        """,
+        pg_conn,
+    )
+    for enabled in ("on", "off"):
+        run_command(
+            f"SET LOCAL pg_lake_table.enable_full_query_pushdown = {enabled}",
+            pg_conn,
+        )
+        assert run_query(
+            'SELECT "a", "A", b FROM equality_test ORDER BY b', pg_conn
+        ) == [(2, 100, 8)]
+    pg_conn.rollback()
+
+
+def test_case_colliding_equality_keys(s3, pg_conn, extension, tmp_path):
+    fields = [(1, "a", "int"), (2, "A", "int"), (3, "b", "int")]
+    table = DeleteTable(tmp_path, s3, fields=fields)
+    table.add([(1, 100, 7), (2, 100, 8), (1, 200, 9)])
+    table.add([(1, 100)], content=2, sequence=2, equality_ids=[1, 2])
+    path = table.finish()
+    for file in table.directory.iterdir():
+        table.s3.upload_file(str(file), TEST_BUCKET, f"{table.prefix}/{file.name}")
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE equality_test (
+            "a" int, "A" int, b int
+        ) SERVER pg_lake OPTIONS (
+            path '{table.file_url(path)}',
+            format 'iceberg'
+        )
+        """,
+        pg_conn,
+    )
+    for enabled in ("on", "off"):
+        run_command(
+            f"SET LOCAL pg_lake_table.enable_full_query_pushdown = {enabled}",
+            pg_conn,
+        )
+        assert run_query(
+            'SELECT "a", "A", b FROM equality_test ORDER BY b', pg_conn
+        ) == [(2, 100, 8), (1, 200, 9)]
+    pg_conn.rollback()
+
+
 def test_quoted_key_names(s3, pg_conn, extension, tmp_path):
     fields = [(1, "qualify", "int"), (2, 'key"name', "string")] + FIELDS[2:]
     table = DeleteTable(tmp_path, s3, fields=fields)

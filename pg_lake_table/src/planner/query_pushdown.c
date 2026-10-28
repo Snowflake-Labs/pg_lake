@@ -1845,13 +1845,16 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 		{
 			IcebergOutOfRangePolicy outOfRangePolicy =
 				GetIcebergOutOfRangePolicyForTable(scanState->insertIntoRelid);
+			DataFileSchema *insertSchema =
+				GetDataFileSchemaForTable(scanState->insertIntoRelid);
 
 			if (outOfRangePolicy != ICEBERG_OOR_NONE)
 				queryString =
 					IcebergWrapQueryWithErrorOrClampChecks(queryString,
 														   scanState->insertTargetTupleDesc,
 														   outOfRangePolicy,
-														   false);
+														   false,
+														   insertSchema);
 
 			if (IsWritableIcebergTable(scanState->insertIntoRelid))
 			{
@@ -1861,7 +1864,7 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 												 false,
 												 ICEBERG_REWRITE_NATIVE_ENCODE |
 												 ICEBERG_REWRITE_STORAGE_CAST,
-												 GetDataFileSchemaForTable(scanState->insertIntoRelid));
+												 insertSchema);
 			}
 		}
 

@@ -69,6 +69,7 @@ extern PGDLLEXPORT char *ReadDataSourceQuery(List *dataFilePaths,
 											 TupleDesc expectedDesc,
 											 List *formatOptions,
 											 DataFileSchema * schema,
+											 DataFileSchema * columnNameSchema,
 											 ReadDataStats * stats,
 											 int flags);
 extern PGDLLEXPORT char *TupleDescToProjectionList(TupleDesc tupleDesc,
@@ -77,7 +78,9 @@ extern PGDLLEXPORT char *TupleDescToProjectionList(TupleDesc tupleDesc,
 												   ReadRowLocationMode readRowLocationMode,
 												   bool emitRowId,
 												   bool addCast,
-												   DataFileSchema * storageSchema);
+												   DataFileSchema * storageSchema,
+												   DataFileSchema * scanNameSchema,
+												   DataFileSchema * outputNameSchema);
 
 /*
  * Returns a DuckDB expression converting every INTERVAL and TIMETZ leaf in
@@ -93,7 +96,8 @@ extern PGDLLEXPORT char *BuildIcebergReadConversion(const char *expression,
 extern PGDLLEXPORT char *TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc,
 													 CopyDataFormat sourceFormat,
 													 bool preferVarchar,
-													 bool skipFilename);
+													 bool skipFilename,
+													 DataFileSchema * nameSchema);
 
 extern PGDLLEXPORT char *CopyOptionsToReadCSVParams(List *copyOptions);
 extern PGDLLEXPORT void AppendReadCSVClause(StringInfo buf,

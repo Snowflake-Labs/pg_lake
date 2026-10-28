@@ -21,6 +21,8 @@
 #include "access/table.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/fdw/schema_operations/register_field_ids.h"
+#include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/fdw/partition_pushdown.h"
@@ -292,6 +294,7 @@ TransformPushdownableInsertSelect(Query *query)
 	Oid			insertRelid = GetInsertRelidFromInsertSelect(query);
 	Relation	insertRel = table_open(insertRelid, RowExclusiveLock);
 	TupleDesc	relationTupleDesc = RelationGetDescr(insertRel);
+	DataFileSchema *schema = GetDataFileSchemaForTable(insertRelid);
 
 	List	   *newTargetList = NIL;
 	ListCell   *targetEntryCell = list_head(query->targetList);
@@ -322,6 +325,8 @@ TransformPushdownableInsertSelect(Query *query)
 
 			/* fix resno */
 			targetEntry->resno = columnIndex + 1;
+			targetEntry->resname = DuckDBNameForColumnName(schema,
+														   NameStr(column->attname));
 
 			/* move on to the next item in the INSERT target list */
 			targetEntryCell = lnext(query->targetList, targetEntryCell);
@@ -347,15 +352,13 @@ TransformPushdownableInsertSelect(Query *query)
 												  column->attcollation);
 
 			/*
-			 * column does not have a target list entry, create one.
-			 *
-			 * pstrdup because makeTargetEntry does not copy resname: the name
-			 * outlives the table_close below, and deparse reads it after
-			 * catalog access that can free the relcache entry.
+			 * makeTargetEntry does not copy resname. The returned name is
+			 * palloc'd and outlives table_close.
 			 */
 			targetEntry = makeTargetEntry((Expr *) nullConst,
 										  columnIndex + 1,
-										  pstrdup(NameStr(column->attname)),
+										  DuckDBNameForColumnName(schema,
+																  NameStr(column->attname)),
 										  resjunk);
 			newTargetList = lappend(newTargetList, targetEntry);
 		}
