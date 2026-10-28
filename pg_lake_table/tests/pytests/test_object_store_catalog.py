@@ -2339,16 +2339,13 @@ def test_read_only_lowercase_column_names(
             if field["name"] == "id_temp":
                 field["name"] = "id"
     bucket, key = parse_s3_path(location)
-    suffix = ".metadata.json"
-    renamed_key = key[: -len(suffix)] + "-renamed" + suffix
-    s3.put_object(
-        Bucket=bucket, Key=renamed_key, Body=json.dumps(metadata).encode("utf-8")
-    )
-    renamed = f"s3://{bucket}/{renamed_key}"
+    s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(metadata).encode("utf-8"))
+    run_query(f"SELECT lake_file_cache.remove('{location}')", pg_conn)
     error = run_command(
-        f"""
-        CREATE FOREIGN TABLE object_store_sc2.colliding () SERVER pg_lake
-        OPTIONS (path '{renamed}', lowercase_column_names 'true')
+        """
+        CREATE TABLE object_store_sc2.colliding () USING iceberg
+        WITH (catalog='object_store', read_only=True, catalog_namespace='object_store_sc1',
+              catalog_table_name='tbl_3', lowercase_column_names=True);
         """,
         pg_conn,
         raise_error=False,

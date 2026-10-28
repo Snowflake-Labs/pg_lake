@@ -272,13 +272,8 @@ PgLakeAsciiStrcasecmp(const char *s1, const char *s2)
 
 	while (*s1 != '\0' && *s2 != '\0')
 	{
-		unsigned char c1 = (unsigned char) *s1++;
-		unsigned char c2 = (unsigned char) *s2++;
-
-		if (c1 >= 'A' && c1 <= 'Z')
-			c1 += 'a' - 'A';
-		if (c2 >= 'A' && c2 <= 'Z')
-			c2 += 'a' - 'A';
+		unsigned char c1 = pg_ascii_tolower((unsigned char) *s1++);
+		unsigned char c2 = pg_ascii_tolower((unsigned char) *s2++);
 
 		if (c1 != c2)
 			return (int) c1 - (int) c2;

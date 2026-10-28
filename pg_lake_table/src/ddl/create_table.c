@@ -68,7 +68,6 @@
 #include "pg_lake/util/case_insensitive_names.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
-#include "pg_lake/util/string_utils.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
@@ -170,16 +169,13 @@ CreatePgLakeTableCheckUnsupportedFeaturesPostProcess(ProcessUtilityParams * para
 	/* cannot use geometry without pg_lake_spatial */
 	ErrorIfUsingGeometryWithoutSpatialAnalytics(createStmt->base.tableElts);
 
-	/*
-	 * Same DuckDB name rule as Iceberg; the relation now has its real
-	 * columns.
-	 */
-	if (GetBoolOption(createStmt->options, "writable", false))
+	/* pg_lake_iceberg server tables are checked when they are created */
+	if (tableType == PG_LAKE_TABLE_TYPE)
 	{
 		Oid			relationId =
-			RangeVarGetRelid(createStmt->base.relation, NoLock, true);
+			RangeVarGetRelid(createStmt->base.relation, NoLock, false);
 
-		if (OidIsValid(relationId))
+		if (IsWritablePgLakeTable(relationId) || IsIcebergTable(relationId))
 			ErrorIfCaseInsensitiveDuplicateNames(relationId);
 	}
 }

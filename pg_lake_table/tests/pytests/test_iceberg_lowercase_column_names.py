@@ -25,11 +25,6 @@ def _rename_iceberg_fields(fields, renames):
                 element = field_type.get("element")
                 if isinstance(element, dict) and element.get("type") == "struct":
                     _rename_iceberg_fields(element.get("fields", []), renames)
-            elif field_type.get("type") == "map":
-                for key in ("key", "value"):
-                    nested = field_type.get(key)
-                    if isinstance(nested, dict) and nested.get("type") == "struct":
-                        _rename_iceberg_fields(nested.get("fields", []), renames)
 
 
 def rewrite_iceberg_field_names(s3, metadata_location, renames, schema_ids=None):

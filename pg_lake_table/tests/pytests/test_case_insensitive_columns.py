@@ -32,37 +32,33 @@ def test_create_iceberg_table_case_duplicate_columns(
 
 
 def test_create_iceberg_nested_composite_case_duplicate(
-    pg_conn, extension, with_default_location
+    pg_conn, superuser_conn, extension, with_default_location
 ):
-    run_command("""CREATE TYPE case_comp_dup AS ("a" int, "A" int)""", pg_conn)
-
-    error = run_command(
-        """CREATE TABLE case_nested (c case_comp_dup) USING iceberg""",
-        pg_conn,
-        raise_error=False,
+    run_command(
+        """
+        CREATE TYPE case_comp_dup AS ("a" int, "A" int);
+        CREATE TYPE case_outer AS (inner_f case_comp_dup);
+        """,
+        superuser_conn,
     )
-    assert 'field name "A" conflicts with field "a"' in str(error)
-    assert "case_comp_dup" in str(error)
-    pg_conn.rollback()
+    map_type = run_query(
+        "SELECT map_type.create('text', 'case_comp_dup')", superuser_conn
+    )[0][0]
+    superuser_conn.commit()
 
-    run_command("""CREATE TYPE case_comp_dup AS ("a" int, "A" int)""", pg_conn)
-    error = run_command(
-        """CREATE TABLE case_nested_arr (c case_comp_dup[]) USING iceberg""",
-        pg_conn,
-        raise_error=False,
-    )
-    assert 'field name "A" conflicts with field "a"' in str(error)
-    pg_conn.rollback()
+    for column_type in ["case_comp_dup", "case_comp_dup[]", "case_outer", map_type]:
+        error = run_command(
+            f"""CREATE TABLE case_nested (c {column_type}) USING iceberg""",
+            pg_conn,
+            raise_error=False,
+        )
+        assert 'field name "A" conflicts with field "a" in type case_comp_dup' in str(
+            error
+        )
+        pg_conn.rollback()
 
-    run_command("""CREATE TYPE case_comp_dup AS ("a" int, "A" int)""", pg_conn)
-    run_command("""CREATE TYPE case_outer AS (inner_f case_comp_dup)""", pg_conn)
-    error = run_command(
-        """CREATE TABLE case_nested_outer (c case_outer) USING iceberg""",
-        pg_conn,
-        raise_error=False,
-    )
-    assert 'field name "A" conflicts with field "a"' in str(error)
-    pg_conn.rollback()
+    run_command("DROP TYPE case_comp_dup CASCADE", superuser_conn)
+    superuser_conn.commit()
 
 
 def test_create_iceberg_domain_over_colliding_composite(
@@ -178,6 +174,9 @@ def test_alter_table_add_column_case_duplicate(
     assert run_query("""SELECT "A" FROM case_add""", pg_conn) == [[42]]
     pg_conn.rollback()
 
+    run_command("DROP TABLE case_add", pg_conn)
+    pg_conn.commit()
+
 
 def test_alter_table_rename_column_case_duplicate(
     pg_conn, extension, with_default_location
@@ -205,6 +204,9 @@ def test_alter_table_rename_column_case_duplicate(
     assert run_query("""SELECT "A", "b" FROM case_rename""", pg_conn) == [[1, 2]]
     pg_conn.rollback()
 
+    run_command("DROP TABLE case_rename", pg_conn)
+    pg_conn.commit()
+
 
 def test_create_table_like_case_duplicate(pg_conn, extension, with_default_location):
     run_command(
@@ -231,6 +233,44 @@ def test_create_table_as_case_duplicate(pg_conn, extension, with_default_locatio
     )
     assert 'column name "A" conflicts with column "a"' in str(error)
     pg_conn.rollback()
+
+
+def test_create_lake_table_case_duplicate(pg_conn, extension, with_default_location):
+    url = f"s3://{TEST_BUCKET}/test_case_insensitive_columns/writable/"
+    error = run_command(
+        f"""
+        CREATE FOREIGN TABLE case_writable ("a" int, "A" int) SERVER pg_lake
+        OPTIONS (writable 'true', location '{url}', format 'parquet')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert 'column name "A" conflicts with column "a"' in str(error)
+    pg_conn.rollback()
+
+    run_command("""CREATE TABLE case_source ("a" int, b int) USING iceberg""", pg_conn)
+    pg_conn.commit()
+    path = run_query(
+        """
+        SELECT metadata_location FROM iceberg_tables
+        WHERE table_name = 'case_source'
+        """,
+        pg_conn,
+    )[0][0]
+
+    error = run_command(
+        f"""
+        CREATE FOREIGN TABLE case_external ("a" int, "A" int) SERVER pg_lake
+        OPTIONS (path '{path}')
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert 'column name "A" conflicts with column "a"' in str(error)
+    pg_conn.rollback()
+
+    run_command("DROP TABLE case_source", pg_conn)
+    pg_conn.commit()
 
 
 def test_legacy_table_repair_operations(

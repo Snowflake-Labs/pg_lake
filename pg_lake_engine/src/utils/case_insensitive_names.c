@@ -17,7 +17,6 @@
 
 #include "postgres.h"
 
-#include "access/htup_details.h"
 #include "access/table.h"
 #include "catalog/pg_type.h"
 #include "utils/builtins.h"
@@ -25,12 +24,11 @@
 #include "utils/rel.h"
 #include "utils/typcache.h"
 
-#include "pg_lake/pgduck/map.h"
 #include "pg_lake/util/case_insensitive_names.h"
 #include "pg_lake/util/string_utils.h"
 
-static void CheckType(Oid typeOid, int32 typmod);
-static void CheckTupleDesc(TupleDesc tupleDesc, const char *typeName);
+static void CheckType(Oid typeOid);
+static void CheckTupleDesc(TupleDesc tupleDesc, Oid typeOid);
 
 
 /*
@@ -41,13 +39,14 @@ ErrorIfCaseInsensitiveDuplicateNames(Oid relationId)
 {
 	Relation	relation = table_open(relationId, AccessShareLock);
 
-	CheckTupleDesc(RelationGetDescr(relation), NULL);
+	CheckTupleDesc(RelationGetDescr(relation), InvalidOid);
 	table_close(relation, AccessShareLock);
 }
 
 
+/* typeOid is InvalidOid for table columns */
 static void
-CheckTupleDesc(TupleDesc tupleDesc, const char *typeName)
+CheckTupleDesc(TupleDesc tupleDesc, Oid typeOid)
 {
 	for (int outerIndex = 0; outerIndex < tupleDesc->natts; outerIndex++)
 	{
@@ -67,13 +66,13 @@ CheckTupleDesc(TupleDesc tupleDesc, const char *typeName)
 									  NameStr(innerAttr->attname)) != 0)
 				continue;
 
-			if (typeName != NULL)
+			if (OidIsValid(typeOid))
 				ereport(ERROR,
 						(errcode(ERRCODE_DUPLICATE_COLUMN),
 						 errmsg("field name \"%s\" conflicts with field \"%s\" in type %s",
 								NameStr(innerAttr->attname),
 								NameStr(outerAttr->attname),
-								typeName)));
+								format_type_be(typeOid))));
 
 			ereport(ERROR,
 					(errcode(ERRCODE_DUPLICATE_COLUMN),
@@ -88,43 +87,28 @@ CheckTupleDesc(TupleDesc tupleDesc, const char *typeName)
 		Form_pg_attribute attribute = TupleDescAttr(tupleDesc, attnum);
 
 		if (!attribute->attisdropped)
-			CheckType(attribute->atttypid, attribute->atttypmod);
+			CheckType(attribute->atttypid);
 	}
 }
 
 
-/* Arrays, domains, composites and maps, same walk as the Iceberg field builder. */
+/* getBaseType also unwraps map domains to their array of key/value rows. */
 static void
-CheckType(Oid typeOid, int32 typmod)
+CheckType(Oid typeOid)
 {
-	typeOid = ResolveDomainBaseTypeAndTypmod(typeOid, &typmod);
+	typeOid = getBaseType(typeOid);
 
 	if (type_is_array(typeOid))
 	{
-		CheckType(get_element_type(typeOid), typmod);
+		CheckType(get_element_type(typeOid));
 		return;
 	}
 
 	if (get_typtype(typeOid) == TYPTYPE_COMPOSITE)
 	{
-		TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeOid, typmod);
+		TupleDesc	tupleDesc = lookup_rowtype_tupdesc(typeOid, -1);
 
-		CheckTupleDesc(tupleDesc, format_type_be(typeOid));
+		CheckTupleDesc(tupleDesc, typeOid);
 		ReleaseTupleDesc(tupleDesc);
-		return;
 	}
-
-	if (!IsMapTypeOid(typeOid))
-		return;
-
-	Oid			elementType = get_element_type(getBaseType(typeOid));
-	TypeCacheEntry *typeEntry = lookup_type_cache(elementType, TYPECACHE_TUPDESC);
-
-	if (typeEntry == NULL || typeEntry->tupDesc == NULL)
-		return;
-
-	CheckType(TupleDescAttr(typeEntry->tupDesc, 0)->atttypid,
-			  TupleDescAttr(typeEntry->tupDesc, 0)->atttypmod);
-	CheckType(TupleDescAttr(typeEntry->tupDesc, 1)->atttypid,
-			  TupleDescAttr(typeEntry->tupDesc, 1)->atttypmod);
 }
