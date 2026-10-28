@@ -27,7 +27,6 @@
 #include "postgres.h"
 #include "catalog/pg_type_d.h"
 
-#include "catalog/namespace.h"
 #include "nodes/makefuncs.h"
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
@@ -790,198 +789,12 @@ RteWillUseDuckNames(RewriteContext * context, RangeTblEntry *rte)
 }
 
 
-static RangeTblEntry *
-JoinInputRte(Query *query, Node *input)
-{
-	if (input == NULL)
-		return NULL;
-
-	if (IsA(input, RangeTblRef))
-		return rt_fetch(((RangeTblRef *) input)->rtindex, query->rtable);
-
-	if (IsA(input, JoinExpr) && ((JoinExpr *) input)->rtindex > 0)
-		return rt_fetch(((JoinExpr *) input)->rtindex, query->rtable);
-
-	return NULL;
-}
-
-
-static AttrNumber
-ErefAttnum(RangeTblEntry *rte, const char *name)
-{
-	ListCell   *cell = NULL;
-	AttrNumber	attnum = 1;
-
-	if (rte == NULL)
-		return InvalidAttrNumber;
-
-	foreach(cell, ErefColumnNames(rte))
-	{
-		if (strcmp(strVal(lfirst(cell)), name) == 0)
-			return attnum;
-
-		attnum++;
-	}
-
-	return InvalidAttrNumber;
-}
-
-
-static bool
-ColumnTypeOfRte(RangeTblEntry *rte, AttrNumber attnum,
-				Oid *typeId, int32 *typeMod, Oid *collation)
-{
-	TargetEntry *entry = NULL;
-	ListCell   *cell = NULL;
-	AttrNumber	visible = 1;
-
-	*typeId = InvalidOid;
-	*typeMod = -1;
-	*collation = InvalidOid;
-
-	if (rte == NULL || attnum <= 0)
-		return false;
-
-	if ((rte->rtekind == RTE_RELATION || rte->rtekind == RTE_FUNCTION) &&
-		OidIsValid(rte->relid))
-	{
-		get_atttypetypmodcoll(rte->relid, attnum, typeId, typeMod, collation);
-		return OidIsValid(*typeId);
-	}
-
-	if (rte->rtekind == RTE_SUBQUERY && rte->subquery != NULL)
-	{
-		foreach(cell, rte->subquery->targetList)
-		{
-			entry = lfirst(cell);
-
-			if (entry->resjunk)
-				continue;
-
-			if (visible == attnum)
-			{
-				*typeId = exprType((Node *) entry->expr);
-				*typeMod = exprTypmod((Node *) entry->expr);
-				*collation = exprCollation((Node *) entry->expr);
-				return OidIsValid(*typeId);
-			}
-
-			visible++;
-		}
-	}
-
-	if (rte->joinaliasvars != NIL && attnum <= list_length(rte->joinaliasvars))
-	{
-		Node	   *aliasVar = list_nth(rte->joinaliasvars, attnum - 1);
-
-		if (aliasVar != NULL)
-		{
-			*typeId = exprType(aliasVar);
-			*typeMod = exprTypmod(aliasVar);
-			*collation = exprCollation(aliasVar);
-			return OidIsValid(*typeId);
-		}
-	}
-
-	return false;
-}
-
-
-static Expr *
-MakeUsingEquality(RangeTblEntry *leftRte, AttrNumber leftAtt,
-				  RangeTblEntry *rightRte, AttrNumber rightAtt,
-				  Index leftVarno, Index rightVarno)
-{
-	Oid			leftType = InvalidOid;
-	Oid			rightType = InvalidOid;
-	int32		leftMod = -1;
-	int32		rightMod = -1;
-	Oid			leftColl = InvalidOid;
-	Oid			rightColl = InvalidOid;
-	Oid			operatorId = InvalidOid;
-	Var		   *leftVar = NULL;
-	Var		   *rightVar = NULL;
-	OpExpr	   *operation = NULL;
-
-	if (!ColumnTypeOfRte(leftRte, leftAtt, &leftType, &leftMod, &leftColl) ||
-		!ColumnTypeOfRte(rightRte, rightAtt, &rightType, &rightMod, &rightColl))
-		return NULL;
-
-	operatorId = OpernameGetOprid(list_make1(makeString("=")), leftType, rightType);
-
-	if (!OidIsValid(operatorId))
-		return NULL;
-
-	leftVar = makeVar(leftVarno, leftAtt, leftType, leftMod, leftColl, 0);
-	rightVar = makeVar(rightVarno, rightAtt, rightType, rightMod, rightColl, 0);
-	operation = (OpExpr *) make_opclause(operatorId, BOOLOID, false,
-										 (Expr *) leftVar, (Expr *) rightVar,
-										 InvalidOid, InvalidOid);
-	operation->opfuncid = get_opcode(operatorId);
-	operation->opresulttype = BOOLOID;
-
-	return (Expr *) operation;
-}
-
-
 static void
-ExpandOneUsing(RewriteContext * context, JoinExpr *join)
+ExpandOneUsing(JoinExpr *join)
 {
-	RangeTblEntry *leftRte = NULL;
-	RangeTblEntry *rightRte = NULL;
-	Index		leftVarno = 0;
-	Index		rightVarno = 0;
-	List	   *equalities = NIL;
-	ListCell   *cell = NULL;
-
-	if (join->usingClause == NIL)
+	if (join->usingClause == NIL || join->quals == NULL)
 		return;
 
-	leftRte = JoinInputRte(context->query, join->larg);
-	rightRte = JoinInputRte(context->query, join->rarg);
-
-	if (leftRte == NULL || rightRte == NULL)
-		return;
-
-	if (!RteWillUseDuckNames(context, leftRte) &&
-		!RteWillUseDuckNames(context, rightRte))
-		return;
-
-	if (IsA(join->larg, RangeTblRef))
-		leftVarno = ((RangeTblRef *) join->larg)->rtindex;
-	else if (IsA(join->larg, JoinExpr))
-		leftVarno = ((JoinExpr *) join->larg)->rtindex;
-
-	if (IsA(join->rarg, RangeTblRef))
-		rightVarno = ((RangeTblRef *) join->rarg)->rtindex;
-	else if (IsA(join->rarg, JoinExpr))
-		rightVarno = ((JoinExpr *) join->rarg)->rtindex;
-
-	if (leftVarno == 0 || rightVarno == 0)
-		return;
-
-	foreach(cell, join->usingClause)
-	{
-		const char *name = strVal(lfirst(cell));
-		AttrNumber	leftAtt = ErefAttnum(leftRte, name);
-		AttrNumber	rightAtt = ErefAttnum(rightRte, name);
-		Expr	   *equality = NULL;
-
-		if (leftAtt == InvalidAttrNumber || rightAtt == InvalidAttrNumber)
-			return;
-
-		equality = MakeUsingEquality(leftRte, leftAtt, rightRte, rightAtt,
-									 leftVarno, rightVarno);
-
-		if (equality == NULL)
-			return;
-
-		equalities = lappend(equalities, equality);
-	}
-
-	join->quals = (Node *) (list_length(equalities) == 1 ?
-							linitial(equalities) :
-							make_andclause(equalities));
 	join->usingClause = NIL;
 	join->isNatural = false;
 }
@@ -1006,7 +819,7 @@ ExpandUsingClauses(RewriteContext * context, Node *node)
 
 		ExpandUsingClauses(context, join->larg);
 		ExpandUsingClauses(context, join->rarg);
-		ExpandOneUsing(context, join);
+		ExpandOneUsing(join);
 	}
 }
 
