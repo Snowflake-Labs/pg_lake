@@ -1861,21 +1861,24 @@ GetExternalIcebergFieldsForAttributes(Oid relationId, List *columnsUsedInFilters
 		Var		   *column = lfirst(columnCell);
 		AttrNumber	pgAttNum = column->varattno;
 		char	   *columnName = get_attname(relationId, pgAttNum, false);
+		DataFileSchemaField *match = NULL;
+		int			matchCount = 0;
 
 		for (int i = 0; i < schema->nfields; i++)
 		{
 			DataFileSchemaField *field = &schema->fields[i];
-			Field	   *fieldType = field->type;
-			PGType		pgType = IcebergFieldToPostgresType(fieldType);
 
-			if (strcasecmp(field->name, columnName) == 0 &&
-				pgType.postgresTypeOid == column->vartype)
+			if (strcasecmp(field->name, columnName) == 0)
 			{
-				fields = lappend(fields, field);
-				break;
+				match = field;
+				matchCount++;
 			}
-
 		}
+
+		/* DuckDB cannot tell apart fields that differ only by case */
+		if (matchCount == 1 &&
+			IcebergFieldToPostgresType(match->type).postgresTypeOid == column->vartype)
+			fields = lappend(fields, match);
 	}
 
 	return fields;

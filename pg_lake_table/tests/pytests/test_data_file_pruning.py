@@ -1,3 +1,4 @@
+import json
 import pytest
 from helpers.polaris import *
 from utils_pytest import *
@@ -785,6 +786,62 @@ def test_pruning_for_non_ascii_chars(
             assert int(fetch_data_files_used(results)) == 1
 
     run_command("DROP SCHEMA test_pruning_for_non_ascii_chars CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_no_pruning_for_case_only_field_names(
+    s3, pg_conn, extension, with_default_location
+):
+    run_command(
+        """
+        CREATE SCHEMA test_no_pruning_for_case_only_field_names;
+        CREATE TABLE test_no_pruning_for_case_only_field_names.tbl (
+            "A" int, a_temp int
+        ) USING iceberg WITH (autovacuum_enabled='False');
+        INSERT INTO test_no_pruning_for_case_only_field_names.tbl VALUES (100, 1);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    location = run_query(
+        """
+        SELECT metadata_location FROM iceberg_tables
+        WHERE table_namespace = 'test_no_pruning_for_case_only_field_names'
+        """,
+        pg_conn,
+    )[0][0]
+
+    # Iceberg allows "A" and "a" in one table
+    metadata = json.loads(read_s3_operations(s3, location))
+    for schema in metadata["schemas"]:
+        for field in schema["fields"]:
+            if field["name"] == "a_temp":
+                field["name"] = "a"
+    bucket, key = parse_s3_path(location)
+    renamed_key = key.replace(".metadata.json", "-renamed.metadata.json")
+    s3.put_object(Bucket=bucket, Key=renamed_key, Body=json.dumps(metadata))
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE test_no_pruning_for_case_only_field_names.ext (a int)
+        SERVER pg_lake OPTIONS (path 's3://{bucket}/{renamed_key}')
+        """,
+        pg_conn,
+    )
+
+    # the bounds of "A" would skip the only file and return no rows
+    error = run_query(
+        "SELECT * FROM test_no_pruning_for_case_only_field_names.ext WHERE a = 1",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "duplicate column name" in error
+
+    pg_conn.rollback()
+    run_command(
+        "DROP SCHEMA test_no_pruning_for_case_only_field_names CASCADE", pg_conn
+    )
     pg_conn.commit()
 
 
