@@ -922,9 +922,9 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 	if (opts->enableVendedCredentials)
 	{
 		result->vendedCredentials = ExtractVendedCredentials(body, opts,
-															restCatalogName,
-															namespaceName,
-															relationName);
+															 restCatalogName,
+															 namespaceName,
+															 relationName);
 		result->tableRoot = TableRootFromLoadTableResponse(body);
 
 		if (result->vendedCredentials != NIL)
