@@ -33,6 +33,7 @@
 #include "access/relation.h"
 #include "access/table.h"
 #include "catalog/namespace.h"
+#include "catalog/pg_inherits.h"
 #include "commands/trigger.h"
 #include "executor/spi.h"
 #include "foreign/foreign.h"
@@ -79,6 +80,9 @@ typedef struct FieldMapping
 
 static void SyncIcebergMetadataFromExternalWrite(Oid relationId,
 												 const char *metadataLocation);
+static void ErrorIfTableHasPostgresOnlyRules(Oid relationId);
+static void ErrorIfNullsInRequiredFields(DataFile * dataFile,
+										 IcebergTableSchema * schema);
 static char *GetTableLocationFromMetadataLocation(const char *metadataLocation);
 static void ErrorIfOutsideTableLocation(const char *path, const char *tableLocation);
 static void SyncSchemaFromMetadata(Oid relationId, IcebergTableMetadata * metadata);
@@ -145,6 +149,8 @@ SyncIcebergMetadataFromExternalWrite(Oid relationId, const char *metadataLocatio
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("external writes are not supported on tables with row_ids")));
 
+	ErrorIfTableHasPostgresOnlyRules(relationId);
+
 	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
 
 	/*
@@ -184,6 +190,76 @@ SyncIcebergMetadataFromExternalWrite(Oid relationId, const char *metadataLocatio
 		SkipIcebergDDLProcessing = false;
 	}
 	PG_END_TRY();
+}
+
+
+/*
+ * ErrorIfTableHasPostgresOnlyRules throws an error if the table has rules
+ * that Postgres enforces on writes but an external writer cannot see: CHECK
+ * constraints, partition bounds, stored generated columns and triggers.
+ * Postgres keeps relying on the constraints after the write, for instance to
+ * prune partitions.
+ */
+static void
+ErrorIfTableHasPostgresOnlyRules(Oid relationId)
+{
+	const char *rule = NULL;
+
+	if (get_rel_relispartition(relationId) || has_superclass(relationId))
+		rule = "a partition or inheritance child";
+
+	Relation	rel = RelationIdGetRelation(relationId);
+	TupleConstr *constr = RelationGetDescr(rel)->constr;
+
+	if (rule == NULL && constr != NULL && constr->num_check > 0)
+		rule = "CHECK constraints";
+	else if (rule == NULL && constr != NULL && constr->has_generated_stored)
+		rule = "generated columns";
+
+	for (int triggerIndex = 0;
+		 rule == NULL && rel->trigdesc != NULL && triggerIndex < rel->trigdesc->numtriggers;
+		 triggerIndex++)
+	{
+		if (!rel->trigdesc->triggers[triggerIndex].tgisinternal)
+			rule = "triggers";
+	}
+
+	RelationClose(rel);
+
+	if (rule != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("external writes are not supported on tables with %s", rule),
+				 errdetail("External writers do not apply them.")));
+}
+
+
+/*
+ * ErrorIfNullsInRequiredFields throws an error if the manifest says a data
+ * file has nulls in a required (NOT NULL) column. Files without null counts
+ * are accepted.
+ */
+static void
+ErrorIfNullsInRequiredFields(DataFile * dataFile, IcebergTableSchema * schema)
+{
+	for (size_t statIndex = 0; statIndex < dataFile->null_value_counts_length; statIndex++)
+	{
+		ColumnStat *nullCount = &dataFile->null_value_counts[statIndex];
+
+		if (nullCount->value <= 0)
+			continue;
+
+		for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+		{
+			DataFileSchemaField *field = &schema->fields[fieldIdx];
+
+			if (field->id == nullCount->column_id && field->required)
+				ereport(ERROR,
+						(errcode(ERRCODE_NOT_NULL_VIOLATION),
+						 errmsg("file \"%s\" has null values in column \"%s\", which is required",
+								dataFile->file_path, field->name)));
+		}
+	}
 }
 
 
@@ -650,6 +726,8 @@ SyncDataFilesFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 
 				if (content == CONTENT_DATA)
 				{
+					ErrorIfNullsInRequiredFields(dataFile, icebergSchema);
+
 					List	   *columnStatsList =
 						BuildColumnStatsForManifestEntry(entry, icebergSchema);
 

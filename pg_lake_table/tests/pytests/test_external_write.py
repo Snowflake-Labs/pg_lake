@@ -3,6 +3,7 @@ import threading
 import pytest
 import pyarrow as pa
 import pyarrow.parquet
+import pyiceberg.io.pyarrow
 from pyiceberg.catalog.sql import SqlCatalog
 from pyiceberg.transforms import IdentityTransform
 from pyiceberg.types import LongType
@@ -1689,4 +1690,131 @@ def test_external_write_row_ids_rejected(
 
     assert _metadata_location(pg_conn, name) == location
     assert run_query(f"SELECT count(*) FROM {tbl}", pg_conn)[0][0] == 5
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
+    "setup, message",
+    [
+        ("ALTER TABLE {tbl} ADD CHECK (a > 0)", "CHECK constraints"),
+        (
+            "CREATE FUNCTION {name}_fn() RETURNS trigger LANGUAGE plpgsql "
+            "AS $$BEGIN RETURN NEW; END$$; "
+            "CREATE TRIGGER {name}_trg AFTER INSERT ON {tbl} "
+            "FOR EACH ROW EXECUTE FUNCTION {name}_fn()",
+            "triggers",
+        ),
+        (
+            "CREATE TABLE {name}_parent (a int, b text) PARTITION BY RANGE (a); "
+            "ALTER TABLE {name}_parent ATTACH PARTITION {tbl} FOR VALUES FROM (0) TO (10)",
+            "a partition",
+        ),
+    ],
+    ids=["check", "trigger", "partition"],
+)
+def test_external_write_postgres_only_rules_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+    setup,
+    message,
+):
+    """
+    Tables whose rules only Postgres applies reject external writes, since
+    the writer would bypass them (e.g. a row outside the partition bounds
+    disappears from filtered queries on the parent).
+    """
+    name = f"{TABLE_NAME}_rule_{message.split()[-1].lower()}"
+    tbl = _create_table(pg_conn, name)
+    run_command(setup.format(tbl=tbl, name=name), pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pytest.raises(Exception, match=f"not supported on tables with {message}"):
+        pyiceberg_table.append(_rows([500]))
+
+    assert run_query(f"SELECT count(*) FROM {tbl}", pg_conn)[0][0] == 5
+    pg_conn.rollback()
+
+
+def test_external_write_generated_column_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+):
+    """A stored generated column would get whatever the writer puts there."""
+    name = f"{TABLE_NAME}_generated"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    run_command(
+        f"CREATE TABLE {tbl} (a int, b int GENERATED ALWAYS AS (a * 10) STORED) USING iceberg",
+        pg_conn,
+    )
+    run_command(f"INSERT INTO {tbl} (a) VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    with pytest.raises(
+        Exception, match="not supported on tables with generated columns"
+    ):
+        pyiceberg_table.append(
+            pa.table(
+                {"a": [2], "b": [12345]},
+                schema=pa.schema(
+                    [pa.field("a", pa.int32()), pa.field("b", pa.int32())]
+                ),
+            )
+        )
+
+    assert run_query(f"SELECT a, b FROM {tbl}", pg_conn) == [[1, 10]]
+    pg_conn.rollback()
+
+
+def test_external_write_nulls_in_required_column_rejected(
+    s3,
+    pg_conn,
+    superuser_conn,
+    extension,
+    with_default_location,
+    iceberg_catalog,
+    monkeypatch,
+):
+    """
+    pyiceberg refuses to write nulls to a required column, so turn off its
+    schema check to act like a writer that does not, and let the manifest
+    record the nulls.
+    """
+    name = f"{TABLE_NAME}_required"
+    tbl = f"{TABLE_NAMESPACE}.{name}"
+    run_command(f"CREATE TABLE {tbl} (a int NOT NULL, b text) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1, 'x')", pg_conn)
+    pg_conn.commit()
+
+    pyiceberg_table = iceberg_catalog.load_table(f"{TABLE_NAMESPACE}.{name}")
+    table_location = pyiceberg_table.location().split(f"s3://{TEST_BUCKET}/", 1)[1]
+
+    buffer = pa.BufferOutputStream()
+    pa.parquet.write_table(
+        pa.table(
+            {"a": pa.array([None, 2], pa.int32()), "b": ["null", "two"]},
+        ),
+        buffer,
+    )
+    key = f"{table_location}/data/with_nulls.parquet"
+    s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=buffer.getvalue().to_pybytes())
+
+    monkeypatch.setattr(
+        pyiceberg.io.pyarrow,
+        "_check_pyarrow_schema_compatible",
+        lambda *args, **kwargs: None,
+    )
+    with pytest.raises(Exception, match='has null values in column "a"'):
+        pyiceberg_table.add_files([f"s3://{TEST_BUCKET}/{key}"])
+
+    assert run_query(f"SELECT count(*), count(a) FROM {tbl}", pg_conn) == [[1, 1]]
     pg_conn.rollback()
