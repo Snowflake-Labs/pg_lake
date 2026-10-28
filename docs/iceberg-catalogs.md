@@ -488,16 +488,16 @@ and repeated group reads can cause additional I/O.
 
 pg_lake writes a line to the PostgreSQL server log, never to the client, when a catalog
 request fails, when no catalog credential can be obtained, when an Iceberg table is created,
-attached or dropped, and periodically with usage counts. The lines carry no table, schema,
-namespace or catalog names, no URLs or paths, no SQL text and no error messages from the
-catalog. Every value is a number, an object ID, a SQLSTATE or a word from a fixed list, so
-the lines can be collected in places where the rest of the server log should not go.
+attached or dropped, and when a table uses something pg_lake cannot handle. The lines carry
+no table, schema, namespace or catalog names, no URLs or paths, no SQL text and no error
+messages from the catalog. Every value is a number, an object ID, a SQLSTATE or a word from
+a fixed list, so the lines can be collected in places where the rest of the server log
+should not go.
 
 Each line starts with `pg_lake_catalog: `, followed by the event name and `key=value` fields:
 
 ```
 LOG:  pg_lake_catalog: request_failed catalog=rest_server op=load_table status=403 error_type=ForbiddenException attempts=1 auth_refreshed=false ms=84
-LOG:  pg_lake_catalog: usage catalog=rest_server op=load_table requests=212 failed=1 not_found=3 retried=0 auth_refreshed=0 total_ms=10240 max_ms=310 window_s=900
 LOG:  pg_lake_catalog: table_created catalog=rest_server relid=16412
 ```
 
@@ -517,11 +517,9 @@ The `catalog` field is one of:
 |:--|:--|:--|
 | `request_failed` | A REST catalog request fails after its retries | `catalog`, `op`, `status`, `error_type` or `curl_error` and `curl_code`, `attempts`, `auth_refreshed`, `ms` |
 | `auth_failed` | No credential could be obtained for a REST catalog | `catalog`, `source`, `sqlstate` |
-| `usage` | Every `pg_lake_iceberg.catalog_log_interval`, and when a session ends | `catalog`, `op`, `requests`, `failed`, `not_found`, `retried`, `auth_refreshed`, `total_ms`, `max_ms`, `window_s` |
 | `table_created` | A transaction that created an Iceberg table commits | `catalog`, `relid` |
 | `table_attached` | A transaction that attached a read-only table from a catalog commits | `catalog`, `relid`, `format_version` |
 | `table_dropped` | A transaction that dropped an Iceberg table commits | `catalog`, `relid`, `read_only` |
-| `inventory` | Every `pg_lake_iceberg.catalog_log_interval`, per database | `catalog`, `writable`, `read_only` |
 | `unsupported_feature` | A table uses an Iceberg feature pg_lake cannot read or write | `feature`, and `format_version` or `type` |
 | `vended_credentials` | Storage credentials from a catalog cannot be used | `reason`, and `catalog`, `storage`, `sqlstate` or `relid` |
 
@@ -535,13 +533,11 @@ the catalog does not have.
 of `dns`, `connect`, `timeout`, `tls`, `transfer`, `aborted`, `out_of_memory` or `other`.
 Otherwise `error_type` is the Iceberg exception type or OAuth2 error code the catalog
 answered with, `other` for one pg_lake does not know, or `none` when the response named
-none. A 404 is not logged as a failure, because pg_lake looks up namespaces and tables that
-may not exist as part of creating and attaching tables. It is counted in `not_found` instead.
+none. A 404 is not logged, because pg_lake looks up namespaces and tables that may not
+exist as part of creating and attaching tables.
 
 For `auth_failed`, `source` is `oauth2` when pg_lake's own OAuth2 token request failed, and
-`provider` when a credential provider supplied by another extension failed. `usage` counts
-are per session. A session logs one line per catalog and request kind it used, then starts
-counting again.
+`provider` when a credential provider supplied by another extension failed.
 
 `feature` is `deletion_vectors`, `initial_default`, `format_version` or
 `write_format_version` (with the version), or `type` with the Iceberg type: `geography`,

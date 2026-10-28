@@ -25,20 +25,14 @@
 
 #include "pg_extension_base/pg_compat.h"
 
-#include "access/genam.h"
-#include "access/htup_details.h"
-#include "access/table.h"
 #include "access/xact.h"
-#include "catalog/pg_foreign_table.h"
 #include "fmgr.h"
 #include "foreign/foreign.h"
 #include "nodes/miscnodes.h"
-#include "storage/ipc.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/memutils.h"
 #include "utils/numeric.h"
-#include "utils/timestamp.h"
 
 #include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/parsetree/options.h"
@@ -53,9 +47,6 @@
 /* managed via pg_lake_iceberg.log_catalog_events */
 bool		LogCatalogEvents = true;
 
-/* managed via pg_lake_iceberg.catalog_log_interval, in seconds */
-int			CatalogLogInterval = 900;
-
 typedef enum CatalogLogLabel
 {
 	CATALOG_LABEL_HORIZON,
@@ -65,9 +56,6 @@ typedef enum CatalogLogLabel
 	CATALOG_LABEL_POSTGRES,
 	CATALOG_LABEL_COUNT
 }			CatalogLogLabel;
-
-/* the labels a REST catalog can carry come first */
-#define REST_CATALOG_LABEL_COUNT (CATALOG_LABEL_REST_SERVER + 1)
 
 static const char *const CatalogLabelNames[CATALOG_LABEL_COUNT] = {
 	[CATALOG_LABEL_HORIZON] = "horizon",
@@ -134,17 +122,6 @@ static const char *const KnownIcebergTypes[] = {
 	"variant",
 };
 
-typedef struct CatalogRequestUsage
-{
-	int64		requests;
-	int64		failed;
-	int64		notFound;
-	int64		retried;
-	int64		authRefreshed;
-	int64		totalMs;
-	int64		maxMs;
-}			CatalogRequestUsage;
-
 typedef struct PendingCatalogEvent
 {
 	int			nestLevel;
@@ -152,22 +129,14 @@ typedef struct PendingCatalogEvent
 	char	   *fields;
 }			PendingCatalogEvent;
 
-static CatalogRequestUsage RequestUsage[REST_CATALOG_LABEL_COUNT][REST_CATALOG_OP_COUNT];
-static TimestampTz UsageWindowStart = 0;
-static bool UsageExitFlushRegistered = false;
-
 /* lives in TopTransactionContext */
 static List *PendingCatalogEvents = NIL;
-
-static TimestampTz LastInventoryTime = 0;
 
 static void EmitCatalogLog(const char *event, const char *fields);
 static CatalogLogLabel RestCatalogLabel(const RestCatalogOptions * opts);
 static CatalogLogLabel CatalogLabelForRelation(Oid relationId);
 static const char *CatalogErrorType(const HttpResult * result);
 static const char *CurlErrorClass(int curlCode);
-static void FlushCatalogUsage(void);
-static void FlushCatalogUsageAtExit(int code, Datum arg);
 static void CatalogLogXactCallback(XactEvent event, void *arg);
 static void CatalogLogSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
 									  SubTransactionId parentSubid, void *arg);
@@ -188,7 +157,7 @@ InitCatalogLog(void)
 /*
  * EmitCatalogLog writes one line.  It goes to the server log only: these
  * lines are for whoever operates the server, and keeping them off the client
- * connection makes them safe to emit at commit and at backend exit.
+ * connection makes them safe to emit at commit.
  */
 static void
 EmitCatalogLog(const char *event, const char *fields)
@@ -382,14 +351,12 @@ CatalogLogLabelForRelation(Oid relationId)
 
 
 /*
- * LogCatalogRequest records the outcome of one REST catalog request, after
- * its retries, in this backend's usage counters and logs a request_failed
- * line when it failed.
+ * LogCatalogRequest logs a request_failed line when a REST catalog request
+ * failed after its retries.
  *
- * 404 is counted on its own rather than as a failure: probing for a
- * namespace or table that is not there is a normal part of attaching and
- * creating tables, and a missing table the user asked for is reported to
- * the user anyway.
+ * 404 is not logged: probing for a namespace or table that is not there is
+ * a normal part of attaching and creating tables, and a missing table the
+ * user asked for is reported to the user anyway.
  *
  * This runs after commit for the requests that publish changes, so it must
  * not throw; parsing the error body is done without raising errors.
@@ -404,99 +371,22 @@ LogCatalogRequest(const RestCatalogOptions * opts, RestCatalogOp op,
 
 	Assert(op >= 0 && op < REST_CATALOG_OP_COUNT);
 
-	CatalogLogLabel label = RestCatalogLabel(opts);
-	bool		notFound = result->status == 404;
-	bool		failed = result->status == 0 || (result->status >= 400 && !notFound);
+	const char *catalog = RestCatalogLogLabel(opts);
 
-	if (failed)
-	{
-		if (result->status == 0)
-			LogCatalogEvent("request_failed",
-							"catalog=%s op=%s status=0 curl_error=%s curl_code=%d "
-							"attempts=%d auth_refreshed=%s ms=%ld",
-							CatalogLabelNames[label], RestCatalogOpNames[op],
-							CurlErrorClass(result->curlCode), result->curlCode,
-							attempts, authRefreshed ? "true" : "false", elapsedMs);
-		else
-			LogCatalogEvent("request_failed",
-							"catalog=%s op=%s status=%ld error_type=%s "
-							"attempts=%d auth_refreshed=%s ms=%ld",
-							CatalogLabelNames[label], RestCatalogOpNames[op],
-							result->status, CatalogErrorType(result),
-							attempts, authRefreshed ? "true" : "false", elapsedMs);
-	}
-
-	CatalogRequestUsage *usage = &RequestUsage[label][op];
-
-	usage->requests++;
-	usage->failed += failed ? 1 : 0;
-	usage->notFound += notFound ? 1 : 0;
-	usage->retried += attempts > 1 ? 1 : 0;
-	usage->authRefreshed += authRefreshed ? 1 : 0;
-	usage->totalMs += elapsedMs;
-	usage->maxMs = Max(usage->maxMs, elapsedMs);
-
-	TimestampTz now = GetCurrentTimestamp();
-
-	if (UsageWindowStart == 0)
-		UsageWindowStart = now;
-
-	if (!UsageExitFlushRegistered)
-	{
-		before_shmem_exit(FlushCatalogUsageAtExit, (Datum) 0);
-		UsageExitFlushRegistered = true;
-	}
-
-	if (CatalogLogInterval == 0 ||
-		TimestampDifferenceExceeds(UsageWindowStart, now, CatalogLogInterval * 1000))
-		FlushCatalogUsage();
-}
-
-
-/*
- * FlushCatalogUsage logs a usage line for every catalog and request kind
- * this backend used since the last flush, and starts a new window.
- */
-static void
-FlushCatalogUsage(void)
-{
-	if (UsageWindowStart == 0)
-		return;
-
-	long		windowSecs =
-		TimestampDifferenceMilliseconds(UsageWindowStart, GetCurrentTimestamp()) / 1000;
-
-	for (int label = 0; label < REST_CATALOG_LABEL_COUNT; label++)
-	{
-		for (int op = 0; op < REST_CATALOG_OP_COUNT; op++)
-		{
-			CatalogRequestUsage *usage = &RequestUsage[label][op];
-
-			if (usage->requests == 0)
-				continue;
-
-			LogCatalogEvent("usage",
-							"catalog=%s op=%s requests=" INT64_FORMAT
-							" failed=" INT64_FORMAT " not_found=" INT64_FORMAT
-							" retried=" INT64_FORMAT " auth_refreshed=" INT64_FORMAT
-							" total_ms=" INT64_FORMAT " max_ms=" INT64_FORMAT
-							" window_s=%ld",
-							CatalogLabelNames[label], RestCatalogOpNames[op],
-							usage->requests, usage->failed, usage->notFound,
-							usage->retried, usage->authRefreshed,
-							usage->totalMs, usage->maxMs, windowSecs);
-		}
-	}
-
-	MemSet(RequestUsage, 0, sizeof(RequestUsage));
-	UsageWindowStart = 0;
-}
-
-
-static void
-FlushCatalogUsageAtExit(int code, Datum arg)
-{
-	FlushCatalogUsage();
+	if (result->status == 0)
+		LogCatalogEvent("request_failed",
+						"catalog=%s op=%s status=0 curl_error=%s curl_code=%d "
+						"attempts=%d auth_refreshed=%s ms=%ld",
+						catalog, RestCatalogOpNames[op],
+						CurlErrorClass(result->curlCode), result->curlCode,
+						attempts, authRefreshed ? "true" : "false", elapsedMs);
+	else if (result->status >= 400 && result->status != 404)
+		LogCatalogEvent("request_failed",
+						"catalog=%s op=%s status=%ld error_type=%s "
+						"attempts=%d auth_refreshed=%s ms=%ld",
+						catalog, RestCatalogOpNames[op],
+						result->status, CatalogErrorType(result),
+						attempts, authRefreshed ? "true" : "false", elapsedMs);
 }
 
 
@@ -651,72 +541,4 @@ IcebergFormatVersionFromMetadata(Jsonb *metadata)
 	int			formatVersion = numeric_int4_opt_error(value->val.numeric, &haveError);
 
 	return haveError ? -1 : formatVersion;
-}
-
-
-/*
- * IcebergTableInventoryIsDue reports whether pg_lake_iceberg.catalog_log_interval
- * has passed since this process last logged the inventory.
- */
-bool
-IcebergTableInventoryIsDue(void)
-{
-	if (!LogCatalogEvents)
-		return false;
-
-	return LastInventoryTime == 0 || CatalogLogInterval == 0 ||
-		TimestampDifferenceExceeds(LastInventoryTime, GetCurrentTimestamp(),
-								   CatalogLogInterval * 1000);
-}
-
-
-/*
- * LogIcebergTableInventory logs how many Iceberg tables the current
- * database has in each catalog, writable and read-only, one line per
- * catalog that has any.  Must be called in a transaction.
- */
-void
-LogIcebergTableInventory(void)
-{
-	LastInventoryTime = GetCurrentTimestamp();
-
-	if (!LogCatalogEvents)
-		return;
-
-	int64		writable[CATALOG_LABEL_COUNT] = {0};
-	int64		readOnly[CATALOG_LABEL_COUNT] = {0};
-
-	Relation	foreignTableRel = table_open(ForeignTableRelationId, AccessShareLock);
-	SysScanDesc scan = systable_beginscan(foreignTableRel, InvalidOid, false,
-										  NULL, 0, NULL);
-	HeapTuple	tuple;
-
-	while (HeapTupleIsValid(tuple = systable_getnext(scan)))
-	{
-		Oid			relationId = ((Form_pg_foreign_table) GETSTRUCT(tuple))->ftrelid;
-		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
-
-		if (catalogType == NONE_CATALOG)
-			continue;
-
-		CatalogLogLabel label = CatalogLabelForRelation(relationId);
-
-		if (HasReadOnlyOption(GetForeignTable(relationId)->options))
-			readOnly[label]++;
-		else
-			writable[label]++;
-	}
-
-	systable_endscan(scan);
-	table_close(foreignTableRel, AccessShareLock);
-
-	for (int label = 0; label < CATALOG_LABEL_COUNT; label++)
-	{
-		if (writable[label] == 0 && readOnly[label] == 0)
-			continue;
-
-		LogCatalogEvent("inventory",
-						"catalog=%s writable=" INT64_FORMAT " read_only=" INT64_FORMAT,
-						CatalogLabelNames[label], writable[label], readOnly[label]);
-	}
 }

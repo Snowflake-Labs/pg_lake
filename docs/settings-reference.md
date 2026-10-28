@@ -95,7 +95,6 @@ See [performance](performance.md) for how these affect queries.
 | `pg_lake_iceberg.object_store_catalog_location_prefix`<span class="pglake-meta">Default none, set by reload</span> | Storage location of the object store catalog. |
 | `pg_lake_iceberg.object_store_catalog_max_age`<span class="pglake-meta">Default `1min`, set by reload</span> | Time after which the object store catalog file is rewritten even without changes. |
 | `pg_lake_iceberg.log_catalog_events`<span class="pglake-meta">Default `on`, set by superuser</span> | Write the [catalog activity log](iceberg-catalogs.md#catalog-activity-log) to the server log. |
-| `pg_lake_iceberg.catalog_log_interval`<span class="pglake-meta">Default `15min`, set by superuser</span> | Time between catalog usage summaries and Iceberg table inventories in the catalog activity log. |
 
 ## Security
 

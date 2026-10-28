@@ -1,13 +1,12 @@
 """
-Tests for the "pg_lake_catalog: " lines about Iceberg tables: table_created,
-table_dropped and the inventory the autovacuum worker logs.
+Tests for the "pg_lake_catalog: " lines about Iceberg tables: table_created
+and table_dropped.
 
 The lines go to the server log only, and they must not name the table, its
 schema or its location, so they report the relation OID instead.
 """
 
 import os
-import time
 import uuid
 
 from utils_pytest import *
@@ -124,55 +123,3 @@ def test_rolled_back_table_is_not_logged(s3, pg_conn, extension, installcheck):
 
     run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
     pg_conn.commit()
-
-
-def test_inventory_is_logged_by_autovacuum_worker(s3, pg_conn, extension, installcheck):
-    if installcheck:
-        return
-
-    schema = f"catlog_{uuid.uuid4().hex[:8]}"
-    location = f"s3://{TEST_BUCKET}/{schema}"
-
-    run_command(
-        f"""
-        CREATE SCHEMA {schema};
-        CREATE TABLE {schema}.counted (id int) USING iceberg
-        WITH (location = '{location}/counted');
-        """,
-        pg_conn,
-    )
-    pg_conn.commit()
-
-    offset = _log_offset()
-
-    run_command_outside_tx(
-        [
-            "ALTER SYSTEM SET pg_lake_iceberg.catalog_log_interval TO 1",
-            "SELECT pg_reload_conf()",
-        ]
-    )
-
-    try:
-        inventory = []
-        deadline = time.monotonic() + 60
-        while time.monotonic() < deadline:
-            inventory = [
-                e
-                for e in _events(offset, "inventory")
-                if e["catalog"] == "postgres" and int(e["writable"]) >= 1
-            ]
-            if inventory:
-                break
-            time.sleep(1)
-
-        assert inventory, _catalog_lines(offset)
-        assert set(inventory[0]) == {"catalog", "writable", "read_only"}
-    finally:
-        run_command_outside_tx(
-            [
-                "ALTER SYSTEM RESET pg_lake_iceberg.catalog_log_interval",
-                "SELECT pg_reload_conf()",
-            ]
-        )
-        run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
-        pg_conn.commit()

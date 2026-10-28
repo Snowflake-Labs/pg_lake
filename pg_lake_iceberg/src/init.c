@@ -213,16 +213,6 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
-	DefineCustomIntVariable("pg_lake_iceberg.catalog_log_interval",
-							gettext_noop("Time between catalog usage summaries and Iceberg "
-										 "table inventories in the server log."),
-							gettext_noop("0 logs a summary after every catalog request; "
-										 "meant for testing."),
-							&CatalogLogInterval,
-							900, 0, INT_MAX / 1000,
-							PGC_SUSET, GUC_UNIT_S,
-							NULL, NULL, NULL);
-
 	DefineCustomBoolVariable(
 							 "pg_lake_iceberg.http_client_trace_traffic",
 							 gettext_noop("When set to true, HTTP client logging is enabled."),

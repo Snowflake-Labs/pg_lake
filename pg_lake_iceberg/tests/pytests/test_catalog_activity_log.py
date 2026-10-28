@@ -1,7 +1,6 @@
 """
 Tests for the "pg_lake_catalog: " lines pg_lake writes to the server log about
-REST catalog activity: failed requests, authentication failures and per-backend
-usage summaries.
+REST catalog activity: failed requests and authentication failures.
 
 The lines are meant to be collectable where the rest of the server log is not,
 so besides checking what they report, every test checks that nothing the user
@@ -17,7 +16,6 @@ import json
 import os
 import socket
 import threading
-import time
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
@@ -122,10 +120,7 @@ def _reset_catalog_gucs():
 
 @pytest.fixture(scope="function")
 def catalog_and_conn(postgres, iceberg_extension):
-    """
-    Point the built-in catalog at a mock and hand back a fresh connection, on
-    which every usage summary is logged right away.
-    """
+    """Point the built-in catalog at a mock and hand back a fresh connection."""
     port = _find_free_port()
     handler_class = _make_handler_class()
     handler_class.port = port
@@ -140,7 +135,6 @@ def catalog_and_conn(postgres, iceberg_extension):
     conn = open_pg_conn()
     wait_for_reloaded_settings([conn], {"pg_lake_iceberg.rest_catalog_host": host})
     run_command(_HOOK_FNS, conn)
-    run_command("SET pg_lake_iceberg.catalog_log_interval TO 0", conn)
     conn.commit()
 
     yield handler_class, conn
@@ -180,15 +174,6 @@ def _events(offset, event):
         for name, fields in (_parse(line) for line in _catalog_lines(offset))
         if name == event
     ]
-
-
-def _wait_for_events(offset, event, timeout=10):
-    deadline = time.monotonic() + timeout
-    while True:
-        events = _events(offset, event)
-        if events or time.monotonic() > deadline:
-            return events
-        time.sleep(0.2)
 
 
 def _assert_nothing_identifying(offset, *secrets):
@@ -241,10 +226,6 @@ def test_failed_request_is_logged_by_class(installcheck, catalog_and_conn):
     assert failures[0]["attempts"] == "1"
     assert failures[0]["auth_refreshed"] == "false"
 
-    usage = {u["op"]: u for u in _events(offset, "usage")}
-    assert usage["get_namespace"]["failed"] == "1"
-    assert usage["token"]["failed"] == "0"
-
     _assert_nothing_identifying(
         offset,
         REMOTE_MESSAGE,
@@ -277,10 +258,10 @@ def test_unknown_error_type_is_not_logged_verbatim(installcheck, catalog_and_con
     _assert_nothing_identifying(offset, REMOTE_MESSAGE)
 
 
-def test_not_found_is_counted_not_logged_as_failure(installcheck, catalog_and_conn):
+def test_not_found_is_not_logged_as_failure(installcheck, catalog_and_conn):
     """
     Probing for a namespace that does not exist yet is how a namespace gets
-    created, so its 404 shows up in the usage summary, not as a failure.
+    created, so its 404 is not logged as a failure.
     """
     if installcheck:
         return
@@ -300,17 +281,7 @@ def test_not_found_is_counted_not_logged_as_failure(installcheck, catalog_and_co
 
     _register_namespace(conn, namespace)
 
-    assert _events(offset, "request_failed") == []
-
-    usage = {u["op"]: u for u in _events(offset, "usage")}
-    assert usage["get_namespace"]["requests"] == "1"
-    assert usage["get_namespace"]["not_found"] == "1"
-    assert usage["get_namespace"]["failed"] == "0"
-    assert usage["list_namespaces"]["requests"] == "1"
-    assert usage["create_namespace"]["requests"] == "1"
-    assert all(u["catalog"] == "rest_builtin" for u in usage.values())
-
-    _assert_nothing_identifying(offset, namespace, CATALOG_NAME, REMOTE_MESSAGE)
+    assert _catalog_lines(offset) == []
 
 
 def test_oauth2_failure_is_logged_as_auth_failed(installcheck, catalog_and_conn):
@@ -409,36 +380,6 @@ def test_unreachable_catalog_is_logged_by_curl_class(
     finally:
         conn.close()
         _reset_catalog_gucs()
-
-
-def test_usage_is_flushed_when_the_backend_exits(installcheck, catalog_and_conn):
-    """
-    With the default interval nothing is summarized while the session runs,
-    but what it used is still logged when it disconnects.
-    """
-    if installcheck:
-        return
-
-    handler_class, _ = catalog_and_conn
-
-    conn = open_pg_conn()
-    wait_for_reloaded_settings(
-        [conn],
-        {"pg_lake_iceberg.rest_catalog_host": f"http://127.0.0.1:{handler_class.port}"},
-    )
-    run_command(_HOOK_FNS, conn)
-    conn.commit()
-
-    offset = _log_offset()
-
-    _register_namespace(conn, "ns_exit")
-    assert _events(offset, "usage") == []
-
-    conn.close()
-
-    usage = _wait_for_events(offset, "usage")
-    assert {u["op"] for u in usage} == {"token", "get_namespace"}, usage
-    assert all(int(u["window_s"]) >= 0 for u in usage)
 
 
 def test_catalog_events_can_be_disabled(installcheck, catalog_and_conn):

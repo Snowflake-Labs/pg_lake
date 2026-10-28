@@ -41,7 +41,6 @@
 #define CATALOG_LOG_PREFIX "pg_lake_catalog: "
 
 extern PGDLLEXPORT bool LogCatalogEvents;
-extern PGDLLEXPORT int CatalogLogInterval;
 
 extern void InitCatalogLog(void);
 extern PGDLLEXPORT void LogCatalogEvent(const char *event, const char *fieldsFormat,...)
@@ -57,5 +56,3 @@ extern void LogCatalogAuthFailure(const RestCatalogOptions * opts, const char *s
 								  int sqlerrcode);
 extern void LogCatalogUnsupportedType(const char *icebergType);
 extern PGDLLEXPORT int IcebergFormatVersionFromMetadata(Jsonb *metadata);
-extern PGDLLEXPORT bool IcebergTableInventoryIsDue(void);
-extern PGDLLEXPORT void LogIcebergTableInventory(void);
