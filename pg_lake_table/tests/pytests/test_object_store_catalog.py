@@ -2339,7 +2339,8 @@ def test_read_only_lowercase_column_names(
             if field["name"] == "id_temp":
                 field["name"] = "id"
     bucket, key = parse_s3_path(location)
-    renamed_key = key + ".renamed.json"
+    suffix = ".metadata.json"
+    renamed_key = key[: -len(suffix)] + "-renamed" + suffix
     s3.put_object(
         Bucket=bucket, Key=renamed_key, Body=json.dumps(metadata).encode("utf-8")
     )

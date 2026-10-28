@@ -43,7 +43,8 @@ def rewrite_iceberg_field_names(s3, metadata_location, renames, schema_ids=None)
             continue
         _rename_iceberg_fields(schema.get("fields", []), renames)
     bucket, key = parse_s3_path(metadata_location)
-    new_key = key + ".renamed.json"
+    suffix = ".metadata.json"
+    new_key = key[: -len(suffix)] + "-renamed" + suffix
     s3.put_object(Bucket=bucket, Key=new_key, Body=json.dumps(metadata).encode("utf-8"))
     return f"s3://{bucket}/{new_key}"
 
