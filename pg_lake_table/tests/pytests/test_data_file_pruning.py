@@ -521,7 +521,9 @@ def test_pruning_for_edge_cases(
     pg_conn.commit()
 
 
-def test_pruning_for_null_values(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_null_values(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -597,7 +599,9 @@ def test_pruning_for_null_values(s3, pg_conn, extension, with_default_location):
     pg_conn.commit()
 
 
-def test_pruning_for_complex_filters(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_complex_filters(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -729,7 +733,9 @@ def test_pruning_for_complex_filters(s3, pg_conn, extension, with_default_locati
     pg_conn.commit()
 
 
-def test_pruning_for_non_ascii_chars(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_non_ascii_chars(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -782,7 +788,9 @@ def test_pruning_for_non_ascii_chars(s3, pg_conn, extension, with_default_locati
     pg_conn.commit()
 
 
-def test_pruning_with_add_drop_column(s3, pg_conn, extension, with_default_location):
+def test_pruning_with_add_drop_column(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -837,7 +845,9 @@ def test_pruning_with_add_drop_column(s3, pg_conn, extension, with_default_locat
     pg_conn.commit()
 
 
-def test_pruning_for_prepared_statement(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_prepared_statement(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -1293,7 +1303,9 @@ def test_pruning_deletes_trigger(s3, pg_conn, extension, with_default_location):
     pg_conn.commit()
 
 
-def test_pruning_for_joins(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_joins(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -2101,6 +2113,7 @@ def test_data_file_pruning_after_type_promotion(
     post_val,
     prune_filter_pre,
     prune_filter_post,
+    create_helper_functions,
 ):
     """Verify data file pruning still works after an Iceberg type promotion."""
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
