@@ -33,14 +33,19 @@ def _rename_iceberg_fields(fields, renames):
 
 
 def rewrite_iceberg_field_names(s3, metadata_location, renames, schema_ids=None):
-    """Rename fields in an already written metadata.json."""
+    """Write a new metadata URL with fields renamed.
+
+    Postgres may still serve the original URL from its file cache.
+    """
     metadata = json.loads(read_s3_operations(s3, metadata_location))
     for schema in metadata.get("schemas", []):
         if schema_ids is not None and schema.get("schema-id") not in schema_ids:
             continue
         _rename_iceberg_fields(schema.get("fields", []), renames)
     bucket, key = parse_s3_path(metadata_location)
-    s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(metadata).encode("utf-8"))
+    new_key = key + ".renamed.json"
+    s3.put_object(Bucket=bucket, Key=new_key, Body=json.dumps(metadata).encode("utf-8"))
+    return f"s3://{bucket}/{new_key}"
 
 
 def create_copy_pushdown_probe(superuser_conn):
@@ -90,19 +95,23 @@ def uppercase_source(pg_conn, superuser_conn, s3, extension, with_default_locati
     )
     pg_conn.commit()
 
-    colliding_meta = metadata_location(pg_conn, "colliding")
-    rewrite_iceberg_field_names(s3, colliding_meta, {"id_temp": "id"})
+    colliding_meta = rewrite_iceberg_field_names(
+        s3, metadata_location(pg_conn, "colliding"), {"id_temp": "id"}
+    )
 
-    old_collision_meta = metadata_location(pg_conn, "old_collision")
-    old_metadata = json.loads(read_s3_operations(s3, old_collision_meta))
+    old_collision_location = metadata_location(pg_conn, "old_collision")
+    old_metadata = json.loads(read_s3_operations(s3, old_collision_location))
     current_schema_id = old_metadata["current-schema-id"]
     historical_schema_ids = [
         schema["schema-id"]
         for schema in old_metadata.get("schemas", [])
         if schema["schema-id"] != current_schema_id
     ]
-    rewrite_iceberg_field_names(
-        s3, old_collision_meta, {"id_temp": "id"}, schema_ids=historical_schema_ids
+    old_collision_meta = rewrite_iceberg_field_names(
+        s3,
+        old_collision_location,
+        {"id_temp": "id"},
+        schema_ids=historical_schema_ids,
     )
 
     yield {
@@ -567,8 +576,9 @@ def nested_source(pg_conn, superuser_conn, s3, extension, with_default_location)
             pg_conn,
         )[0][0]
 
-    colliding_meta = nested_location("colliding")
-    rewrite_iceberg_field_names(s3, colliding_meta, {"x_temp": "x"})
+    colliding_meta = rewrite_iceberg_field_names(
+        s3, nested_location("colliding"), {"x_temp": "x"}
+    )
 
     yield {
         "source": nested_location("source"),

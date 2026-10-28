@@ -2212,7 +2212,7 @@ def test_read_only_lowercase_column_names(
         USING iceberg WITH (catalog='object_store');
         INSERT INTO object_store_sc1.tbl_2 SELECT i, 'name_' || i FROM generate_series(1,10) i;
 
-        CREATE TABLE object_store_sc1.tbl_3("ID" int, id int)
+        CREATE TABLE object_store_sc1.tbl_3("ID" int, id_temp int)
         USING iceberg WITH (catalog='object_store');
         """,
         pg_conn,
@@ -2326,11 +2326,28 @@ def test_read_only_lowercase_column_names(
     assert result == [[3, "name_3"]]
 
     # names that differ only in case cannot both be lowercased
-    error = run_command(
+    location = run_query(
         """
-        CREATE TABLE object_store_sc2.colliding () USING iceberg
-        WITH (catalog='object_store', read_only=True, catalog_namespace='object_store_sc1',
-              catalog_table_name='tbl_3', lowercase_column_names=True);
+        SELECT metadata_location FROM iceberg_tables
+        WHERE table_namespace = 'object_store_sc1' AND table_name = 'tbl_3'
+        """,
+        pg_conn,
+    )[0][0]
+    metadata = json.loads(read_s3_operations(s3, location))
+    for schema in metadata["schemas"]:
+        for field in schema["fields"]:
+            if field["name"] == "id_temp":
+                field["name"] = "id"
+    bucket, key = parse_s3_path(location)
+    renamed_key = key + ".renamed.json"
+    s3.put_object(
+        Bucket=bucket, Key=renamed_key, Body=json.dumps(metadata).encode("utf-8")
+    )
+    renamed = f"s3://{bucket}/{renamed_key}"
+    error = run_command(
+        f"""
+        CREATE FOREIGN TABLE object_store_sc2.colliding () SERVER pg_lake
+        OPTIONS (path '{renamed}', lowercase_column_names 'true')
         """,
         pg_conn,
         raise_error=False,
