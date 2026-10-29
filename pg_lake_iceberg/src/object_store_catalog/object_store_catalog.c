@@ -71,7 +71,16 @@ typedef struct CachedCatalogDocument
 	char	   *path;
 	char	   *content;
 	TimestampTz readStartTime;
+	uint64		generation;
 }			CachedCatalogDocument;
+
+/*
+ * Bumped whenever pg_lake_iceberg.external_catalog_document_max_age is set, so a
+ * document read before is not reused after: a caller that sets the age at the
+ * start of a run starts that run with a fresh read, whatever the session read
+ * under an earlier setting.
+ */
+static uint64 CatalogDocumentGeneration = 0;
 
 /* list of CachedCatalogDocument, in TopMemoryContext */
 static List *CachedCatalogDocuments = NIL;
@@ -587,7 +596,8 @@ BuildAndUploadObjectStoreCatalogFile(void)
  * lets such a backend reuse a document it read within that many milliseconds.
  * The age counts from when the read began, so a reused document is never
  * older than the setting allows, and it only ever moves forward: a read that
- * replaces it is a newer one.
+ * replaces it is a newer one. Setting the age starts over: what was read
+ * before is not reused after.
  */
 char *
 ReadExternalObjectStoreCatalogDocument(const char *catalogPath)
@@ -629,10 +639,22 @@ ReadExternalObjectStoreCatalogDocument(const char *catalogPath)
 
 	cached->content = pstrdup(content);
 	cached->readStartTime = readStartTime;
+	cached->generation = CatalogDocumentGeneration;
 
 	MemoryContextSwitchTo(previousContext);
 
 	return content;
+}
+
+
+/*
+ * AssignExternalCatalogDocumentMaxAge is the assign hook of
+ * pg_lake_iceberg.external_catalog_document_max_age.
+ */
+void
+AssignExternalCatalogDocumentMaxAge(int newValue, void *extra)
+{
+	CatalogDocumentGeneration++;
 }
 
 
@@ -661,6 +683,7 @@ static bool
 CachedCatalogDocumentIsFresh(CachedCatalogDocument *document)
 {
 	return document != NULL && ExternalCatalogDocumentMaxAge > 0 &&
+		document->generation == CatalogDocumentGeneration &&
 		!TimestampDifferenceExceeds(document->readStartTime, GetCurrentTimestamp(),
 								   ExternalCatalogDocumentMaxAge);
 }

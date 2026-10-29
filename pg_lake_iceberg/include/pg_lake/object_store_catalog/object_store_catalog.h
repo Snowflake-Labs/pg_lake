@@ -25,5 +25,6 @@ extern PGDLLEXPORT char *GetExternalObjectStoreCatalogFilePathForTable(Oid relat
 extern PGDLLEXPORT char *GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId, const char *catalogContent);
 extern PGDLLEXPORT void ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName);
 extern PGDLLEXPORT char *ReadExternalObjectStoreCatalogDocument(const char *catalogPath);
+extern PGDLLEXPORT void AssignExternalCatalogDocumentMaxAge(int newValue, void *extra);
 extern PGDLLEXPORT char *GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, const char *catalogNamespace, const char *catalogTableName);
 extern PGDLLEXPORT void TriggerCatalogExportIfObjectStoreTable(Oid relationId);

@@ -2023,8 +2023,9 @@ def test_catalog_json_out_of_band_update_azure(
 
 
 # pg_lake_iceberg.external_catalog_document_max_age lets a backend reuse a
-# catalog.json it read. Within the age an out-of-band change stays unseen, past
-# it, or with the setting at 0, the next statement reads the change.
+# catalog.json it read. Within the age an out-of-band change stays unseen; past
+# it, with the setting at 0, or once the setting is set again, the next statement
+# reads the change.
 def test_external_catalog_document_max_age(
     pg_conn, s3, extension, with_default_location, adjust_object_store_settings
 ):
@@ -2084,19 +2085,27 @@ def test_external_catalog_document_max_age(
         point_wrt_tbl_at("wrt_tbl_b")
         assert read() == [1, 2, 3]
 
+        # setting the age again starts over, so the next statement reads it fresh
+        run_command(
+            "SET pg_lake_iceberg.external_catalog_document_max_age = '1h'", reader
+        )
+        assert read() == [100, 200, 300]
+        point_wrt_tbl_at("wrt_tbl")
+        assert read() == [100, 200, 300]
+
         # at 0 every statement reads it fresh again
         run_command("SET pg_lake_iceberg.external_catalog_document_max_age = 0", reader)
-        assert read() == [100, 200, 300]
+        assert read() == [1, 2, 3]
 
         # and past the age a reused document is replaced by a fresh read
         run_command(
             "SET pg_lake_iceberg.external_catalog_document_max_age = '1s'", reader
         )
-        assert read() == [100, 200, 300]
-        point_wrt_tbl_at("wrt_tbl")
-        assert read() == [100, 200, 300]
-        run_command("SELECT pg_sleep(1.2)", reader)
         assert read() == [1, 2, 3]
+        point_wrt_tbl_at("wrt_tbl_b")
+        assert read() == [1, 2, 3]
+        run_command("SELECT pg_sleep(1.2)", reader)
+        assert read() == [100, 200, 300]
     finally:
         reader.close()
         s3.put_object(
