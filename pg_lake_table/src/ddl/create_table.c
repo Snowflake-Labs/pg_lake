@@ -126,6 +126,14 @@ static char *SetIcebergTableLocationOptionFromDefaultPrefix(Oid relationId,
 															char *schemaName, char *tableName);
 
 /*
+ * Set while a read-only catalog table's CREATE reruns with the columns it
+ * inferred, so the rerun does not ask the catalog about the table again: on an
+ * object store catalog that is a fresh read of the catalog file, on a REST
+ * catalog another loadTable. The rerun takes it, so nothing it runs sees it.
+ */
+static bool ReadOnlyCatalogTableResolved = false;
+
+/*
 * CreatePgLakeTableCheckUnsupportedFeaturesPostProcess is a utility statement handler
 * for checking unsupported features in CREATE FOREIGN TABLE statements that have to be called
 * after the table has been created.
@@ -929,7 +937,15 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			catalogName = catalogNameProvided;
 		}
 
-		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
+		bool    catalogTableResolved = ReadOnlyCatalogTableResolved;
+
+		ReadOnlyCatalogTableResolved = false;
+
+		if (catalogTableResolved)
+		{
+			/* the first pass found the table and stored its names */
+		}
+		else if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
 			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
 			RestCatalogOptions *opts =
@@ -1032,7 +1048,16 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			 * Rerun all DDL handlers. We will not re-enter this path since
 			 * the tableElts is no longer NIL.
 			 */
-			PgLakeCommonProcessUtility(params);
+			ReadOnlyCatalogTableResolved = true;
+			PG_TRY();
+			{
+				PgLakeCommonProcessUtility(params);
+			}
+			PG_FINALLY();
+			{
+				ReadOnlyCatalogTableResolved = false;
+			}
+			PG_END_TRY();
 
 			return true;
 		}
