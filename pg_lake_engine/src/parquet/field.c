@@ -317,13 +317,12 @@ PostgresBaseTypeIdToIcebergTypeName(PGType pgType)
 		case NUMERICOID:
 			{
 				/*
-				 * The GUC check mirrors
-				 * MaybeConvertUnsupportedNumericColumnsToDouble: with the GUC
-				 * off CREATE rejects such a numeric at any level instead of
-				 * storing it in some other shape.
+				 * Deliberately not gated on unsupported_numeric_as_double, to
+				 * match GetFullDuckDBTypeNameForPGType: with the GUC off
+				 * CREATE rejects such a numeric, so any table that has one
+				 * stores it as a double.
 				 */
-				if (UnsupportedNumericAsDouble &&
-					IsUnsupportedNumericForIceberg(NUMERICOID,
+				if (IsUnsupportedNumericForIceberg(NUMERICOID,
 												   pgType.postgresTypeMod))
 					return "double";
 

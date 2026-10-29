@@ -95,10 +95,9 @@ pg_lake_same_iceberg_representation(PG_FUNCTION_ARGS)
 	 * Caller policy, not a property of the primitives: with
 	 * unsupported_numeric_as_double off, CREATE rejects such a numeric at any
 	 * level instead of storing it, so it has no stored form to compare.
-	 * Report "not the same" rather than letting both sides fall through to
-	 * the `string` default and match.  (A caller comparing against a
-	 * persisted field does not need this: a persisted field can never be an
-	 * unsupported numeric.)
+	 * Report "not the same" rather than letting both sides derive `double`
+	 * and match.  (A caller comparing against a persisted field does not need
+	 * this: a persisted field can never be an unsupported numeric.)
 	 */
 	if (!UnsupportedNumericAsDouble &&
 		(TypeHasUnrepresentableLeaf(MakePGType(oldTypeOid, oldTypeMod),

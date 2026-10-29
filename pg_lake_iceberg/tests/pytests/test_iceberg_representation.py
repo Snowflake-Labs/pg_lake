@@ -164,14 +164,14 @@ def test_storage_type(pg_type, expected, superuser_conn, iceberg_representation_
 def test_storage_type_unsupported_numeric_guc_off(
     superuser_conn, iceberg_representation_fns
 ):
-    """With unsupported_numeric_as_double off there is no double rewrite, so an
-    oversized numeric falls through to the `string` default -- a shape CREATE
-    never actually stores, because it rejects such a column instead.  Pinned here
-    because it is precisely why a caller must not read a `string` match as "same
-    representation" (see test_unsupported_numeric_not_representable_when_disabled).
+    """With unsupported_numeric_as_double off CREATE rejects an oversized numeric,
+    but the leaf still derives to `double`, the type a table created with the GUC
+    on stores it as: turning the GUC off later must not change how that table is
+    read.  The comparison still says "not the same" for such a numeric (see
+    test_unsupported_numeric_not_representable_when_disabled).
     """
-    assert _storage_type(superuser_conn, "numeric(50,2)", False) == "string"
-    assert _storage_type(superuser_conn, "numeric(50,2)[]", False) == "list<string>"
+    assert _storage_type(superuser_conn, "numeric(50,2)", False) == "double"
+    assert _storage_type(superuser_conn, "numeric(50,2)[]", False) == "list<double>"
     # a bounded numeric is a genuine Iceberg decimal either way
     assert _storage_type(superuser_conn, "numeric(10,2)", False) == "decimal(10,2)"
 

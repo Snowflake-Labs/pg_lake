@@ -774,6 +774,35 @@ def test_guc_off_nested_unsupported_numeric_errors(
     pg_conn.rollback()
 
 
+def test_guc_off_after_create_keeps_nested_double(
+    s3, pg_conn, extension, with_default_location
+):
+    """The GUC only decides whether CREATE accepts a nested unsupported numeric.
+    A table created with it on stores a double, so a session that turns it off
+    must still write and read that field as one."""
+    run_command(
+        """
+        CREATE TYPE guc_flip_comp AS (label text, amount numeric);
+        CREATE TABLE ice_guc_flip (id int, v guc_flip_comp) USING iceberg;
+        INSERT INTO ice_guc_flip VALUES (1, row('before', 1.5)::guc_flip_comp);
+        SET pg_lake_iceberg.unsupported_numeric_as_double TO off;
+        INSERT INTO ice_guc_flip VALUES
+            (2, row('big', 1e30::numeric)::guc_flip_comp),
+            (3, row('frac', 0.1234567890123::numeric)::guc_flip_comp);
+    """,
+        pg_conn,
+    )
+
+    result = run_query("SELECT id, (v).amount FROM ice_guc_flip ORDER BY id", pg_conn)
+    assert result == [
+        [1, Decimal("1.5")],
+        [2, Decimal("1E+30")],
+        [3, Decimal("0.1234567890123")],
+    ]
+
+    pg_conn.rollback()
+
+
 def test_ctas_array_of_composite_with_numeric(
     s3, pg_conn, extension, with_default_location
 ):
