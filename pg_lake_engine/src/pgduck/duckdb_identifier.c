@@ -15,11 +15,7 @@
  * limitations under the License.
  */
 
-/*
- * DuckDB folds identifiers. When top-level Iceberg siblings differ only by
- * ASCII case, DuckDB sees c<field id> for every sibling at that level.
- * Iceberg metadata keeps the real names and field ids.
- */
+/* DuckDB ignores case, so case-colliding top-level Iceberg columns use c<field-id> there. */
 #include "postgres.h"
 
 #include "mb/pg_wchar.h"
@@ -27,83 +23,16 @@
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/pgduck/duckdb_identifier.h"
 
-/*
- * A wide table asks for every column name separately. Remember the collision
- * result, but key it by a signature of the field names: a later schema can
- * reuse the same allocation.
- */
-#define COLLISION_CACHE_SLOTS 4
 
-typedef struct CollisionCacheEntry
+static uint32
+AsciiFoldedHash(const char *name)
 {
-	const		DataFileSchema *schema;
-	const		DataFileSchemaField *fields;
-	size_t		nfields;
-	uint64		signature;
-	bool		collision;
-	bool		valid;
-}			CollisionCacheEntry;
+	uint32		hash = 2166136261u;
 
-static CollisionCacheEntry CollisionCache[COLLISION_CACHE_SLOTS];
-static int	CollisionCacheNext = 0;
+	for (; *name != '\0'; name++)
+		hash = (hash ^ (unsigned char) pg_ascii_tolower((unsigned char) *name)) * 16777619u;
 
-
-static uint64
-SchemaSignature(const DataFileSchema * schema)
-{
-	uint64		signature = UINT64CONST(14695981039346656037);
-
-	signature ^= schema->nfields;
-	signature *= UINT64CONST(1099511628211);
-
-	for (size_t fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
-	{
-		const		DataFileSchemaField *field = &schema->fields[fieldIndex];
-		const unsigned char *name = NULL;
-
-		signature ^= (uint64) field->id;
-		signature *= UINT64CONST(1099511628211);
-
-		if (field->name == NULL)
-			continue;
-
-		name = (const unsigned char *) field->name;
-
-		while (*name != '\0')
-		{
-			signature ^= *name;
-			signature *= UINT64CONST(1099511628211);
-			name++;
-		}
-	}
-
-	return signature;
-}
-
-
-static bool
-ComputeCaseCollision(const DataFileSchema * schema)
-{
-	for (size_t leftIndex = 0; leftIndex < schema->nfields; leftIndex++)
-	{
-		const char *left = schema->fields[leftIndex].name;
-
-		if (left == NULL || left[0] == '\0')
-			continue;
-
-		for (size_t rightIndex = leftIndex + 1; rightIndex < schema->nfields; rightIndex++)
-		{
-			const char *right = schema->fields[rightIndex].name;
-
-			if (right == NULL || right[0] == '\0' || strcmp(left, right) == 0)
-				continue;
-
-			if (PgLakeAsciiNamesEqual(left, right))
-				return true;
-		}
-	}
-
-	return false;
+	return hash;
 }
 
 
@@ -127,39 +56,65 @@ PgLakeAsciiNamesEqual(const char *left, const char *right)
 }
 
 
+/* Find two names that differ only by ASCII case, in one hashed pass. */
+bool
+NamesHaveCaseCollision(const char **names, int count)
+{
+	int			slotCount = count * 2 + 1;
+	int		   *slots = NULL;
+	bool		collision = false;
+
+	if (count < 2)
+		return false;
+
+	slots = palloc(slotCount * sizeof(int));
+	memset(slots, -1, slotCount * sizeof(int));
+
+	for (int i = 0; i < count && !collision; i++)
+	{
+		const char *name = names[i];
+		uint32		slot = 0;
+
+		if (name == NULL || name[0] == '\0')
+			continue;
+
+		slot = AsciiFoldedHash(name) % slotCount;
+
+		for (; slots[slot] >= 0; slot = (slot + 1) % slotCount)
+		{
+			const char *other = names[slots[slot]];
+
+			if (strcmp(other, name) != 0 && PgLakeAsciiNamesEqual(other, name))
+				collision = true;
+		}
+
+		slots[slot] = i;
+	}
+
+	pfree(slots);
+
+	return collision;
+}
+
+
 bool
 DataFileSchemaHasCaseCollision(const DataFileSchema * schema)
 {
-	uint64		signature = 0;
-	CollisionCacheEntry *entry = NULL;
+	const char **names = NULL;
+	bool		collision = false;
 
-	if (schema == NULL)
+	if (schema == NULL || schema->nfields < 2)
 		return false;
 
-	signature = SchemaSignature(schema);
+	names = palloc(schema->nfields * sizeof(char *));
 
-	for (int slot = 0; slot < COLLISION_CACHE_SLOTS; slot++)
-	{
-		entry = &CollisionCache[slot];
+	for (size_t fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
+		names[fieldIndex] = schema->fields[fieldIndex].name;
 
-		if (entry->valid &&
-			entry->schema == schema &&
-			entry->fields == schema->fields &&
-			entry->nfields == schema->nfields &&
-			entry->signature == signature)
-			return entry->collision;
-	}
+	collision = NamesHaveCaseCollision(names, (int) schema->nfields);
+	pfree(names);
 
-	entry = &CollisionCache[CollisionCacheNext];
-	CollisionCacheNext = (CollisionCacheNext + 1) % COLLISION_CACHE_SLOTS;
-	entry->schema = schema;
-	entry->fields = schema->fields;
-	entry->nfields = schema->nfields;
-	entry->signature = signature;
-	entry->collision = ComputeCaseCollision(schema);
-	entry->valid = true;
-
-	return entry->collision;
+	return collision;
 }
 
 

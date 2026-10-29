@@ -22,6 +22,7 @@
 #include "pg_lake/parquet/field.h"
 
 extern PGDLLEXPORT bool PgLakeAsciiNamesEqual(const char *left, const char *right);
+extern PGDLLEXPORT bool NamesHaveCaseCollision(const char **names, int count);
 extern PGDLLEXPORT bool DataFileSchemaHasCaseCollision(const DataFileSchema * schema);
 extern PGDLLEXPORT char *DuckDBNameForField(const DataFileSchema * schema,
 											const char *name, int fieldId);

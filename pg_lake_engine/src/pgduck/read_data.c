@@ -68,14 +68,9 @@ static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
 static char *TupleDescToDuckDBColumnsArray(TupleDesc tupleDesc, bool skipFilename);
 static char *TupleDescToAliasList(TupleDesc tupleDesc, DataFileSchema * nameSchema);
 static char *JsonKeyPath(const char *key);
-static void AppendCaseSensitiveJsonScan(StringInfo command,
-										List *sourcePaths,
-										CopyDataCompression sourceCompression,
-										TupleDesc expectedDesc,
-										List *formatOptions,
-										DataFileSchema * scanNameSchema,
-										bool preferVarchar,
-										bool emitFilename);
+static void AppendJsonKeyProjection(StringInfo command, TupleDesc expectedDesc,
+									DataFileSchema * scanNameSchema, bool preferVarchar,
+									bool emitFilename);
 static DuckDBTypeInfo ChooseCompatibleDuckDBType(Oid postgresTypeId, int postgresTypeMod,
 												 CopyDataFormat sourceFormat,
 												 bool preferVarchar);
@@ -126,11 +121,7 @@ ReadDataSourceQuery(List *sourcePaths,
 	/* whether to prepare output for TRANSMIT */
 	bool		isTransmit = (flags & READ_DATA_TRANSMIT) != 0;
 
-	/*
-	 * scanNameSchema names the columns the reader emits. outputNameSchema
-	 * names the SELECT outputs. A copy between Iceberg tables uses the source
-	 * field ids for the scan and the destination field ids for the outputs.
-	 */
+	/* Scan names come from the source schema, output names from the target. */
 	DataFileSchema *scanNameSchema = schema != NULL ? schema : columnNameSchema;
 	DataFileSchema *outputNameSchema = columnNameSchema != NULL ? columnNameSchema : schema;
 
@@ -280,93 +271,49 @@ JsonKeyPath(const char *key)
 }
 
 
-/*
- * AppendCaseSensitiveJsonScan reads each object whole and projects its keys
- * by name. DuckDB's columns map cannot hold two keys that differ only by
- * case, and key order is not a safe substitute.
- */
+/* Pick JSON keys by exact name, since a DuckDB columns map ignores case. */
 static void
-AppendCaseSensitiveJsonScan(StringInfo command,
-							List *sourcePaths,
-							CopyDataCompression sourceCompression,
-							TupleDesc expectedDesc,
-							List *formatOptions,
-							DataFileSchema * scanNameSchema,
-							bool preferVarchar,
-							bool emitFilename)
+AppendJsonKeyProjection(StringInfo command, TupleDesc expectedDesc,
+						DataFileSchema * scanNameSchema, bool preferVarchar,
+						bool emitFilename)
 {
 	bool		hasColumns = false;
-	int			attnum = 0;
 
 	appendStringInfoString(command, "(SELECT ");
 
-	for (attnum = 1; attnum <= expectedDesc->natts; attnum++)
+	for (int attnum = 1; attnum <= expectedDesc->natts; attnum++)
 	{
 		Form_pg_attribute column = TupleDescAttr(expectedDesc, attnum - 1);
-		char	   *realName = NULL;
-		char	   *outputName = NULL;
-		DuckDBTypeInfo duckdbType;
+		char	   *realName = NameStr(column->attname);
 
 		if (column->attisdropped)
 			continue;
 
-		realName = NameStr(column->attname);
-		outputName = DuckDBNameForColumnName(scanNameSchema, realName);
-
 		if (hasColumns)
 			appendStringInfoString(command, ", ");
 
-		if (emitFilename && strcmp(realName, "_filename") == 0)
-			appendStringInfoString(command, duckdb_quote_identifier(realName));
-		else
-		{
-			duckdbType = ChooseCompatibleDuckDBType(column->atttypid,
-													column->atttypmod,
-													DATA_FORMAT_JSON,
-													preferVarchar);
-			appendStringInfo(command, "CAST(json_extract_string(json, %s) AS %s) AS %s",
-							 quote_literal_cstr(JsonKeyPath(realName)),
-							 duckdbType.typeName,
-							 duckdb_quote_identifier(outputName));
-		}
-
 		hasColumns = true;
-	}
 
-	if (!hasColumns)
-		appendStringInfoString(command, "NULL");
-
-	appendStringInfo(command, " FROM read_json_objects(%s",
-					 PathListToString(sourcePaths));
-
-	if (sourceCompression != DATA_COMPRESSION_NONE)
-	{
-		appendStringInfo(command, ", compression=%s",
-						 quote_literal_cstr(CopyDataCompressionToName(sourceCompression)));
-	}
-
-	if (emitFilename)
-		appendStringInfoString(command, ", filename='_filename'");
-
-	if (formatOptions != NIL)
-	{
-		DefElem    *maximumObjectSizeOption = GetOption(formatOptions,
-														"maximum_object_size");
-
-		if (maximumObjectSizeOption != NULL)
+		if (emitFilename && strcmp(realName, "_filename") == 0)
 		{
-			int64		maximumObjectSize = defGetInt64(maximumObjectSizeOption);
-
-			if (maximumObjectSize < 0)
-				ereport(ERROR, (errcode(ERRCODE_NUMERIC_VALUE_OUT_OF_RANGE),
-								errmsg("option value \"maximum_object_size\" must be non-negative")));
-
-			appendStringInfo(command, ", maximum_object_size=" INT64_FORMAT,
-							 maximumObjectSize);
+			appendStringInfoString(command, duckdb_quote_identifier(realName));
+			continue;
 		}
+
+		DuckDBTypeInfo duckdbType = ChooseCompatibleDuckDBType(column->atttypid,
+															   column->atttypmod,
+															   DATA_FORMAT_JSON,
+															   preferVarchar);
+		DuckDBTypeInfo storageType = GuessStorageType(duckdbType, DATA_FORMAT_JSON);
+
+		appendStringInfo(command, "CAST(json_extract_string(json, %s) AS %s) AS %s",
+						 quote_literal_cstr(JsonKeyPath(realName)),
+						 storageType.typeName,
+						 duckdb_quote_identifier(DuckDBNameForColumnName(scanNameSchema,
+																		 realName)));
 	}
 
-	appendStringInfoString(command, "))");
+	appendStringInfoString(command, " FROM read_json_objects(");
 }
 
 
@@ -460,19 +407,16 @@ ReadDataSourceFunction(List *sourcePaths,
 										   "not supported for JSON format")));
 				}
 
-				if (expectedDesc != NULL && expectedDesc->natts > 0 &&
-					DataFileSchemaHasCaseCollision(scanNameSchema))
-				{
-					AppendCaseSensitiveJsonScan(&command, sourcePaths,
-												sourceCompression, expectedDesc,
-												formatOptions, scanNameSchema,
-												preferVarchar, emitFilename);
-					break;
-				}
+				bool		pickKeysByName = expectedDesc != NULL && expectedDesc->natts > 0 &&
+					DataFileSchemaHasCaseCollision(scanNameSchema);
 
-				appendStringInfo(&command,
-								 "read_json_auto(%s",
-								 PathListToString(sourcePaths));
+				if (pickKeysByName)
+					AppendJsonKeyProjection(&command, expectedDesc, scanNameSchema,
+											preferVarchar, emitFilename);
+				else
+					appendStringInfoString(&command, "read_json_auto(");
+
+				appendStringInfoString(&command, PathListToString(sourcePaths));
 
 				/* read_json does not react well to compression='none' */
 				if (sourceCompression != DATA_COMPRESSION_NONE)
@@ -485,7 +429,7 @@ ReadDataSourceFunction(List *sourcePaths,
 									 quote_literal_cstr(compressionName));
 				}
 
-				if (expectedDesc != NULL && expectedDesc->natts > 0)
+				if (!pickKeysByName && expectedDesc != NULL && expectedDesc->natts > 0)
 				{
 					/*
 					 * if read_json_auto emits a filename, skip it in the
@@ -498,9 +442,6 @@ ReadDataSourceFunction(List *sourcePaths,
 					 * text, such that cast failures (e.g. trying to write
 					 * text into an int column) happen in PostgreSQL when
 					 * parsing the intermediate CSV.
-					 *
-					 * JSON keys are matched by name. Colliding keys are
-					 * handled by AppendCaseSensitiveJsonScan.
 					 *
 					 * We should revise this if we stop using CSV as an
 					 * intermediate format.
@@ -535,7 +476,7 @@ ReadDataSourceFunction(List *sourcePaths,
 									 maximumObjectSize);
 				}
 
-				appendStringInfo(&command, ")");
+				appendStringInfoString(&command, pickKeysByName ? "))" : ")");
 				break;
 			}
 
@@ -1550,10 +1491,7 @@ BuildStorageToSurfaceProjection(const char *lookupName, const char *sourceName,
  * is used to detect columns whose physical storage diverges from the surface
  * type (e.g. a nested uuid stored as string under compatibility_mode), which
  * require an unconditional cast back to the surface type.
- *
- * scanNameSchema names columns in the scan. outputNameSchema names the
- * SELECT aliases. They differ when copying between Iceberg tables whose
- * field ids do not match.
+ * scanNameSchema names the scan columns and outputNameSchema names the outputs.
  */
 char *
 TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,

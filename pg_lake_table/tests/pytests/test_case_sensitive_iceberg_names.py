@@ -23,6 +23,10 @@ def test_case_sensitive_iceberg_column_names(
         ) USING iceberg;
         INSERT INTO test_case_sensitive_iceberg_names.swapped ("a", "A", b)
         SELECT "a", "A", b FROM test_case_sensitive_iceberg_names.cols;
+        CREATE TABLE test_case_sensitive_iceberg_names.plain (
+            "a" int, z int
+        ) USING iceberg;
+        INSERT INTO test_case_sensitive_iceberg_names.plain VALUES (1, 5);
         """,
         pg_conn,
     )
@@ -134,6 +138,75 @@ def test_case_sensitive_iceberg_column_names(
         )
         assert joined == [[100, 1], [100, 1], [100, 1], [100, 1]]
 
+        two_tables = run_query(
+            """
+            SELECT s."a", s."A"
+            FROM (
+                SELECT l."a", r."A"
+                FROM test_case_sensitive_iceberg_names.cols l
+                CROSS JOIN test_case_sensitive_iceberg_names.swapped r
+            ) s
+            """,
+            pg_conn,
+        )
+        assert two_tables == [[1, 100]] * 4
+
+        cte_alias = run_query(
+            """
+            WITH s(x) AS (
+                SELECT "a", "A", b FROM test_case_sensitive_iceberg_names.cols
+            )
+            SELECT x, "A" FROM s ORDER BY x
+            """,
+            pg_conn,
+        )
+        assert cte_alias == [[1, 100], [1, 100]]
+
+        using_subquery = run_query(
+            """
+            SELECT l."A", r."A"
+            FROM test_case_sensitive_iceberg_names.cols l
+            JOIN (
+                SELECT "a", "A", b FROM test_case_sensitive_iceberg_names.cols
+            ) r USING ("a", "A")
+            """,
+            pg_conn,
+        )
+        assert using_subquery == [[100, 100]] * 4
+
+        natural = run_query(
+            """
+            SELECT count(*)
+            FROM test_case_sensitive_iceberg_names.cols
+            NATURAL JOIN test_case_sensitive_iceberg_names.swapped
+            """,
+            pg_conn,
+        )
+        assert natural == [[4]]
+
+        mixed = run_query(
+            """
+            SELECT l."A", p.z
+            FROM test_case_sensitive_iceberg_names.cols l
+            JOIN test_case_sensitive_iceberg_names.plain p USING ("a")
+            """,
+            pg_conn,
+        )
+        assert mixed == [[100, 5], [100, 5]]
+
+        recursive = run_query(
+            """
+            WITH RECURSIVE r AS (
+                SELECT DISTINCT "a", "A" FROM test_case_sensitive_iceberg_names.cols
+                UNION ALL
+                SELECT "a" + 1, "A" FROM r WHERE "a" < 3
+            )
+            SELECT "a", "A" FROM r ORDER BY "a"
+            """,
+            pg_conn,
+        )
+        assert recursive == [[1, 100], [2, 100], [3, 100]]
+
     run_command(
         """
         UPDATE test_case_sensitive_iceberg_names.cols
@@ -181,3 +254,27 @@ def test_case_sensitive_iceberg_column_names(
         pg_conn,
     )
     pg_conn.commit()
+
+
+def test_case_sensitive_iceberg_copy_from_json(
+    pg_conn, s3, extension, with_default_location
+):
+    key = "test_case_sensitive_iceberg_copy_from_json/data.json"
+    s3.put_object(
+        Bucket=TEST_BUCKET,
+        Key=key,
+        Body='{"a": 1, "A": "x", "tags": [1, 2]}\n{"a": 2, "A": "y", "tags": []}\n',
+    )
+    run_command(
+        f"""
+        CREATE TABLE json_cols ("a" int, "A" text, tags int[]) USING iceberg;
+        COPY json_cols FROM 's3://{TEST_BUCKET}/{key}' WITH (format 'json');
+        """,
+        pg_conn,
+    )
+
+    assert run_query('SELECT "a", "A", tags FROM json_cols ORDER BY "a"', pg_conn) == [
+        [1, "x", [1, 2]],
+        [2, "y", []],
+    ]
+    pg_conn.rollback()

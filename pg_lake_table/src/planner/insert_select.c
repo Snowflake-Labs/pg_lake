@@ -351,10 +351,7 @@ TransformPushdownableInsertSelect(Query *query)
 												  column->atttypmod,
 												  column->attcollation);
 
-			/*
-			 * makeTargetEntry does not copy resname. The returned name is
-			 * palloc'd and outlives table_close.
-			 */
+			/* No entry yet, so add NULL; the name copy outlives table_close. */
 			targetEntry = makeTargetEntry((Expr *) nullConst,
 										  columnIndex + 1,
 										  DuckDBNameForColumnName(schema,

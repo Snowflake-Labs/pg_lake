@@ -599,11 +599,7 @@ AppendFields(StringInfo map, DataFileSchema * schema)
 }
 
 
-/*
- * AppendNamedFields appends field-id mappings. duckNames is true only for
- * the top-level schema. Nested structs keep Iceberg names because the read
- * struct type still uses those names.
- */
+/* Only top-level fields get DuckDB names; nested fields keep their Iceberg names. */
 static void
 AppendNamedFields(StringInfo map, DataFileSchema * schema, bool duckNames)
 {
