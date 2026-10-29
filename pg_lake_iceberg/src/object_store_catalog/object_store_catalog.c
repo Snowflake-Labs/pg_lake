@@ -22,6 +22,7 @@
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "pg_lake/util/s3_reader_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
@@ -57,6 +58,24 @@ bool		EnableObjectStoreCatalog = true;
 /* pg_lake_iceberg.object_store_catalog_max_age setting, in seconds */
 int			ObjectStoreCatalogMaxAge = 60;
 
+/* pg_lake_iceberg.external_catalog_document_max_age setting, in milliseconds */
+int			ExternalCatalogDocumentMaxAge = 0;
+
+/*
+ * An external catalog document this backend read, kept for
+ * ReadExternalObjectStoreCatalogDocument while it is younger than
+ * pg_lake_iceberg.external_catalog_document_max_age.
+ */
+typedef struct CachedCatalogDocument
+{
+	char	   *path;
+	char	   *content;
+	TimestampTz readStartTime;
+}			CachedCatalogDocument;
+
+/* list of CachedCatalogDocument, in TopMemoryContext */
+static List *CachedCatalogDocuments = NIL;
+
 
 /* whether to export the catalog to object storage, always do so on start-up */
 static List *InvalidatedRelationIds = NULL;
@@ -79,6 +98,8 @@ static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogN
 static char *GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent, const char *catalogNamespace, const char *catalogTableName);
 static void FormatCurrentTimestampUTC(char *buf, size_t bufsize);
 static bool IsBlankCatalogField(const char *value);
+static CachedCatalogDocument *FindCachedCatalogDocument(const char *catalogPath);
+static bool CachedCatalogDocumentIsFresh(CachedCatalogDocument *document);
 
 /*
 * Lists all tables registered in the given object store catalog.
@@ -555,6 +576,97 @@ BuildAndUploadObjectStoreCatalogFile(void)
 
 
 /*
+ * ReadExternalObjectStoreCatalogDocument returns the content of an external
+ * object store catalog document.
+ *
+ * The document sits at a fixed path that its writer rewrites, so by default
+ * every call reads it fresh. A backend that reads many tables of one catalog
+ * in quick succession, such as one applying a feed table by table, pays that
+ * read per statement, which against object storage is most of the cost of a
+ * small statement. Setting pg_lake_iceberg.external_catalog_document_max_age
+ * lets such a backend reuse a document it read within that many milliseconds.
+ * The age counts from when the read began, so a reused document is never
+ * older than the setting allows, and it only ever moves forward: a read that
+ * replaces it is a newer one.
+ */
+char *
+ReadExternalObjectStoreCatalogDocument(const char *catalogPath)
+{
+	CachedCatalogDocument *cached = FindCachedCatalogDocument(catalogPath);
+
+	if (CachedCatalogDocumentIsFresh(cached))
+		return pstrdup(cached->content);
+
+	TimestampTz readStartTime = GetCurrentTimestamp();
+
+	/* catalog.json is a fixed path that may change out of band; read fresh. */
+	char	   *content = GetJsonFromURINoCache(catalogPath);
+
+	if (ExternalCatalogDocumentMaxAge <= 0)
+	{
+		/* nothing will reuse it, so do not keep a copy around */
+		if (cached != NULL)
+		{
+			CachedCatalogDocuments = list_delete_ptr(CachedCatalogDocuments, cached);
+			pfree(cached->path);
+			pfree(cached->content);
+			pfree(cached);
+		}
+
+		return content;
+	}
+
+	MemoryContext previousContext = MemoryContextSwitchTo(TopMemoryContext);
+
+	if (cached == NULL)
+	{
+		cached = palloc0(sizeof(CachedCatalogDocument));
+		cached->path = pstrdup(catalogPath);
+		CachedCatalogDocuments = lappend(CachedCatalogDocuments, cached);
+	}
+	else
+		pfree(cached->content);
+
+	cached->content = pstrdup(content);
+	cached->readStartTime = readStartTime;
+
+	MemoryContextSwitchTo(previousContext);
+
+	return content;
+}
+
+
+/*
+ * FindCachedCatalogDocument returns the document this backend keeps for the
+ * given path, or NULL.
+ */
+static CachedCatalogDocument *
+FindCachedCatalogDocument(const char *catalogPath)
+{
+	foreach_ptr(CachedCatalogDocument, document, CachedCatalogDocuments)
+	{
+		if (strcmp(document->path, catalogPath) == 0)
+			return document;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * CachedCatalogDocumentIsFresh returns whether a kept document may still be
+ * used under pg_lake_iceberg.external_catalog_document_max_age.
+ */
+static bool
+CachedCatalogDocumentIsFresh(CachedCatalogDocument *document)
+{
+	return document != NULL && ExternalCatalogDocumentMaxAge > 0 &&
+		!TimestampDifferenceExceeds(document->readStartTime, GetCurrentTimestamp(),
+								   ExternalCatalogDocumentMaxAge);
+}
+
+
+/*
 * GetTableMetadataLocationFromExternalObjectStoreCatalog returns the metadata location
 * for the table with the given catalog namespace and catalog table name by
 * looking up the object store catalog file in S3.
@@ -567,8 +679,7 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	const char *catalogPath =
 		GetExternalObjectStoreCatalogFilePath(catalogName);
 
-	/* catalog.json is a fixed path that may change out of band; read fresh. */
-	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
+	char	   *catalogContent = ReadExternalObjectStoreCatalogDocument(catalogPath);
 
 	return GetTableMetadataLocationFromObjectStoreCatalogContent(catalogContent, catalogNamespace, catalogTableName);
 }
@@ -666,6 +777,10 @@ static bool
 CheckIfExternalObjectStoreCatalogExists(const char *catalogName)
 {
 	char	   *filePath = GetExternalObjectStoreCatalogFilePath(catalogName);
+
+	/* a document read within the allowed age existed then, which is all we ask */
+	if (CachedCatalogDocumentIsFresh(FindCachedCatalogDocument(filePath)))
+		return true;
 
 	return RemoteFileExists(filePath);
 }

@@ -157,8 +157,8 @@ ResolveObjectStoreCatalogTable(Oid relationId)
 
 	if (content == NULL)
 	{
-		/* catalog.json is a fixed path that may change out of band */
-		content = GetJsonFromURINoCache(path);
+		/* fresh unless pg_lake_iceberg.external_catalog_document_max_age allows */
+		content = ReadExternalObjectStoreCatalogDocument(path);
 
 		/* lets tests count how many versions a read could have seen */
 		ereport(DEBUG1,

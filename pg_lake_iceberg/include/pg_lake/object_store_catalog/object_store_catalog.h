@@ -10,6 +10,9 @@ extern PGDLLEXPORT bool EnableObjectStoreCatalog;
 /* pg_lake_iceberg.object_store_catalog_max_age setting, in seconds */
 extern PGDLLEXPORT int ObjectStoreCatalogMaxAge;
 
+/* pg_lake_iceberg.external_catalog_document_max_age setting, in milliseconds */
+extern PGDLLEXPORT int ExternalCatalogDocumentMaxAge;
+
 extern PGDLLEXPORT char *ObjectStoreCatalogLocationPrefix;
 extern PGDLLEXPORT char *ExternalObjectStorePrefix;
 extern PGDLLEXPORT char *InternalObjectStorePrefix;
@@ -21,5 +24,6 @@ extern PGDLLEXPORT const char *GetObjectStoreDefaultLocationPrefix(void);
 extern PGDLLEXPORT char *GetExternalObjectStoreCatalogFilePathForTable(Oid relationId);
 extern PGDLLEXPORT char *GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId, const char *catalogContent);
 extern PGDLLEXPORT void ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName);
+extern PGDLLEXPORT char *ReadExternalObjectStoreCatalogDocument(const char *catalogPath);
 extern PGDLLEXPORT char *GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, const char *catalogNamespace, const char *catalogTableName);
 extern PGDLLEXPORT void TriggerCatalogExportIfObjectStoreTable(Oid relationId);

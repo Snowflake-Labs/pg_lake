@@ -158,6 +158,18 @@ _PG_init(void)
 							PGC_SIGHUP, GUC_UNIT_S,
 							NULL, NULL, NULL);
 
+	DefineCustomIntVariable("pg_lake_iceberg.external_catalog_document_max_age",
+							gettext_noop("Maximum age in milliseconds at which a backend reuses an "
+										 "external object store catalog document it read."),
+							gettext_noop("0, the default, reads the document fresh for every "
+										 "statement. A backend that reads many tables of one "
+										 "catalog in a row can set it to read the document once "
+										 "per interval instead, accepting a view up to that old."),
+							&ExternalCatalogDocumentMaxAge,
+							0, 0, INT_MAX,
+							PGC_USERSET, GUC_UNIT_MS,
+							NULL, NULL, NULL);
+
 	DefineCustomStringVariable("pg_lake_iceberg.external_object_store_catalog_prefix",
 							   gettext_noop("Specifies the prefix used for the object store catalog files for external tables."),
 							   NULL,
