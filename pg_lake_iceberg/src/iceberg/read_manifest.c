@@ -28,6 +28,7 @@
 #include "utils/snapmgr.h"
 #include "utils/wait_event.h"
 
+#include "pg_lake/iceberg/immutable_file_cache.h"
 #include "pg_lake/iceberg/manifest_spec.h"
 #include "pg_lake/avro/avro_reader.h"
 #include "pg_lake/copy/copy_format.h"
@@ -95,7 +96,7 @@ ReadIcebergManifests(const char *manifestListPath)
 	ValidateStorageURL(manifestListPath);
 
 	size_t		contentLength = 0;
-	char	   *manifestListBlob = GetBlobFromURI(manifestListPath, &contentLength);
+	char	   *manifestListBlob = ReadImmutableIcebergBlob(manifestListPath, &contentLength);
 
 	/*
 	 * TODO: replace below hack via avro memory api? tempfile will be closed
@@ -146,7 +147,7 @@ ReadManifestEntries(const char *manifestPath)
 	ValidateStorageURL(manifestPath);
 
 	size_t		contentLength = 0;
-	char	   *manifestBlob = GetBlobFromURI(manifestPath, &contentLength);
+	char	   *manifestBlob = ReadImmutableIcebergBlob(manifestPath, &contentLength);
 
 	/*
 	 * TODO: replace below hack via avro memory api? tempfile will be closed

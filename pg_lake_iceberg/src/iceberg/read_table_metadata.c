@@ -21,6 +21,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_lake/iceberg/immutable_file_cache.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_reader.h"
@@ -70,7 +71,7 @@ ReadIcebergTableMetadata(const char *tableMetadataPath)
 {
 	ValidateStorageURL(tableMetadataPath);
 
-	char	   *tableMetadataText = GetTextFromURI(tableMetadataPath);
+	char	   *tableMetadataText = ReadImmutableIcebergText(tableMetadataPath);
 	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, PointerGetDatum(tableMetadataText));
 	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
 
