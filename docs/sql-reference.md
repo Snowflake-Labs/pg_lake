@@ -178,6 +178,18 @@ lake.version() RETURNS text
 
 Returns the version of the installed pg_lake build.
 
+### lake.worker_id_sequence
+
+```sql
+lake.worker_id_sequence() RETURNS record
+```
+
+Returns `extension_base.workers_worker_id_seq` against `extension_base.workers`: `last_value`,
+`is_called`, the `next_value` the next registration will insert, `max_worker_id`, `worker_count`,
+whether that next value is already in the table, and the `worker_id:worker_name` rows. `EXECUTE`
+is granted to `pg_monitor`. The function runs as the extension owner, because `extension_base`
+has no `USAGE` grant.
+
 ## Views and tables
 
 ### iceberg_tables
