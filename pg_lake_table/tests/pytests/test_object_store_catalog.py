@@ -2022,6 +2022,91 @@ def test_catalog_json_out_of_band_update_azure(
         superuser_conn.autocommit = False
 
 
+# pg_lake_iceberg.external_catalog_document_max_age lets a backend reuse a
+# catalog.json it read. Within the age an out-of-band change stays unseen, past
+# it, or with the setting at 0, the next statement reads the change.
+def test_external_catalog_document_max_age(
+    pg_conn, s3, extension, with_default_location, adjust_object_store_settings
+):
+    schema = "test_catalog_doc_max_age"
+    run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", pg_conn)
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    for table, values in (
+        ("wrt_tbl", "(1),(2),(3)"),
+        ("wrt_tbl_b", "(100),(200),(300)"),
+    ):
+        run_command(
+            f"CREATE TABLE {schema}.{table}(a INT) USING iceberg WITH (catalog='object_store')",
+            pg_conn,
+        )
+        run_command(f"INSERT INTO {schema}.{table} VALUES {values}", pg_conn)
+        pg_conn.commit()
+        wait_until_object_store_writable_table_pushed(pg_conn, schema, table)
+
+    dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+    key = f"tmp/catalog/{dbname}/catalog.json"
+    original = json.loads(s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read())
+
+    def point_wrt_tbl_at(source_table):
+        body = json.loads(json.dumps(original))
+        location = next(
+            t["metadata-location"]
+            for t in body["tables"]
+            if t["table-name"] == source_table
+        )
+        for t in body["tables"]:
+            if t["table-name"] == "wrt_tbl":
+                t["metadata-location"] = location
+        s3.put_object(
+            Bucket=TEST_BUCKET, Key=key, Body=json.dumps(body).encode("utf-8")
+        )
+
+    reader = open_pg_conn_to_db(dbname)
+    try:
+        run_command(
+            f"CREATE TABLE {schema}.read_tbl() USING iceberg "
+            f"WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl')",
+            reader,
+        )
+        reader.commit()
+
+        def read():
+            rows = run_query(f"SELECT a FROM {schema}.read_tbl ORDER BY a", reader)
+            reader.commit()
+            return [r[0] for r in rows]
+
+        run_command(
+            "SET pg_lake_iceberg.external_catalog_document_max_age = '1h'", reader
+        )
+        assert read() == [1, 2, 3]
+
+        # within the age the document this backend read is reused
+        point_wrt_tbl_at("wrt_tbl_b")
+        assert read() == [1, 2, 3]
+
+        # at 0 every statement reads it fresh again
+        run_command("SET pg_lake_iceberg.external_catalog_document_max_age = 0", reader)
+        assert read() == [100, 200, 300]
+
+        # and past the age a reused document is replaced by a fresh read
+        run_command(
+            "SET pg_lake_iceberg.external_catalog_document_max_age = '1s'", reader
+        )
+        assert read() == [100, 200, 300]
+        point_wrt_tbl_at("wrt_tbl")
+        assert read() == [100, 200, 300]
+        run_command("SELECT pg_sleep(1.2)", reader)
+        assert read() == [1, 2, 3]
+    finally:
+        reader.close()
+        s3.put_object(
+            Bucket=TEST_BUCKET, Key=key, Body=json.dumps(original).encode("utf-8")
+        )
+
+    run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def assert_tables_are_the_same(pg_conn, tbl_1, tbl_2):
     res = run_query(
         f"""
