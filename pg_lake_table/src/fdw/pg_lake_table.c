@@ -2351,6 +2351,18 @@ postgresExecForeignDelete(EState *estate,
 	/* get the ctid value produced by RowIdRecordStringToItemPointer */
 	ItemPointer ctid = (ItemPointer) DatumGetPointer(ctidDatum);
 
+	/*
+	 * If the row was already deleted, we skip subsequent deletes in the same
+	 * command to match the behaviour of PostgreSQL. Otherwise, duplicates
+	 * would inflate the deleted row count of the file, which could cause the
+	 * whole file to be removed.
+	 */
+	if (fmstate->requiresUpdateTracking &&
+		!IsFirstUpdateOfTuple(&fmstate->updateTrackingState, ctid))
+	{
+		return NULL;
+	}
+
 	/* write a delete record for the file name and row number to a delete file */
 	DeleteSingleRow(fmstate, ctid);
 
@@ -3738,11 +3750,12 @@ create_foreign_modify(Relation rel,
 
 			/*
 			 * If our subplan is not a foreign scan (of the relation being
-			 * updated), then it may produce duplicates and we need
+			 * updated or deleted), then it may produce duplicates and we need
 			 * deduplication.
 			 */
 			fmstate->requiresUpdateTracking =
-				operation == CMD_UPDATE && !IsA(subPlan, ForeignScan);
+				(operation == CMD_UPDATE || operation == CMD_DELETE) &&
+				!IsA(subPlan, ForeignScan);
 		}
 
 		/*
