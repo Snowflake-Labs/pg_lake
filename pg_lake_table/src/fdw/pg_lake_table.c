@@ -3537,7 +3537,22 @@ fetch_more_data(ForeignScanState *node)
 		int			numrows;
 		int			i;
 
-		res = WaitForResult(fsstate->conn);
+		/*
+		 * The empty PGRES_TUPLES_OK ends the rows, but ReadyForQuery may
+		 * still be pending. Consume it before reporting EOF and closing the
+		 * connection.
+		 */
+		for (;;)
+		{
+			res = WaitForResult(fsstate->conn);
+			if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK ||
+				PQntuples(res) != 0)
+				break;
+
+			PQclear(res);
+			res = NULL;
+		}
+
 		if (res == NULL)
 		{
 			fsstate->eof_reached = true;
@@ -3547,10 +3562,7 @@ fetch_more_data(ForeignScanState *node)
 		{
 			numrows = PQntuples(res);
 
-			/* one way of SingleRowMode to indicate we are at the end */
-			if (PQresultStatus(res) == PGRES_TUPLES_OK && numrows == 0)
-				fsstate->eof_reached = true;
-			else if (PQresultStatus(res) != PGRES_SINGLE_TUPLE)
+			if (PQresultStatus(res) != PGRES_SINGLE_TUPLE)
 			{
 				ThrowIfPGDuckResultHasError(fsstate->conn, res);
 			}
