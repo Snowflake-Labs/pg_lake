@@ -484,6 +484,69 @@ files once per table scan, regardless of how many groups reference them. It does
 not count physical reader executions or object-storage requests. Footer reads
 and repeated group reads can cause additional I/O.
 
+## Catalog activity log
+
+pg_lake writes a line to the PostgreSQL server log, never to the client, when a catalog
+request fails, when no catalog credential can be obtained, when an Iceberg table is created,
+attached or dropped, and when a table uses something pg_lake cannot handle. The lines carry
+no table, schema, namespace or catalog names, no URLs or paths, no SQL text and no error
+messages from the catalog. Every value is a number, an object ID, a SQLSTATE or a word from
+a fixed list, so the lines can be collected in places where the rest of the server log
+should not go.
+
+Each line starts with `pg_lake_catalog: `, followed by the event name and `key=value` fields:
+
+```
+LOG:  pg_lake_catalog: request_failed catalog=rest_server op=load_table status=403 error_type=ForbiddenException attempts=1 auth_refreshed=false ms=84
+LOG:  pg_lake_catalog: table_created catalog=rest_server relid=16412
+```
+
+To collect all of them, match on the prefix; to collect one event, match on the prefix and
+the event name. Set `pg_lake_iceberg.log_catalog_events` to `off` to turn the lines off.
+
+The `catalog` field is one of:
+
+- `postgres`: the [PostgreSQL catalog](#the-postgresql-catalog).
+- `object_store`: the [object store catalog](#the-object-store-catalog).
+- `rest_builtin`: the [built-in `rest` catalog](#configure-the-built-in-rest-catalog).
+- `horizon`: the built-in `rest` catalog when `pg_lake_iceberg.rest_catalog_auth_type` is
+  `horizon`.
+- `rest_server`: a catalog defined with [CREATE SERVER](#external-catalogs-with-create-server).
+
+| Event | Logged when | Fields |
+|:--|:--|:--|
+| `request_failed` | A REST catalog request fails after its retries | `catalog`, `op`, `status`, `error_type` or `curl_error` and `curl_code`, `attempts`, `auth_refreshed`, `ms` |
+| `auth_failed` | No credential could be obtained for a REST catalog | `catalog`, `source`, `sqlstate` |
+| `table_created` | A transaction that created an Iceberg table commits | `catalog`, `relid` |
+| `table_attached` | A transaction that attached a read-only table from a catalog commits | `catalog`, `relid`, `format_version` |
+| `table_dropped` | A transaction that dropped an Iceberg table commits | `catalog`, `relid`, `read_only` |
+| `unsupported_feature` | A table uses an Iceberg feature pg_lake cannot read or write | `feature`, and `format_version` or `type` |
+| `vended_credentials` | Storage credentials from a catalog cannot be used | `reason`, and `catalog`, `storage`, `sqlstate` or `relid` |
+
+`op` names the kind of request: `config`, `token`, `list_namespaces`, `get_namespace`,
+`create_namespace`, `load_table`, `create_table`, and `publish_create_table`,
+`publish_drop_table` and `publish_commit` for the changes sent to the catalog after a
+transaction commits. A failed `publish_*` request means PostgreSQL committed a change that
+the catalog does not have.
+
+`status` is the HTTP status, or 0 when no response arrived. In that case `curl_error` is one
+of `dns`, `connect`, `timeout`, `tls`, `transfer`, `aborted`, `out_of_memory` or `other`.
+Otherwise `error_type` is the Iceberg exception type or OAuth2 error code the catalog
+answered with, `other` for one pg_lake does not know, or `none` when the response named
+none. A 404 is not logged, because pg_lake looks up namespaces and tables that may not
+exist as part of creating and attaching tables.
+
+For `auth_failed`, `source` is `oauth2` when pg_lake's own OAuth2 token request failed, and
+`provider` when a credential provider supplied by another extension failed.
+
+`feature` is `deletion_vectors`, `initial_default`, `format_version` or
+`write_format_version` (with the version), or `type` with the Iceberg type: `geography`,
+`geometry`, `timestamp_ns`, `timestamptz_ns`, `unknown`, `variant` or `other`. For
+`vended_credentials`, `reason` is `unusable` or `endpoint_not_allowed` when the credentials
+the catalog returned cannot be used, `none_returned` when vended credentials were requested
+but the catalog returned none, and `resolution_failed` when resolving them for a query
+failed.
+
 ## Snowflake
 
 Snowflake can query pg_lake's Iceberg tables in place, without copying the data:

@@ -64,6 +64,7 @@
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/util/numeric.h"
 #include "pg_lake/util/rel_utils.h"
@@ -1048,6 +1049,12 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			/* Keep in sync with the writable-table call below. */
 			RecordIcebergCatalogServerDependency(readOnlyRelId, createStmt->options);
 
+			int			formatVersion = IcebergFormatVersionFromMetadata(catalogTableMetadata);
+
+			LogCatalogEventAtCommit("table_attached", "catalog=%s relid=%u format_version=%s",
+									CatalogLogLabelForRelation(readOnlyRelId), readOnlyRelId,
+									formatVersion > 0 ? psprintf("%d", formatVersion) : "unknown");
+
 			return true;
 		}
 	}
@@ -1355,6 +1362,9 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		ErrorIfNotInManagedStorageRegion(staged.location);
 		ErrorIfLocationIsNotEmpty(staged.location);
 	}
+
+	LogCatalogEventAtCommit("table_created", "catalog=%s relid=%u",
+							CatalogLogLabelForRelation(relationId), relationId);
 
 	/* signal that we already executed parent process utility */
 	return true;

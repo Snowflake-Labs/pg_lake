@@ -49,6 +49,7 @@
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/iceberg/api/partitioning.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/iceberg/operations/find_referenced_files.h"
 #include "pg_lake/util/rel_utils.h"
@@ -311,6 +312,9 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 
 			IcebergCatalogType catalogType = GetIcebergCatalogType(objectId);
 
+			LogCatalogEventAtCommit("table_dropped", "catalog=%s relid=%u read_only=false",
+									CatalogLogLabelForRelation(objectId), objectId);
+
 			IcebergDDLOperation *ddlOperation = palloc0(sizeof(IcebergDDLOperation));
 
 			ddlOperation->type = DDL_TABLE_DROP;
@@ -325,6 +329,10 @@ DropTableAccessHook(ObjectAccessType access, Oid classId, Oid objectId,
 	}
 	else if (!isColumn && IsAnyLakeForeignTableById(objectId))
 	{
+		if (GetIcebergCatalogType(objectId) != NONE_CATALOG)
+			LogCatalogEventAtCommit("table_dropped", "catalog=%s relid=%u read_only=true",
+									CatalogLogLabelForRelation(objectId), objectId);
+
 		/*
 		 * A read-only lake table owns none of the files it reads, so the drop
 		 * queues no deletes and the secrets this backend pushed for it are

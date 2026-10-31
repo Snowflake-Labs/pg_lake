@@ -32,6 +32,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
@@ -199,6 +200,18 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+
+	DefineCustomBoolVariable(
+							 "pg_lake_iceberg.log_catalog_events",
+							 gettext_noop("Log catalog activity, such as failed catalog requests, "
+										  "authentication failures and table creation, in the "
+										  "server log."),
+							 gettext_noop("The lines carry no names, locations or SQL text."),
+							 &LogCatalogEvents,
+							 true,
+							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
 
 	DefineCustomBoolVariable(
 							 "pg_lake_iceberg.http_client_trace_traffic",
@@ -457,6 +470,7 @@ _PG_init(void)
 	RegisterUtilityStatementHandler(RedactRestCatalogUserMappingSecrets, NULL);
 
 	InitializeIcebergCatalogObjectAccessHook();
+	InitCatalogLog();
 }
 
 

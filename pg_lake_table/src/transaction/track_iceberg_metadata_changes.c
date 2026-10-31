@@ -510,7 +510,8 @@ PostAllRestCatalogRequests(void)
 			if (createTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
+					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+											 REST_CATALOG_OP_PUBLISH_CREATE_TABLE, HTTP_POST,
 											 requestPerTable->tableRestUrl, createTableRequest->body,
 											 PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
@@ -527,7 +528,8 @@ PostAllRestCatalogRequests(void)
 			else if (dropTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_DELETE,
+					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+											 REST_CATALOG_OP_PUBLISH_DROP_TABLE, HTTP_DELETE,
 											 requestPerTable->tableRestUrl, NULL,
 											 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
@@ -659,7 +661,8 @@ PostAllRestCatalogRequests(void)
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT,
 								   PgLakeXactRestCatalog->catalogOpts->baseUri,
 								   URLEncodePrefix(catalogName));
-		HttpResult	httpResult = SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
+		HttpResult	httpResult = SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+														  REST_CATALOG_OP_PUBLISH_COMMIT, HTTP_POST,
 														  url, batchRequestBody->data,
 														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
