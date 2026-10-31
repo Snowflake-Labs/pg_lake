@@ -34,11 +34,14 @@
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/iceberg/api/partitioning.h"
 #include "pg_lake/iceberg/manifest_spec.h"
+#include "pg_lake/fdw/schema_operations/register_field_ids.h"
+#include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/write_data.h"
 
 
-static char *PartitionTransformToDuckDBExpression(IcebergPartitionTransform * transform);
+static char *PartitionTransformToDuckDBExpression(IcebergPartitionTransform * transform,
+												  DataFileSchema * schema);
 
 
 /*
@@ -53,9 +56,12 @@ List *
 GetPartitionByExpressionsForRelation(Oid relationId)
 {
 	List	   *transforms = CurrentPartitionTransformList(relationId);
+	DataFileSchema *schema = NULL;
 
 	if (transforms == NIL)
 		return NIL;
+
+	schema = GetDataFileSchemaForTable(relationId);
 
 	List	   *exprs = NIL;
 	ListCell   *cell = NULL;
@@ -63,7 +69,7 @@ GetPartitionByExpressionsForRelation(Oid relationId)
 	foreach(cell, transforms)
 	{
 		IcebergPartitionTransform *transform = lfirst(cell);
-		char	   *expr = PartitionTransformToDuckDBExpression(transform);
+		char	   *expr = PartitionTransformToDuckDBExpression(transform, schema);
 
 		if (expr == NULL)
 			return NIL;
@@ -89,9 +95,11 @@ GetPartitionByExpressionsForRelation(Oid relationId)
  * - identity: the column value as-is (whitelisted types only)
  */
 static char *
-PartitionTransformToDuckDBExpression(IcebergPartitionTransform * transform)
+PartitionTransformToDuckDBExpression(IcebergPartitionTransform * transform,
+									 DataFileSchema * schema)
 {
-	const char *col = quote_identifier(transform->columnName);
+	const char *col = quote_identifier(DuckDBNameForColumnName(schema,
+															   transform->columnName));
 	Oid			typeOid = transform->pgType.postgresTypeOid;
 
 	switch (transform->type)

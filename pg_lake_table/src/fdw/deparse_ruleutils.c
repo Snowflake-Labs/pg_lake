@@ -27,6 +27,7 @@
 #include "postgres.h"
 #include "catalog/pg_type_d.h"
 
+#include "nodes/makefuncs.h"
 #include "parser/parse_func.h"
 #include "parser/parsetree.h"
 #include "nodes/nodeFuncs.h"
@@ -37,6 +38,7 @@
 #include "utils/rel.h"
 #include "utils/ruleutils.h"
 
+#include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
@@ -346,6 +348,239 @@ ParseQuery(char *command, List *paramList)
 	return (Query *) linitial(queryTreeList);
 }
 
+/* Shared state while we pick DuckDB-safe column names for one statement. */
+typedef struct DuckDBNamesState
+{
+	int			nextNameId;
+}			DuckDBNamesState;
+
+static void RewriteQueryForDuckDBNames(Query *query, DuckDBNamesState * state);
+
+
+static bool
+ListHasCaseCollision(List *names)
+{
+	int			count = list_length(names);
+	const char **array = NULL;
+	bool		collision = false;
+
+	if (count < 2)
+		return false;
+
+	array = palloc(count * sizeof(char *));
+
+	for (int i = 0; i < count; i++)
+		array[i] = strVal(list_nth(names, i));
+
+	collision = NamesHaveCaseCollision(array, count);
+	pfree(array);
+
+	return collision;
+}
+
+
+static bool
+NameCollides(List *names, const char *name)
+{
+	ListCell   *cell = NULL;
+
+	foreach(cell, names)
+	{
+		const char *other = strVal(lfirst(cell));
+
+		if (strcmp(other, name) != 0 && PgLakeAsciiNamesEqual(other, name))
+			return true;
+	}
+
+	return false;
+}
+
+
+static bool
+NameTaken(List *names, const char *name)
+{
+	ListCell   *cell = NULL;
+
+	foreach(cell, names)
+	{
+		if (PgLakeAsciiNamesEqual(strVal(lfirst(cell)), name))
+			return true;
+	}
+
+	return false;
+}
+
+
+static char *
+FreshName(DuckDBNamesState * state, List *names, List *chosen)
+{
+	for (;;)
+	{
+		char	   *name = psprintf("pg_lake_%d", ++state->nextNameId);
+
+		if (!NameTaken(names, name) && !NameTaken(chosen, name))
+			return name;
+	}
+}
+
+
+/* Give a new name to every column whose name differs from another only by case. */
+static List *
+UniqueNames(DuckDBNamesState * state, List *names)
+{
+	List	   *unique = NIL;
+	ListCell   *cell = NULL;
+
+	foreach(cell, names)
+	{
+		char	   *name = strVal(lfirst(cell));
+
+		if (name[0] != '\0' && NameCollides(names, name))
+			name = FreshName(state, names, unique);
+
+		unique = lappend(unique, makeString(pstrdup(name)));
+	}
+
+	return unique;
+}
+
+
+/* Print the new names as a full alias list, so DuckDB matches them by position. */
+static void
+RenameRteColumns(DuckDBNamesState * state, RangeTblEntry *rte)
+{
+	List	   *names = NIL;
+
+	if (!ListHasCaseCollision(rte->eref->colnames))
+		return;
+
+	names = UniqueNames(state, rte->eref->colnames);
+	rte->eref->colnames = names;
+
+	if (rte->alias == NULL)
+		rte->alias = makeAlias(rte->eref->aliasname, NIL);
+
+	rte->alias->colnames = copyObject(names);
+}
+
+
+static List *
+JoinTreeNames(Query *query, Node *node)
+{
+	if (IsA(node, RangeTblRef))
+	{
+		RangeTblEntry *rte = rt_fetch(((RangeTblRef *) node)->rtindex, query->rtable);
+
+		return list_copy(rte->eref->colnames);
+	}
+
+	if (IsA(node, JoinExpr))
+	{
+		JoinExpr   *join = (JoinExpr *) node;
+		RangeTblEntry *rte = rt_fetch(join->rtindex, query->rtable);
+		List	   *names = list_copy(rte->eref->colnames);
+
+		names = list_concat(names, JoinTreeNames(query, join->larg));
+		names = list_concat(names, JoinTreeNames(query, join->rarg));
+
+		return list_concat(names, join->usingClause);
+	}
+
+	return NIL;
+}
+
+
+/* ruleutils pushes USING names into both join inputs, so keep them unique too. */
+static void
+RenameUsingColumns(DuckDBNamesState * state, Query *query, Node *node)
+{
+	ListCell   *cell = NULL;
+
+	if (IsA(node, FromExpr))
+	{
+		foreach(cell, ((FromExpr *) node)->fromlist)
+			RenameUsingColumns(state, query, lfirst(cell));
+	}
+	else if (IsA(node, JoinExpr))
+	{
+		JoinExpr   *join = (JoinExpr *) node;
+		List	   *names = NIL;
+		List	   *usingNames = NIL;
+
+		RenameUsingColumns(state, query, join->larg);
+		RenameUsingColumns(state, query, join->rarg);
+
+		if (join->usingClause == NIL)
+			return;
+
+		names = list_concat(JoinTreeNames(query, join->larg),
+							JoinTreeNames(query, join->rarg));
+		names = list_concat(names, join->usingClause);
+
+		if (!ListHasCaseCollision(names))
+			return;
+
+		foreach(cell, join->usingClause)
+		{
+			char	   *name = strVal(lfirst(cell));
+
+			if (NameCollides(names, name))
+				name = FreshName(state, names, usingNames);
+
+			usingNames = lappend(usingNames, makeString(name));
+		}
+
+		join->usingClause = usingNames;
+	}
+}
+
+
+static bool
+RewriteNamesWalker(Node *node, DuckDBNamesState * state)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		RewriteQueryForDuckDBNames((Query *) node, state);
+		return false;
+	}
+
+	return expression_tree_walker(node, RewriteNamesWalker, state);
+}
+
+
+/* DuckDB ignores case, so give every FROM item, CTE and USING list case-unique names. */
+static void
+RewriteQueryForDuckDBNames(Query *query, DuckDBNamesState * state)
+{
+	ListCell   *cell = NULL;
+
+	foreach(cell, query->cteList)
+	{
+		CommonTableExpr *cte = lfirst(cell);
+
+		if (ListHasCaseCollision(cte->ctecolnames))
+			cte->aliascolnames = UniqueNames(state, cte->ctecolnames);
+	}
+
+	query_tree_walker(query, RewriteNamesWalker, state, 0);
+
+	foreach(cell, query->rtable)
+	{
+		RangeTblEntry *rte = lfirst(cell);
+
+		if (rte->rtekind == RTE_FUNCTION || rte->rtekind == RTE_SUBQUERY ||
+			rte->rtekind == RTE_CTE || rte->rtekind == RTE_VALUES)
+			RenameRteColumns(state, rte);
+	}
+
+	if (query->jointree != NULL)
+		RenameUsingColumns(state, query, (Node *) query->jointree);
+}
+
+
 /*
  * PreparePGDuckSQLTemplate - prepare the query template for duckdb pushdown.
  * We use the Postgres' ruleutils.c to deparse the query as it is a lot more
@@ -354,6 +589,10 @@ ParseQuery(char *command, List *paramList)
 char *
 PreparePGDuckSQLTemplate(Query *query)
 {
+	DuckDBNamesState namesState = {0};
+
+	RewriteQueryForDuckDBNames(query, &namesState);
+
 	char	   *newQuery = DeparseQualifiedQuery(query);
 
 #ifdef USE_ASSERT_CHECKING

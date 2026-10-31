@@ -22,6 +22,7 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/parquet/geoparquet.h"
+#include "pg_lake/pgduck/duckdb_identifier.h"
 
 
 /*
@@ -38,7 +39,7 @@ typedef struct GeometryColumn
 }			GeometryColumn;
 
 
-static List *GetGeometryColumns(TupleDesc tupleDesc);
+static List *GetGeometryColumns(TupleDesc tupleDesc, DataFileSchema * schema);
 static char *GetGeometryTypeName(int geometryType);
 
 
@@ -47,9 +48,9 @@ static char *GetGeometryTypeName(int geometryType);
  * any of the columns are geometry type.
  */
 char *
-GetGeoParquetMetadataForTupleDesc(TupleDesc tupleDesc)
+GetGeoParquetMetadataForTupleDesc(TupleDesc tupleDesc, DataFileSchema * schema)
 {
-	List	   *geometryColumns = GetGeometryColumns(tupleDesc);
+	List	   *geometryColumns = GetGeometryColumns(tupleDesc, schema);
 
 	if (geometryColumns == NIL)
 		return NULL;
@@ -120,7 +121,7 @@ GetGeoParquetMetadataForTupleDesc(TupleDesc tupleDesc)
  * GetGeometryColumns returns metadata about geometry columns.
  */
 static List *
-GetGeometryColumns(TupleDesc tupleDesc)
+GetGeometryColumns(TupleDesc tupleDesc, DataFileSchema * schema)
 {
 	List	   *geometryColumns = NIL;
 
@@ -136,7 +137,7 @@ GetGeometryColumns(TupleDesc tupleDesc)
 
 		GeometryColumn *geoColumn = palloc0(sizeof(GeometryColumn));
 
-		geoColumn->name = pstrdup(NameStr(column->attname));
+		geoColumn->name = DuckDBNameForColumnName(schema, NameStr(column->attname));
 		geoColumn->geometryType = GEOMETRY_GET_TYPE(column->atttypmod);
 
 		geometryColumns = lappend(geometryColumns, geoColumn);
