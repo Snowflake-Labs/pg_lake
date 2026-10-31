@@ -377,6 +377,14 @@ def test_writable_rest_iceberg_table(
         TABLE_NAMESPACE, TABLE_NAME, pg_conn
     )
 
+    # A write queues the file its predecessor replaced, not the one it
+    # replaces itself, which the REST commit after it may still fail to
+    # replace.  So the newest file the catalog replaced besides prev_path is
+    # still in S3: queued by VACUUM's own commit after its removal pass, or
+    # not queued yet when VACUUM had nothing to commit.
+    metadata_log = get_rest_table_metadata_log(TABLE_NAMESPACE, TABLE_NAME, pg_conn)
+    awaiting_removal = [p for p in metadata_log[-2:] if p != prev_path][-1:]
+
     assert_iceberg_s3_file_consistency(
         pg_conn,
         s3,
@@ -385,6 +393,7 @@ def test_writable_rest_iceberg_table(
         current_location,
         current_path,
         prev_path,
+        awaiting_removal,
     )
 
     run_command(
@@ -554,6 +563,29 @@ def get_rest_table_metadata_location(encoded_namespace, encoded_table_name, pg_c
     status, json_str, headers = res[0]
     metadata = json.loads(json_str)
     return metadata["metadata"]["location"]
+
+
+def get_rest_table_metadata_log(encoded_namespace, encoded_table_name, pg_conn):
+
+    url = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog/v1/{server_params.PG_DATABASE}/namespaces/{encoded_namespace}/tables/{encoded_table_name}"
+    token = get_polaris_access_token()
+
+    res = run_query(
+        f"""
+        SELECT *
+        FROM lake_iceberg.test_http_get(
+         '{url}',
+         ARRAY['Authorization: Bearer {token}']);
+        """,
+        pg_conn,
+    )
+
+    assert res[0][0] == 200
+    status, json_str, headers = res[0]
+    metadata = json.loads(json_str)
+    return [
+        entry["metadata-file"] for entry in metadata["metadata"].get("metadata-log", [])
+    ]
 
 
 server_option_override_params = [
