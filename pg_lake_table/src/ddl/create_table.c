@@ -398,8 +398,10 @@ ErrorIfCreateForeignTableOnIcebergCatalog(CreateForeignTableStmt *createStmt)
  *
  * The built-in pg_lake_rest_catalog skips discovery and always uses the
  * database name, so its tables keep the layout they have always had.  A
- * catalog that rejects /v1/config (Polaris or Lakekeeper without a warehouse)
- * yields no prefix, which also falls back to the database name.
+ * TYPE 'iceberg-rest' server skips discovery too, since its REST URLs carry
+ * no {prefix} segment.  A catalog that rejects /v1/config (Polaris or
+ * Lakekeeper without a warehouse) yields no prefix, which also falls back to
+ * the database name.
  */
 static char *
 ResolveWritableRestCatalogName(RestCatalogOptions * opts)
@@ -407,7 +409,7 @@ ResolveWritableRestCatalogName(RestCatalogOptions * opts)
 	if (opts->catalogName != NULL)
 		return pstrdup(opts->catalogName);
 
-	if (!opts->isBuiltin)
+	if (!opts->isBuiltin && !opts->omitCatalogPrefix)
 	{
 		char	   *advertisedPrefix = FetchRestCatalogConfigPrefix(opts);
 
@@ -912,8 +914,11 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 				RestCatalogOptions *opts =
 					ResolveRestCatalogOptions(catalogOptionValue);
 
-				catalogName = opts->catalogName ? pstrdup(opts->catalogName)
-					: FetchRestCatalogConfigPrefix(opts);
+				if (opts->catalogName != NULL)
+					catalogName = pstrdup(opts->catalogName);
+				else if (!opts->omitCatalogPrefix)
+					catalogName = FetchRestCatalogConfigPrefix(opts);
+
 				if (catalogName == NULL)
 					catalogName = get_database_name(MyDatabaseId);
 			}
