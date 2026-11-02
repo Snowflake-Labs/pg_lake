@@ -456,6 +456,8 @@ extern PGDLLEXPORT bool RestCatalogVendingEnabledForRelation(Oid relationId);
 extern PGDLLEXPORT List *IcebergProvideStorageCredentials(Oid relationId);
 extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
+extern void GetRestCatalogErrorFields(const char *body, const char **message,
+									  const char **type);
 extern PGDLLEXPORT List *PostHeadersWithAuth(RestCatalogOptions * opts);
 extern PGDLLEXPORT List *DeleteHeadersWithAuth(RestCatalogOptions * opts);
 extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(RestCatalogOptions * opts, RestCatalogOp op,

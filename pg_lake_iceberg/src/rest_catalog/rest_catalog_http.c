@@ -296,15 +296,18 @@ IsParseableErrorBody(const char *body)
 
 /*
  * GetRestCatalogErrorFields sets the error message and type from a REST
- * catalog error response, or leaves them NULL.
+ * catalog error response, or leaves them NULL.  The type is the Iceberg
+ * error envelope's, or the error code of an OAuth2 error response, which has
+ * no message.
  *
- * ReportHTTPError also runs after commit, where any ERROR becomes a PANIC,
- * and the body can be anything a catalog or a proxy in front of it sent.
- * So parse it without raising errors and skip what does not fit.  A soft
- * parse still raises on deep nesting (check_stack_depth) and on oversized
- * jsonb, so bodies that could hit either are skipped before parsing.
+ * ReportHTTPError and the catalog error log also run after commit, where any
+ * ERROR becomes a PANIC, and the body can be anything a catalog or a proxy
+ * in front of it sent.  So parse it without raising errors and skip what
+ * does not fit.  A soft parse still raises on deep nesting
+ * (check_stack_depth) and on oversized jsonb, so bodies that could hit
+ * either are skipped before parsing.
  */
-static void
+void
 GetRestCatalogErrorFields(const char *body, const char **message, const char **type)
 {
 	ErrorSaveContext escontext = {T_ErrorSaveContext};
@@ -321,6 +324,12 @@ GetRestCatalogErrorFields(const char *body, const char **message, const char **t
 		return;
 
 	JsonbValue *error = getKeyJsonValueFromContainer(&jsonb->root, "error", strlen("error"), NULL);
+
+	if (error != NULL && error->type == jbvString)
+	{
+		*type = pnstrdup(error->val.string.val, error->val.string.len);
+		return;
+	}
 
 	if (error == NULL || error->type != jbvBinary ||
 		!JsonContainerIsObject(error->val.binary.data))

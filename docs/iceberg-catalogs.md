@@ -530,8 +530,9 @@ arrived, the network problem is one of `host not found`, `connection failed`, `t
 `TLS error`, `connection lost`, `out of memory` or `network error`.
 
 A request is logged once its retries are over. A 404 is not logged, because pg_lake looks up
-namespaces and tables that may not exist as part of creating and attaching tables, and
-neither is a request interrupted by a cancel.
+namespaces and tables that may not exist as part of creating and attaching tables, except
+when publishing a new table or committed changes: there it means the catalog lost the
+namespace or table. A request interrupted by a cancel is not logged either.
 
 ### Authentication failures
 

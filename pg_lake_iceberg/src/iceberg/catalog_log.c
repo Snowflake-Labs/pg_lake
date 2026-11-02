@@ -26,18 +26,10 @@
 
 #include "pg_extension_base/pg_compat.h"
 
-#include "fmgr.h"
-#include "nodes/miscnodes.h"
-#include "utils/builtins.h"
-#include "utils/jsonb.h"
-
 #include "pg_lake/iceberg/catalog_log.h"
 
 /* longest sentence a line carries, prefix excluded */
 #define CATALOG_LOG_MAX_LINE 256
-
-/* error bodies larger than this are not parsed for an error type */
-#define CATALOG_LOG_MAX_ERROR_BODY 65536
 
 /* managed via pg_lake_iceberg.log_catalog_events */
 bool		LogCatalogEvents = true;
@@ -150,9 +142,13 @@ RestCatalogLogName(const RestCatalogOptions * opts)
  * LogCatalogRequest logs a REST catalog request that failed after its
  * retries.
  *
- * 404 is not logged: probing for a namespace or table that is not there is
- * a normal part of attaching and creating tables, and a missing table the
- * user asked for is reported to the user anyway.
+ * 404 is not logged for most requests: probing for a namespace or table
+ * that is not there is a normal part of attaching and creating tables, a
+ * missing table the user asked for is reported to the user anyway, and a
+ * dropped table being gone from the catalog already is the outcome the drop
+ * wanted.  Publishing a new table or committed changes is the exception:
+ * there a 404 means the catalog lost the namespace or table that Postgres
+ * just committed to.
  *
  * This runs after commit for the requests that publish changes, so it must
  * not throw; parsing the error body is done without raising errors.
@@ -176,7 +172,10 @@ LogCatalogRequest(const RestCatalogOptions * opts, RestCatalogOp op,
 		if (problem != NULL)
 			LogCatalogLine("could not %s %s: %s", action, catalog, problem);
 	}
-	else if (result->status >= 400 && result->status != 404)
+	else if (result->status >= 400 &&
+			 (result->status != 404 ||
+			  op == REST_CATALOG_OP_PUBLISH_CREATE_TABLE ||
+			  op == REST_CATALOG_OP_PUBLISH_COMMIT))
 	{
 		const char *errorType = CatalogErrorType(result);
 
@@ -324,22 +323,10 @@ LogCatalogUnsupportedType(const char *icebergType)
 static const char *
 CatalogErrorType(const HttpResult * result)
 {
-	if (result->body == NULL || result->bodyLength == 0 ||
-		result->bodyLength > CATALOG_LOG_MAX_ERROR_BODY)
-		return NULL;
+	const char *message = NULL;
+	const char *type = NULL;
 
-	ErrorSaveContext escontext = {T_ErrorSaveContext};
-	Datum		jsonbDatum;
-
-	if (!DirectInputFunctionCallSafe(jsonb_in, result->body, InvalidOid, -1,
-									 (Node *) &escontext, &jsonbDatum))
-		return NULL;
-
-	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
-	char	   *type = JsonbGetOptionalString(jsonb, 2, "error", "type");
-
-	if (type == NULL)
-		type = JsonbGetOptionalString(jsonb, 1, "error");
+	GetRestCatalogErrorFields(result->body, &message, &type);
 
 	if (type == NULL)
 		return NULL;

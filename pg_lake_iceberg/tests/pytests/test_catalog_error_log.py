@@ -52,12 +52,12 @@ def _make_handler_class():
         token_status = 200
         token_body = None
 
-        # answer for GET .../namespaces/<name>
+        # answer for GET .../namespaces/<name>, as JSON or as raw bytes
         namespace_status = 200
         namespace_body = None
 
         def _reply(self, status, body):
-            payload = json.dumps(body).encode()
+            payload = body if isinstance(body, bytes) else json.dumps(body).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
@@ -211,6 +211,31 @@ def test_unknown_error_type_is_left_out(installcheck, catalog_and_conn):
     handler_class.namespace_body = {
         "error": {"message": "boom", "type": REMOTE_MESSAGE, "code": 500}
     }
+
+    offset = server_log_offset()
+
+    with pytest.raises(Exception, match="HTTP 500"):
+        _register_namespace(conn, f"ns_{uuid.uuid4().hex[:8]}")
+    conn.rollback()
+
+    assert catalog_log_lines(offset) == [
+        "could not look up a namespace in the built-in REST catalog: HTTP 500"
+    ]
+
+
+def test_deeply_nested_error_body_is_not_parsed(installcheck, catalog_and_conn):
+    """
+    An error body nested deeper than the parser's stack allows is logged
+    without an error type rather than failing to parse.  After commit, where
+    publish requests are logged, a failed parse would be a PANIC.
+    """
+    if installcheck:
+        return
+
+    handler_class, conn = catalog_and_conn
+    handler_class.namespace_status = 500
+    depth = 30000
+    handler_class.namespace_body = b'{"error": ' + b"[" * depth + b"]" * depth + b"}"
 
     offset = server_log_offset()
 
