@@ -242,6 +242,7 @@ def test_case_sensitive_iceberg_column_names(
         )
         == [[2]]
     )
+    pg_conn.commit()
 
     run_command("RESET pg_lake_table.enable_full_query_pushdown", pg_conn)
 
@@ -297,7 +298,7 @@ def test_case_sensitive_iceberg_column_names(
 
 
 def test_case_sensitive_iceberg_copy_from_json(
-    pg_conn, s3, extension, with_default_location
+    pg_conn, superuser_conn, s3, extension, with_default_location
 ):
     key = "test_case_sensitive_iceberg_copy_from_json/data.json"
     s3.put_object(
@@ -308,7 +309,11 @@ def test_case_sensitive_iceberg_copy_from_json(
             '{"a": 2, "A": "y", "tags": [], "m": {}}\n'
         ),
     )
-    map_type = run_query("SELECT map_type.create('text', 'int')::text", pg_conn)[0][0]
+    map_type = run_query(
+        "SELECT map_type.create('text', 'int', 'case_json_text_int')::text",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
     run_command(
         f"""
         CREATE TABLE json_cols (
