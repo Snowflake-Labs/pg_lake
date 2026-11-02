@@ -495,6 +495,7 @@ def test_vended_azure_sas_cannot_add_connection_string_fields(
         _attach_rest_table(superuser_conn, attached, table)
 
         superuser_conn.notices.clear()
+        offset = server_log_offset()
         run_query(
             f"SELECT count(*) FROM {attached}.{table}",
             superuser_conn,
@@ -506,6 +507,10 @@ def test_vended_azure_sas_cannot_add_connection_string_fields(
             "could not resolve storage credentials" in n and '";"' in n
             for n in superuser_conn.notices
         ), "\n".join(superuser_conn.notices)
+        assert (
+            "could not resolve storage credentials for a table (SQLSTATE 22023)"
+            in catalog_log_lines(offset)
+        ), catalog_log_lines(offset)
 
         location = meta.split("/metadata/", 1)[0]
         assert not any(

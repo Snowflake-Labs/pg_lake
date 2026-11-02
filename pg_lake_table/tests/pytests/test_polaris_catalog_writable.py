@@ -2,6 +2,11 @@ from utils_pytest import *
 from helpers.polaris import *
 import pytest
 import json
+import socket
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import requests
 
 
 # pg_conn is to start Polaris server
@@ -508,6 +513,156 @@ def test_writable_rest_vacuum(
     ensure_table_dropped("test_writable_rest_vacuum", "writable_rest", superuser_conn)
 
     run_command("RESET pg_lake_iceberg.default_catalog", pg_conn)
+
+
+def test_failed_publish_is_logged(
+    pg_conn,
+    superuser_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+    create_http_helper_functions,
+):
+    """
+    Changes Postgres committed that the catalog rejects after commit are
+    logged, a 404 included: there it means the catalog lost the table.  A
+    404 when publishing a drop is not logged, since the table is gone either
+    way.
+
+    Postgres checks the table against the catalog before it commits, so a
+    proxy in front of Polaris rejects the publish requests that follow.
+    """
+    if installcheck:
+        return
+
+    run_command("CREATE SCHEMA test_failed_publish", pg_conn)
+    for table in ("written", "dropped"):
+        run_command(
+            f"CREATE TABLE test_failed_publish.{table} USING iceberg "
+            "WITH (catalog='rest', autovacuum_enabled=False) AS SELECT 1 AS a",
+            pg_conn,
+        )
+    pg_conn.commit()
+
+    polaris = f"{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
+    proxy, thread = _start_publish_rejecting_proxy(f"http://{polaris}")
+    proxy_host = f"127.0.0.1:{proxy.server_address[1]}/api/catalog"
+
+    try:
+        _set_rest_catalog_host(proxy_host, [pg_conn, superuser_conn])
+
+        offset = server_log_offset()
+        run_command("INSERT INTO test_failed_publish.written VALUES (2)", pg_conn)
+        pg_conn.commit()
+
+        assert catalog_log_lines(offset) == [
+            "could not publish committed changes to the built-in REST catalog: "
+            "HTTP 404 (NoSuchTableException)"
+        ]
+
+        offset = server_log_offset()
+        run_command("DROP TABLE test_failed_publish.dropped", pg_conn)
+        pg_conn.commit()
+
+        assert catalog_log_lines(offset) == []
+    finally:
+        pg_conn.rollback()
+        _set_rest_catalog_host(f"{polaris}/api/catalog", [pg_conn, superuser_conn])
+        proxy.shutdown()
+        thread.join(timeout=5)
+
+        # the proxy kept both changes from reaching Polaris
+        for table in ("written", "dropped"):
+            polaris_session.delete(
+                f"http://{polaris}/api/catalog/v1/{server_params.PG_DATABASE}"
+                f"/namespaces/test_failed_publish/tables/{table}"
+            )
+        run_command("DROP SCHEMA test_failed_publish CASCADE", pg_conn)
+        pg_conn.commit()
+
+
+def _start_publish_rejecting_proxy(target):
+    """
+    Forward requests to target, except that committed changes and table drops
+    are answered with a 404, as if the catalog had lost the table.
+    """
+
+    class _Proxy(BaseHTTPRequestHandler):
+        def _handle(self):
+            length = int(self.headers.get("Content-Length", 0))
+            body = self.rfile.read(length) if length else None
+
+            if self.command == "DELETE" or (
+                self.command == "POST" and self.path.endswith("/transactions/commit")
+            ):
+                payload = json.dumps(
+                    {
+                        "error": {
+                            "message": "Table does not exist",
+                            "type": "NoSuchTableException",
+                            "code": 404,
+                        }
+                    }
+                ).encode()
+                self.send_response(404)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+
+            headers = {
+                key: value
+                for key, value in self.headers.items()
+                if key.lower() not in ("host", "content-length")
+            }
+            response = requests.request(
+                self.command, target + self.path, headers=headers, data=body, timeout=30
+            )
+
+            self.send_response(response.status_code)
+            for key, value in response.headers.items():
+                if key.lower() not in (
+                    "connection",
+                    "content-encoding",
+                    "content-length",
+                    "transfer-encoding",
+                ):
+                    self.send_header(key, value)
+            self.send_header("Content-Length", str(len(response.content)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(response.content)
+
+        do_GET = _handle
+        do_POST = _handle
+        do_PUT = _handle
+        do_DELETE = _handle
+        do_HEAD = _handle
+
+        def log_message(self, fmt, *args):
+            pass
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    proxy = ThreadingHTTPServer(("127.0.0.1", port), _Proxy)
+    thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+    thread.start()
+    return proxy, thread
+
+
+def _set_rest_catalog_host(host, conns):
+    run_command_outside_tx(
+        [
+            f"ALTER SYSTEM SET pg_lake_iceberg.rest_catalog_host TO '{host}'",
+            "SELECT pg_reload_conf()",
+        ]
+    )
+    wait_for_reloaded_settings(conns, {"pg_lake_iceberg.rest_catalog_host": host})
 
 
 def test_writable_drop_table(

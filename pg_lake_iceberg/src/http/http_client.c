@@ -273,6 +273,7 @@ CurlSetOptions(CURL *curl, const char *url, HttpMethod method,
 	CURL_SETOPT(curl, CURLOPT_MAXREDIRS, MAX_REDIRECTS);
 	CURL_SETOPT(curl, CURLOPT_CONNECTTIMEOUT_MS, CONNECT_TIMEOUT_MS);
 	CURL_SETOPT(curl, CURLOPT_TIMEOUT_MS, TOTAL_TIMEOUT_MS);
+	CURL_SETOPT(curl, CURLOPT_USERAGENT, PG_LAKE_HTTP_USER_AGENT);
 
 	/*
 	 * Client certificate material, for requests addressed to the edge that
@@ -419,6 +420,7 @@ CurlReturnError(CURL *curl, struct curl_slist *headerList,
 	HttpResult	errorRes = {0};
 
 	errorRes.errorMsg = errorMsg;
+	errorRes.curlCode = curlCode;
 
 	return errorRes;
 }

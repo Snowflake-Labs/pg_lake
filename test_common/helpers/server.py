@@ -479,6 +479,27 @@ def run_cli_command(command):
 # ---------------------------------------------------------------------------
 
 
+CATALOG_LOG_PREFIX = "pg_lake_catalog: "
+
+
+def server_log_offset():
+    """The size of the test server's log, to read what is logged after it."""
+    return os.path.getsize(f"{server_params.PG_DIR}/logfile")
+
+
+def catalog_log_lines(offset):
+    """The pg_lake_catalog sentences logged since offset, without the prefix."""
+    with open(f"{server_params.PG_DIR}/logfile") as f:
+        f.seek(offset)
+        delta = f.read()
+
+    return [
+        line.split(CATALOG_LOG_PREFIX, 1)[1]
+        for line in delta.splitlines()
+        if CATALOG_LOG_PREFIX in line
+    ]
+
+
 def start_postgres(db_path, db_user, db_port):
     # Stop any leftover PostgreSQL from a previous interrupted run.
     stop_postgres(db_path)
