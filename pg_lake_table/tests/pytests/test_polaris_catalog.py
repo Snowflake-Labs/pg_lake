@@ -1201,6 +1201,70 @@ def test_rest_catalog_uppercase_columns(
     rest_catalog.drop_namespace(namespace)
 
 
+def test_rest_catalog_read_only_gzip_metadata(
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """A read-only table whose catalog writes gzip metadata is readable (#823).
+
+    pg_lake cannot decompress *.gz.metadata.json, so it reads the copy of the
+    metadata the catalog inlines in its loadTable response instead.
+    """
+    if installcheck:
+        return
+
+    namespace = "test_gzip_metadata"
+    table_name = "gzip_table"
+    rest_catalog = create_iceberg_rest_catalog(namespace)
+
+    schema = Schema(
+        NestedField(1, "id", LongType(), required=False),
+        NestedField(2, "name", StringType(), required=False),
+    )
+    iceberg_table = rest_catalog.create_table(
+        identifier=f"{namespace}.{table_name}",
+        schema=schema,
+        properties={"write.metadata.compression-codec": "gzip"},
+    )
+    iceberg_table.append(
+        pyarrow.Table.from_pylist([{"id": 1, "name": "a"}, {"id": 2, "name": "b"}])
+    )
+    assert iceberg_table.metadata_location.endswith(".gz.metadata.json")
+
+    run_command(f"""CREATE SCHEMA "{namespace}" """, pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE "{namespace}".gzip_read ()
+        USING iceberg
+        WITH (catalog='rest', read_only=True, catalog_table_name='{table_name}')
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        f"""SELECT id, name FROM "{namespace}".gzip_read ORDER BY id""", pg_conn
+    )
+    assert result == [[1, "a"], [2, "b"]]
+
+    # a later version is gzip as well, and the next statement sees it
+    iceberg_table.append(pyarrow.Table.from_pylist([{"id": 3, "name": "c"}]))
+    assert iceberg_table.metadata_location.endswith(".gz.metadata.json")
+
+    result = run_query(f"""SELECT count(*) FROM "{namespace}".gzip_read""", pg_conn)
+    assert result == [[3]]
+    pg_conn.commit()
+
+    run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
+    pg_conn.commit()
+    rest_catalog.drop_table(f"{namespace}.{table_name}")
+    rest_catalog.drop_namespace(namespace)
+
+
 def test_rest_catalog_lowercase_column_names(
     pg_conn,
     s3,
