@@ -309,10 +309,8 @@ def test_case_sensitive_iceberg_copy_from_json(
             '{"a": 2, "A": "y", "tags": [], "m": {}}\n'
         ),
     )
-    map_type = run_query(
-        "SELECT map_type.create('text', 'int', 'case_json_text_int')::text",
-        superuser_conn,
-    )[0][0]
+    query = "SELECT map_type.create('text', 'int')::text"
+    map_type = run_query(query, superuser_conn)[0][0]
     superuser_conn.commit()
     run_command(
         f"""
