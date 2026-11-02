@@ -314,7 +314,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
  * The list elements have a different type per table type, so dataFile is
  * untyped: it points to a TableDataFile for internal Iceberg tables and to a
  * DataFile for external ones. externalLeafFields is only used for the latter,
- * where the stats are read from the remote Parquet footer.
+ * whose stats come from the bounds in their manifest entry.
  */
 static List *
 GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
@@ -333,10 +333,10 @@ GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
 		DataFile   *externalDataFile = (DataFile *) dataFile;
 
 		*partition = &(externalDataFile->partition);
-		return GetRemoteParquetColumnStats((char *) externalDataFile->file_path,
-										   externalLeafFields);
+		return GetIcebergDataFileColumnStats(externalDataFile, externalLeafFields);
 	}
 }
+
 
 /*
  * GetPartitionSpecFieldsUsedInQuery gets the partition spec fields that are

@@ -167,6 +167,10 @@ no account (`az://<container>/...`); configure a pgduck_server Azure secret for 
 | `r2://` | Cloudflare R2 | Yes | Yes |
 | `https://`, `http://` | Public web servers | Yes | No |
 
+A catalog can only point pg_lake to object storage. pg_lake refuses an `https://` or `http://`
+URL that a catalog answers with, and one inside Iceberg metadata, a manifest list or a manifest,
+unless that file was itself read from a web server.
+
 pg_lake detects the region of S3 buckets automatically. For the best performance and to avoid
 data transfer charges, keep buckets that you write to or query often in the same region as
 your server.
