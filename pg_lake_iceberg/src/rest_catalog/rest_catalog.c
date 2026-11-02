@@ -122,7 +122,8 @@ FetchRestCatalogConfigPrefix(RestCatalogOptions * opts)
 	}
 
 	List	   *headers = GetHeadersWithAuth(opts);
-	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, configUrl, NULL, headers);
+	HttpResult	hr = SendRequestToRestCatalog(opts, REST_CATALOG_OP_CONFIG, HTTP_GET, configUrl,
+											  NULL, headers);
 
 	if (hr.status != 200)
 		return NULL;

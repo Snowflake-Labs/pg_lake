@@ -486,6 +486,96 @@ files once per table scan, regardless of how many groups reference them. It does
 not count physical reader executions or object-storage requests. Footer reads
 and repeated group reads can cause additional I/O.
 
+## Catalog error log
+
+pg_lake writes a line to the PostgreSQL server log, never to the client, when a catalog
+request fails, when no catalog credential can be obtained, when storage credentials from a
+catalog cannot be used, and when a table uses something pg_lake cannot handle. Each line is
+`pg_lake_catalog: ` followed by one of the sentences below. The sentences carry no table,
+schema, namespace or catalog names, no URLs or paths, no SQL text and no error messages from
+the catalog, so the lines can be collected in places where the rest of the server log should
+not go.
+
+```
+LOG:  pg_lake_catalog: could not load a table from the Horizon catalog: HTTP 403 (ForbiddenException)
+LOG:  pg_lake_catalog: a table uses Iceberg deletion vectors, which pg_lake does not support
+```
+
+To collect them, match on the prefix. Set `pg_lake_iceberg.log_catalog_events` to `off` to
+turn the lines off.
+
+Where a sentence names the catalog, it is one of:
+
+- `the Horizon catalog`: the [built-in `rest` catalog](#configure-the-built-in-rest-catalog)
+  when `pg_lake_iceberg.rest_catalog_auth_type` is `horizon`.
+- `the built-in REST catalog`: the built-in `rest` catalog with any other authentication.
+- `a catalog server`: a catalog defined with [CREATE SERVER](#external-catalogs-with-create-server).
+
+### Failed catalog requests
+
+```
+could not <request> <catalog>: HTTP <status> (<error type>)
+could not <request> <catalog>: HTTP <status>
+could not <request> <catalog>: <network problem>
+```
+
+`<request>` is one of `get the configuration of`, `get an access token from`,
+`list namespaces in`, `look up a namespace in`, `create a namespace in`, `load a table from`
+and `create a table in`, or, for the changes sent to the catalog after a transaction
+commits, `publish a new table to`, `publish a table drop to` and
+`publish committed changes to`. A failed publish means PostgreSQL committed a change that the
+catalog does not have.
+
+The error type is the Iceberg exception type or OAuth2 error code the catalog answered with.
+It is left out when the response names none, or one pg_lake does not know. When no response
+arrived, the network problem is one of `host not found`, `connection failed`, `timed out`,
+`TLS error`, `connection lost`, `out of memory` or `network error`.
+
+A request is logged once its retries are over. A 404 is not logged, because pg_lake looks up
+namespaces and tables that may not exist as part of creating and attaching tables, except
+when publishing a new table or committed changes: there it means the catalog lost the
+namespace or table. A request interrupted by a cancel is not logged either.
+
+### Authentication failures
+
+```
+could not authenticate to <catalog> (SQLSTATE <code>)
+```
+
+No credential could be obtained for the catalog, either from pg_lake's own OAuth2 token
+request or from a credential provider supplied by another extension.
+
+### Vended credentials
+
+```
+<catalog> returned no vended credentials for a table
+ignoring vended credentials for <storage> from <catalog> that pg_lake cannot use
+ignoring a vended Azure endpoint that is not allowed
+could not resolve storage credentials for a table (SQLSTATE <code>)
+```
+
+The first is logged when a table asks its catalog for vended credentials and gets none.
+`<storage>` is `S3`, `Azure Data Lake Storage`, `Google Cloud Storage` or
+`an unrecognized kind of storage`. An Azure endpoint is not allowed when its host is not
+under `pg_lake.allowed_azure_host_suffixes` or is not the storage account's own. Each of these
+three is logged once per session for each table or endpoint. The last is logged when
+resolving the credentials a query needs fails.
+
+### Unsupported Iceberg features
+
+```
+a table uses Iceberg deletion vectors, which pg_lake does not support
+a table uses Iceberg column default values, which pg_lake does not support
+a table uses Iceberg format version <version>, which pg_lake cannot read
+a table uses Iceberg format version <version>, which pg_lake cannot write
+a table uses the Iceberg type <type>, which pg_lake does not support
+a table uses an Iceberg type pg_lake does not support
+```
+
+`<type>` is `geography`, `geometry`, `timestamp_ns`, `timestamptz_ns`, `unknown` or
+`variant`; any other type gets the last sentence. Each is logged along with the error that
+refuses the table.
+
 ## Snowflake
 
 Snowflake can query pg_lake's Iceberg tables in place, without copying the data:

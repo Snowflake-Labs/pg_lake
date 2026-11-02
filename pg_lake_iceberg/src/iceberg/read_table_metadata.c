@@ -21,6 +21,7 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_reader.h"
@@ -190,14 +191,18 @@ ErrorIfSchemaDeclaresInitialDefault(IcebergTableMetadata * metadata)
 			const char *named = field->initialDefault != NULL ?
 				field->name : NameOfFieldWithInitialDefault(field->type);
 
-			if (named != NULL)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("iceberg column default values are not supported"),
-						 errdetail("Column \"%s\" declares an initial-default, "
-								   "which rows written before the column was "
-								   "added would have to read back as.",
-								   named)));
+			if (named == NULL)
+				continue;
+
+			LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_COLUMN_DEFAULTS);
+
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg column default values are not supported"),
+					 errdetail("Column \"%s\" declares an initial-default, "
+							   "which rows written before the column was "
+							   "added would have to read back as.",
+							   named)));
 		}
 	}
 }
@@ -234,6 +239,8 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 	 */
 	if (metadata->format_version != 2 && metadata->format_version != 3)
 	{
+		LogCatalogUnsupportedFormatVersion(metadata->format_version, false);
+
 		ereport(ERROR, (errmsg("unsupported iceberg format version %d",
 							   metadata->format_version)));
 	}
@@ -668,6 +675,8 @@ JsonExtractField(JsonbContainer *topLevelJsonContainer, char *fieldName, FieldRe
 		}
 		else
 		{
+			LogCatalogUnsupportedType(subfieldType);
+
 			ereport(ERROR, (errmsg("unsupported Iceberg type: %s", subfieldType)));
 		}
 

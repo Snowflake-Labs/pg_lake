@@ -2001,6 +2001,7 @@ def test_vended_credentials_credential_pg_lake_cannot_use_is_reported(
     httpd, thread = _serve_provider_case(shape, location, vended_config, superuser_conn)
     try:
         superuser_conn.notices.clear()
+        offset = server_log_offset()
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
         assert summary is None, f"expected no usable credential, got {summary!r}"
@@ -2008,6 +2009,10 @@ def test_vended_credentials_credential_pg_lake_cannot_use_is_reported(
             f"ignoring vended credentials for {provider}" in n
             for n in superuser_conn.notices
         ), "\n".join(superuser_conn.notices)
+        assert catalog_log_lines(offset) == [
+            f"ignoring vended credentials for {provider} from the built-in REST "
+            "catalog that pg_lake cannot use"
+        ]
 
     finally:
         _drop_vended_creds_fn(superuser_conn)
@@ -2384,6 +2389,7 @@ def test_vended_credentials_azure_endpoint_is_held_to_the_host_allowlist(
     if installcheck:
         return
 
+    offset = server_log_offset()
     cred = _azure_credential(
         superuser_conn,
         "storage-credentials",
@@ -2401,6 +2407,9 @@ def test_vended_credentials_azure_endpoint_is_held_to_the_host_allowlist(
     assert any(
         "ignoring the endpoint the catalog vended" in n for n in superuser_conn.notices
     ), "\n".join(superuser_conn.notices)
+    assert catalog_log_lines(offset) == [
+        "ignoring a vended Azure endpoint that is not allowed"
+    ]
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,7 @@
 #include "utils/resowner.h"
 #include "utils/timestamp.h"
 
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/vended_secrets.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -264,6 +265,8 @@ ReportOrRethrowBestEffortError(ErrorData *edata, const char *what,
 		edata->sqlerrcode == ERRCODE_QUERY_CANCELED ||
 		edata->sqlerrcode == ERRCODE_ADMIN_SHUTDOWN)
 		ReThrowError(edata);
+
+	LogCatalogCredentialResolutionFailure(edata->sqlerrcode);
 
 	/*
 	 * Warn rather than whisper.  Whatever follows this will fail on its own
