@@ -918,7 +918,7 @@ CreatePGCompositeType(CompositeType * type)
 								   CStringGetDatum(type->typeName),
 								   ObjectIdGetDatum(structNamespaceId))))
 	{
-		type->typeName = psprintf("%s%u_", type->typeName, GetUserId());
+		type->typeName = psprintf("%s_%u", type->typeName, GetUserId());
 		type->isFinalized = false;
 		FinalizeCompositeTypeName(type);
 	}
