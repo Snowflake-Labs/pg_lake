@@ -410,10 +410,12 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 	List	   *columnStatsList = NIL;
 
 	Assert(schema != NULL);
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
+
 	for (int fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
 	{
 		DataFileSchemaField *field = &schema->fields[fieldIndex];
-		char	   *fieldName = DuckDBNameForField(schema, field->name, field->id);
+		char	   *fieldName = DuckDBNameForFieldId(field->name, field->id, hasCollision);
 		int			fieldId = field->id;
 
 		int			nameIndex = FindIndexInStringList(names, fieldName);

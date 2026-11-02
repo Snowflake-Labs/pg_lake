@@ -124,6 +124,7 @@ static List *
 GetGeometryColumns(TupleDesc tupleDesc, DataFileSchema * schema)
 {
 	List	   *geometryColumns = NIL;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	for (int columnIndex = 0; columnIndex < tupleDesc->natts; columnIndex++)
 	{
@@ -137,7 +138,8 @@ GetGeometryColumns(TupleDesc tupleDesc, DataFileSchema * schema)
 
 		GeometryColumn *geoColumn = palloc0(sizeof(GeometryColumn));
 
-		geoColumn->name = DuckDBNameForColumnName(schema, NameStr(column->attname));
+		geoColumn->name = DuckDBNameForColumn(schema, NameStr(column->attname),
+											  hasCollision);
 		geoColumn->geometryType = GEOMETRY_GET_TYPE(column->atttypmod);
 
 		geometryColumns = lappend(geometryColumns, geoColumn);

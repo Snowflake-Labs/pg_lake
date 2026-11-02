@@ -27,6 +27,10 @@ def test_case_sensitive_iceberg_column_names(
             "a" int, z int
         ) USING iceberg;
         INSERT INTO test_case_sensitive_iceberg_names.plain VALUES (1, 5);
+        CREATE TABLE test_case_sensitive_iceberg_names.lo ("a" int) USING iceberg;
+        INSERT INTO test_case_sensitive_iceberg_names.lo VALUES (1);
+        CREATE TABLE test_case_sensitive_iceberg_names.up ("A" int) USING iceberg;
+        INSERT INTO test_case_sensitive_iceberg_names.up VALUES (2);
         """,
         pg_conn,
     )
@@ -207,6 +211,18 @@ def test_case_sensitive_iceberg_column_names(
         )
         assert recursive == [[1, 100], [2, 100], [3, 100]]
 
+        aliased_join = run_query(
+            """
+            SELECT j."A"
+            FROM (
+                test_case_sensitive_iceberg_names.lo l
+                CROSS JOIN test_case_sensitive_iceberg_names.up u
+            ) AS j
+            """,
+            pg_conn,
+        )
+        assert aliased_join == [[2]]
+
     run_command(
         """
         UPDATE test_case_sensitive_iceberg_names.cols
@@ -250,6 +266,30 @@ def test_case_sensitive_iceberg_column_names(
     ]
 
     run_command(
+        f"""
+        CREATE FOREIGN TABLE test_case_sensitive_iceberg_names.cols_ro (
+            "a" int, "A" int, b int
+        ) SERVER pg_lake OPTIONS (
+            path '{metadata[0][0]}',
+            format 'iceberg'
+        )
+        """,
+        pg_conn,
+    )
+    assert (
+        run_query(
+            """
+            SELECT "a", "A", b
+            FROM test_case_sensitive_iceberg_names.cols_ro
+            WHERE "a" = 1 AND "A" = 100
+            ORDER BY b
+            """,
+            pg_conn,
+        )
+        == [[1, 100, 9], [1, 100, 9]]
+    )
+
+    run_command(
         "DROP SCHEMA test_case_sensitive_iceberg_names CASCADE",
         pg_conn,
     )
@@ -263,18 +303,105 @@ def test_case_sensitive_iceberg_copy_from_json(
     s3.put_object(
         Bucket=TEST_BUCKET,
         Key=key,
-        Body='{"a": 1, "A": "x", "tags": [1, 2]}\n{"a": 2, "A": "y", "tags": []}\n',
+        Body=(
+            '{"a": 1, "A": "x", "tags": [1, 2], "m": {"k": 1}}\n'
+            '{"a": 2, "A": "y", "tags": [], "m": {}}\n'
+        ),
     )
+    map_type = run_query("SELECT map_type.create('text', 'int')::text", pg_conn)[0][0]
     run_command(
         f"""
-        CREATE TABLE json_cols ("a" int, "A" text, tags int[]) USING iceberg;
+        CREATE TABLE json_cols (
+            "a" int, "A" text, tags int[], m {map_type}
+        ) USING iceberg;
         COPY json_cols FROM 's3://{TEST_BUCKET}/{key}' WITH (format 'json');
         """,
         pg_conn,
     )
 
-    assert run_query('SELECT "a", "A", tags FROM json_cols ORDER BY "a"', pg_conn) == [
-        [1, "x", [1, 2]],
-        [2, "y", []],
+    assert run_query(
+        f'SELECT "a", "A", tags, map_type.extract(m, \'k\') FROM json_cols ORDER BY "a"',
+        pg_conn,
+    ) == [
+        [1, "x", [1, 2], 1],
+        [2, "y", [], None],
     ]
+    pg_conn.rollback()
+
+
+def test_case_sensitive_copy_from_iceberg_without_source_clash(
+    pg_conn, s3, extension, with_default_location
+):
+    run_command(
+        """
+        CREATE SCHEMA case_copy_from_iceberg;
+        CREATE TABLE case_copy_from_iceberg.src (x int, y int, w int) USING iceberg;
+        INSERT INTO case_copy_from_iceberg.src VALUES (1, 100, 7);
+        CREATE TABLE case_copy_from_iceberg.cols ("a" int, "A" int, b int) USING iceberg;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+    metadata = run_query(
+        """
+        SELECT metadata_location FROM lake_iceberg.tables
+        WHERE table_namespace = 'case_copy_from_iceberg'
+          AND table_name = 'src'
+        """,
+        pg_conn,
+    )
+    run_command(
+        f"COPY case_copy_from_iceberg.cols FROM '{metadata[0][0]}' WITH (format 'iceberg')",
+        pg_conn,
+    )
+    assert run_query(
+        'SELECT "a", "A", b FROM case_copy_from_iceberg.cols', pg_conn
+    ) == [[1, 100, 7]]
+    run_command("DROP SCHEMA case_copy_from_iceberg CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_case_sensitive_partition_and_add_column(
+    pg_conn, s3, extension, with_default_location
+):
+    run_command(
+        """
+        CREATE TABLE parted ("a" int, "A" int, b int) USING iceberg
+            WITH (partition_by = '"A"');
+        INSERT INTO parted VALUES (1, 100, 7);
+        CREATE TABLE grown ("a" int, b int) USING iceberg;
+        INSERT INTO grown VALUES (1, 7);
+        ALTER TABLE grown ADD COLUMN "A" int;
+        """,
+        pg_conn,
+    )
+
+    assert run_query('SELECT "a", "A", b FROM parted', pg_conn) == [[1, 100, 7]]
+    assert run_query('SELECT "a", "A", b FROM grown ORDER BY "a"', pg_conn) == [
+        [1, None, 7]
+    ]
+
+    run_command('INSERT INTO grown ("a", b, "A") VALUES (2, 8, 100)', pg_conn)
+    assert run_query('SELECT "a", "A", b FROM grown ORDER BY "a"', pg_conn) == [
+        [1, None, 7],
+        [2, 100, 8],
+    ]
+    pg_conn.rollback()
+
+
+def test_nested_case_collision_has_a_clear_error(
+    pg_conn, s3, extension, with_default_location
+):
+    error = run_command(
+        """
+        CREATE TYPE case_nest AS ("a" int, "A" int);
+        CREATE TABLE nested_case (n case_nest) USING iceberg;
+        INSERT INTO nested_case VALUES (ROW(1, 2));
+        """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert "nested fields that differ only by letter case are not supported" in str(
+        error
+    )
     pg_conn.rollback()

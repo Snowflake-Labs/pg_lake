@@ -353,6 +353,7 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 
 	appendStringInfoString(command, "SELECT ");
 	bool		first = true;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	for (int i = 0; i < projection->natts; i++)
 	{
@@ -361,8 +362,9 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 		if (attribute->attisdropped)
 			continue;
 		appendStringInfo(command, "%sd.%s", first ? "" : ", ",
-						 duckdb_quote_identifier(DuckDBNameForColumnName(schema,
-																		 NameStr(attribute->attname))));
+						 duckdb_quote_identifier(DuckDBNameForColumn(schema,
+																	 NameStr(attribute->attname),
+																	 hasCollision)));
 		first = false;
 	}
 	appendStringInfo(command, " FROM (%s) AS d", dataQuery);
@@ -375,14 +377,17 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 
 		appendStringInfo(command, "%s NOT EXISTS (SELECT 1 FROM (%s) AS e WHERE ",
 						 first ? " WHERE" : " AND", deleteQuery);
+		bool		deleteCollision = DataFileSchemaHasCaseCollision(deletion->schema);
+
 		for (size_t i = 0; i < deletion->schema->nfields; i++)
 		{
 			DataFileSchemaField *field = &deletion->schema->fields[i];
 			const char *dataName =
-				duckdb_quote_identifier(DuckDBNameForField(schema, field->name, field->id));
+				duckdb_quote_identifier(DuckDBNameForFieldId(field->name, field->id,
+															 hasCollision));
 			const char *deleteName =
-				duckdb_quote_identifier(DuckDBNameForField(deletion->schema,
-														   field->name, field->id));
+				duckdb_quote_identifier(DuckDBNameForFieldId(field->name, field->id,
+															 deleteCollision));
 
 			appendStringInfo(command, "%sd.%s IS NOT DISTINCT FROM e.%s",
 							 i == 0 ? "" : " AND ", dataName, deleteName);

@@ -298,6 +298,7 @@ TransformPushdownableInsertSelect(Query *query)
 
 	List	   *newTargetList = NIL;
 	ListCell   *targetEntryCell = list_head(query->targetList);
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	for (int columnIndex = 0; columnIndex < relationTupleDesc->natts; columnIndex++)
 	{
@@ -325,8 +326,9 @@ TransformPushdownableInsertSelect(Query *query)
 
 			/* fix resno */
 			targetEntry->resno = columnIndex + 1;
-			targetEntry->resname = DuckDBNameForColumnName(schema,
-														   NameStr(column->attname));
+			targetEntry->resname = DuckDBNameForColumn(schema,
+													   NameStr(column->attname),
+													   hasCollision);
 
 			/* move on to the next item in the INSERT target list */
 			targetEntryCell = lnext(query->targetList, targetEntryCell);
@@ -354,8 +356,9 @@ TransformPushdownableInsertSelect(Query *query)
 			/* No entry yet, so add NULL; the name copy outlives table_close. */
 			targetEntry = makeTargetEntry((Expr *) nullConst,
 										  columnIndex + 1,
-										  DuckDBNameForColumnName(schema,
-																  NameStr(column->attname)),
+										  DuckDBNameForColumn(schema,
+															  NameStr(column->attname),
+															  hasCollision),
 										  resjunk);
 			newTargetList = lappend(newTargetList, targetEntry);
 		}

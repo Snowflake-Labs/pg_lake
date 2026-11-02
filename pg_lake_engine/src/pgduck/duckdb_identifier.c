@@ -119,12 +119,12 @@ DataFileSchemaHasCaseCollision(const DataFileSchema * schema)
 
 
 char *
-DuckDBNameForField(const DataFileSchema * schema, const char *name, int fieldId)
+DuckDBNameForFieldId(const char *name, int fieldId, bool hasCollision)
 {
 	if (name == NULL)
 		return pstrdup("");
 
-	if (!DataFileSchemaHasCaseCollision(schema))
+	if (!hasCollision)
 		return pstrdup(name);
 
 	return psprintf("c%d", fieldId);
@@ -132,12 +132,19 @@ DuckDBNameForField(const DataFileSchema * schema, const char *name, int fieldId)
 
 
 char *
-DuckDBNameForColumnName(const DataFileSchema * schema, const char *name)
+DuckDBNameForField(const DataFileSchema * schema, const char *name, int fieldId)
+{
+	return DuckDBNameForFieldId(name, fieldId, DataFileSchemaHasCaseCollision(schema));
+}
+
+
+char *
+DuckDBNameForColumn(const DataFileSchema * schema, const char *name, bool hasCollision)
 {
 	if (name == NULL)
 		return pstrdup("");
 
-	if (schema == NULL)
+	if (schema == NULL || !hasCollision)
 		return pstrdup(name);
 
 	for (size_t fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
@@ -145,8 +152,70 @@ DuckDBNameForColumnName(const DataFileSchema * schema, const char *name)
 		const		DataFileSchemaField *field = &schema->fields[fieldIndex];
 
 		if (field->name != NULL && strcmp(field->name, name) == 0)
-			return DuckDBNameForField(schema, name, field->id);
+			return DuckDBNameForFieldId(name, field->id, true);
 	}
 
 	return pstrdup(name);
+}
+
+
+char *
+DuckDBNameForColumnName(const DataFileSchema * schema, const char *name)
+{
+	return DuckDBNameForColumn(schema, name, DataFileSchemaHasCaseCollision(schema));
+}
+
+
+static bool
+FieldTreeHasCaseCollision(const Field * field)
+{
+	if (field == NULL)
+		return false;
+
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			return false;
+
+		case FIELD_TYPE_LIST:
+			return FieldTreeHasCaseCollision(field->field.list.element);
+
+		case FIELD_TYPE_MAP:
+			return FieldTreeHasCaseCollision(field->field.map.key) ||
+				FieldTreeHasCaseCollision(field->field.map.value);
+
+		case FIELD_TYPE_STRUCT:
+			if (DataFileSchemaHasCaseCollision(&field->field.structType))
+				return true;
+
+			for (size_t fieldIndex = 0; fieldIndex < field->field.structType.nfields; fieldIndex++)
+			{
+				if (FieldTreeHasCaseCollision(field->field.structType.fields[fieldIndex].type))
+					return true;
+			}
+
+			return false;
+
+		default:
+			return false;
+	}
+}
+
+
+/* DuckDB still rejects a nested struct whose fields differ only by case. */
+void
+ErrorOnNestedCaseCollision(const DataFileSchema * schema)
+{
+	if (schema == NULL)
+		return;
+
+	for (size_t fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
+	{
+		if (!FieldTreeHasCaseCollision(schema->fields[fieldIndex].type))
+			continue;
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("nested fields that differ only by letter case are not supported")));
+	}
 }

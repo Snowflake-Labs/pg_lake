@@ -138,6 +138,8 @@ WriteQueryResultTo(char *query,
 				   bool wrapNativeTypes,
 				   List *partitionByExprs)
 {
+	ErrorOnNestedCaseCollision(schema);
+
 	if (outOfRangePolicy != ICEBERG_OOR_NONE)
 	{
 		query = IcebergWrapQueryWithErrorOrClampChecks(query, queryTupleDesc,
@@ -483,6 +485,7 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 	initStringInfo(&projection);
 
 	bool		hasColumns = false;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	for (int attnum = 1; attnum <= tupleDesc->natts; attnum++)
 	{
@@ -491,7 +494,8 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		if (column->attisdropped)
 			continue;
 
-		char	   *columnName = DuckDBNameForColumnName(schema, NameStr(column->attname));
+		char	   *columnName = DuckDBNameForColumn(schema, NameStr(column->attname),
+													 hasCollision);
 		Oid			columnTypeId = column->atttypid;
 
 		if (hasColumns)
@@ -560,6 +564,8 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
 
 	appendStringInfoString(&map, "{");
 
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
+
 	for (int attnum = 1; attnum <= tupleDesc->natts; attnum++)
 	{
 		Form_pg_attribute column = TupleDescAttr(tupleDesc, attnum - 1);
@@ -576,7 +582,8 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
 
 		appendStringInfo(&map, "%s%s:%s",
 						 hasColumns ? "," : "",
-						 quote_literal_cstr(DuckDBNameForColumnName(schema, columnName)),
+						 quote_literal_cstr(DuckDBNameForColumn(schema, columnName,
+																hasCollision)),
 						 quote_literal_cstr(duckdbType.typeName));
 
 		hasColumns = true;
@@ -604,12 +611,13 @@ static void
 AppendNamedFields(StringInfo map, DataFileSchema * schema, bool duckNames)
 {
 	bool		addComma = false;
+	bool		hasCollision = duckNames && DataFileSchemaHasCaseCollision(schema);
 
 	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
 	{
 		DataFileSchemaField *field = &schema->fields[fieldIdx];
 		const char *fieldName = duckNames ?
-			DuckDBNameForField(schema, field->name, field->id) :
+			DuckDBNameForFieldId(field->name, field->id, hasCollision) :
 			(field->name != NULL ? field->name : "");
 
 		appendStringInfo(map, "%s%s: ",

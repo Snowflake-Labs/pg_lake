@@ -26,5 +26,10 @@ extern PGDLLEXPORT bool NamesHaveCaseCollision(const char **names, int count);
 extern PGDLLEXPORT bool DataFileSchemaHasCaseCollision(const DataFileSchema * schema);
 extern PGDLLEXPORT char *DuckDBNameForField(const DataFileSchema * schema,
 											const char *name, int fieldId);
+extern PGDLLEXPORT char *DuckDBNameForFieldId(const char *name, int fieldId,
+											  bool hasCollision);
 extern PGDLLEXPORT char *DuckDBNameForColumnName(const DataFileSchema * schema,
 												 const char *name);
+extern PGDLLEXPORT char *DuckDBNameForColumn(const DataFileSchema * schema,
+											 const char *name, bool hasCollision);
+extern PGDLLEXPORT void ErrorOnNestedCaseCollision(const DataFileSchema * schema);

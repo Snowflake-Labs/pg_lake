@@ -41,7 +41,8 @@
 
 
 static char *PartitionTransformToDuckDBExpression(IcebergPartitionTransform * transform,
-												  DataFileSchema * schema);
+												  DataFileSchema * schema,
+												  bool hasCollision);
 
 
 /*
@@ -65,11 +66,13 @@ GetPartitionByExpressionsForRelation(Oid relationId)
 
 	List	   *exprs = NIL;
 	ListCell   *cell = NULL;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	foreach(cell, transforms)
 	{
 		IcebergPartitionTransform *transform = lfirst(cell);
-		char	   *expr = PartitionTransformToDuckDBExpression(transform, schema);
+		char	   *expr = PartitionTransformToDuckDBExpression(transform, schema,
+																hasCollision);
 
 		if (expr == NULL)
 			return NIL;
@@ -96,10 +99,11 @@ GetPartitionByExpressionsForRelation(Oid relationId)
  */
 static char *
 PartitionTransformToDuckDBExpression(IcebergPartitionTransform * transform,
-									 DataFileSchema * schema)
+									 DataFileSchema * schema, bool hasCollision)
 {
-	const char *col = quote_identifier(DuckDBNameForColumnName(schema,
-															   transform->columnName));
+	const char *col = quote_identifier(DuckDBNameForColumn(schema,
+														   transform->columnName,
+														   hasCollision));
 	Oid			typeOid = transform->pgType.postgresTypeOid;
 
 	switch (transform->type)

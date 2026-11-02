@@ -572,7 +572,8 @@ RewriteQueryForDuckDBNames(Query *query, DuckDBNamesState * state)
 		RangeTblEntry *rte = lfirst(cell);
 
 		if (rte->rtekind == RTE_FUNCTION || rte->rtekind == RTE_SUBQUERY ||
-			rte->rtekind == RTE_CTE || rte->rtekind == RTE_VALUES)
+			rte->rtekind == RTE_CTE || rte->rtekind == RTE_VALUES ||
+			(rte->rtekind == RTE_JOIN && rte->alias != NULL))
 			RenameRteColumns(state, rte);
 	}
 

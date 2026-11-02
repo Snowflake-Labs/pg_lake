@@ -125,6 +125,8 @@ ReadDataSourceQuery(List *sourcePaths,
 	DataFileSchema *scanNameSchema = schema != NULL ? schema : columnNameSchema;
 	DataFileSchema *outputNameSchema = columnNameSchema != NULL ? columnNameSchema : schema;
 
+	ErrorOnNestedCaseCollision(schema);
+
 	/* whether to read all types as varchar */
 	bool		preferVarchar = (flags & READ_DATA_PREFER_VARCHAR) != 0;
 
@@ -214,7 +216,11 @@ ReadDataSourceQuery(List *sourcePaths,
 
 	if (expectedDesc != NULL)
 	{
-		char	   *aliasList = TupleDescToAliasList(expectedDesc, scanNameSchema);
+		/*
+		 * The alias list is positional, so it uses the same names as the
+		 * SELECT outputs.
+		 */
+		char	   *aliasList = TupleDescToAliasList(expectedDesc, outputNameSchema);
 
 		appendStringInfo(&command, " res %s", aliasList);
 	}
@@ -278,6 +284,7 @@ AppendJsonKeyProjection(StringInfo command, TupleDesc expectedDesc,
 						bool emitFilename)
 {
 	bool		hasColumns = false;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(scanNameSchema);
 
 	appendStringInfoString(command, "(SELECT ");
 
@@ -305,12 +312,17 @@ AppendJsonKeyProjection(StringInfo command, TupleDesc expectedDesc,
 															   DATA_FORMAT_JSON,
 															   preferVarchar);
 		DuckDBTypeInfo storageType = GuessStorageType(duckdbType, DATA_FORMAT_JSON);
+		bool		isNested = duckdbType.isArrayType ||
+			duckdbType.typeId == DUCKDB_TYPE_STRUCT ||
+			duckdbType.typeId == DUCKDB_TYPE_MAP;
 
-		appendStringInfo(command, "CAST(json_extract_string(json, %s) AS %s) AS %s",
+		appendStringInfo(command, "CAST(%s(json, %s) AS %s) AS %s",
+						 isNested ? "json_extract" : "json_extract_string",
 						 quote_literal_cstr(JsonKeyPath(realName)),
 						 storageType.typeName,
-						 duckdb_quote_identifier(DuckDBNameForColumnName(scanNameSchema,
-																		 realName)));
+						 duckdb_quote_identifier(DuckDBNameForColumn(scanNameSchema,
+																	 realName,
+																	 hasCollision)));
 	}
 
 	appendStringInfoString(command, " FROM read_json_objects(");
@@ -690,6 +702,7 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 	appendStringInfoString(&schemaString, "schema=map {");
 
 	bool		addComma = false;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
 	{
@@ -711,7 +724,8 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 		 */
 		appendStringInfo(&schemaString, "%d: {name: %s, type: %s, default_value: %s}",
 						 field->id,
-						 quote_literal_cstr(DuckDBNameForField(schema, field->name, field->id)),
+						 quote_literal_cstr(DuckDBNameForFieldId(field->name, field->id,
+																 hasCollision)),
 						 quote_literal_cstr(GetSchemaType(field->type)),
 						 defaultValue);
 
@@ -941,6 +955,7 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
 	appendStringInfoString(&query, "(SELECT ");
 
 	bool		addComma = false;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(scanNameSchema);
 
 	for (int attnum = 1; attnum <= tupleDesc->natts; attnum++)
 	{
@@ -952,7 +967,7 @@ ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bool prefe
 		}
 
 		char	   *realName = NameStr(column->attname);
-		char	   *columnName = DuckDBNameForColumnName(scanNameSchema, realName);
+		char	   *columnName = DuckDBNameForColumn(scanNameSchema, realName, hasCollision);
 		Oid			columnTypeId = column->atttypid;
 		int			columnTypeMod = column->atttypmod;
 
@@ -1010,6 +1025,7 @@ TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bo
 	initStringInfo(&map);
 
 	bool		addComma = false;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(nameSchema);
 
 	appendStringInfoString(&map, "{");
 
@@ -1034,7 +1050,7 @@ TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bo
 			break;
 		}
 
-		char	   *columnName = DuckDBNameForColumnName(nameSchema, realName);
+		char	   *columnName = DuckDBNameForColumn(nameSchema, realName, hasCollision);
 
 		Oid			columnTypeId = column->atttypid;
 		int			columnTypeMod = column->atttypmod;
@@ -1122,6 +1138,7 @@ TupleDescToAliasList(TupleDesc tupleDesc, DataFileSchema * nameSchema)
 	initStringInfo(&alias);
 
 	bool		hasColumns = false;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(nameSchema);
 
 	for (int attnum = 1; attnum <= tupleDesc->natts; attnum++)
 	{
@@ -1130,8 +1147,9 @@ TupleDescToAliasList(TupleDesc tupleDesc, DataFileSchema * nameSchema)
 		if (column->attisdropped)
 			continue;
 
-		char	   *columnName = DuckDBNameForColumnName(nameSchema,
-														 NameStr(column->attname));
+		char	   *columnName = DuckDBNameForColumn(nameSchema,
+													 NameStr(column->attname),
+													 hasCollision);
 
 		appendStringInfo(&alias, "%s%s",
 						 hasColumns ? "," : "(",
@@ -1503,6 +1521,7 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 						  DataFileSchema * outputNameSchema)
 {
 	StringInfoData projection;
+	bool		outputCollision = DataFileSchemaHasCaseCollision(outputNameSchema);
 
 	initStringInfo(&projection);
 
@@ -1519,8 +1538,10 @@ TupleDescToProjectionList(TupleDesc tupleDesc, CopyDataFormat sourceFormat,
 		bool		preferVarchar = false;
 
 		char	   *realName = NameStr(column->attname);
-		char	   *sourceName = DuckDBNameForColumnName(scanNameSchema, realName);
-		char	   *outputName = DuckDBNameForColumnName(outputNameSchema, realName);
+		char	   *sourceName = DuckDBNameForColumn(outputNameSchema, realName,
+													 outputCollision);
+		char	   *outputName = DuckDBNameForColumn(outputNameSchema, realName,
+													 outputCollision);
 		Oid			columnTypeId = column->atttypid;
 		int			columnTypeMod = column->atttypmod;
 		DuckDBTypeInfo duckdbType = ChooseCompatibleDuckDBType(columnTypeId,
