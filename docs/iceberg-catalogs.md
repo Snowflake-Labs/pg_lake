@@ -131,6 +131,8 @@ of its own catalog, and other engines using that catalog see them immediately. p
 attach tables that other engines created there. It speaks the
 [Iceberg REST catalog protocol](https://iceberg.apache.org/rest-catalog-spec/) with OAuth2
 client credentials, and has been tested with [Apache Polaris](https://polaris.apache.org/).
+Its requests carry the header `User-Agent: pg_lake/<version>` with the major and minor
+version, such as `pg_lake/3.6`.
 
 {: .note }
 Writing to an external catalog is still experimental. See
