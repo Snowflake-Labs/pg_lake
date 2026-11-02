@@ -203,9 +203,8 @@ _PG_init(void)
 
 	DefineCustomBoolVariable(
 							 "pg_lake_iceberg.log_catalog_events",
-							 gettext_noop("Log catalog activity, such as failed catalog requests, "
-										  "authentication failures and table creation, in the "
-										  "server log."),
+							 gettext_noop("Log catalog errors, such as failed catalog requests "
+										  "and authentication failures, in the server log."),
 							 gettext_noop("The lines carry no names, locations or SQL text."),
 							 &LogCatalogEvents,
 							 true,
@@ -470,7 +469,6 @@ _PG_init(void)
 	RegisterUtilityStatementHandler(RedactRestCatalogUserMappingSecrets, NULL);
 
 	InitializeIcebergCatalogObjectAccessHook();
-	InitCatalogLog();
 }
 
 

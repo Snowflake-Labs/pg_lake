@@ -16,23 +16,20 @@
  */
 
 /*
- * Catalog activity log lines.
+ * Catalog error log lines.
  *
- * Each line is CATALOG_LOG_PREFIX, an event name, then space-separated
- * key=value fields:
+ * Each line is CATALOG_LOG_PREFIX followed by a sentence from a fixed set:
  *
- *     pg_lake_catalog: request_failed catalog=rest_builtin op=load_table status=503 ...
+ *     pg_lake_catalog: could not load a table from the Horizon catalog: HTTP 403 (ForbiddenException)
  *
- * so a log pipeline can select the whole family by the prefix, or a single
- * event by the prefix and the event name.  Log filters match the prefix
- * literally, so its spelling and the event names are part of the interface.
+ * Log filters match the prefix and the sentences literally, so their wording
+ * is part of the interface; docs/iceberg-catalogs.md lists every one.
  *
  * The lines are meant to be safe to collect where the rest of the server log
- * is not.  Every value is a number, an OID, a SQLSTATE, or a word from a
- * fixed vocabulary.  Never put a table, schema, namespace or catalog name, a
- * URL or path, SQL text, a remote error message, or anything else a user or
- * a remote service controls into one; map such input onto a fixed set of
- * values instead.
+ * is not.  The only parts of a sentence that vary are numbers, SQLSTATEs and
+ * words from a fixed vocabulary.  Never put a table, schema, namespace or
+ * catalog name, a URL or path, SQL text, a remote error message, or anything
+ * else a user or a remote service controls into one.
  */
 #pragma once
 
@@ -40,19 +37,23 @@
 
 #define CATALOG_LOG_PREFIX "pg_lake_catalog: "
 
-extern PGDLLEXPORT bool LogCatalogEvents;
+/* Iceberg features a table may use that pg_lake cannot read */
+typedef enum CatalogLogFeature
+{
+	CATALOG_LOG_FEATURE_DELETION_VECTORS,
+	CATALOG_LOG_FEATURE_COLUMN_DEFAULTS
+}			CatalogLogFeature;
 
-extern void InitCatalogLog(void);
-extern PGDLLEXPORT void LogCatalogEvent(const char *event, const char *fieldsFormat,...)
-			pg_attribute_printf(2, 3);
-extern PGDLLEXPORT void LogCatalogEventAtCommit(const char *event, const char *fieldsFormat,...)
-			pg_attribute_printf(2, 3);
-extern PGDLLEXPORT const char *CatalogLogLabelForRelation(Oid relationId);
-extern const char *RestCatalogLogLabel(const RestCatalogOptions * opts);
+extern bool LogCatalogEvents;
+
 extern void LogCatalogRequest(const RestCatalogOptions * opts, RestCatalogOp op,
-							  const HttpResult * result, int attempts,
-							  bool authRefreshed, long elapsedMs);
-extern void LogCatalogAuthFailure(const RestCatalogOptions * opts, const char *source,
-								  int sqlerrcode);
+							  const HttpResult * result);
+extern void LogCatalogAuthFailure(const RestCatalogOptions * opts, int sqlerrcode);
+extern void LogCatalogNoVendedCredentials(const RestCatalogOptions * opts);
+extern void LogCatalogUnusableVendedCredentials(const RestCatalogOptions * opts,
+												const char *storageName);
+extern void LogCatalogAzureEndpointNotAllowed(void);
+extern void LogCatalogCredentialResolutionFailure(int sqlerrcode);
+extern void LogCatalogUnsupportedFeature(CatalogLogFeature feature);
+extern void LogCatalogUnsupportedFormatVersion(int formatVersion, bool forWrite);
 extern void LogCatalogUnsupportedType(const char *icebergType);
-extern PGDLLEXPORT int IcebergFormatVersionFromMetadata(Jsonb *metadata);

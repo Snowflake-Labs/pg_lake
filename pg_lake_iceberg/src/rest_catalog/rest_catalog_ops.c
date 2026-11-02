@@ -1389,8 +1389,7 @@ AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 		bool		firstReport = FirstVendedReport(reportKey);
 
 		if (firstReport)
-			LogCatalogEvent("vended_credentials",
-							"reason=endpoint_not_allowed storage=adls");
+			LogCatalogAzureEndpointNotAllowed();
 
 		ereport(firstReport ? WARNING : DEBUG2,
 				(errmsg("ignoring the endpoint the catalog vended for Azure "
@@ -1408,8 +1407,7 @@ AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 		bool		firstReport = FirstVendedReport(reportKey);
 
 		if (firstReport)
-			LogCatalogEvent("vended_credentials",
-							"reason=endpoint_not_allowed storage=adls");
+			LogCatalogAzureEndpointNotAllowed();
 
 		ereport(firstReport ? WARNING : DEBUG2,
 				(errmsg("ignoring the endpoint the catalog vended for Azure "
@@ -1651,19 +1649,6 @@ static const VendedStorage UnknownStorage = {
 static const VendedStorage *const KnownVendedStorage[] = {
 	&S3Storage, &AzureStorage, &GcsStorage
 };
-
-/* names a kind of storage in catalog activity logs */
-static const char *
-VendedStorageLogName(const VendedStorage * storage)
-{
-	if (storage == &S3Storage)
-		return "s3";
-	if (storage == &AzureStorage)
-		return "adls";
-	if (storage == &GcsStorage)
-		return "gcs";
-	return "unknown";
-}
 
 static const struct
 {
@@ -2006,9 +1991,7 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts,
 		bool		firstReport = FirstVendedReport(reportKey);
 
 		if (firstReport)
-			LogCatalogEvent("vended_credentials",
-							"catalog=%s reason=unusable storage=%s",
-							RestCatalogLogLabel(opts), VendedStorageLogName(unusable));
+			LogCatalogUnusableVendedCredentials(opts, unusable->name);
 
 		ereport(firstReport ? WARNING : DEBUG2,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -2029,8 +2012,7 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts,
 										 opts->userMappingOid, identity);
 
 		if (FirstVendedReport(reportKey))
-			LogCatalogEvent("vended_credentials", "catalog=%s reason=none_returned",
-							RestCatalogLogLabel(opts));
+			LogCatalogNoVendedCredentials(opts);
 
 		elog(DEBUG2, "REST catalog loadTable response did not contain "
 			 "usable vended credentials");

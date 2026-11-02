@@ -324,7 +324,7 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 		dataFile->file_format != NULL &&
 		pg_strcasecmp(dataFile->file_format, "PUFFIN") == 0)
 	{
-		LogCatalogEvent("unsupported_feature", "feature=deletion_vectors");
+		LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_DELETION_VECTORS);
 
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),

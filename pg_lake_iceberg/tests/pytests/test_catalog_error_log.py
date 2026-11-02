@@ -1,10 +1,10 @@
 """
 Tests for the "pg_lake_catalog: " lines pg_lake writes to the server log about
-REST catalog activity: failed requests and authentication failures.
+REST catalog errors: failed requests and authentication failures.
 
 The lines are meant to be collectable where the rest of the server log is not,
-so besides checking what they report, every test checks that nothing the user
-or the catalog controls -- catalog and namespace names, the endpoint, the
+so besides checking the sentence, every test checks that nothing the user or
+the catalog controls -- catalog and namespace names, the endpoint, the
 catalog's error message -- made it into one.
 
 A mock HTTP server stands in for the catalog, as in the credential provider
@@ -13,7 +13,7 @@ log file of the test server.
 """
 
 import json
-import os
+import re
 import socket
 import threading
 import uuid
@@ -147,41 +147,10 @@ def catalog_and_conn(postgres, iceberg_extension):
     _reset_catalog_gucs()
 
 
-def _logfile():
-    return f"{server_params.PG_DIR}/logfile"
-
-
-def _log_offset():
-    return os.path.getsize(_logfile())
-
-
-def _catalog_lines(offset):
-    with open(_logfile()) as f:
-        f.seek(offset)
-        delta = f.read()
-
-    return [line for line in delta.splitlines() if "pg_lake_catalog: " in line]
-
-
-def _parse(line):
-    words = line.split("pg_lake_catalog: ", 1)[1].split()
-    return words[0], dict(word.split("=", 1) for word in words[1:])
-
-
-def _events(offset, event):
-    return [
-        fields
-        for name, fields in (_parse(line) for line in _catalog_lines(offset))
-        if name == event
-    ]
-
-
 def _assert_nothing_identifying(offset, *secrets):
-    lines = _catalog_lines(offset)
-    for line in lines:
-        logged = line.split("pg_lake_catalog: ", 1)[1]
+    for line in catalog_log_lines(offset):
         for secret in secrets:
-            assert secret not in logged, f"{secret!r} leaked into {line!r}"
+            assert secret not in line, f"{secret!r} leaked into {line!r}"
 
 
 def _register_namespace(conn, namespace):
@@ -192,7 +161,7 @@ def _register_namespace(conn, namespace):
     conn.commit()
 
 
-def test_failed_request_is_logged_by_class(installcheck, catalog_and_conn):
+def test_failed_request_is_logged(installcheck, catalog_and_conn):
     """
     A catalog error is logged with its status and error type, and without the
     message the catalog sent, which can say anything.
@@ -211,20 +180,16 @@ def test_failed_request_is_logged_by_class(installcheck, catalog_and_conn):
     }
     namespace = f"ns_{uuid.uuid4().hex[:8]}"
 
-    offset = _log_offset()
+    offset = server_log_offset()
 
     with pytest.raises(Exception, match="HTTP 403"):
         _register_namespace(conn, namespace)
     conn.rollback()
 
-    failures = _events(offset, "request_failed")
-    assert len(failures) == 1, _catalog_lines(offset)
-    assert failures[0]["catalog"] == "rest_builtin"
-    assert failures[0]["op"] == "get_namespace"
-    assert failures[0]["status"] == "403"
-    assert failures[0]["error_type"] == "ForbiddenException"
-    assert failures[0]["attempts"] == "1"
-    assert failures[0]["auth_refreshed"] == "false"
+    assert catalog_log_lines(offset) == [
+        "could not look up a namespace in the built-in REST catalog: "
+        "HTTP 403 (ForbiddenException)"
+    ]
 
     _assert_nothing_identifying(
         offset,
@@ -236,8 +201,8 @@ def test_failed_request_is_logged_by_class(installcheck, catalog_and_conn):
     )
 
 
-def test_unknown_error_type_is_not_logged_verbatim(installcheck, catalog_and_conn):
-    """An error type outside the known vocabulary is reported as "other"."""
+def test_unknown_error_type_is_left_out(installcheck, catalog_and_conn):
+    """An error type outside the known vocabulary is not logged."""
     if installcheck:
         return
 
@@ -247,21 +212,21 @@ def test_unknown_error_type_is_not_logged_verbatim(installcheck, catalog_and_con
         "error": {"message": "boom", "type": REMOTE_MESSAGE, "code": 500}
     }
 
-    offset = _log_offset()
+    offset = server_log_offset()
 
     with pytest.raises(Exception, match="HTTP 500"):
         _register_namespace(conn, f"ns_{uuid.uuid4().hex[:8]}")
     conn.rollback()
 
-    failures = _events(offset, "request_failed")
-    assert [f["error_type"] for f in failures] == ["other"]
-    _assert_nothing_identifying(offset, REMOTE_MESSAGE)
+    assert catalog_log_lines(offset) == [
+        "could not look up a namespace in the built-in REST catalog: HTTP 500"
+    ]
 
 
-def test_not_found_is_not_logged_as_failure(installcheck, catalog_and_conn):
+def test_not_found_is_not_logged(installcheck, catalog_and_conn):
     """
     Probing for a namespace that does not exist yet is how a namespace gets
-    created, so its 404 is not logged as a failure.
+    created, so its 404 is not logged.
     """
     if installcheck:
         return
@@ -277,14 +242,14 @@ def test_not_found_is_not_logged_as_failure(installcheck, catalog_and_conn):
     }
     namespace = f"ns_{uuid.uuid4().hex[:8]}"
 
-    offset = _log_offset()
+    offset = server_log_offset()
 
     _register_namespace(conn, namespace)
 
-    assert _catalog_lines(offset) == []
+    assert catalog_log_lines(offset) == []
 
 
-def test_oauth2_failure_is_logged_as_auth_failed(installcheck, catalog_and_conn):
+def test_oauth2_failure_is_logged(installcheck, catalog_and_conn):
     """
     A rejected token request is logged both as the failed request it is and
     as the authentication failure it causes, with the OAuth2 error code but
@@ -300,56 +265,64 @@ def test_oauth2_failure_is_logged_as_auth_failed(installcheck, catalog_and_conn)
         "error_description": REMOTE_MESSAGE,
     }
 
-    offset = _log_offset()
+    offset = server_log_offset()
 
     with pytest.raises(Exception, match="token request failed"):
         _register_namespace(conn, "ns_auth")
     conn.rollback()
 
-    failures = _events(offset, "request_failed")
-    assert len(failures) == 1, _catalog_lines(offset)
-    assert failures[0]["op"] == "token"
-    assert failures[0]["status"] == "401"
-    assert failures[0]["error_type"] == "invalid_client"
-
-    auth_failures = _events(offset, "auth_failed")
-    assert len(auth_failures) == 1, _catalog_lines(offset)
-    assert auth_failures[0]["catalog"] == "rest_builtin"
-    assert auth_failures[0]["source"] == "oauth2"
-    assert len(auth_failures[0]["sqlstate"]) == 5
+    lines = catalog_log_lines(offset)
+    assert len(lines) == 2, lines
+    assert lines[0] == (
+        "could not get an access token from the built-in REST catalog: "
+        "HTTP 401 (invalid_client)"
+    )
+    assert re.fullmatch(
+        r"could not authenticate to the built-in REST catalog "
+        r"\(SQLSTATE [0-9A-Z]{5}\)",
+        lines[1],
+    ), lines[1]
 
     _assert_nothing_identifying(offset, REMOTE_MESSAGE, "test_secret", "test_id")
 
 
-def test_provider_failure_is_logged_as_auth_failed(installcheck, catalog_and_conn):
-    """A credential provider that fails is reported as the source."""
+@pytest.mark.parametrize(
+    "auth_type, catalog",
+    [
+        ("oauth2", "the built-in REST catalog"),
+        ("horizon", "the Horizon catalog"),
+    ],
+)
+def test_provider_failure_is_logged(installcheck, catalog_and_conn, auth_type, catalog):
+    """
+    A credential provider that fails is logged as an authentication failure,
+    and the built-in catalog is named by how it authenticates.
+    """
     if installcheck:
         return
 
     handler_class, conn = catalog_and_conn
 
+    run_command(f"SET pg_lake_iceberg.rest_catalog_auth_type TO '{auth_type}'", conn)
     run_command("SELECT set_test_rest_catalog_auth_response('', 3600, true)", conn)
     run_command("SELECT set_test_rest_catalog_auth_provider(true)", conn)
     conn.commit()
 
-    offset = _log_offset()
+    offset = server_log_offset()
 
     with pytest.raises(Exception, match="empty authorization"):
         _register_namespace(conn, "ns_provider")
     conn.rollback()
 
-    auth_failures = _events(offset, "auth_failed")
-    assert len(auth_failures) == 1, _catalog_lines(offset)
-    assert auth_failures[0]["source"] == "provider"
-    assert auth_failures[0]["sqlstate"] == "XX000"
+    assert catalog_log_lines(offset) == [
+        f"could not authenticate to {catalog} (SQLSTATE XX000)"
+    ]
 
 
-def test_unreachable_catalog_is_logged_by_curl_class(
-    installcheck, postgres, iceberg_extension
-):
+def test_unreachable_catalog_is_logged(installcheck, postgres, iceberg_extension):
     """
-    A request that never gets a response is logged with the class of the
-    libcurl error rather than libcurl's message, which names the host.
+    A request that never gets a response is logged with a description of the
+    network problem rather than libcurl's message, which names the host.
     """
     if installcheck:
         return
@@ -364,17 +337,17 @@ def test_unreachable_catalog_is_logged_by_curl_class(
         run_command(_HOOK_FNS, conn)
         conn.commit()
 
-        offset = _log_offset()
+        offset = server_log_offset()
 
         with pytest.raises(Exception):
             _register_namespace(conn, "ns_unreachable")
         conn.rollback()
 
-        failures = _events(offset, "request_failed")
-        assert len(failures) == 1, _catalog_lines(offset)
-        assert failures[0]["op"] == "token"
-        assert failures[0]["status"] == "0"
-        assert failures[0]["curl_error"] == "connect"
+        lines = catalog_log_lines(offset)
+        assert lines[0] == (
+            "could not get an access token from the built-in REST catalog: "
+            "connection failed"
+        ), lines
 
         _assert_nothing_identifying(offset, "127.0.0.1", str(port))
     finally:
@@ -392,13 +365,13 @@ def test_catalog_events_can_be_disabled(installcheck, catalog_and_conn):
     run_command("SET pg_lake_iceberg.log_catalog_events TO off", conn)
     conn.commit()
 
-    offset = _log_offset()
+    offset = server_log_offset()
 
     with pytest.raises(Exception, match="HTTP 403"):
         _register_namespace(conn, "ns_disabled")
     conn.rollback()
 
-    assert _catalog_lines(offset) == []
+    assert catalog_log_lines(offset) == []
 
 
 def test_catalog_events_setting_is_superuser_only(postgres, iceberg_extension):

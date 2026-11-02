@@ -194,7 +194,7 @@ ErrorIfSchemaDeclaresInitialDefault(IcebergTableMetadata * metadata)
 			if (named == NULL)
 				continue;
 
-			LogCatalogEvent("unsupported_feature", "feature=initial_default");
+			LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_COLUMN_DEFAULTS);
 
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
@@ -239,8 +239,7 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 	 */
 	if (metadata->format_version != 2 && metadata->format_version != 3)
 	{
-		LogCatalogEvent("unsupported_feature", "feature=format_version format_version=%d",
-						metadata->format_version);
+		LogCatalogUnsupportedFormatVersion(metadata->format_version, false);
 
 		ereport(ERROR, (errmsg("unsupported iceberg format version %d",
 							   metadata->format_version)));

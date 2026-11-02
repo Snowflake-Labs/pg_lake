@@ -364,7 +364,7 @@ RestCatalogAuthProviderIsRegistered(void)
  * token minted for the deployment.  User-created servers authenticate with
  * their own user mapping credentials instead.
  *
- * A failure from either source is logged as auth_failed before it
+ * A failure from either source is logged (see catalog_log.h) before it
  * propagates.
  */
 static void
@@ -403,7 +403,7 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts,
 		}
 		PG_CATCH();
 		{
-			LogCatalogAuthFailure(opts, "provider", geterrcode());
+			LogCatalogAuthFailure(opts, geterrcode());
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -424,7 +424,7 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts,
 	}
 	PG_CATCH();
 	{
-		LogCatalogAuthFailure(opts, "oauth2", geterrcode());
+		LogCatalogAuthFailure(opts, geterrcode());
 		PG_RE_THROW();
 	}
 	PG_END_TRY();

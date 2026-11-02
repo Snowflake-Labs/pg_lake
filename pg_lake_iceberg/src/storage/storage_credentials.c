@@ -266,8 +266,7 @@ ReportOrRethrowBestEffortError(ErrorData *edata, const char *what,
 		edata->sqlerrcode == ERRCODE_ADMIN_SHUTDOWN)
 		ReThrowError(edata);
 
-	LogCatalogEvent("vended_credentials", "reason=resolution_failed sqlstate=%s relid=%u",
-					unpack_sql_state(edata->sqlerrcode), relationId);
+	LogCatalogCredentialResolutionFailure(edata->sqlerrcode);
 
 	/*
 	 * Warn rather than whisper.  Whatever follows this will fail on its own

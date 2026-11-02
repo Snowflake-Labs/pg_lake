@@ -41,8 +41,8 @@ extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
 
 /*
- * What a request to a REST catalog is for, as reported in catalog activity
- * logs (see catalog_log.h).
+ * What a request to a REST catalog is for, as reported in the catalog error
+ * log (see catalog_log.h).
  */
 typedef enum RestCatalogOp
 {

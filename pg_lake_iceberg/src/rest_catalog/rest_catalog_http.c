@@ -148,7 +148,7 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo,
  * (see SendCredentialRequestToRestCatalog), both to avoid recursion and so
  * that its own 401 is reported as the authentication failure it is.
  *
- * The outcome is recorded under op once retries are over; recording must not
+ * A failure is logged under op once retries are over; logging must not
  * throw, for the same post-commit reason.
  */
 static HttpResult
@@ -159,8 +159,6 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
 
 	bool		authAlreadyRefreshed = false;
-	int			attempts = 0;
-	TimestampTz startTime = GetCurrentTimestamp();
 
 	/*
 	 * Only the built-in catalog, reached through the deployment's own edge,
@@ -181,7 +179,6 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG && !done; retryNo++)
 	{
 		result = SendHttpRequest(method, url, body, headers, clientAuth);
-		attempts = retryNo;
 
 		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG,
 												retryNo, canRefreshCredential, authAlreadyRefreshed))
@@ -215,8 +212,7 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 		}
 	}
 
-	LogCatalogRequest(opts, op, &result, attempts, authAlreadyRefreshed,
-					  TimestampDifferenceMilliseconds(startTime, GetCurrentTimestamp()));
+	LogCatalogRequest(opts, op, &result);
 
 	return result;
 }

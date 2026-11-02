@@ -66,8 +66,7 @@ WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata)
 	 */
 	if (metadata->format_version != 2)
 	{
-		LogCatalogEvent("unsupported_feature", "feature=write_format_version format_version=%d",
-						metadata->format_version);
+		LogCatalogUnsupportedFormatVersion(metadata->format_version, true);
 
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
