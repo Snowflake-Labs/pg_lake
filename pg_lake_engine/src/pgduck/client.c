@@ -23,7 +23,9 @@
 #include "access/hash.h"
 #include "access/xact.h"
 #include "pg_lake/pgduck/client.h"
+#include "pgtime.h"
 #include "storage/latch.h"
+#include "utils/builtins.h"
 #include "utils/memutils.h"
 #include "utils/timestamp.h"
 #include "utils/wait_event.h"
@@ -54,6 +56,10 @@ static bool FinishCancelQuery(PGconn *conn, TimestampTz endtime, bool consume_in
 static bool WaitForLastResultWithTimeout(PGconn *conn, TimestampTz endtime,
 										 PGresult **result, bool *timed_out);
 static void LogPGDuckErrorClass(const char *errorClass);
+static void SetPGDuckTimeZone(PGDuckConnection * pgDuckConnection);
+static bool TrySetPGDuckTimeZone(PGDuckConnection * pgDuckConnection,
+								 const char *timeZoneName);
+static const char *GetPGDuckTimeZoneName(void);
 
 /* query engine settings */
 char	   *PgduckServerConninfo = DEFAULT_PGDUCK_SERVER_CONNINFO;
@@ -131,7 +137,8 @@ SetupPgDuckConnectionHash(void)
 
 
 /*
- * GetPGDuckConnection returns the main PGDuck connection.
+ * GetPGDuckConnection returns the main PGDuck connection, set to the
+ * session's TimeZone.
  */
 PGDuckConnection *
 GetPGDuckConnection(void)
@@ -149,6 +156,17 @@ GetPGDuckConnection(void)
 #endif
 	}
 
+	PG_TRY();
+	{
+		SetPGDuckTimeZone(pgDuckConnection);
+	}
+	PG_CATCH();
+	{
+		ReleasePGDuckConnection(pgDuckConnection);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
 	return pgDuckConnection;
 }
 
@@ -156,6 +174,7 @@ GetPGDuckConnection(void)
 /*
  * TryGetPGDuckConnection is like GetPGDuckConnection, but returns NULL and
  * sets *errorMessage to the libpq error when pgduck_server is not reachable.
+ * It does not set the connection's TimeZone.
  */
 PGDuckConnection *
 TryGetPGDuckConnection(char **errorMessage)
@@ -187,6 +206,88 @@ TryGetPGDuckConnection(char **errorMessage)
 	}
 
 	return &entry->pgDuckConnection;
+}
+
+
+/*
+ * SetPGDuckTimeZone makes the query engine evaluate time-zone-dependent
+ * expressions in the session's TimeZone. Connections are opened for each
+ * command, so reading the setting here also covers SET LOCAL and cached plans.
+ *
+ * The query engine ignores failed SET commands, so the result is verified.
+ * Zones it cannot represent fall back to UTC.
+ */
+static void
+SetPGDuckTimeZone(PGDuckConnection * pgDuckConnection)
+{
+	const char *timeZoneName = GetPGDuckTimeZoneName();
+
+	if (timeZoneName != NULL)
+	{
+		if (TrySetPGDuckTimeZone(pgDuckConnection, timeZoneName))
+			return;
+
+		elog(DEBUG1, "query engine does not support TimeZone \"%s\", using UTC",
+			 timeZoneName);
+	}
+
+	if (!TrySetPGDuckTimeZone(pgDuckConnection, "UTC"))
+		ereport(ERROR,
+				(errmsg("could not set query engine TimeZone to UTC")));
+}
+
+
+/*
+ * TrySetPGDuckTimeZone verifies both the requested zone and the UTC fallback,
+ * since pgduck_server can acknowledge a SET that DuckDB rejected.
+ */
+static bool
+TrySetPGDuckTimeZone(PGDuckConnection * pgDuckConnection, const char *timeZoneName)
+{
+	char	   *command = psprintf("SET TimeZone = %s; "
+								   "SELECT current_setting('TimeZone')",
+								   quote_literal_cstr(timeZoneName));
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(pgDuckConnection, command);
+
+	CheckPGDuckResult(pgDuckConnection, result);
+
+	bool		isSet = PQresultStatus(result) == PGRES_TUPLES_OK &&
+		PQntuples(result) == 1 &&
+		PQnfields(result) == 1 &&
+		!PQgetisnull(result, 0, 0) &&
+		pg_strcasecmp(PQgetvalue(result, 0, 0), timeZoneName) == 0;
+
+	PQclear(result);
+
+	return isSet;
+}
+
+
+/*
+ * GetPGDuckTimeZoneName returns the name of the session's TimeZone in the
+ * query engine, or NULL if it has no equivalent there.
+ *
+ * Fixed offsets are spelled as Etc/GMT zones, because the query engine reads
+ * POSIX names such as UTC+9 with the opposite sign. Etc/GMT zones only exist
+ * for whole hours.
+ */
+static const char *
+GetPGDuckTimeZoneName(void)
+{
+	long		utcOffset = 0;
+
+	if (!pg_get_timezone_offset(session_timezone, &utcOffset))
+		return pg_get_timezone_name(session_timezone);
+
+	if (utcOffset == 0)
+		return "UTC";
+
+	if (utcOffset % SECS_PER_HOUR != 0 ||
+		utcOffset < -12 * SECS_PER_HOUR || utcOffset > 14 * SECS_PER_HOUR)
+		return NULL;
+
+	/* Etc/GMT names use the POSIX sign, so Etc/GMT-9 is 9 hours east of UTC */
+	return psprintf("Etc/GMT%+ld", -utcOffset / SECS_PER_HOUR);
 }
 
 
