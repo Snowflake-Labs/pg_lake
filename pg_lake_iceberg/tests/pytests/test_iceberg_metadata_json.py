@@ -124,3 +124,71 @@ def create_helper_functions(superuser_conn):
 """,
         superuser_conn,
     )
+
+
+def corrupt_missing_field_type(metadata):
+    del metadata["schemas"][0]["fields"][0]["type"]
+
+
+def corrupt_schemas_scalar_elements(metadata):
+    metadata["schemas"] = [1, 2]
+
+
+def corrupt_schemas_array_elements(metadata):
+    metadata["schemas"] = [[1, 2]]
+
+
+def corrupt_schemas_object(metadata):
+    metadata["schemas"] = {"a": 1}
+
+
+def corrupt_field_type_array(metadata):
+    metadata["schemas"][0]["fields"][0]["type"] = ["struct", 1]
+
+
+def corrupt_refs_array(metadata):
+    metadata["refs"] = [1, 2]
+
+
+def corrupt_ref_value_array(metadata):
+    metadata["refs"] = {"main": [1, 2]}
+
+
+@pytest.mark.parametrize(
+    "corrupt",
+    [
+        corrupt_missing_field_type,
+        corrupt_schemas_scalar_elements,
+        corrupt_schemas_array_elements,
+        corrupt_schemas_object,
+        corrupt_field_type_array,
+        corrupt_refs_array,
+        corrupt_ref_value_array,
+    ],
+)
+def test_corrupt_metadata_json_errors(
+    create_helper_functions, corrupt, superuser_conn, s3, tmp_path
+):
+    # metadata with a value of the wrong JSON type is rejected, not read as
+    # the expected type
+    _, filepath = FILE_DATA[0]
+    metadata = read_json(filepath)
+    corrupt(metadata)
+
+    local = tmp_path / "metadata.json"
+    local.write_text(json.dumps(metadata))
+    s3_key = f"test_corrupt_metadata_json/{corrupt.__name__}.metadata.json"
+    s3.upload_file(str(local), TEST_BUCKET, s3_key)
+
+    # the helper function is not committed, so keep it across the error
+    run_command("SAVEPOINT corrupt_metadata", superuser_conn)
+    error = run_query(
+        f"SELECT lake_iceberg.reserialize_iceberg_table_metadata('s3://{TEST_BUCKET}/{s3_key}')",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert "Iceberg" in error
+    run_command("ROLLBACK TO SAVEPOINT corrupt_metadata", superuser_conn)
+
+    # the backend survived
+    assert run_query("SELECT 1", superuser_conn) == [[1]]

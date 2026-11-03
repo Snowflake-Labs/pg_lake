@@ -37,13 +37,11 @@ typedef enum VendedStorageProvider
  * (ultimately from the REST catalog loadTable response), and only the
  * ones belonging to provider are read.
  *
- * For S3, endpoint / urlStyle / useSsl carry the catalog-provided
- * connection settings.  Each of them, left NULL, is filled in on its own
- * from the pre-existing (non-vended) S3 secret that covers the same
- * bucket, so vended secrets keep working against local S3 mocks
- * (Moto/MinIO) and custom endpoints even when the catalog states only
- * part of the connection.  Catalog-provided values always win over the
- * inherited fallback.
+ * For S3, the endpoint and SSL setting always come from the
+ * pre-existing (non-vended) S3 secret that covers the same bucket, or
+ * DuckDB's AWS default when there is none, never from the catalog.
+ * urlStyle carries the catalog-provided addressing style, and left NULL
+ * is inherited the same way.
  *
  * For Azure, a SAS token for one storage account.  blobEndpoint /
  * dfsEndpoint are used as the caller resolved them, and left NULL they
@@ -62,9 +60,7 @@ typedef struct VendedSecret
 	const char *secretAccessKey;
 	const char *sessionToken;	/* NULL for non-STS credentials */
 	const char *region;			/* NULL when the catalog omits it */
-	const char *endpoint;		/* NULL -> inherit from existing secret */
 	const char *urlStyle;		/* "path"/"vhost"; NULL -> inherit */
-	const char *useSsl;			/* "true"/"false"; NULL -> inherit */
 
 	/* Azure */
 	const char *accountName;
@@ -102,6 +98,24 @@ extern PGDLLEXPORT void PushVendedSecretToPGDuck(PGDuckConnection * conn,
 extern PGDLLEXPORT void DropVendedSecretFromPGDuck(PGDuckConnection * conn,
 												   Oid serverOid,
 												   const char *secretId);
+
+/*
+ * DropVendedSecretsUnderScopeFromPGDuck removes every vended secret of
+ * the given server in the current database whose scope lies at or below
+ * scopePrefix, whichever backend pushed it, and returns the names of
+ * those it dropped.
+ */
+extern PGDLLEXPORT List *DropVendedSecretsUnderScopeFromPGDuck(PGDuckConnection * conn,
+															   Oid serverOid,
+															   const char *scopePrefix);
+
+/*
+ * EvictCachedFilesUnderScopeFromPGDuck removes every file at or below
+ * scopePrefix from pgduck_server's file cache.  A no-op when caching is
+ * disabled.
+ */
+extern PGDLLEXPORT void EvictCachedFilesUnderScopeFromPGDuck(PGDuckConnection * conn,
+															 const char *scopePrefix);
 
 /*
  * GenerateVendedSecretName produces the deterministic secret name for

@@ -206,3 +206,25 @@ def test_data_type_failures(pgduck_server):
     run_simple_command(server_params.PGDUCK_UNIX_DOMAIN_PATH, server_params.PGDUCK_PORT)
 
     conn.close()
+
+
+def test_nested_list_with_null_element(pgduck_server):
+    # a NULL inner list or array is sent as NULL instead of crashing the server
+    conn = psycopg2.connect(
+        host=server_params.PGDUCK_UNIX_DOMAIN_PATH, port=server_params.PGDUCK_PORT
+    )
+    cur = conn.cursor()
+
+    cur.execute("SELECT [[1,2], NULL, [3]]")
+    assert cur.fetchall() == [("{{1,2},NULL,{3}}",)]
+
+    cur.execute("SELECT [NULL, ['a']]")
+    assert cur.fetchall() == [("{NULL,{a}}",)]
+
+    cur.execute("SELECT [NULL, [1,2]::INTEGER[2]]")
+    assert cur.fetchall() == [("{NULL,{1,2}}",)]
+
+    cur.execute("SELECT [1,2]::INTEGER[2] IS NULL")
+    assert cur.fetchall() == [(False,)]
+
+    conn.close()

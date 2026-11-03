@@ -16,29 +16,38 @@
  */
 
 #include "postgres.h"
+
 #include "catalog/pg_type_d.h"
 
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
+#include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
 #include "pg_lake/parquet/leaf_field.h"
 
-#include "utils/builtins.h"
+#include <math.h>
+
+#include "mb/pg_wchar.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
-#include "utils/numeric.h"
+#include "utils/timestamp.h"
 
 static void SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 											 ColumnBound * *lowerBounds,
 											 size_t *nLowerBounds,
 											 ColumnBound * *upperBounds,
-											 size_t *nUpperBounds);
+											 size_t *nUpperBounds,
+											 ColumnStat * *nanValueCounts,
+											 size_t *nNanValueCounts);
 static ColumnBound * CreateColumnBoundForLeafField(LeafField * leafField, char *columnBoundText);
+static ColumnBound * FindColumnBound(ColumnBound * bounds, size_t boundCount, int fieldId);
+static bool DataFileHasNoNaN(DataFile * dataFile, int fieldId);
+static char *ColumnBoundText(ColumnBound * bound, LeafField * leafField);
 
 /*
  * SetIcebergDataFileStats sets the record count, file size, lower and upper bounds
- * for the given data file stats.
+ * and NaN counts for the given data file stats.
  */
 void
 SetIcebergDataFileStats(const DataFileStats * dataFileStats,
@@ -47,25 +56,35 @@ SetIcebergDataFileStats(const DataFileStats * dataFileStats,
 						ColumnBound * *lowerBounds,
 						size_t *nLowerBounds,
 						ColumnBound * *upperBounds,
-						size_t *nUpperBounds)
+						size_t *nUpperBounds,
+						ColumnStat * *nanValueCounts,
+						size_t *nNanValueCounts)
 {
 	*recordCount = dataFileStats->rowCount;
 	*fileSizeInBytes = dataFileStats->fileSize;
 
-	SetColumnBoundsFromDataFileStats(dataFileStats, lowerBounds, nLowerBounds, upperBounds, nUpperBounds);
+	SetColumnBoundsFromDataFileStats(dataFileStats, lowerBounds, nLowerBounds,
+									 upperBounds, nUpperBounds,
+									 nanValueCounts, nNanValueCounts);
 }
 
 
 /*
  * SetColumnBoundsFromDataFileStats sets the lower and upper bounds for each leaf field
  * in the given data file stats.
+ *
+ * A float or double column only has bounds when the file has no NaN (see
+ * ExtractMinMaxForColumn), so it also gets a NaN count of zero. Readers need
+ * that count to trust its bounds, since Iceberg bounds leave out NaN.
  */
 static void
 SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 								 ColumnBound * *lowerBounds,
 								 size_t *nLowerBounds,
 								 ColumnBound * *upperBounds,
-								 size_t *nUpperBounds)
+								 size_t *nUpperBounds,
+								 ColumnStat * *nanValueCounts,
+								 size_t *nNanValueCounts)
 {
 	List	   *columnStats = dataFileStats->columnStats;
 
@@ -75,8 +94,11 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 	ColumnBound *uBounds = palloc0(sizeof(ColumnBound) * totalColumnStats);
 
+	ColumnStat *nanCounts = palloc0(sizeof(ColumnStat) * totalColumnStats);
+
 	int			totalLowerBounds = 0;
 	int			totalUpperBounds = 0;
+	int			totalNanCounts = 0;
 
 	for (int columnStatIdx = 0; columnStatIdx < totalColumnStats; columnStatIdx++)
 	{
@@ -120,6 +142,13 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 			uBounds[totalUpperBounds] = *upperBound;
 			totalUpperBounds++;
+
+			if (LeafFieldIsFloatingPoint(leafField))
+			{
+				nanCounts[totalNanCounts].column_id = leafField->fieldId;
+				nanCounts[totalNanCounts].value = 0;
+				totalNanCounts++;
+			}
 		}
 	}
 
@@ -128,6 +157,9 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 	*upperBounds = uBounds;
 	*nUpperBounds = totalUpperBounds;
+
+	*nanValueCounts = nanCounts;
+	*nNanValueCounts = totalNanCounts;
 }
 
 
@@ -221,95 +253,244 @@ ColumnBoundDatum(char *columnBoundText, PGType pgType)
 }
 
 
-/* FindColumnBound rejects absent or duplicated optional metric IDs. */
-static ColumnBound *
-FindColumnBound(ColumnBound * bounds, size_t count, int fieldId)
+/*
+ * GetIcebergDataFileColumnStats returns the column stats of a data file as the
+ * manifest entry records them: the lower and upper bounds, matched to the leaf
+ * fields by field id. The bounds are rendered in the text form of each type,
+ * the same form the Parquet footer path produced, so callers can use the result
+ * in its place.
+ *
+ * A field without both bounds, or one whose statistics are never used for
+ * pruning (ShouldSkipStatistics), gets no entry and is therefore unprunable.
+ * The Iceberg spec allows a writer to record only one bound, for instance a
+ * truncated string upper bound it cannot increment, but that is rare enough
+ * not to be worth a one-sided constraint.
+ *
+ * The manifest may come from any writer, and pruning is only an optimization,
+ * so a bound we cannot use safely is dropped rather than raising an error; see
+ * ColumnBoundText.
+ */
+List *
+GetIcebergDataFileColumnStats(DataFile * dataFile, List *leafFields)
 {
-	ColumnBound *result = NULL;
+	List	   *columnStatsList = NIL;
+	ListCell   *leafFieldCell = NULL;
 
-	for (size_t i = 0; bounds != NULL && i < count; i++)
+	foreach(leafFieldCell, leafFields)
 	{
-		if (bounds[i].column_id != fieldId)
+		LeafField  *leafField = lfirst(leafFieldCell);
+
+		if (ShouldSkipStatistics(leafField))
 			continue;
-		if (result != NULL)
-			return NULL;
-		result = &bounds[i];
+
+		ColumnBound *lowerBound = FindColumnBound(dataFile->lower_bounds,
+												  dataFile->lower_bounds_length,
+												  leafField->fieldId);
+		ColumnBound *upperBound = FindColumnBound(dataFile->upper_bounds,
+												  dataFile->upper_bounds_length,
+												  leafField->fieldId);
+
+		if (lowerBound == NULL || upperBound == NULL)
+			continue;
+
+		/*
+		 * Iceberg bounds leave out NaN, which Postgres orders above every
+		 * other value, so float bounds only cover the file if the writer says
+		 * it has no NaN.
+		 */
+		if (LeafFieldIsFloatingPoint(leafField) &&
+			!DataFileHasNoNaN(dataFile, leafField->fieldId))
+			continue;
+
+		char	   *lowerBoundText = ColumnBoundText(lowerBound, leafField);
+		char	   *upperBoundText = ColumnBoundText(upperBound, leafField);
+
+		if (lowerBoundText == NULL || upperBoundText == NULL)
+			continue;
+
+		DataFileColumnStats *columnStats = palloc0(sizeof(DataFileColumnStats));
+
+		columnStats->leafField = *leafField;
+		columnStats->lowerBoundText = lowerBoundText;
+		columnStats->upperBoundText = upperBoundText;
+
+		columnStatsList = lappend(columnStatsList, columnStats);
 	}
-	return result;
+
+	return columnStatsList;
 }
 
-/* DecodeColumnBound returns false for unsupported or malformed metrics. */
-static bool
-DecodeColumnBound(Field * field, PGType pgType, ColumnBound * bound, Datum *value, int64 *integer)
-{
-	if (field->type != FIELD_TYPE_SCALAR || bound->value == NULL)
-		return false;
-
-	const char *name = field->field.scalar.typeName;
-	Oid			type = pgType.postgresTypeOid;
-	size_t		length = bound->value_length;
-	int			precision,
-				scale,
-				consumed = 0;
-
-	/* A promoted long may retain four-byte int bounds in older files. */
-	if ((type == INT4OID && strcmp(name, "int") == 0 && length == 4) ||
-		(type == INT8OID && strcmp(name, "long") == 0 && (length == 4 || length == 8)) ||
-		(type == DATEOID && strcmp(name, "date") == 0 && length == 4))
-	{
-		*value = PGIcebergBinaryDeserialize(bound->value, length, field, pgType);
-		*integer = type == INT8OID ? DatumGetInt64(*value) :
-			type == DATEOID ? DatumGetDateADT(*value) : DatumGetInt32(*value);
-		return type != DATEOID || IS_VALID_DATE(*integer);
-	}
-	if (type != NUMERICOID || length < 1 || length > 16 ||
-		sscanf(name, "decimal(%d,%d)%n", &precision, &scale, &consumed) != 2 ||
-		consumed == 0 || name[consumed] != '\0' ||
-		precision < 1 || precision > 38 || scale < 0 || scale > precision ||
-		pgType.postgresTypeMod != ((precision << 16) | scale) + VARHDRSZ)
-		return false;
-
-	/*
-	 * All signed128 values fit numeric(39,S); then check the declared
-	 * precision.
-	 */
-	PGType		temporaryType = pgType;
-
-	temporaryType.postgresTypeMod = ((39 << 16) | scale) + VARHDRSZ;
-	*value = PGIcebergBinaryDeserialize(bound->value, length, field, temporaryType);
-	Datum		limit = DirectFunctionCall3(numeric_in,
-											CStringGetDatum(psprintf("1e%d", precision - scale)),
-											ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
-	Datum		absolute = DirectFunctionCall1(numeric_abs, *value);
-
-	return DatumGetInt32(DirectFunctionCall2(numeric_cmp, absolute, limit)) < 0;
-}
 
 /*
- * GetIcebergColumnBounds returns ordered non-NULL bounds for supported columns.
- * Missing, ambiguous or invalid metrics return false. NULL counts are separate;
- * successful decoding does not establish whether the column contains NULLs.
+ * FindColumnBound returns the bound for the given field id, or NULL if the
+ * data file has none.
  */
-bool
-GetIcebergColumnBounds(DataFile * dataFile, int fieldId, Field * field, PGType pgType,
-					   Datum *lowerValue, Datum *upperValue)
+static ColumnBound *
+FindColumnBound(ColumnBound * bounds, size_t boundCount, int fieldId)
 {
-	ColumnBound *lower = FindColumnBound(dataFile->lower_bounds,
-										 dataFile->lower_bounds_length, fieldId);
-	ColumnBound *upper = FindColumnBound(dataFile->upper_bounds,
-										 dataFile->upper_bounds_length, fieldId);
-	int64		lowerInteger = 0,
-				upperInteger = 0;
-	Oid			type = pgType.postgresTypeOid;
+	for (size_t boundIndex = 0; boundIndex < boundCount; boundIndex++)
+	{
+		if (bounds[boundIndex].column_id == fieldId)
+			return &bounds[boundIndex];
+	}
 
-	if (lower == NULL || upper == NULL ||
-		((type == INT4OID || type == INT8OID || type == DATEOID) &&
-		 lower->value_length != upper->value_length) ||
-		!DecodeColumnBound(field, pgType, lower, lowerValue, &lowerInteger) ||
-		!DecodeColumnBound(field, pgType, upper, upperValue, &upperInteger))
-		return false;
+	return NULL;
+}
 
-	return type == NUMERICOID ?
-		DatumGetInt32(DirectFunctionCall2(numeric_cmp, *lowerValue, *upperValue)) <= 0 :
-		lowerInteger <= upperInteger;
+
+/*
+ * DataFileHasNoNaN returns whether the manifest entry records a NaN count of
+ * zero for the given field. A missing count means the writer did not say.
+ */
+static bool
+DataFileHasNoNaN(DataFile * dataFile, int fieldId)
+{
+	for (size_t countIndex = 0; countIndex < dataFile->nan_value_counts_length; countIndex++)
+	{
+		if (dataFile->nan_value_counts[countIndex].column_id == fieldId)
+			return dataFile->nan_value_counts[countIndex].value == 0;
+	}
+
+	return false;
+}
+
+
+/*
+ * ColumnBoundText turns a manifest bound into the text form the pruning code
+ * expects, or returns NULL when we would rather not use it.
+ *
+ * These bounds may come from any writer, not only pg_lake, so we treat them
+ * as untrusted input. Most of the checks below guard against bounds we have
+ * not actually seen a real writer produce. They are here because pruning is
+ * only an optimization: skipping a bad bound costs a file read, while trusting
+ * it can fail the query or, worse, silently skip a file that has matching
+ * rows. So whenever a bound looks off, we skip it rather than error.
+ *
+ * - Length: bounds are raw bytes of any length, while we read fixed widths.
+ *   A length that does not fit the type, allowing for the narrower width of
+ *   an int->long or float->double promotion, is skipped instead of reading
+ *   past the value.
+ *
+ * - NUL bytes and invalid UTF-8 in strings: Postgres text cannot hold them,
+ *   and a string cut at a NUL would make the upper bound too small.
+ *
+ * - Decimals that do not fit the column's precision: numeric_in would raise
+ *   an overflow error during planning, failing every query on the table, so
+ *   we parse softly and skip.
+ *
+ * - NaN: Postgres orders NaN above every other value, but Iceberg bounds
+ *   leave it out, so a NaN bound tells us nothing.
+ *
+ * - Floats are printed with all their digits, since extra_float_digits could
+ *   otherwise round a bound past the values it covers.
+ *
+ * - Dates, times and timestamps outside the Postgres range are skipped. For
+ *   timestamps we also check before shifting to the Postgres epoch, since the
+ *   earliest Iceberg timestamps wrap around to a valid looking far-future one.
+ */
+static char *
+ColumnBoundText(ColumnBound * bound, LeafField * leafField)
+{
+	PGType		pgType = leafField->pgType;
+	Oid			typeOid = pgType.postgresTypeOid;
+
+	if (bound->value == NULL ||
+		!IcebergBinaryLengthIsValid(bound->value_length, leafField->field, pgType))
+		return NULL;
+
+	/*
+	 * Postgres text cannot hold a NUL byte, and deserializing would cut the
+	 * string there, making an upper bound too small. Strings in another
+	 * encoding cannot be compared the way the writer ordered them.
+	 */
+	if (typeOid == TEXTOID &&
+		(memchr(bound->value, '\0', bound->value_length) != NULL ||
+		 !pg_verifymbstr((char *) bound->value, bound->value_length, true)))
+		return NULL;
+
+	Datum		boundDatum;
+
+	/*
+	 * A decimal bound that does not fit the precision of the column would
+	 * fail the query while deserializing.
+	 */
+	if (typeOid == NUMERICOID)
+	{
+		if (!PGNumericIcebergBinaryDeserializeSafe(bound->value, bound->value_length,
+												   pgType, &boundDatum))
+			return NULL;
+	}
+	else
+		boundDatum = PGIcebergBinaryDeserialize(bound->value, bound->value_length,
+												leafField->field, pgType);
+
+	switch (typeOid)
+	{
+		case FLOAT4OID:
+			{
+				float4		value = DatumGetFloat4(boundDatum);
+
+				if (isnan(value))
+					return NULL;
+
+				/*
+				 * Print every digit: the output function rounds according to
+				 * extra_float_digits, and a rounded bound may not contain the
+				 * file's values.
+				 */
+				if (isinf(value))
+					return pstrdup(value > 0 ? "Infinity" : "-Infinity");
+
+				return psprintf("%.9g", value);
+			}
+
+		case FLOAT8OID:
+			{
+				float8		value = DatumGetFloat8(boundDatum);
+
+				if (isnan(value))
+					return NULL;
+
+				if (isinf(value))
+					return pstrdup(value > 0 ? "Infinity" : "-Infinity");
+
+				return psprintf("%.17g", value);
+			}
+
+		case DATEOID:
+			if (!IS_VALID_DATE(DatumGetDateADT(boundDatum)))
+				return NULL;
+			break;
+
+		case TIMESTAMPOID:
+		case TIMESTAMPTZOID:
+			if (!IcebergBinaryTimestampIsValid(bound->value, bound->value_length))
+				return NULL;
+			break;
+
+		case TIMEOID:
+			if (DatumGetTimeADT(boundDatum) < 0 ||
+				DatumGetTimeADT(boundDatum) > USECS_PER_DAY)
+				return NULL;
+			break;
+
+		case TIMETZOID:
+			{
+				TimeTzADT  *timetz = DatumGetTimeTzADTP(boundDatum);
+
+				if (timetz->time < 0 || timetz->time > USECS_PER_DAY)
+					return NULL;
+				break;
+			}
+
+		default:
+			break;
+	}
+
+	Oid			typoutput;
+	bool		typIsVarlena;
+
+	getTypeOutputInfo(typeOid, &typoutput, &typIsVarlena);
+
+	return OidOutputFunctionCall(typoutput, boundDatum);
 }

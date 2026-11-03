@@ -136,22 +136,41 @@ SetupPgDuckConnectionHash(void)
 PGDuckConnection *
 GetPGDuckConnection(void)
 {
-	InitializePGDuckClient();
+	char	   *errorMessage = NULL;
+	PGDuckConnection *pgDuckConnection = TryGetPGDuckConnection(&errorMessage);
 
-	PGconn	   *connection = PQconnectdb(PgduckServerConninfo);
-
-	if (PQstatus(connection) != CONNECTION_OK)
+	if (pgDuckConnection == NULL)
 	{
-		char		PG_USED_FOR_ASSERTS_ONLY *errorMessage = pstrdup(PQerrorMessage(connection));
-
-		PQfinish(connection);
-
 #ifdef USE_ASSERT_CHECKING
 		ereport(ERROR, (errmsg("could not start query engine: %s", errorMessage)));
 #else
 		/* hide internals from users */
 		ereport(ERROR, (errmsg("could not start query engine")));
 #endif
+	}
+
+	return pgDuckConnection;
+}
+
+
+/*
+ * TryGetPGDuckConnection is like GetPGDuckConnection, but returns NULL and
+ * sets *errorMessage to the libpq error when pgduck_server is not reachable.
+ */
+PGDuckConnection *
+TryGetPGDuckConnection(char **errorMessage)
+{
+	InitializePGDuckClient();
+
+	PGconn	   *connection = PQconnectdb(PgduckServerConninfo);
+
+	if (PQstatus(connection) != CONNECTION_OK)
+	{
+		*errorMessage = pstrdup(PQerrorMessage(connection));
+
+		PQfinish(connection);
+
+		return NULL;
 	}
 
 	int			connectionId = ConnectionId++;

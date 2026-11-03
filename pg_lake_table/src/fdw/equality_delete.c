@@ -23,7 +23,7 @@
 #include "catalog/pg_type_d.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "nodes/bitmapset.h"
-#include "pg_lake/iceberg/data_file_stats.h"
+#include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/fdw/partition_transform.h"
@@ -89,6 +89,9 @@ static bool AvroTypesEqual(IcebergScalarAvroType left, IcebergScalarAvroType rig
 static DataFileSchema * EqualityKeySchema(IcebergTableMetadata * metadata, DataFile * file);
 static bool KeySchemasEqual(DataFileSchema * left, DataFileSchema * right);
 static void AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile);
+static ColumnBound * FindColumnBound(ColumnBound * bounds, size_t count, int fieldId);
+static bool GetIntegerBounds(DataFile * file, DataFileSchemaField * key, bool isLong,
+							 int64 *lowerValue, int64 *upperValue);
 static void PrepareEqualityDeleteBounds(EqualityDeleteFile * deletion);
 static bool IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion);
 static void ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan, int startRow, int endRow);
@@ -530,6 +533,45 @@ AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile)
 	}
 }
 
+/* FindColumnBound rejects absent or duplicated optional metric IDs. */
+static ColumnBound *
+FindColumnBound(ColumnBound * bounds, size_t count, int fieldId)
+{
+	ColumnBound *result = NULL;
+
+	for (size_t i = 0; bounds != NULL && i < count; i++)
+	{
+		if (bounds[i].column_id != fieldId)
+			continue;
+		if (result != NULL)
+			return NULL;
+		result = &bounds[i];
+	}
+	return result;
+}
+
+/* GetIntegerBounds returns ordered bounds, including promoted int values. */
+static bool
+GetIntegerBounds(DataFile * file, DataFileSchemaField * key, bool isLong,
+				 int64 *lowerValue, int64 *upperValue)
+{
+	ColumnBound *lower = FindColumnBound(file->lower_bounds, file->lower_bounds_length, key->id);
+	ColumnBound *upper = FindColumnBound(file->upper_bounds, file->upper_bounds_length, key->id);
+	PGType		pgType = MakePGTypeOid(isLong ? INT8OID : INT4OID);
+
+	if (lower == NULL || upper == NULL || lower->value == NULL || upper->value == NULL ||
+		lower->value_length != upper->value_length ||
+		!IcebergBinaryLengthIsValid(lower->value_length, key->type, pgType))
+		return false;
+
+	Datum		lowerDatum = PGIcebergBinaryDeserialize(lower->value, lower->value_length, key->type, pgType);
+	Datum		upperDatum = PGIcebergBinaryDeserialize(upper->value, upper->value_length, key->type, pgType);
+
+	*lowerValue = isLong ? DatumGetInt64(lowerDatum) : DatumGetInt32(lowerDatum);
+	*upperValue = isLong ? DatumGetInt64(upperDatum) : DatumGetInt32(upperDatum);
+	return *lowerValue <= *upperValue;
+}
+
 /*
  * Prepare integer bounds once per delete file. Bounds omit NULLs, so require
  * an explicit zero delete null count for each usable component. Otherwise
@@ -567,19 +609,9 @@ PrepareEqualityDeleteBounds(EqualityDeleteFile * deletion)
 		if (nullStats != 1 || !noDeleteNulls)
 			continue;
 
-		PGType		pgType = MakePGTypeOid(isLong ? INT8OID : INT4OID);
-		Datum		deleteLowerValue,
-					deleteUpperValue;
-
-		if (!GetIcebergColumnBounds(deleteFile, key->id, key->type, pgType,
-									&deleteLowerValue, &deleteUpperValue))
-			continue;
-
 		EqualityDeleteBounds *bounds = &deletion->bounds[i];
 
-		bounds->lower = isLong ? DatumGetInt64(deleteLowerValue) : DatumGetInt32(deleteLowerValue);
-		bounds->upper = isLong ? DatumGetInt64(deleteUpperValue) : DatumGetInt32(deleteUpperValue);
-		bounds->valid = true;
+		bounds->valid = GetIntegerBounds(deleteFile, key, isLong, &bounds->lower, &bounds->upper);
 	}
 }
 
@@ -596,16 +628,11 @@ IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion)
 
 		DataFileSchemaField *key = &deletion->schema->fields[i];
 		bool		isLong = strcmp(key->type->field.scalar.typeName, "long") == 0;
-		PGType		pgType = MakePGTypeOid(isLong ? INT8OID : INT4OID);
-		Datum		dataLowerValue,
-					dataUpperValue;
+		int64		dataLower,
+					dataUpper;
 
-		if (!GetIcebergColumnBounds(dataFile, key->id, key->type, pgType,
-									&dataLowerValue, &dataUpperValue))
+		if (!GetIntegerBounds(dataFile, key, isLong, &dataLower, &dataUpper))
 			continue;
-
-		int64		dataLower = isLong ? DatumGetInt64(dataLowerValue) : DatumGetInt32(dataLowerValue);
-		int64		dataUpper = isLong ? DatumGetInt64(dataUpperValue) : DatumGetInt32(dataUpperValue);
 
 		if (dataUpper < bounds->lower || bounds->upper < dataLower)
 			return true;
@@ -787,7 +814,7 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
  * does not skip other files sharing the same equality key schema.
  *
  * Batch footer queries to bound query size and reduce pgduck_server round trips.
- * No delete rows are read.
+ * No delete rows are read, including during ordinary EXPLAIN.
  */
 void
 ValidateEqualityDeleteFiles(List *deleteScans)

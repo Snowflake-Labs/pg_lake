@@ -35,6 +35,8 @@
 #include "pg_lake/fs/region_aware_s3fs.hpp"
 #include "pg_lake/utils/pgduck_log_utils.h"
 
+#include "azure_blob_filesystem.hpp"
+
 namespace duckdb {
 
 /*
@@ -493,18 +495,21 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 	FileOpener *opener = context.client_data->file_opener.get();
 	DatabaseInstance &db = DatabaseInstance::GetDatabase(context);
 	RegionAwareS3FileSystem s3fs(BufferManager::GetBufferManager(db));
+	AzureBlobStorageFileSystem abfs;
 	FileSystem &virtualFs = FileSystem::GetFileSystem(context);
 
 	vector<string> s3Paths;
+	vector<string> azurePaths;
 
 	for (const string &path : paths)
 	{
 		/*
-		 * Only S3 has a bulk delete API. Everything else -- Azure, HTTP, local
-		 * -- goes through the ordinary per-file RemoveFile, which is one round
-		 * trip each and evicts the cache on the way out. Paths that opt out of
-		 * caching land here too: s3fs does not recognize the prefix, and the
-		 * virtual file system strips it.
+		 * S3 and Azure Blob both have bulk delete APIs, so collect their paths
+		 * separately and batch-delete them below. Everything else -- DFS (abfss),
+		 * HTTP, local -- goes through the ordinary per-file RemoveFile, which is
+		 * one round trip each and evicts the cache on the way out. Paths that opt
+		 * out of caching land here too: s3fs does not recognize the prefix, and
+		 * the virtual file system strips it.
 		 *
 		 * RemoveFile, not TryRemoveFile: the remote file systems are registered
 		 * wrapped in this class, so an object that is already gone is tolerated
@@ -512,42 +517,57 @@ PGLakeCachingFileSystem::RemoveFiles(ClientContext &context, const vector<string
 		 * would also swallow a path that no remote file system claims, which
 		 * falls through to the local file system and is a real failure.
 		 *
-		 * No opener here, unlike the s3fs call below: what a ClientContext hands
-		 * out is a ClientContextFileSystem, an OpenerFileSystem, which pushes
-		 * its own opener into every call and rejects one from the caller with
-		 * "OpenerFileSystem cannot take an opener". That is an InternalException,
-		 * which takes the whole server down rather than failing the statement.
+		 * No opener here, unlike the s3fs/abfs calls below: what a ClientContext
+		 * hands out is a ClientContextFileSystem, an OpenerFileSystem, which
+		 * pushes its own opener into every call and rejects one from the caller
+		 * with "OpenerFileSystem cannot take an opener". That is an
+		 * InternalException, which takes the whole server down rather than
+		 * failing the statement.
 		 */
 		if (s3fs.CanHandleFile(path))
 			s3Paths.push_back(path);
+		else if (abfs.CanHandleFile(path))
+			azurePaths.push_back(path);
 		else
 			virtualFs.RemoveFile(path);
 	}
 
-	if (s3Paths.empty())
-		return;
-
 	/*
-	 * The batch delete goes straight to S3 rather than through this wrapper, so
-	 * evict the cache entries here instead, both before and after.
+	 * The batch deletes go straight to the storage back ends rather than through
+	 * this wrapper, so evict the cache entries here instead, both before and
+	 * after.
 	 *
-	 * Before, because RemoveFiles sends the keys in batches and throws as soon as
-	 * one batch reports an error: evicting only afterwards would leave the
-	 * already-deleted batches holding a local copy, which is the stale cache this
-	 * is meant to prevent. Dropping the copy of a file whose delete then fails
-	 * only costs a re-download.
+	 * Before, because the batch calls throw as soon as one batch reports an
+	 * error: evicting only afterwards would leave the already-deleted batches
+	 * holding a local copy, which is the stale cache this is meant to prevent.
+	 * Dropping the copy of a file whose delete then fails only costs a
+	 * re-download.
 	 *
 	 * After, because a concurrent reader can cache the file again in the window
 	 * between the eviction and the delete. Eviction of an uncached file is a
 	 * cheap no-op, so the second pass costs little.
 	 */
-	for (const string &path : s3Paths)
-		RemoveCachedCopy(context, path, opener);
+	if (!s3Paths.empty())
+	{
+		for (const string &path : s3Paths)
+			RemoveCachedCopy(context, path, opener);
 
-	s3fs.RemoveFiles(s3Paths, opener);
+		s3fs.RemoveFiles(s3Paths, opener);
 
-	for (const string &path : s3Paths)
-		RemoveCachedCopy(context, path, opener);
+		for (const string &path : s3Paths)
+			RemoveCachedCopy(context, path, opener);
+	}
+
+	if (!azurePaths.empty())
+	{
+		for (const string &path : azurePaths)
+			RemoveCachedCopy(context, path, opener);
+
+		abfs.RemoveFiles(azurePaths, opener);
+
+		for (const string &path : azurePaths)
+			RemoveCachedCopy(context, path, opener);
+	}
 }
 
 

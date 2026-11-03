@@ -29,6 +29,7 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <getopt.h>
+#include <unistd.h>
 
 #include "command_line/command_line.h"
 #include "duckdb/duckdb.h"
@@ -48,6 +49,15 @@
 #define DEFAULT_PORT 5332
 #define DEFAULT_MAX_CLIENTS 10000
 #define DEFAULT_CACHE_ON_WRITE_MAX_SIZE 1024 * 1024 * 1024 // 1GB
+
+/*
+ * On Red Hat-family systems, update-ca-trust writes certificates distrusted
+ * through /etc/pki/ca-trust/source/blocklist only into this OpenSSL-format
+ * bundle. The plain PEM bundles that DuckDB's extensions find on their own
+ * cannot express distrust, so a certificate chaining through a distrusted
+ * intermediate still verifies against them.
+ */
+#define DEFAULT_CA_CERT_FILE "/etc/pki/ca-trust/extracted/openssl/ca-bundle.trust.crt"
 
 /*
  * ensure_pglake_user_dir returns $HOME/.pglake, creating it (mode 0700) if
@@ -117,7 +127,8 @@ print_usage()
 	printf(" --init_file_path <path>			Execute all statements in this file on start-up\n");
 	printf(" --cache_dir                    	Specify the directory to use to cache remote files (from S3)\n");
 	printf(" --extensions_dir <path>			Install and load extensions in the specified directory\n");
-	printf(" --pidfile <path>					Write the pid of this program to the given path\n");
+	printf(" --pidfile <path>          Write the pid of this program to the given path\n");
+	printf(" --ca_cert_file <path>        CA certificates used to verify TLS connections, default is %s if it exists; an empty string uses DuckDB's defaults\n", DEFAULT_CA_CERT_FILE);
 	printf(" --no_extension_install             Disable extension installation\n");
 	printf(" --debug                            Include debug-level log messages (including full queries) in server output\n");
 	printf(" --verbose                     		Run in verbose mode\n");
@@ -143,6 +154,7 @@ parse_arguments(int argc, char *argv[])
 		.duckdb_database_file_path = get_or_create_duckdb_database_file(),
 		.init_file_path = NULL,
 		.pidfile_path = NULL,
+		.ca_cert_file = NULL,
 		.cache_dir = NULL,
 		.extensions_dir = NULL,
 		.no_extension_install = false,
@@ -169,6 +181,7 @@ parse_arguments(int argc, char *argv[])
 		{"no_extension_install", no_argument, NULL, 'n'},
 		{"init_file_path", required_argument, NULL, 'i'},
 		{"pidfile", required_argument, NULL, 'p'},
+		{"ca_cert_file", required_argument, NULL, 'A'},
 		{"debug", no_argument, NULL, 'd'},
 		{0, 0, 0, 0}
 	};
@@ -302,6 +315,9 @@ parse_arguments(int argc, char *argv[])
 			case 'p':
 				options.pidfile_path = strdup(optarg);
 				break;
+			case 'A':
+				options.ca_cert_file = strdup(optarg);
+				break;
 			case '?':
 				print_usage();
 				exit(EXIT_FAILURE);
@@ -334,6 +350,31 @@ parse_arguments(int argc, char *argv[])
 	}
 
 	PGDUCK_SERVER_LOG("Cache on write max size is set to: %" PRIu64, options.cache_on_write_max_size);
+
+	if (options.ca_cert_file == NULL)
+	{
+		if (access(DEFAULT_CA_CERT_FILE, R_OK) == 0)
+			options.ca_cert_file = DEFAULT_CA_CERT_FILE;
+	}
+	else if (options.ca_cert_file[0] == '\0')
+	{
+		options.ca_cert_file = NULL;
+	}
+	else if (access(options.ca_cert_file, R_OK) != 0)
+	{
+		fprintf(stderr, "Error: could not read ca_cert_file \"%s\": %s\n",
+				options.ca_cert_file, strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+
+	if (options.ca_cert_file != NULL)
+	{
+		PGDUCK_SERVER_LOG("CA certificate file is set to: %s", options.ca_cert_file);
+	}
+	else
+	{
+		PGDUCK_SERVER_LOG("Using DuckDB's default CA certificate locations");
+	}
 
 	if (options.verbose)
 	{

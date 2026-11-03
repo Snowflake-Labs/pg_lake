@@ -56,6 +56,13 @@ struct InodeBudget
 	/* inodes we want to keep available on the cache file system */
 	int64_t floor = 0;
 
+	/*
+	 * Inodes to evict toward once floor is breached. Cache-on-write has no
+	 * reservation in this budget, so this target provides headroom for files
+	 * added between management rounds. Always >= floor.
+	 */
+	int64_t purgeTarget = 0;
+
 	/* inodes reserved for the queued downloads and the directories they need */
 	int64_t reserved = 0;
 
@@ -68,11 +75,20 @@ struct InodeBudget
 	/*
 	 * Deficit returns the number of inodes we are still short of the floor once
 	 * the queued downloads have taken theirs, and a number <= 0 when we are not
-	 * under inode pressure.
+	 * under inode pressure. This is what decides whether to act at all.
 	 */
 	int64_t Deficit() const
 	{
 		return floor + reserved - (freeInodes + freed);
+	}
+
+	/*
+	 * PurgeDeficit returns the inodes needed to reach purgeTarget after queued
+	 * downloads are accounted for. Deficit() decides whether to act at all.
+	 */
+	int64_t PurgeDeficit() const
+	{
+		return purgeTarget + reserved - (freeInodes + freed);
 	}
 };
 

@@ -124,6 +124,44 @@ def test_read_only_flag_vacuum(
     pg_conn.commit()
 
 
+def test_read_only_table_drop_cleans_catalog(
+    pg_conn, superuser_conn, s3, extension, with_default_location
+):
+    run_command("CREATE SCHEMA test_read_only_drop;", pg_conn)
+    run_command("CREATE TABLE test_read_only_drop.test(a int) USING iceberg;", pg_conn)
+    # a data file row, so lake_table.files cleanup is covered as well
+    run_command("INSERT INTO test_read_only_drop.test VALUES (1);", pg_conn)
+    pg_conn.commit()
+
+    table_oid = run_query("SELECT 'test_read_only_drop.test'::regclass::oid", pg_conn)[
+        0
+    ][0]
+
+    # flip the table read-only, the way lake_table.finish_postgres_recovery() does
+    run_command(
+        "UPDATE lake_iceberg.tables_internal SET read_only = true "
+        "WHERE table_name = 'test_read_only_drop.test'::regclass",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command("DROP TABLE test_read_only_drop.test;", pg_conn)
+    pg_conn.commit()
+
+    # the drop must remove the table's bookkeeping even while the table is
+    # read-only: no orphaned rows pointing at an oid with no pg_class entry
+    for catalog in ["lake_iceberg.tables_internal", "lake_table.files"]:
+        rows = run_query(
+            f"SELECT count(*) FROM {catalog} "
+            f"WHERE table_name = {table_oid}::regclass",
+            superuser_conn,
+        )
+        assert rows[0][0] == 0
+
+    run_command("DROP SCHEMA test_read_only_drop CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 def open_conn_to_db(dbname):
     conn_str = f"dbname='{dbname}' user={server_params.PG_USER} password={server_params.PG_PASSWORD} port={server_params.PG_PORT} host={server_params.PG_HOST}"
 

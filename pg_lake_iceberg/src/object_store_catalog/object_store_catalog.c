@@ -18,6 +18,7 @@
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parsetree/options.h"
+#include "pg_lake/permissions/roles.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/client.h"
@@ -35,6 +36,19 @@ char	   *InternalObjectStorePrefix = "frompg";
 PG_FUNCTION_INFO_V1(list_object_store_tables);
 PG_FUNCTION_INFO_V1(trigger_object_store_catalog_generation);
 PG_FUNCTION_INFO_V1(force_push_object_store_catalog);
+
+/*
+ * Prefix on every error raised while exporting the object store catalog.
+ *
+ * The periodic export runs in the vacuum worker, which demotes the error to a
+ * WARNING and carries on, so the message text is all a log collector has to
+ * recognize the failure by. The underlying errors come from pgduck, DuckDB or
+ * file access and say nothing about the catalog, and a stale catalog is
+ * invisible from the outside: readers keep resolving the last catalog file that
+ * landed and see a database that has stopped gaining tables. Prefixing gives
+ * one string to match on.
+ */
+#define CATALOG_EXPORT_ERROR_PREFIX "pg_lake_iceberg: object store catalog export failed"
 
 
 /* pg_lake_iceberg.enable_object_store_catalog setting */
@@ -56,11 +70,13 @@ static TimestampTz LastCatalogPushTime = 0;
 
 static bool CatalogNeedsExport(void);
 static void PushMetadataLocationToObjectStoreCatalog(void);
+static void BuildAndUploadObjectStoreCatalogFile(void);
 static void TrackInvalidateCatalogExport(Datum argument, Oid relationId);
 static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName);
 static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
 static bool CheckIfExternalObjectStoreCatalogExists(const char *catalogName);
 static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogNamespace, char **catalogTableName);
+static char *GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent, const char *catalogNamespace, const char *catalogTableName);
 static void FormatCurrentTimestampUTC(char *buf, size_t bufsize);
 static bool IsBlankCatalogField(const char *value);
 
@@ -338,12 +354,29 @@ GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **
 
 
 /*
-* GetMetadataLocationFromExternalObjectStoreCatalogForTable returns the metadata location
-* for the given relationId by looking up the object store catalog using the catalog
-* information from the foreign table options.
+* GetExternalObjectStoreCatalogFilePathForTable returns the path of the
+* catalog file that lists the given read-only object store catalog table.
 */
 char *
-GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId)
+GetExternalObjectStoreCatalogFilePathForTable(Oid relationId)
+{
+	char	   *catalogName = NULL;
+	char	   *catalogNamespace = NULL;
+	char	   *catalogTableName = NULL;
+
+	GetObjectStoreCatalogInfoFromCatalog(relationId, &catalogName, &catalogNamespace, &catalogTableName);
+
+	return GetExternalObjectStoreCatalogFilePath(catalogName);
+}
+
+
+/*
+* GetMetadataLocationFromExternalObjectStoreCatalogForTable returns the metadata location
+* for the given relationId by looking it up in the given contents of its object store
+* catalog, using the catalog information from the foreign table options.
+*/
+char *
+GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId, const char *catalogContent)
 {
 	char	   *catalogName = NULL;
 	char	   *catalogNamespace = NULL;
@@ -354,16 +387,50 @@ GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId)
 	/* otherwise we should have thrown an error */
 	Assert(catalogName != NULL && catalogNamespace != NULL && catalogTableName != NULL);
 
-	return GetTableMetadataLocationFromExternalObjectStoreCatalog(catalogName, catalogNamespace, catalogTableName);
+	return GetTableMetadataLocationFromObjectStoreCatalogContent(catalogContent, catalogNamespace, catalogTableName);
 }
 
 
 /*
 * PushMetadataLocationToObjectStoreCatalog exports the current contents of
 * tables_internal to the object store catalog file in S3.
+*
+* Any failure is re-raised with CATALOG_EXPORT_ERROR_PREFIX in front of the
+* original message, keeping the error code, detail and hint intact.
 */
 static void
 PushMetadataLocationToObjectStoreCatalog(void)
+{
+	MemoryContext callerContext = CurrentMemoryContext;
+
+	PG_TRY();
+	{
+		BuildAndUploadObjectStoreCatalogFile();
+	}
+	PG_CATCH();
+	{
+		/* CopyErrorData() refuses to run in ErrorContext */
+		MemoryContextSwitchTo(callerContext);
+
+		ErrorData  *edata = CopyErrorData();
+
+		FlushErrorState();
+
+		edata->message = psprintf(CATALOG_EXPORT_ERROR_PREFIX ": %s",
+								  edata->message ? edata->message : "unknown error");
+
+		ThrowErrorData(edata);
+	}
+	PG_END_TRY();
+}
+
+
+/*
+* BuildAndUploadObjectStoreCatalogFile builds the catalog file from
+* tables_internal and uploads it to the catalog's fixed path in object storage.
+*/
+static void
+BuildAndUploadObjectStoreCatalogFile(void)
 {
 	/*
 	 * allocate before SPI so that future expansions use the current memory
@@ -404,12 +471,20 @@ PushMetadataLocationToObjectStoreCatalog(void)
 					 "		)");
 
 	/*
-	 * we don't use this param, but our SPI Apis rely on at least one arg, so
-	 * we do true=true
+	 * Push the latest snapshot so the catalog query always sees every
+	 * committed row in tables_internal, even when the caller is in REPEATABLE
+	 * READ (whose transaction snapshot would hide rows committed after the
+	 * transaction started).
+	 *
+	 * readOnly below must stay true: that is what makes SPI run the query
+	 * under this active snapshot instead of taking a fresh transaction
+	 * snapshot of its own.
 	 */
+	PushActiveSnapshot(GetLatestSnapshot());
+
 	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
-	bool		readOnly = false;
+	bool		readOnly = true;
 
 	SPI_execute(fetchObjectStoreMetadata->data, readOnly, 0);
 
@@ -461,6 +536,8 @@ PushMetadataLocationToObjectStoreCatalog(void)
 
 	SPI_END();
 
+	PopActiveSnapshot();
+
 	/* End JSON array and object */
 	appendStringInfoString(objectStoreCatalogFileContent, "]\n");
 	appendStringInfoString(objectStoreCatalogFileContent, "}");
@@ -493,6 +570,18 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	/* catalog.json is a fixed path that may change out of band; read fresh. */
 	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
 
+	return GetTableMetadataLocationFromObjectStoreCatalogContent(catalogContent, catalogNamespace, catalogTableName);
+}
+
+
+/*
+* GetTableMetadataLocationFromObjectStoreCatalogContent returns the metadata location
+* for the table with the given catalog namespace and catalog table name by looking it
+* up in the given contents of an object store catalog file.
+*/
+static char *
+GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent, const char *catalogNamespace, const char *catalogTableName)
+{
 	StringInfo	metadataLocationStrInfo = makeStringInfo();
 	StringInfo	getMetadataLocation = makeStringInfo();
 
@@ -545,6 +634,8 @@ GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, 
 	}
 
 	SPI_END();
+
+	ErrorIfURLLeavesObjectStorage(metadataLocationStrInfo->data, NULL);
 
 	return metadataLocationStrInfo->data;
 }

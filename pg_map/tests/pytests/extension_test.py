@@ -250,6 +250,37 @@ def test_null_map(pg_conn, pg_map):
     pg_conn.rollback()
 
 
+def test_null_entry_and_key(pg_conn, pg_map):
+    # a NULL entry or a NULL key in the array is skipped, not dereferenced
+    run_query("SELECT map_type.create('text','integer')", pg_conn)
+
+    result = run_query(
+        """SELECT map_type.extract('{NULL,"(i,3)"}'::map_type.key_text_val_int, 'i')""",
+        pg_conn,
+    )
+    assert result == [[3]]
+
+    result = run_query(
+        """SELECT map_type.extract('{"(,1)","(i,3)"}'::map_type.key_text_val_int, 'i')""",
+        pg_conn,
+    )
+    assert result == [[3]]
+
+    result = run_query(
+        """SELECT map_type.extract('{NULL,"(,1)"}'::map_type.key_text_val_int, 'i')""",
+        pg_conn,
+    )
+    assert result == [[None]]
+
+    result = run_query(
+        """SELECT * FROM map_type.entries('{NULL,"(i,3)"}'::map_type.key_text_val_int)""",
+        pg_conn,
+    )
+    assert result == [["i", 3]]
+
+    pg_conn.rollback()
+
+
 @pytest.fixture(scope="module")
 def pg_map(superuser_conn, pg_conn, app_user):
     run_command(

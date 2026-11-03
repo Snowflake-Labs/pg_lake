@@ -1,0 +1,13 @@
+diff --git a/sdk/core/azure-core/src/http/curl/curl.cpp b/sdk/core/azure-core/src/http/curl/curl.cpp
+--- a/sdk/core/azure-core/src/http/curl/curl.cpp
++++ b/sdk/core/azure-core/src/http/curl/curl.cpp
+@@ -390,6 +390,9 @@
+     {
+       break;
+     }
++    // The failed attempt may already have read the request body, in which case the retry would
++    // announce a content-length and then send nothing, and wait for a response that never comes.
++    request.GetBodyStream()->Rewind();
+     // Let session be destroyed and request a new connection. If the number of
+     // request for connection has reached `RequestPoolResetAfterConnectionFailed`, ask the pool to
+     // clean (remove connections) and create a new one. This is because, keep getting connections

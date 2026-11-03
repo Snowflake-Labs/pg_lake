@@ -49,6 +49,9 @@ typedef struct S3InheritedSettings
 	char	   *useSsl;
 }			S3InheritedSettings;
 
+/* The start of a vended secret's name: its database and server OIDs. */
+#define VENDED_SECRET_NAME_PREFIX "pglake_vended_%u_%u_"
+
 
 /*
  * GenerateVendedSecretName produces a deterministic name for a vended
@@ -69,7 +72,7 @@ GenerateVendedSecretName(Oid serverOid, const char *secretId)
 	uint64		keyHash = hash_bytes_extended((const unsigned char *) secretId,
 											  strlen(secretId), 0);
 
-	return psprintf("pglake_vended_%u_%u_%016llx",
+	return psprintf(VENDED_SECRET_NAME_PREFIX "%016llx",
 					MyDatabaseId, serverOid, (unsigned long long) keyHash);
 }
 
@@ -155,13 +158,12 @@ ExtractFieldFromSecretString(const char *secretString, const char *key)
  * been vended at all.  Vended secrets are excluded, since one of those
  * is likely this very secret from an earlier push.
  *
- * This is what lets a vended secret reach an S3-compatible store whose
- * catalog states only part of the connection: without it DuckDB falls
- * back to real-AWS defaults and the scan leaves the deployment
- * entirely.  What it cannot do is move a credential somewhere the
- * catalog did not point: the caller keeps every value the catalog
- * stated, so a secret in a namespace other tenants can write to can
- * only supply a setting nobody else has.
+ * This is what lets a vended secret reach an S3-compatible store: the
+ * catalog's endpoint is never used, so without it DuckDB falls back to
+ * real-AWS defaults and the scan leaves the deployment entirely.  It is
+ * safe to take the endpoint from here because non-vended secrets come
+ * only from whoever runs pgduck_server (its startup defaults and init
+ * file), not from a catalog or a database role.
  */
 static S3InheritedSettings
 LookupInheritedS3Settings(PGDuckConnection * conn, const char *s3Prefix)
@@ -306,43 +308,32 @@ BuildCreateS3SecretSQL(const char *secretName,
  * PushNamedS3Secret resolves the S3 connection settings and creates the
  * vended secret under the given name.
  *
- * The catalog is the authority on where its own storage lives, so its
- * values are taken as given.  Each setting is resolved on its own,
- * though: a catalog that states an endpoint but not an addressing style
- * is the ordinary case for an S3-compatible store, and dropping the
- * URL_STYLE that the existing secret carries leaves DuckDB addressing
- * the bucket as a subdomain of a host that has no such name.
+ * Where the request goes -- the endpoint, and whether it uses SSL -- is
+ * always taken from the secret that already serves the prefix, never
+ * from the catalog.  Secrets live in one DuckDB instance shared by every
+ * database and role, and a vended secret wins over the static one by
+ * having a more specific scope, so an endpoint the catalog chose would
+ * move every session's requests under that scope, not just the ones for
+ * this catalog's table.  On AWS nothing is lost: the region-aware file
+ * system finds the right endpoint from the bucket.  A store elsewhere is
+ * reached by a static secret pointing at it, as without vending.
  *
- * Inheriting cannot redirect the credentials: an endpoint the catalog
- * stated is never overwritten, and SSL is already pinned by that
- * endpoint's scheme, so the fallback only fills in what nobody has
- * stated.  The query itself is skipped entirely when there is nothing
- * left to fill in.
+ * The addressing style is the catalog's to state, since it cannot send
+ * a request anywhere else, and is inherited when the catalog omits it.
  */
 static void
 PushNamedS3Secret(PGDuckConnection * conn,
 				  const char *secretName,
 				  const VendedSecret * secret)
 {
-	const char *endpoint = secret->endpoint;
-	const char *urlStyle = secret->urlStyle;
-	const char *useSsl = secret->useSsl;
-
-	if (endpoint == NULL || urlStyle == NULL || useSsl == NULL)
-	{
-		S3InheritedSettings inherited =
-			LookupInheritedS3Settings(conn, secret->scope);
-
-		if (endpoint == NULL)
-			endpoint = inherited.endpoint;
-		if (urlStyle == NULL)
-			urlStyle = inherited.urlStyle;
-		if (useSsl == NULL)
-			useSsl = inherited.useSsl;
-	}
+	S3InheritedSettings inherited =
+		LookupInheritedS3Settings(conn, secret->scope);
+	const char *urlStyle = secret->urlStyle != NULL ?
+		secret->urlStyle : inherited.urlStyle;
 
 	char	   *sql = BuildCreateS3SecretSQL(secretName, secret,
-											 endpoint, urlStyle, useSsl);
+											 inherited.endpoint, urlStyle,
+											 inherited.useSsl);
 
 	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, sql);
 
@@ -475,12 +466,14 @@ PushVendedSecretToPGDuck(PGDuckConnection * conn,
 }
 
 
-void
-DropVendedSecretFromPGDuck(PGDuckConnection * conn,
-						   Oid serverOid, const char *secretId)
+/*
+ * DropNamedSecret removes one secret from pgduck_server, if it exists.
+ */
+static void
+DropNamedSecret(PGDuckConnection * conn, const char *secretName)
 {
-	char	   *secretName = GenerateVendedSecretName(serverOid, secretId);
-	char	   *sql = psprintf("DROP SECRET IF EXISTS \"%s\"", secretName);
+	char	   *sql = psprintf("DROP SECRET IF EXISTS %s",
+							   quote_identifier(secretName));
 
 	elog(DEBUG2, "dropping vended secret \"%s\" from pgduck_server",
 		 secretName);
@@ -491,5 +484,134 @@ DropVendedSecretFromPGDuck(PGDuckConnection * conn,
 	PQclear(result);
 
 	pfree(sql);
+}
+
+
+void
+DropVendedSecretFromPGDuck(PGDuckConnection * conn,
+						   Oid serverOid, const char *secretId)
+{
+	char	   *secretName = GenerateVendedSecretName(serverOid, secretId);
+
+	DropNamedSecret(conn, secretName);
 	pfree(secretName);
+}
+
+
+/*
+ * DropVendedSecretsUnderScopeFromPGDuck looks the secrets up in
+ * duckdb_secrets() rather than naming them, since neither the principal
+ * nor the scope a secret another backend pushed was named after is known
+ * here.  Only the name prefix ties a secret to its database and server.
+ */
+List *
+DropVendedSecretsUnderScopeFromPGDuck(PGDuckConnection * conn, Oid serverOid,
+									  const char *scopePrefix)
+{
+	List	   *names = NIL;
+
+	/* An empty prefix would cover every secret of the server. */
+	if (scopePrefix == NULL || scopePrefix[0] == '\0')
+		return NIL;
+
+	char	   *namePrefix = psprintf(VENDED_SECRET_NAME_PREFIX, MyDatabaseId,
+									  serverOid);
+	char	   *escapedScope = EscapeSingleQuotes(scopePrefix);
+	char	   *query =
+		psprintf("SELECT DISTINCT name FROM ("
+				 "SELECT name, unnest(scope) AS prefix "
+				 "FROM duckdb_secrets() "
+				 "WHERE starts_with(name, '%s')) s "
+				 "WHERE starts_with(prefix, '%s')",
+				 namePrefix, escapedScope);
+
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, query);
+
+	PG_TRY();
+	{
+		ThrowIfPGDuckResultHasError(conn, result);
+
+		for (int row = 0; row < PQntuples(result); row++)
+			names = lappend(names, pstrdup(PQgetvalue(result, row, 0)));
+	}
+	PG_FINALLY();
+	{
+		PQclear(result);
+	}
+	PG_END_TRY();
+
+	ListCell   *nameCell;
+
+	foreach(nameCell, names)
+		DropNamedSecret(conn, lfirst(nameCell));
+
+	pfree(query);
+	pfree(escapedScope);
+	pfree(namePrefix);
+
+	return names;
+}
+
+
+void
+EvictCachedFilesUnderScopeFromPGDuck(PGDuckConnection * conn,
+									 const char *scopePrefix)
+{
+	List	   *urls = NIL;
+
+	/* An empty prefix would cover the whole cache. */
+	if (scopePrefix == NULL || scopePrefix[0] == '\0')
+		return;
+
+	char	   *escapedScope = EscapeSingleQuotes(scopePrefix);
+	char	   *query =
+		psprintf("SELECT url FROM pg_lake_list_cache() "
+				 "WHERE starts_with(url, '%s')",
+				 escapedScope);
+
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, query);
+
+	PG_TRY();
+	{
+		/* the cache-manager worker recognizes a disabled cache the same way */
+		bool		cachingDisabled =
+			PQresultStatus(result) != PGRES_TUPLES_OK &&
+			strstr(PQresultErrorMessage(result),
+				   "caching is currently disabled") != NULL;
+
+		if (!cachingDisabled)
+		{
+			ThrowIfPGDuckResultHasError(conn, result);
+
+			for (int row = 0; row < PQntuples(result); row++)
+				urls = lappend(urls, pstrdup(PQgetvalue(result, row, 0)));
+		}
+	}
+	PG_FINALLY();
+	{
+		PQclear(result);
+	}
+	PG_END_TRY();
+
+	ListCell   *urlCell;
+
+	foreach(urlCell, urls)
+	{
+		char	   *escapedUrl = EscapeSingleQuotes(lfirst(urlCell));
+		char	   *sql = psprintf("SELECT removed FROM pg_lake_uncache_file('%s')",
+								   escapedUrl);
+		PGresult   *uncacheResult = ExecuteQueryOnPGDuckConnection(conn, sql);
+
+		CheckPGDuckResult(conn, uncacheResult);
+		PQclear(uncacheResult);
+
+		pfree(sql);
+		pfree(escapedUrl);
+	}
+
+	elog(DEBUG2, "evicted %d cached files under \"%s\" from pgduck_server",
+		 list_length(urls), scopePrefix);
+
+	pfree(query);
+	pfree(escapedScope);
 }

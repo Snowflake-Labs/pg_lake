@@ -178,8 +178,12 @@ def test_unsupported_format_version_still_refused(
     )
     _put(s3, bad_location, json.dumps(metadata).encode())
 
+    offset = server_log_offset()
     err = _data_files(superuser_conn, bad_location, raise_error=False)
     assert "unsupported iceberg format version 4" in str(err)
+    assert catalog_log_lines(offset) == [
+        "a table uses Iceberg format version 4, which pg_lake cannot read"
+    ]
 
 
 def test_manifest_without_sort_order_id_is_readable(
@@ -233,8 +237,12 @@ def test_deletion_vector_is_rejected(
     for manifest in _manifest_paths(table):
         _rewrite_manifest(s3, manifest, record_fn=as_deletion_vector)
 
+    offset = server_log_offset()
     err = _data_files(superuser_conn, table.metadata_location, raise_error=False)
     assert "deletion vectors are not supported" in str(err)
+    assert catalog_log_lines(offset) == [
+        "a table uses Iceberg deletion vectors, which pg_lake does not support"
+    ]
 
 
 def test_v3_column_default_is_rejected(
@@ -264,6 +272,10 @@ def test_v3_column_default_is_rejected(
     )
     _put(s3, default_location, json.dumps(metadata).encode())
 
+    offset = server_log_offset()
     err = _data_files(superuser_conn, default_location, raise_error=False)
     assert "column default values are not supported" in str(err)
     assert "city" in str(err)
+    assert catalog_log_lines(offset) == [
+        "a table uses Iceberg column default values, which pg_lake does not support"
+    ]

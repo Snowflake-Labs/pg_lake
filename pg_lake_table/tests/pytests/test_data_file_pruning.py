@@ -521,7 +521,9 @@ def test_pruning_for_edge_cases(
     pg_conn.commit()
 
 
-def test_pruning_for_null_values(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_null_values(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -597,7 +599,9 @@ def test_pruning_for_null_values(s3, pg_conn, extension, with_default_location):
     pg_conn.commit()
 
 
-def test_pruning_for_complex_filters(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_complex_filters(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -729,7 +733,9 @@ def test_pruning_for_complex_filters(s3, pg_conn, extension, with_default_locati
     pg_conn.commit()
 
 
-def test_pruning_for_non_ascii_chars(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_non_ascii_chars(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -782,7 +788,9 @@ def test_pruning_for_non_ascii_chars(s3, pg_conn, extension, with_default_locati
     pg_conn.commit()
 
 
-def test_pruning_with_add_drop_column(s3, pg_conn, extension, with_default_location):
+def test_pruning_with_add_drop_column(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -837,7 +845,9 @@ def test_pruning_with_add_drop_column(s3, pg_conn, extension, with_default_locat
     pg_conn.commit()
 
 
-def test_pruning_for_prepared_statement(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_prepared_statement(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows
@@ -976,7 +986,7 @@ def test_pruning_deletes(s3, pg_conn, extension, with_default_location):
     create_table_sql = f"""
         CREATE SCHEMA test_pruning_deletes;
         CREATE TABLE test_pruning_deletes.tbl (
-            col1 INT
+            col1 INT NOT NULL
         ) USING iceberg WITH (autovacuum_enabled='False');
 
         -- range of values
@@ -1130,6 +1140,116 @@ def test_pruning_deletes(s3, pg_conn, extension, with_default_location):
     pg_conn.commit()
 
 
+def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_location):
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_deletes_nulls;
+        CREATE TABLE test_pruning_deletes_nulls.tbl (
+            col1 INT
+        ) USING iceberg WITH (autovacuum_enabled='False');
+
+        -- min/max of the non-NULL values match, but the file also has a NULL
+        INSERT INTO test_pruning_deletes_nulls.tbl VALUES (1), (NULL);
+        INSERT INTO test_pruning_deletes_nulls.tbl VALUES (2), (3), (NULL);
+
+        CREATE VIEW test_pruning_deletes_nulls.positive AS
+        SELECT * FROM test_pruning_deletes_nulls.tbl WHERE col1 > 0;
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # column stats cannot prove that all rows match, so files must be scanned
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_nulls.tbl where col1 = 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+    assert int(fetch_data_files_skipped(results)) == 0
+
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_nulls.tbl where col1 > 0",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 2
+    assert int(fetch_data_files_skipped(results)) == 0
+
+    run_command("delete from test_pruning_deletes_nulls.tbl where col1 = 1", pg_conn)
+    run_command("delete from test_pruning_deletes_nulls.positive", pg_conn)
+    pg_conn.commit()
+
+    results = run_query(
+        "select count(*), count(col1) from test_pruning_deletes_nulls.tbl", pg_conn
+    )
+    assert results[0][0] == 2
+    assert results[0][1] == 0
+
+    # the remaining files are all NULL, but nullable columns never use stats
+    # for a full match, so IS NULL also has to scan the files
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_nulls.tbl where col1 is null",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 2
+    assert int(fetch_data_files_skipped(results)) == 0
+
+    run_command(
+        "delete from test_pruning_deletes_nulls.tbl where col1 is null", pg_conn
+    )
+    pg_conn.commit()
+
+    results = run_query("select count(*) from test_pruning_deletes_nulls.tbl", pg_conn)
+    assert results[0][0] == 0
+
+    run_command("DROP SCHEMA test_pruning_deletes_nulls CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_pruning_deletes_with_null_partition(
+    s3, pg_conn, extension, with_default_location
+):
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_deletes_null_part;
+        CREATE TABLE test_pruning_deletes_null_part.tbl (
+            col1 INT
+        ) USING iceberg WITH (autovacuum_enabled='False', partition_by='col1');
+
+        INSERT INTO test_pruning_deletes_null_part.tbl VALUES (1), (1);
+        INSERT INTO test_pruning_deletes_null_part.tbl VALUES (NULL), (NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # partition bounds account for NULL partition values, so the file in
+    # partition col1 = 1 is a full match even though col1 is nullable
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_null_part.tbl where col1 = 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 0
+    assert int(fetch_data_files_skipped(results)) == 1
+
+    run_command(
+        "delete from test_pruning_deletes_null_part.tbl where col1 = 1", pg_conn
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "select count(*), count(col1) from test_pruning_deletes_null_part.tbl", pg_conn
+    )
+    assert results[0][0] == 2
+    assert results[0][1] == 0
+
+    run_command("DROP SCHEMA test_pruning_deletes_null_part CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_pruning_deletes_trigger(s3, pg_conn, extension, with_default_location):
     explain_prefix = "EXPLAIN (verbose, format json, analyze) "
 
@@ -1183,7 +1303,9 @@ def test_pruning_deletes_trigger(s3, pg_conn, extension, with_default_location):
     pg_conn.commit()
 
 
-def test_pruning_for_joins(s3, pg_conn, extension, with_default_location):
+def test_pruning_for_joins(
+    s3, pg_conn, extension, with_default_location, create_helper_functions
+):
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "
 
     # Create table and insert rows

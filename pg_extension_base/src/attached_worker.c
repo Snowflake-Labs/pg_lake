@@ -31,6 +31,7 @@
 
 #include "access/htup_details.h"
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "catalog/pg_authid.h"
 #include "commands/dbcommands.h"
 #include "pg_extension_base/attached_worker.h"
@@ -74,7 +75,8 @@
 #define ATTACHED_WORKER_KEY_QUEUE		3
 #define ATTACHED_WORKER_KEY_FLAGS		4
 #define ATTACHED_WORKER_KEY_TUPLE_QUEUE	5
-#define ATTACHED_WORKER_NKEYS			6
+#define ATTACHED_WORKER_KEY_SEARCH_PATH	6
+#define ATTACHED_WORKER_NKEYS			7
 
 #define ATTACHED_WORKER_FLAG_RETURN_RESULTS	0x01
 #define ATTACHED_WORKER_FLAG_CALLER_WRITABLE	0x02
@@ -96,6 +98,9 @@ static char *ProcessProtocolMessages(AttachedWorker * worker, bool nowait,
 									 TupleDesc *resultDesc);
 static void ValidateWorkerTupleDesc(TupleDesc workerDesc, TupleDesc expectedDesc);
 static void ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue);
+static void ExecuteSqlStringInContext(const char *sql, MemoryContext parseContext,
+									  shm_mq_handle *tupleQueue,
+									  CommandDest commandDest);
 static void TrackLiveAttachedWorker(BackgroundWorkerHandle *workerHandle);
 static void RemoveAttachedWorkerHandle(BackgroundWorkerHandle *workerHandle);
 static void StopLiveAttachedWorkersAtExit(int code, Datum arg);
@@ -362,6 +367,17 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	if (!XactReadOnly)
 		flags |= ATTACHED_WORKER_FLAG_CALLER_WRITABLE;
 
+	/*
+	 * The worker resolves names through the caller's search_path, not the one
+	 * it would get from ALTER DATABASE/ROLE ... SET.  Those defaults are set
+	 * by the database owner, and the worker often runs as a more privileged
+	 * role than they are (callers use it to run commands as the superuser),
+	 * so an owner-set path could point an unqualified name in the command at
+	 * a function or operator of theirs.  The caller already chose the path
+	 * its command was written against, so the worker uses that one.
+	 */
+	char	   *searchPath = namespace_search_path;
+
 	/* estimate size of the background worker input */
 	shm_toc_estimator sharedMemoryEstimator;
 
@@ -369,6 +385,7 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(databaseName) + 1);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(userName) + 1);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(command) + 1);
+	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(searchPath) + 1);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, QUEUE_SIZE);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, sizeof(uint32));
 	if (flags & ATTACHED_WORKER_FLAG_RETURN_RESULTS)
@@ -399,6 +416,11 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 
 	strcpy(commandInShm, command);
 	shm_toc_insert(toc, ATTACHED_WORKER_KEY_COMMAND, commandInShm);
+
+	char	   *searchPathInShm = shm_toc_allocate(toc, strlen(searchPath) + 1);
+
+	strcpy(searchPathInShm, searchPath);
+	shm_toc_insert(toc, ATTACHED_WORKER_KEY_SEARCH_PATH, searchPathInShm);
 
 	/* set up the shared memory queue for responses */
 	shm_mq	   *outputQueue = shm_mq_create(shm_toc_allocate(toc, QUEUE_SIZE), QUEUE_SIZE);
@@ -933,6 +955,9 @@ AttachedWorkerMain(Datum mainArg)
 	char	   *databaseName = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_DATABASE, false);
 	char	   *userName = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_USERNAME, false);
 	char	   *command = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_COMMAND, false);
+
+	/* missing_ok, like the flags below, for a caller on an older library */
+	char	   *searchPath = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_SEARCH_PATH, true);
 	shm_mq	   *messageQueue = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_QUEUE, false);
 
 	/* Read flags (missing_ok for backward compatibility) */
@@ -985,6 +1010,14 @@ AttachedWorkerMain(Datum mainArg)
 		SetConfigOption("default_transaction_read_only", "off",
 						PGC_USERSET, PGC_S_SESSION);
 
+	/*
+	 * Use the caller's search_path (see StartAttachedWorkerInternal).  It is
+	 * set at session level, so it overrides ALTER DATABASE/ROLE ... SET, and
+	 * a COMMIT or ROLLBACK in the command cannot undo it.
+	 */
+	if (searchPath != NULL)
+		SetConfigOption("search_path", searchPath, PGC_USERSET, PGC_S_SESSION);
+
 	/* Start the transaction */
 	StartTransactionCommand();
 
@@ -1023,13 +1056,42 @@ ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue)
 {
 	/*
 	 * Create a memory context for parsing that survives commands that
-	 * internally commit.
+	 * internally commit.  Never freed: this backend exits after one command.
 	 */
 	MemoryContext parseContext = AllocSetContextCreate(TopMemoryContext,
 													   "pg_extension_base worker parse",
 													   ALLOCSET_DEFAULT_MINSIZE,
 													   ALLOCSET_DEFAULT_INITSIZE,
 													   ALLOCSET_DEFAULT_MAXSIZE);
+
+	ExecuteSqlStringInContext(sql, parseContext, tupleQueue, DestRemote);
+}
+
+/*
+ * ExecuteSqlStringDiscardingResults runs sql the way an attached worker runs
+ * its command, at top level and with results discarded, so that a lone CALL in
+ * it may commit.  For a backend that runs many commands over its life, such as
+ * a base worker.
+ *
+ * The caller must be in a transaction and outside any transaction block, and
+ * owns parseContext: it has to survive the command's own commits, and the
+ * caller resets it afterwards, whether or not the command succeeded.
+ */
+void
+ExecuteSqlStringDiscardingResults(const char *sql, MemoryContext parseContext)
+{
+	ExecuteSqlStringInContext(sql, parseContext, NULL, DestNone);
+}
+
+/*
+ * ExecuteSqlStringInContext keeps parse and plan trees in parseContext and
+ * sends command tags to commandDest: an attached worker's registrant reads
+ * them, and a backend with no client has nowhere to send them.
+ */
+static void
+ExecuteSqlStringInContext(const char *sql, MemoryContext parseContext,
+						  shm_mq_handle *tupleQueue, CommandDest commandDest)
+{
 	MemoryContext oldContext = MemoryContextSwitchTo(parseContext);
 
 	/*
@@ -1059,7 +1121,7 @@ ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue)
 
 		set_ps_display(GetCommandTagName(commandTag));
 
-		BeginCommand(commandTag, DestRemote);
+		BeginCommand(commandTag, commandDest);
 
 		/* Set up a snapshot if parse analysis/planning will need one. */
 		bool		snapshotSet = false;
@@ -1173,7 +1235,7 @@ ExecuteSqlString(const char *sql, shm_mq_handle *tupleQueue)
 		 * results.  The user backend will report these in the absence of any
 		 * true query results.
 		 */
-		EndCommand(&qc, DestRemote, false);
+		EndCommand(&qc, commandDest, false);
 
 		/* Clean up the portal. */
 		PortalDrop(portal, false);

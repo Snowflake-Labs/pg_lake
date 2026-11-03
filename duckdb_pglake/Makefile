@@ -74,11 +74,11 @@ UNAME_S := $(shell uname -s)
 
 # Detect number of cores
 ifeq ($(UNAME_S),Linux)
-	NCORES := $(shell nproc)
+  NCORES ?= $(shell nproc)
 else ifeq ($(UNAME_S),Darwin)
-	NCORES := $(shell sysctl hw.ncpu | awk '{print $$2}')
+  NCORES ?= $(shell sysctl hw.ncpu | awk '{print $$2}')
 else
-	NCORES := 4
+  NCORES ?= 4
 endif
 
 # Conditionally set the library name

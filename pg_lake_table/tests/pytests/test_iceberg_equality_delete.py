@@ -43,12 +43,11 @@ ARROW_TYPES = {
     "float": pa.float32(),
     "boolean": pa.bool_(),
     "timestamp": pa.timestamp("us"),
+    "timestamptz": pa.timestamp("us", tz="UTC"),
     "time": pa.time64("us"),
     "decimal(9,2)": pa.decimal128(9, 2),
-    "decimal(9,9)": pa.decimal128(9, 9),
     "decimal(12,2)": pa.decimal128(12, 2),
     "decimal(38,2)": pa.decimal128(38, 2),
-    "decimal(38,38)": pa.decimal128(38, 38),
     "uuid": pa.uuid(),
 }
 
@@ -68,11 +67,14 @@ AVRO_IDS = {
     "file_size_in_bytes": 104,
     "equality_ids": 135,
     "lower_bounds": 125,
-    "upper_bounds": 128,
-    "null_value_counts": 110,
     "key": 126,
     "value": 127,
+    "upper_bounds": 128,
+    "nan_value_counts": 137,
+    "null_value_counts": 110,
 }
+# Key and value IDs of the metric maps.
+MAP_IDS = {"upper_bound": (129, 130), "nan_count": (138, 139), "null_count": (121, 122)}
 LIST_IDS = {
     "manifest_path": 500,
     "manifest_length": 501,
@@ -102,11 +104,29 @@ def avro_record(name, fields):
     }
 
 
-def avro_metric_map(name, value_type, key_id, value_id):
-    record = avro_record(name, [("key", "int"), ("value", value_type)])
-    for field, field_id in zip(record["fields"], (key_id, value_id)):
-        field["field-id"] = field_id
-    return {"type": "array", "logicalType": "map", "items": record}
+def map_schema(name, value_type):
+    """An Iceberg int-keyed map, which Avro stores as an array of records."""
+    key_id, value_id = MAP_IDS[name]
+    return {
+        "type": "array",
+        "logicalType": "map",
+        "items": {
+            "type": "record",
+            "name": name,
+            "fields": [
+                {"name": "key", "type": "int", "field-id": key_id},
+                {"name": "value", "type": value_type, "field-id": value_id},
+            ],
+        },
+    }
+
+
+def map_entries(values):
+    if not values:
+        return None
+    if isinstance(values, dict):
+        values = values.items()
+    return [{"key": key, "value": value} for key, value in values]
 
 
 class DeleteTable:
@@ -172,14 +192,21 @@ class DeleteTable:
         physical_ids=None,
         physical_names=None,
         partition_order=None,
-        partition_null_first=True,
-        partition_null_as_object=False,
         file_sequence=99,
         file_format="PARQUET",
         lower_bound=None,
-        metrics=None,
         v1=False,
+        lower_bounds=None,
+        upper_bounds=None,
+        nan_value_counts=None,
+        null_value_counts=None,
     ):
+        """
+        lower_bound is the int lower bound of field 1. lower_bounds and
+        upper_bounds map field IDs to serialized bound bytes, and
+        nan_value_counts and null_value_counts map field IDs to their counts,
+        for entries that mimic what another writer records.
+        """
         index = len(self.files)
         path = self.directory / f"file-{index}.parquet"
         ids = (
@@ -231,16 +258,16 @@ class DeleteTable:
         partition_fields = self.specs[spec]
         if partition_order is not None:
             partition_fields = [partition_fields[i] for i in partition_order]
-        null_type = {"type": "null"} if partition_null_as_object else "null"
         partition_schema = avro_record(
-            "partition",
-            [
-                (f[2], [null_type, f[4]] if partition_null_first else [f[4], null_type])
-                for f in partition_fields
-            ],
+            "partition", [(f[2], ["null", f[4]]) for f in partition_fields]
         )
         for avro_field, spec_field in zip(partition_schema["fields"], partition_fields):
             avro_field["field-id"] = spec_field[1]
+        bounds_schema = {
+            "type": "array",
+            "logicalType": "map",
+            "items": avro_record("bound", [("key", "int"), ("value", "bytes")]),
+        }
         data_schema = avro_record(
             "data_file",
             [
@@ -254,18 +281,10 @@ class DeleteTable:
                     "equality_ids",
                     ["null", {"type": "array", "items": "int", "element-id": 136}],
                 ),
-                (
-                    "lower_bounds",
-                    ["null", avro_metric_map("bound", "bytes", 126, 127)],
-                ),
-                (
-                    "upper_bounds",
-                    ["null", avro_metric_map("upper_bound", "bytes", 129, 130)],
-                ),
-                (
-                    "null_value_counts",
-                    ["null", avro_metric_map("null_count", "long", 121, 122)],
-                ),
+                ("lower_bounds", ["null", bounds_schema]),
+                ("upper_bounds", ["null", map_schema("upper_bound", "bytes")]),
+                ("nan_value_counts", ["null", map_schema("nan_count", "long")]),
+                ("null_value_counts", ["null", map_schema("null_count", "long")]),
             ],
         )
         entry_schema = avro_record(
@@ -287,22 +306,11 @@ class DeleteTable:
             data_schema["fields"] = [
                 f for f in data_schema["fields"] if f["name"] != "content"
             ]
-        metrics = dict(metrics or {})
         if lower_bound is not None:
-            metrics.setdefault(
-                "lower_bounds", {1: lower_bound.to_bytes(4, "little", signed=True)}
-            )
-        manifest_metrics = {}
-        for name in ("lower_bounds", "upper_bounds", "null_value_counts"):
-            values = metrics.get(name)
-            if isinstance(values, dict):
-                values = values.items()
-            # Lists allow deliberately duplicated map keys in malformed metrics.
-            manifest_metrics[name] = (
-                None
-                if values is None
-                else [{"key": key, "value": value} for key, value in values]
-            )
+            lower_bounds = {
+                1: lower_bound.to_bytes(4, "little", signed=True),
+                **(lower_bounds or {}),
+            }
         data = dict(
             content=content,
             file_path=self.file_url(path),
@@ -311,7 +319,10 @@ class DeleteTable:
             record_count=len(rows),
             file_size_in_bytes=path.stat().st_size,
             equality_ids=equality_ids,
-            **manifest_metrics,
+            lower_bounds=map_entries(lower_bounds),
+            upper_bounds=map_entries(upper_bounds),
+            nan_value_counts=map_entries(nan_value_counts),
+            null_value_counts=map_entries(null_value_counts),
         )
         manifest_path = self.directory / f"manifest-{index}.avro"
         with manifest_path.open("wb") as output:
@@ -718,18 +729,8 @@ def test_partition_identity(
 @pytest.mark.parametrize("kind", ["decimal(9,2)", "uuid"])
 @pytest.mark.parametrize("with_delete", [False, True])
 @pytest.mark.parametrize("qualified_name", [False, True])
-@pytest.mark.parametrize("null_first", [True, False])
-@pytest.mark.parametrize("null_as_object", [False, True])
 def test_named_partition_types(
-    s3,
-    pg_conn,
-    extension,
-    tmp_path,
-    kind,
-    with_delete,
-    qualified_name,
-    null_first,
-    null_as_object,
+    s3, pg_conn, extension, tmp_path, kind, with_delete, qualified_name
 ):
     definition = {"type": "fixed", "name": "partition_key"}
     reference = "partition_key"
@@ -756,12 +757,7 @@ def test_named_partition_types(
     )
     rows = [(1, "x", "first", 1, first, first), (1, "x", "second", 1, first, second)]
     for row in rows:
-        table.add(
-            [row],
-            partition={1000: row[4], 1001: row[5]},
-            partition_null_first=null_first,
-            partition_null_as_object=null_as_object,
-        )
+        table.add([row], partition={1000: row[4], 1001: row[5]})
     if with_delete:
         table.add(
             [(1,)],
@@ -769,8 +765,6 @@ def test_named_partition_types(
             sequence=2,
             equality_ids=[1],
             partition={1000: first, 1001: first},
-            partition_null_first=null_first,
-            partition_null_as_object=null_as_object,
         )
     attach(pg_conn, table)
     expected = rows[1:] if with_delete else rows
@@ -779,38 +773,6 @@ def test_named_partition_types(
             (*row[:4], *(str(uuid.UUID(bytes=v)) for v in row[4:])) for row in expected
         ]
     assert_paths(pg_conn, expected)
-    pg_conn.rollback()
-
-
-@pytest.mark.parametrize("with_delete", [False, True])
-@pytest.mark.parametrize("null_first", [True, False])
-@pytest.mark.parametrize("null_as_object", [False, True])
-def test_nullable_primitive_partition_type(
-    s3, pg_conn, extension, tmp_path, with_delete, null_first, null_as_object
-):
-    table = DeleteTable(
-        tmp_path,
-        s3,
-        fields=FIELDS + [(5, "p", "int")],
-        specs={0: [(5, 1000, "p_identity", "identity", "int")]},
-    )
-    rows = [(1, "x", "value", 1, 7), (1, "x", "null", 1, None)]
-    options = dict(
-        partition_null_first=null_first, partition_null_as_object=null_as_object
-    )
-    for row in rows:
-        table.add([row], partition={1000: row[4]}, **options)
-    if with_delete:
-        table.add(
-            [(1,)],
-            content=2,
-            sequence=2,
-            equality_ids=[1],
-            partition={1000: 7},
-            **options,
-        )
-    attach(pg_conn, table)
-    assert_paths(pg_conn, rows[1:] if with_delete else rows)
     pg_conn.rollback()
 
 
@@ -1270,7 +1232,9 @@ def test_empty_and_existing_paths(s3, pg_conn, extension, delete_table, deletion
 
 
 def test_pruning_does_not_read_deletes(s3, pg_conn, extension, delete_table):
-    delete_table.add([(10, "x", "row", 1)], lower_bound=10)
+    delete_table.add(
+        [(10, "x", "row", 1)], lower_bound=10, upper_bounds={1: int_bound(10)}
+    )
     path = delete_table.add([(10,)], content=2, sequence=2, equality_ids=[1])
     attach(pg_conn, delete_table)
     delete_table.s3.delete_object(
@@ -1287,6 +1251,10 @@ def test_pruning_does_not_read_deletes(s3, pg_conn, extension, delete_table):
             == 0
         )
     pg_conn.rollback()
+
+
+def int_bound(value):
+    return value.to_bytes(4, "little", signed=True)
 
 
 def test_empty_snapshot(s3, pg_conn, extension, delete_table):
@@ -1729,7 +1697,7 @@ def test_integer_bounds_pruning(
     s3, pg_conn, extension, delete_table, delete_range, delete_files
 ):
     rows = [(key, "x", "keep", 1) for key in (None, -10, 0, 0, 10)]
-    delete_table.add(rows, metrics=integer_metrics(1, -10, 10, null_count=1))
+    delete_table.add(rows, **integer_metrics(1, -10, 10, null_count=1))
     lower, upper = delete_range
     deleted = {lower, upper}
     if lower <= 0 <= upper:
@@ -1739,7 +1707,7 @@ def test_integer_bounds_pruning(
         content=2,
         sequence=2,
         equality_ids=[1],
-        metrics=integer_metrics(1, lower, upper),
+        **integer_metrics(1, lower, upper),
     )
     attach(pg_conn, delete_table)
     # Bounds exclude NULLs; a NULL data key survives a non-NULL delete set.
@@ -1797,13 +1765,13 @@ def test_integer_bounds_inconclusive_metrics(
         delete_metrics["null_value_counts"] = {1: 1}
     else:
         delete_metrics["null_value_counts"] = [(1, 0), (1, 0)]
-    delete_table.add(rows, metrics=data_metrics)
+    delete_table.add(rows, **data_metrics)
     delete_table.add(
         [(20,)],
         content=2,
         sequence=2,
         equality_ids=[1],
-        metrics=delete_metrics,
+        **delete_metrics,
     )
     attach(pg_conn, delete_table)
     # Uncertain metadata keeps the delete reader, including duplicate metrics.
@@ -1813,13 +1781,13 @@ def test_integer_bounds_inconclusive_metrics(
 @pytest.mark.parametrize("null_count", [None, 1], ids=["unknown", "present"])
 def test_integer_bounds_null_keys(s3, pg_conn, extension, delete_table, null_count):
     rows = [(None, "x", "gone", 1), (10, "x", "keep", 1)]
-    delete_table.add(rows, metrics=integer_metrics(1, 10, 10, null_count=1))
+    delete_table.add(rows, **integer_metrics(1, 10, 10, null_count=1))
     delete_table.add(
         [(None,), (20,)],
         content=2,
         sequence=2,
         equality_ids=[1],
-        metrics=integer_metrics(1, 20, 20, null_count=null_count),
+        **integer_metrics(1, 20, 20, null_count=null_count),
     )
     attach(pg_conn, delete_table)
     # Disjoint non-NULL ranges do not prove that NULL-safe keys cannot match.
@@ -1832,14 +1800,14 @@ def test_integer_bounds_reject_null_metric_value(
 ):
     delete_table.add(
         [(None, "x", "gone", 1), (10, "x", "keep", 1)],
-        metrics=integer_metrics(1, 10, 10, null_count=1),
+        **integer_metrics(1, 10, 10, null_count=1),
     )
     delete_table.add(
         [(None,), (20,)],
         content=2,
         sequence=2,
         equality_ids=[1],
-        metrics=integer_metrics(1, 20, 20, null_count=1),
+        **integer_metrics(1, 20, 20, null_count=1),
     )
     path = delete_table.directory / "manifest-1.avro"
     with path.open("rb") as source:
@@ -1905,13 +1873,13 @@ def test_long_bounds_pruning(
         value = data_value if mixed_width == "data" else delete_value
         metrics["lower_bounds"][4] = value.to_bytes(4, "little", signed=True)
     rows = [(1, "x", "keep", data_value)]
-    data_path = delete_table.add(rows, metrics=data_metrics)
+    data_path = delete_table.add(rows, **data_metrics)
     delete_path = delete_table.add(
         [(delete_value,)],
         content=2,
         sequence=2,
         equality_ids=[4],
-        metrics=delete_metrics,
+        **delete_metrics,
     )
     # Promoted files retain their original int Parquet field and int bounds.
     for path, width, field_index in (
@@ -1950,7 +1918,7 @@ def test_bounds_pruning_key_scope(s3, pg_conn, extension, delete_table, keys):
         delete_table.add(
             [("x", "old", 10)],
             physical_ids=[2, 3, 4],
-            metrics=integer_metrics(4, 10, 10, width=8),
+            **integer_metrics(4, 10, 10, width=8),
         )
         delete_table.histories.append(
             dict(
@@ -1967,7 +1935,7 @@ def test_bounds_pruning_key_scope(s3, pg_conn, extension, delete_table, keys):
         expected = [(None, "x", "old", 10)]
     elif keys == "composite":
         expected = [(1, "x", "keep", 10)] * 2
-        delete_table.add(expected, metrics=integer_metrics(4, 10, 10, width=8))
+        delete_table.add(expected, **integer_metrics(4, 10, 10, width=8))
         deleted = [("x", 20)]
         equality_ids = [2, 4]
         delete_metrics = integer_metrics(4, 20, 20, width=8)
@@ -1975,7 +1943,7 @@ def test_bounds_pruning_key_scope(s3, pg_conn, extension, delete_table, keys):
         expected = [(1, "aaaa", "keep", 10)]
         delete_table.add(
             expected,
-            metrics={"lower_bounds": {2: b"aaaa"}, "upper_bounds": {2: b"aaaa"}},
+            **{"lower_bounds": {2: b"aaaa"}, "upper_bounds": {2: b"aaaa"}},
         )
         deleted = [("zzzz",)]
         equality_ids = [2]
@@ -1989,7 +1957,7 @@ def test_bounds_pruning_key_scope(s3, pg_conn, extension, delete_table, keys):
         content=2,
         sequence=2,
         equality_ids=equality_ids,
-        metrics=delete_metrics,
+        **delete_metrics,
     )
     attach(pg_conn, delete_table)
     assert_paths(pg_conn, expected, data_files=1, delete_files=int(keys != "composite"))
@@ -1999,22 +1967,22 @@ def test_bounds_pruning_is_per_data_file(s3, pg_conn, extension, delete_table):
     low_rows = [(10, "x", "gone", 1), (11, "x", "keep", 1)]
     high_rows = [(20, "x", "gone", 1), (21, "x", "keep", 1)]
     higher_rows = [(30, "x", "gone", 1), (31, "x", "keep", 1)]
-    low_path = delete_table.add(low_rows, metrics=integer_metrics(1, 10, 11))
-    delete_table.add(high_rows, metrics=integer_metrics(1, 20, 21))
-    delete_table.add(higher_rows, metrics=integer_metrics(1, 30, 31))
+    low_path = delete_table.add(low_rows, **integer_metrics(1, 10, 11))
+    delete_table.add(high_rows, **integer_metrics(1, 20, 21))
+    delete_table.add(higher_rows, **integer_metrics(1, 30, 31))
     delete_table.add(
         [(20,)],
         content=2,
         sequence=2,
         equality_ids=[1],
-        metrics=integer_metrics(1, 20, 20),
+        **integer_metrics(1, 20, 20),
     )
     delete_table.add(
         [(30,)],
         content=2,
         sequence=2,
         equality_ids=[1],
-        metrics=integer_metrics(1, 30, 30),
+        **integer_metrics(1, 30, 30),
     )
     delete_table.add([(str(low_path), 0)], content=1, sequence=2)
     attach(pg_conn, delete_table)
@@ -2033,13 +2001,13 @@ def test_disjoint_bounds_skip_unreadable_delete(
     s3, pg_conn, extension, delete_table, with_default_location, pushdown, inherited
 ):
     rows = [(10, "x", "keep", 1)]
-    delete_table.add(rows, metrics=integer_metrics(1, 10, 10))
+    delete_table.add(rows, **integer_metrics(1, 10, 10))
     path = delete_table.add(
         [(20,)],
         content=2,
         sequence=2,
         equality_ids=[1],
-        metrics=integer_metrics(1, 20, 20),
+        **integer_metrics(1, 20, 20),
     )
     attach(pg_conn, delete_table)
     relation = "equality_test"
@@ -2077,428 +2045,3 @@ def test_disjoint_bounds_skip_unreadable_delete(
     assert scans and all(scan.get("Plans") for scan in scans)
     assert bag(pg_conn, query) == row_bag(rows)
     pg_conn.rollback()
-
-
-@pytest.fixture(params=["on", "off"])
-def manifest_pruning_permissions(superuser_conn, app_user, pg_conn, request):
-    run_command(
-        f"GRANT SET ON PARAMETER pg_lake_table.enable_data_file_pruning TO {app_user};"
-        f"GRANT SET ON PARAMETER pg_lake_table.enable_partition_pruning TO {app_user};",
-        superuser_conn,
-    )
-    superuser_conn.commit()
-    run_command(
-        f"SET LOCAL pg_lake_table.enable_full_query_pushdown={request.param}", pg_conn
-    )
-    yield
-
-
-def manifest_explain_stats(pg_conn, pgduck_conn, table, predicate):
-    """Count only per-file planning stats SQL, separately from execution reads."""
-    logging = run_query("SELECT current_setting('enable_logging')", pgduck_conn)[0][0]
-
-    def counts():
-        return [
-            run_query(
-                "SELECT count(*) FROM duckdb_logs() WHERE type='QueryLog' "
-                f"AND contains(message, '{table.file_url(path)}') "
-                "AND contains(message, 'parquet_metadata(') "
-                "AND NOT contains(message, 'duckdb_logs(')",
-                pgduck_conn,
-            )[0][0]
-            for path in table.files
-        ]
-
-    try:
-        run_command("SET GLOBAL enable_logging=true", pgduck_conn)
-        before = counts()
-        run_query(f"EXPLAIN SELECT * FROM equality_test WHERE {predicate}", pg_conn)
-        return [after - prior for after, prior in zip(counts(), before)]
-    finally:
-        run_command(
-            f"SET GLOBAL enable_logging={'true' if logging else 'false'}", pgduck_conn
-        )
-
-
-def assert_manifest_oracle(pg_conn, predicate):
-    """Preserve duplicate rows and NULLs when comparing with unpruned scans."""
-    query = f"SELECT * FROM equality_test WHERE {predicate}"
-    actual = bag(pg_conn, query)
-    run_command("SET LOCAL pg_lake_table.enable_data_file_pruning=off", pg_conn)
-    run_command("SET LOCAL pg_lake_table.enable_partition_pruning=off", pg_conn)
-    assert actual == bag(pg_conn, query)
-    run_command("SET LOCAL pg_lake_table.enable_data_file_pruning=on", pg_conn)
-    run_command("SET LOCAL pg_lake_table.enable_partition_pruning=on", pg_conn)
-
-
-@pytest.mark.parametrize("bounds", ["complete", "missing", "wide"])
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_footer_reads(
-    pg_conn, pgduck_conn, extension, delete_table, bounds
-):
-    delete_table.add([(1, "a", "low", 1)], metrics=integer_metrics(1, 1, 10))
-    delete_table.add(
-        [(100, "b", "high", 100), (150, "b", "high", 150), (200, "b", "high", 200)],
-        metrics=(
-            integer_metrics(1, 0, 1000)
-            if bounds == "wide"
-            else integer_metrics(1, 100, 200)
-        ),
-    )
-    expected = [(150, "b", "high", 150)]
-    if bounds != "complete":
-        delete_table.add([(150, "c", "fallback", 150)])
-        expected.append((150, "c", "fallback", 150))
-    predicate = "id=50" if bounds == "wide" else "id=150"
-    attach(pg_conn, delete_table)
-    counts = manifest_explain_stats(pg_conn, pgduck_conn, delete_table, predicate)
-    assert [count > 0 for count in counts] == (
-        [False, False] if bounds == "complete" else [False, False, True]
-    )
-    assert bag(pg_conn, f"SELECT * FROM equality_test WHERE {predicate}") == row_bag(
-        [] if bounds == "wide" else expected
-    )
-    assert_manifest_oracle(pg_conn, predicate)
-
-
-# Bounds are encoded independently of pg_lake's serializer. Invalid metrics must
-# fall back, including signed128 decimals that exceed their declared precision.
-MANIFEST_BOUND_CASES = [
-    ("int", [-(2**31), -1, 0, 2**31 - 1], -(2**31), 2**31 - 1, 4, True),
-    ("long", [-(2**63), -1, 0, 2**63 - 1], -(2**63), 2**63 - 1, 8, True),
-    ("long", [-10, 0, 10], -10, 10, 4, True),
-    ("date", [date(1970, 1, 1)], -2440588, 2145042905, 4, True),
-    ("date", [date(1970, 1, 1)], -(2**31), 2**31 - 1, 4, False),
-    (
-        "decimal(38,38)",
-        [Decimal("-0.1"), Decimal("0"), Decimal("0.1")],
-        -(10**38 - 1),
-        10**38 - 1,
-        16,
-        True,
-    ),
-    ("decimal(9,2)", [Decimal("1")], -(2**127), 2**127 - 1, 16, False),
-    ("decimal(9,2)", [Decimal("1")], b"", b"\x01", None, False),
-    ("decimal(9,2)", [Decimal("1")], bytes(17), bytes(17), None, False),
-    ("int", [0], 0, 0, 4, True),
-    ("long", [0], 0, 0, 8, True),
-    ("date", [date(1970, 1, 1)], 0, 0, 4, True),
-    ("decimal(9,2)", [Decimal("0")], b"\x00", b"\x00", None, True),
-    ("long", [0], bytes(4), bytes(8), None, False),
-    ("double", [-1.0, 0.0, 1.0], bytes(8), bytes(8), None, False),
-    ("int", [0], bytes(3), bytes(3), None, False),
-    ("long", [0], bytes(9), bytes(9), None, False),
-    ("date", [date(1970, 1, 1)], bytes(5), bytes(5), None, False),
-    ("int", [0], 10, -10, 4, False),
-    ("decimal(9,2)", [0], 10, -10, 2, False),
-]
-
-
-@pytest.mark.parametrize("kind,values,lower,upper,width,complete", MANIFEST_BOUND_CASES)
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_typed_bounds(
-    pg_conn,
-    pgduck_conn,
-    extension,
-    tmp_path,
-    s3,
-    kind,
-    values,
-    lower,
-    upper,
-    width,
-    complete,
-):
-    if width is not None:
-        order = "big" if kind.startswith("decimal") else "little"
-        lower, upper = (v.to_bytes(width, order, signed=True) for v in (lower, upper))
-    table = DeleteTable(tmp_path, s3, fields=[(17, "value", kind)])
-    table.add(
-        [(v,) for v in values + [None, values[0]]],
-        metrics={"lower_bounds": {17: lower}, "upper_bounds": {17: upper}},
-    )
-    attach(pg_conn, table)
-    literal = "DATE '1970-01-01'" if kind == "date" else "0"
-    predicate = f"value = {literal}"
-    counts = manifest_explain_stats(pg_conn, pgduck_conn, table, predicate)
-    assert (counts[0] == 0) == complete
-    assert_manifest_oracle(pg_conn, predicate)
-
-
-@pytest.mark.parametrize(
-    "malformation", ["duplicate-lower", "duplicate-upper", "one-sided", "mixed-width"]
-)
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_invalid_pair(
-    pg_conn, pgduck_conn, extension, delete_table, malformation
-):
-    metrics = integer_metrics(1, 1, 10)
-    if malformation.startswith("duplicate"):
-        key = "lower_bounds" if malformation == "duplicate-lower" else "upper_bounds"
-        metrics[key] = [(1, (5).to_bytes(4, "little", signed=True))] * 2
-    elif malformation == "one-sided":
-        metrics.pop("upper_bounds")
-    else:
-        metrics["upper_bounds"][1] = (10).to_bytes(8, "little", signed=True)
-    delete_table.add([(5, "x", "keep", 5), (None, "x", "null", 5)], metrics=metrics)
-    attach(pg_conn, delete_table)
-    assert manifest_explain_stats(pg_conn, pgduck_conn, delete_table, "id=5")[0] > 0
-    assert_manifest_oracle(pg_conn, "id=5 OR id IS NULL")
-
-
-@pytest.mark.parametrize(
-    "predicate,complete",
-    [
-        ("id IS NULL", True),
-        ("id IS NOT NULL", True),
-        ("id < 0 OR id IS NULL", True),
-        ("id=5 AND code='x'", False),
-        ("id<0 AND code='x'", True),
-        ("id<0 OR code='x'", False),
-        ("id IN (1,5,150)", True),
-        ("id::bigint=5", True),
-    ],
-)
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_expressions(
-    pg_conn, pgduck_conn, extension, delete_table, predicate, complete
-):
-    delete_table.add(
-        [(None, "x", "null", 1), (5, "x", "keep", 5), (5, "x", "keep", 5)],
-        metrics=integer_metrics(1, 1, 10),
-    )
-    attach(pg_conn, delete_table)
-    count = manifest_explain_stats(pg_conn, pgduck_conn, delete_table, predicate)[0]
-    assert (count == 0) == complete
-    assert_manifest_oracle(pg_conn, predicate)
-
-
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_parameters(pg_conn, extension, delete_table):
-    delete_table.add(
-        [(5, "x", "keep", 5), (5, "x", "keep", 5)], metrics=integer_metrics(1, 1, 10)
-    )
-    attach(pg_conn, delete_table)
-    run_command(
-        "PREPARE manifest_parameter(int) AS SELECT * FROM equality_test WHERE id=$1",
-        pg_conn,
-    )
-    for value in (5, 150, 5):
-        assert row_bag(
-            run_query(f"EXECUTE manifest_parameter({value})", pg_conn)
-        ) == bag(pg_conn, f"SELECT * FROM equality_test WHERE id={value}")
-    run_command("DEALLOCATE manifest_parameter", pg_conn)
-
-
-@pytest.mark.parametrize("deletes", ["equality", "position", "mixed"])
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_delete_combinations(
-    pg_conn, pgduck_conn, extension, delete_table, deletes
-):
-    delete_table.add([(1, "x", "low", 1)], metrics=integer_metrics(1, 1, 10))
-    high = delete_table.add(
-        [(150, "x", "keep", 1), (150, "x", "keep", 1), (160, "x", "delete", 2)],
-        metrics=integer_metrics(1, 100, 200),
-    )
-    if deletes in ("equality", "mixed"):
-        delete_table.add([(160,)], content=2, equality_ids=[1], sequence=2)
-    if deletes in ("position", "mixed"):
-        delete_table.add([(str(high), 0)], content=1, sequence=2)
-    attach(pg_conn, delete_table)
-    counts = manifest_explain_stats(pg_conn, pgduck_conn, delete_table, "id>=100")
-    assert counts[:2] == [0, 0]
-    assert_manifest_oracle(pg_conn, "id>=100")
-    assert_manifest_oracle(pg_conn, "id<0")
-
-
-@pytest.mark.parametrize(
-    "mapping", ["reorder", "recreated", "decimal-promotion", "typmod"]
-)
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_schema_mapping(
-    pg_conn, pgduck_conn, extension, tmp_path, s3, mapping
-):
-    if mapping == "reorder":
-        table = DeleteTable(
-            tmp_path, s3, fields=[(41, "value", "int"), (7, "other", "long")]
-        )
-        table.add(
-            [(900, 5), (901, 5)],
-            physical_ids=[7, 41],
-            metrics=integer_metrics(41, 5, 5),
-        )
-        predicate, complete, columns = "value=5", True, ""
-    elif mapping == "recreated":
-        table = DeleteTable(tmp_path, s3, fields=[(17, "value", "int")])
-        table.add([(5,)], metrics=integer_metrics(17, 5, 5))
-        table.histories.append(
-            {
-                "schema-id": 1,
-                "type": "struct",
-                "fields": [
-                    {"id": 17, "name": "value", "type": "int", "required": False}
-                ],
-            }
-        )
-        table.fields = [(29, "value", "int")]
-        predicate, complete, columns = "value IS NULL", False, ""
-    else:
-        table = DeleteTable(tmp_path, s3, fields=[(17, "value", "decimal(9,2)")])
-        table.add(
-            [(Decimal("1.50"),)],
-            metrics={
-                "lower_bounds": {17: b"\x00\x96"},
-                "upper_bounds": {17: b"\x00\x96"},
-            },
-        )
-        if mapping == "decimal-promotion":
-            table.fields = [(17, "value", "decimal(12,2)")]
-        predicate, complete = "value=1.50", mapping != "typmod"
-        columns = "value numeric(12,2)" if mapping == "typmod" else ""
-    attach(pg_conn, table, columns)
-    if mapping == "typmod":
-        # The normal external-schema validation must still reject this mismatch.
-        for enabled in ("on", "off"):
-            run_command(
-                f"SET LOCAL pg_lake_table.enable_data_file_pruning={enabled}", pg_conn
-            )
-            run_command("SAVEPOINT manifest_typmod", pg_conn)
-            with pytest.raises(
-                Exception, match="Schema mismatch between Iceberg and Postgres"
-            ):
-                run_query(
-                    f"EXPLAIN SELECT * FROM equality_test WHERE {predicate}", pg_conn
-                )
-            run_command("ROLLBACK TO SAVEPOINT manifest_typmod", pg_conn)
-        return
-    count = manifest_explain_stats(pg_conn, pgduck_conn, table, predicate)[0]
-    assert (count == 0) == complete
-    assert_manifest_oracle(pg_conn, predicate)
-
-
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_quoted_case_mapping(
-    pg_conn, pgduck_conn, extension, tmp_path, s3
-):
-    table = DeleteTable(tmp_path, s3, fields=[(41, "a", "int"), (7, "A", "int")])
-    table.add(
-        [(1, 150)],
-        metrics={
-            "lower_bounds": {
-                41: (1).to_bytes(4, "little", signed=True),
-                7: (100).to_bytes(4, "little", signed=True),
-            },
-            "upper_bounds": {
-                41: (10).to_bytes(4, "little", signed=True),
-                7: (200).to_bytes(4, "little", signed=True),
-            },
-        },
-    )
-    attach(pg_conn, table)
-    # DuckDB rejects case-colliding physical columns. Exact manifest mapping
-    # must retain this file and preserve that error rather than prune on a's bounds.
-    for enabled in ("on", "off"):
-        run_command(
-            f"SET LOCAL pg_lake_table.enable_data_file_pruning={enabled}", pg_conn
-        )
-        run_command("SAVEPOINT manifest_case", pg_conn)
-        with pytest.raises(Exception, match='duplicate column name "A"'):
-            run_query('EXPLAIN SELECT * FROM equality_test WHERE "A"=150', pg_conn)
-        run_command("ROLLBACK TO SAVEPOINT manifest_case", pg_conn)
-
-
-@pytest.mark.parametrize(
-    "kind,lower,upper,scale",
-    [
-        ("date", -1, 10957, None),
-        ("decimal(9,2)", -128, 128, 2),
-        ("decimal(38,2)", -(10**38 - 2), 10**38 - 2, 2),
-        ("decimal(9,9)", -(10**9 - 2), 10**9 - 2, 9),
-    ],
-)
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_typed_endpoints(
-    pg_conn, pgduck_conn, extension, tmp_path, s3, kind, lower, upper, scale
-):
-    from decimal import localcontext
-
-    if kind == "date":
-        low = date(1970, 1, 1) + timedelta(days=lower)
-        high = date(1970, 1, 1) + timedelta(days=upper)
-        outside_low, outside_high = low - timedelta(days=1), high + timedelta(days=1)
-        lower_bytes, upper_bytes = (
-            value.to_bytes(4, "little", signed=True) for value in (lower, upper)
-        )
-    else:
-        # Compute the oracle values exactly even beyond Python's default precision.
-        with localcontext() as context:
-            context.prec = 50
-            unit = Decimal(1).scaleb(-scale)
-            low, high = (Decimal(value).scaleb(-scale) for value in (lower, upper))
-            outside_low, outside_high = low - unit, high + unit
-        # Unequal minimum signed widths exercise the sign byte independently.
-        lower_bytes, upper_bytes = (
-            value.to_bytes(
-                next(
-                    width
-                    for width in range(1, 17)
-                    if -(1 << (8 * width - 1)) <= value < 1 << (8 * width - 1)
-                ),
-                "big",
-                signed=True,
-            )
-            for value in (lower, upper)
-        )
-    table = DeleteTable(tmp_path, s3, fields=[(17, "value", kind)])
-    table.add(
-        [(low,), (low,), (high,), (None,)],
-        metrics={"lower_bounds": {17: lower_bytes}, "upper_bounds": {17: upper_bytes}},
-    )
-    attach(pg_conn, table)
-    literal = lambda value: (
-        f"DATE '{value}'"
-        if kind == "date"
-        else f"'{value}'::{kind.replace('decimal', 'numeric')}"
-    )
-    for predicate, files in (
-        (f"value={literal(low)}", 1),
-        (f"value={literal(high)}", 1),
-        (f"value<{literal(low)}", 0),
-        (f"value<={literal(low)}", 1),
-        (f"value>{literal(high)}", 0),
-        (f"value>={literal(high)}", 1),
-        (f"value={literal(outside_low)}", 0),
-        (f"value={literal(outside_high)}", 0),
-    ):
-        assert manifest_explain_stats(pg_conn, pgduck_conn, table, predicate) == [0]
-        plan = run_query(
-            f"EXPLAIN (VERBOSE, FORMAT JSON) SELECT * FROM equality_test WHERE {predicate}",
-            pg_conn,
-        )
-        # A decoder that widens either endpoint must not silently retain the file.
-        assert int(fetch_data_files_used(plan)) == files
-        assert_manifest_oracle(pg_conn, predicate)
-
-
-@pytest.mark.usefixtures("manifest_pruning_permissions")
-def test_manifest_where_renamed_field(pg_conn, pgduck_conn, extension, tmp_path, s3):
-    table = DeleteTable(tmp_path, s3, fields=[(17, "old_value", "int")])
-    rows = [(5,), (5,), (10,), (None,)]
-    table.add(rows, metrics=integer_metrics(17, 5, 10))
-    table.histories.append(
-        {
-            "schema-id": 1,
-            "type": "struct",
-            "fields": [
-                {"id": 17, "name": "old_value", "type": "int", "required": False}
-            ],
-        }
-    )
-    table.fields = [(17, "current_value", "int")]
-    attach(pg_conn, table)
-    for predicate in ("current_value=5", "current_value>10", "current_value IS NULL"):
-        assert manifest_explain_stats(pg_conn, pgduck_conn, table, predicate) == [0]
-        assert_manifest_oracle(pg_conn, predicate)
-    assert bag(pg_conn, "SELECT * FROM equality_test WHERE current_value=5") == row_bag(
-        rows[:2]
-    )

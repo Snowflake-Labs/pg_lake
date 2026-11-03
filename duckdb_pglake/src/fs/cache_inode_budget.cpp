@@ -52,7 +52,7 @@ static const int64_t MIN_FREE_INODES_AUTO = -1;
  * DEFAULT_MAX_FREE_INODES, and never more than half of the inodes on the file
  * system.
  */
-static const int64_t DEFAULT_FREE_INODE_FRACTION = 100;
+static const int64_t DEFAULT_FREE_INODE_FRACTION = 20;
 static const int64_t DEFAULT_MIN_FREE_INODES = 1000;
 static const int64_t DEFAULT_MAX_FREE_INODES = 100000;
 
@@ -196,7 +196,7 @@ TryGetInodeStats(const string &path, int64_t &freeInodes, int64_t &totalInodes)
  *
  * Running out of inodes is an absolute condition rather than a relative one, so
  * the fraction also gets an absolute bound: on a file system with 100M inodes,
- * 1% would mean declaring inode pressure while a million of them are still
+ * 5% would mean declaring inode pressure while 5 million of them are still
  * available, which is plenty for a cache that adds files in batches of at most
  * a few thousand per round.
  *
@@ -217,6 +217,36 @@ DeriveInodeFloor(int64_t totalInodes)
 		inodeFloor = totalInodes / 2;
 
 	return inodeFloor;
+}
+
+
+/*
+ * DerivePurgeTarget chooses the target from the file system's inode count,
+ * bounded by absolute limits and never below an explicit floor.
+ */
+static const int64_t DEFAULT_PURGE_FRACTION = 4;
+static const int64_t DEFAULT_MIN_PURGE_TARGET = 5000;
+static const int64_t DEFAULT_MAX_PURGE_TARGET = 500000;
+
+static int64_t
+DerivePurgeTarget(int64_t totalInodes, int64_t floor)
+{
+	int64_t purgeTarget = totalInodes / DEFAULT_PURGE_FRACTION;
+
+	if (purgeTarget < DEFAULT_MIN_PURGE_TARGET)
+		purgeTarget = DEFAULT_MIN_PURGE_TARGET;
+
+	if (purgeTarget > DEFAULT_MAX_PURGE_TARGET)
+		purgeTarget = DEFAULT_MAX_PURGE_TARGET;
+
+	if (purgeTarget > totalInodes / 2)
+		purgeTarget = totalInodes / 2;
+
+	/* an explicit, small pg_lake_min_free_cache_inodes still has to win */
+	if (purgeTarget < floor)
+		purgeTarget = floor;
+
+	return purgeTarget;
 }
 
 
@@ -350,13 +380,24 @@ GetInodeBudget(ClientContext &context, FileSystem &fileSystem,
 		return budget;
 
 	int64_t minFreeInodes = GetMinFreeInodes(context);
+	bool isAutoFloor = minFreeInodes == MIN_FREE_INODES_AUTO;
 
-	budget.floor = minFreeInodes == MIN_FREE_INODES_AUTO ?
+	budget.floor = isAutoFloor ?
 		DeriveInodeFloor(budget.totalInodes) : minFreeInodes;
 
 	if (budget.floor <= 0)
 		/* inode management is off, so there is nothing left to count */
 		return budget;
+
+	/*
+	 * Only widen the target past the floor for the derived AUTO floor.
+	 * Somebody who names an explicit pg_lake_min_free_cache_inodes picked that
+	 * number on purpose (as does this file's own inode-pressure test, which
+	 * sizes a floor its padding can just reach) and evicting past it would
+	 * defeat the point of naming it.
+	 */
+	budget.purgeTarget = isAutoFloor ?
+		DerivePurgeTarget(budget.totalInodes, budget.floor) : budget.floor;
 
 	int64_t queuedFiles = 0;
 
@@ -404,13 +445,15 @@ LogInodePressure(const string &cacheDir, InodeBudget budget,
 
 	PGDUCK_SERVER_LOG("cache directory %s is low on inodes: %" PRIu64
 					  "/%" PRIu64 " available, keeping %" PRIu64
-					  " available; freed %" PRIu64 " inodes this round by "
+					  " available (evicting toward %" PRIu64
+					  "); freed %" PRIu64 " inodes this round by "
 					  "evicting %" PRIu64 " files and %" PRIu64 " empty "
 					  "directories%s",
 					  cacheDir.c_str(),
 					  (uint64_t) budget.freeInodes,
 					  (uint64_t) budget.totalInodes,
 					  (uint64_t) budget.floor,
+					  (uint64_t) budget.purgeTarget,
 					  (uint64_t) budget.freed,
 					  (uint64_t) evictedFiles,
 					  (uint64_t) prunedDirectories,

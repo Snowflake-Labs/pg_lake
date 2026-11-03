@@ -46,6 +46,7 @@
 #include "nodes/nodeFuncs.h"
 #include "parser/parsetree.h"
 #include "utils/builtins.h"
+#include "utils/fmgroids.h"
 #include "utils/guc.h"
 #include "utils/hsearch.h"
 #include "utils/inval.h"
@@ -59,6 +60,7 @@
 #include "pg_lake/extensions/pg_lake_spatial.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/fdw/shippable.h"
+#include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/shippable_builtin_functions.h"
 #include "pg_lake/pgduck/shippable_spatial_functions.h"
 #include "pg_lake/pgduck/shippable_builtin_operators.h"
@@ -113,6 +115,8 @@ static void LoadShippableSpatialOperators(void);
 static void LoadShippablePgduckOperators(const PGDuckShippableOperator * operators, int operatorCount);
 static bool IsShippableStructType(Oid objectId);
 static char *GetObjectDescription(Oid classId, Oid objectId);
+static bool ArraySubscriptMayBeNegative(SubscriptingRef *sbsref);
+static bool IsPostgresOnlyBuiltinFunction(Oid functionId);
 
 /*
  * Initialize the backend-lifespan cache of shippability decisions.
@@ -681,8 +685,38 @@ is_shippable(Oid objectId, Oid classId, Node *expr)
 	if (EnableStrictPushdown)
 		return false;
 
+	/* built-ins that must run in Postgres, not pgduck_server */
+	if (classId == ProcedureRelationId && IsPostgresOnlyBuiltinFunction(objectId))
+		return false;
+
 	/* Built-in objects are presumed shippable in non-strict mode */
 	return is_builtin(objectId);
+}
+
+
+/*
+ * IsPostgresOnlyBuiltinFunction returns whether a built-in function must not be
+ * shipped even in non-strict mode, because DuckDB has a function of the same
+ * name that reads or changes process-wide query engine state (settings that
+ * may include credentials, database and schema names, etc).
+ */
+static bool
+IsPostgresOnlyBuiltinFunction(Oid functionId)
+{
+	switch (functionId)
+	{
+		case F_CURRENT_SETTING_TEXT:
+		case F_CURRENT_SETTING_TEXT_BOOL:
+		case F_SET_CONFIG:
+		case F_CURRENT_DATABASE:
+		case F_CURRENT_SCHEMA:
+		case F_CURRENT_SCHEMAS:
+		case F_CURRENT_QUERY:
+		case F_VERSION:
+			return true;
+		default:
+			return false;
+	}
 }
 
 
@@ -756,6 +790,10 @@ GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId)
  * pushed down (say for FieldSelect), but some uses (such as casting) are
  * prohibited due to there being no equivalent behavior on the DuckDB side.
  *
+ * Subscripting a map type is one such use: on the Postgres side a map is an
+ * array of (key, val) pairs and m[i] is the i-th pair, whereas in DuckDB m[i]
+ * on a MAP is the value for key i.
+ *
  * This shared routine encapsulates the logic of for which nodes UDTs are not
  * pushdownable.  It is very likely we will need to expand the list of node
  * types to check here.
@@ -767,6 +805,31 @@ bool
 is_non_shippable_udt_context(Node *node)
 {
 	int			nodeType = nodeTag(node);
+
+	/*
+	 * The container type of a SubscriptingRef is the domain's base array
+	 * type, so look at refexpr to see whether we are subscripting a map.
+	 *
+	 * More than one subscript is not shippable either.  Postgres reads
+	 * a[i][j] as one subscript of a multidimensional array, so it is NULL for
+	 * the one-dimensional arrays we store.  DuckDB applies [j] to the element
+	 * a[i] instead: a key lookup for an array of maps, a field for an array
+	 * of composites and a character for text[].
+	 *
+	 * Array indexes that may be negative are not shippable either, see
+	 * ArraySubscriptMayBeNegative().
+	 */
+	if (nodeType == T_SubscriptingRef)
+	{
+		SubscriptingRef *sbsref = (SubscriptingRef *) node;
+
+		if (list_length(sbsref->refupperindexpr) > 1 ||
+			IsMapTypeOid(exprType((Node *) sbsref->refexpr)))
+			return true;
+
+		return type_is_array(sbsref->refcontainertype) &&
+			ArraySubscriptMayBeNegative(sbsref);
+	}
 
 	/*
 	 * Not all nodes are expression types, so exprType() can fail; since this
@@ -792,4 +855,45 @@ is_non_shippable_udt_context(Node *node)
 	 */
 
 	return (typeId >= FirstNormalObjectId && !IsGeometryTypeId(typeId));
+}
+
+
+/*
+ * ArraySubscriptMayBeNegative returns whether an index or slice bound of an
+ * array subscript is not known to be non-negative.  DuckDB counts negative
+ * list indexes from the end, while Postgres treats them as out of range, so
+ * only non-negative constants, NULL and omitted slice bounds are shippable.
+ */
+static bool
+ArraySubscriptMayBeNegative(SubscriptingRef *sbsref)
+{
+	List	   *indexLists[] = {sbsref->refupperindexpr, sbsref->reflowerindexpr};
+
+	for (int i = 0; i < lengthof(indexLists); i++)
+	{
+		ListCell   *indexCell;
+
+		foreach(indexCell, indexLists[i])
+		{
+			Node	   *index = lfirst(indexCell);
+
+			/* omitted slice bound, as in a[:2] */
+			if (index == NULL)
+				continue;
+
+			if (!IsA(index, Const))
+				return true;
+
+			Const	   *constIndex = (Const *) index;
+
+			if (constIndex->constisnull)
+				continue;
+
+			if (constIndex->consttype != INT4OID ||
+				DatumGetInt32(constIndex->constvalue) < 0)
+				return true;
+		}
+	}
+
+	return false;
 }

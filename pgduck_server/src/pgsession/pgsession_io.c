@@ -45,7 +45,12 @@
 #include "utils/pgduck_log_utils.h"
 #include "utils/pg_log_utils.h"
 
+/* error text sent to clients is clipped to this many bytes */
+#define MAX_ERROR_MESSAGE_LENGTH 65536
+#define ERROR_MESSAGE_TRUNCATED_SUFFIX "... (truncated)"
+
 static int	process_cancel_request(char *startupPacketBuf, int startupPacketLen);
+static char *clip_error_message(const char *message);
 
 
 /*
@@ -723,6 +728,32 @@ pgsession_get_byte(PGSession * pgSession)
 
 
 /*
+ * clip_error_message returns a copy of message truncated to
+ * MAX_ERROR_MESSAGE_LENGTH bytes on a UTF-8 boundary, or NULL if it fits.
+ */
+static char *
+clip_error_message(const char *message)
+{
+	size_t		length = strlen(message);
+
+	if (length <= MAX_ERROR_MESSAGE_LENGTH)
+		return NULL;
+
+	length = MAX_ERROR_MESSAGE_LENGTH;
+	while (length > 0 && ((unsigned char) message[length] & 0xC0) == 0x80)
+		length--;
+
+	char	   *clipped = pg_malloc(length + sizeof(ERROR_MESSAGE_TRUNCATED_SUFFIX));
+
+	memcpy(clipped, message, length);
+	memcpy(clipped + length, ERROR_MESSAGE_TRUNCATED_SUFFIX,
+		   sizeof(ERROR_MESSAGE_TRUNCATED_SUFFIX));
+
+	return clipped;
+}
+
+
+/*
  * pgsession_send_postgres_error sends an error to the client. A NULL sqlState
  * reports feature_not_supported.
  *
@@ -734,6 +765,7 @@ pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMess
 							  const char *sqlState)
 {
 	StringInfoData msgBuffer;
+	char	   *clippedMessage = NULL;
 
 	bool		codeFound = false;
 	const char *errSevStr = GetErrorCodeStr(errSev, &codeFound);
@@ -757,11 +789,18 @@ pgsession_send_postgres_error(PGSession * pgSession, int errSev, char *errorMess
 	/* M field is required per protocol, so always send something */
 	pq_sendbyte(&msgBuffer, PG_DIAG_MESSAGE_PRIMARY);
 	if (errorMessage)
-		pq_sendstring(&msgBuffer, errorMessage);
+	{
+		/* errors can echo whole result values; clip to avoid the exit() */
+		clippedMessage = clip_error_message(errorMessage);
+		pq_sendstring(&msgBuffer, clippedMessage != NULL ? clippedMessage : errorMessage);
+	}
 	else
 		pq_sendstring(&msgBuffer, _("missing error text"));
 
 	pq_sendbyte(&msgBuffer, '\0');	/* terminator */
+
+	if (clippedMessage != NULL)
+		pg_free(clippedMessage);
 
 	if (!IsOK(pq_endmessage(pgSession, &msgBuffer)))
 		return EOF;

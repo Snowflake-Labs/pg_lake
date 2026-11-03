@@ -21,7 +21,7 @@
 
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/iceberg/catalog.h"
-#include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/iceberg/external_catalog_cache.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
@@ -36,7 +36,6 @@
 char	   *IcebergDefaultLocationPrefix = NULL;
 char	   *IcebergDefaultCatalog = POSTGRES_CATALOG_NAME;
 
-static char *GetIcebergExternalMetadataLocation(Oid relationId);
 static char *GetIcebergCatalogMetadataLocation(Oid relationId, bool forUpdate);
 static char *GetIcebergCatalogMetadataLocationInternal(Oid relationId, bool isPrevMetadata, bool forUpdate);
 static char *GetIcebergCatalogColumnInternal(Oid relationId, char *columnName, bool forUpdate, bool errorIfNotFound);
@@ -308,50 +307,48 @@ GetIcebergMetadataLocation(Oid relationId, bool forUpdate)
 
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	if (IsExternalIcebergTable(relationId) || catalogType == REST_CATALOG_READ_WRITE)
+	if (catalogType == REST_CATALOG_READ_WRITE)
 	{
 		/*
-		 * We get the metadata location from the iceberg catalog table for
-		 * internal iceberg tables, except for REST_CATALOG_READ_WRITE.
-		 *
 		 * Writable rest catalog iceberg tables are a bit different. They are
 		 * internal iceberg tables, all their metadata is stored in our
 		 * catalogs, such as data files, column stats, etc. However, their
-		 * metadata location is stored in the rest catalog itself. So, we need
-		 * to fetch the metadata location from the rest catalog for those
-		 * tables, see below.
+		 * metadata location is stored in the rest catalog itself. Their scans
+		 * read our catalogs under the transaction snapshot rather than this
+		 * location, so whoever asks for it acts on the table as the catalog
+		 * has it now, and we ask the catalog every time.
+		 *
+		 * We still need to acquire locks on the iceberg catalog table row to
+		 * prevent concurrent updates.
 		 */
-		if (forUpdate && catalogType != REST_CATALOG_READ_WRITE)
+		if (forUpdate)
+			LockIcebergPgLakeCatalogForUpdate(relationId);
+
+		return GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+	}
+
+	if (IsExternalIcebergTable(relationId))
+	{
+		if (forUpdate)
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 					 errmsg("Updating iceberg metadata is not supported for external Iceberg tables")));
-		else if (forUpdate && catalogType == REST_CATALOG_READ_WRITE)
-		{
-			/*
-			 * But we still need to acquire locks on the iceberg catalog table
-			 * row for internal iceberg tables to prevent concurrent updates.
-			 * So, we call GetIcebergCatalogMetadataLocation().
-			 */
-			LockIcebergPgLakeCatalogForUpdate(relationId);
-		}
 
-		return GetIcebergExternalMetadataLocation(relationId);
+		return ResolveIcebergExternalMetadataLocation(relationId);
 	}
-	else
-	{
-		char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
 
-		/*
-		 * Iceberg table exists, but metadata_location is NULL. We only expect
-		 * this for REST
-		 */
-		if (metadataLocation == NULL)
-			ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
-							errmsg("metadata location of table %s could not be found",
-								   get_rel_name(relationId))));
+	char	   *metadataLocation = GetIcebergCatalogMetadataLocation(relationId, forUpdate);
 
-		return metadataLocation;
-	}
+	/*
+	 * Iceberg table exists, but metadata_location is NULL. We only expect
+	 * this for REST
+	 */
+	if (metadataLocation == NULL)
+		ereport(ERROR, (errcode(ERRCODE_INTERNAL_ERROR),
+						errmsg("metadata location of table %s could not be found",
+							   get_rel_name(relationId))));
+
+	return metadataLocation;
 }
 
 
@@ -394,42 +391,6 @@ LockIcebergPgLakeCatalogForUpdate(Oid relationId)
 	bool		forUpdate = true;
 
 	GetIcebergCatalogMetadataLocationInternal(relationId, false, forUpdate);
-}
-
-
-/*
- * GetIcebergExternalMetadataLocation returns the metadata location for an external iceberg table.
- */
-static char *
-GetIcebergExternalMetadataLocation(Oid relationId)
-{
-	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
-
-	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
-
-	char	   *currentMetadataPath = NULL;
-
-	if (icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == REST_CATALOG_READ_WRITE)
-	{
-		currentMetadataPath = GetMetadataLocationForRestCatalogForIcebergTable(relationId);
-	}
-	else if (icebergCatalogType == OBJECT_STORE_READ_ONLY)
-	{
-		currentMetadataPath = GetMetadataLocationFromExternalObjectStoreCatalogForTable(relationId);
-	}
-	else if (icebergCatalogType == NONE_CATALOG && tableProperties.tableType == PG_LAKE_TABLE_TYPE && tableProperties.format == DATA_FORMAT_ICEBERG)
-	{
-		currentMetadataPath = GetForeignTablePath(relationId);
-	}
-	else
-	{
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("unsupported iceberg external table type for relation %s",
-						get_rel_name(relationId))));
-	}
-
-	return currentMetadataPath;
 }
 
 

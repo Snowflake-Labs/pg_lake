@@ -52,6 +52,7 @@
 #include "utils/timestamp.h"
 
 #include "pg_lake/copy/copy_format.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_utils.h"
@@ -64,7 +65,7 @@
 #include "pg_lake/util/url_encode.h"
 
 
-static void CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
+static char *CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 static bool RestCatalogExists(RestCatalogOptions * opts, const char *catalogName);
 static bool RestNamespaceExists(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
 static char *UppercaseIdentifierCandidate(const char *name);
@@ -87,7 +88,9 @@ static char *AppendIcebergPartitionSpecForRestCatalog(List *partitionSpecs);
  * collision is a miss rather than the wrong table's credentials.
  *
  * Entries expire based on the REST catalog's credential TTL.  The cache
- * is invalidated on ALTER/DROP SERVER alongside the token cache.
+ * is invalidated on ALTER/DROP SERVER alongside the token cache, and a
+ * table's entry is evicted as soon as a loadTable for it comes back
+ * without credentials.
  */
 typedef struct VendedCredentialsCacheKey
 {
@@ -127,6 +130,7 @@ static List *ExtractVendedCredentials(Jsonb *response,
 									  const char *restCatalogName,
 									  const char *namespaceName,
 									  const char *relationName);
+static char *TableRootFromLoadTableResponse(Jsonb *response);
 static bool FirstVendedReport(const char *reportKey);
 static void InitVendedCredsCacheIfNeeded(void);
 static void FreeCachedVendedCredentials(VendedCredentials * creds);
@@ -141,6 +145,12 @@ static List *LookupVendedCredentialsInCache(Oid serverOid,
 											const char *restCatalogName,
 											const char *namespaceName,
 											const char *tableName);
+static void ForgetVendedCredentialsInCache(Oid serverOid,
+										   Oid userMappingOid,
+										   const char *restCatalogName,
+										   const char *namespaceName,
+										   const char *tableName);
+static void RemoveVendedCredentialsCacheEntry(VendedCredentialsCacheEntry * entry);
 static char *BuildVendedCredentialsIdentity(const char *restCatalogName,
 											const char *namespaceName,
 											const char *tableName);
@@ -154,13 +164,15 @@ static VendedCredentialsCacheKey BuildVendedCredentialsCacheKey(Oid serverOid,
 * in the rest catalog. On any failure, an error is raised. If the table exists,
 * an error is raised as well.
 *
-* As per REST catalog spec, we need to provide an empty schema when creating
-* a table. The schema will be updated when we make this table visible/committed.
-* The main reason for staging early is to be able to get the vended credentials
-* for writable tables.
+* Field-ID mappings must exist before staging. requestedLocation, when not
+* NULL, is sent as the table location; the catalog may honor it (Polaris,
+* Lakekeeper), replace it with its own (Nessie) or reject it. The returned
+* location and UUID are what the table uses. Credentials are cached before
+* any CTAS data is written.
 */
-void
-StartStageRestCatalogIcebergTableCreate(Oid relationId)
+RestCatalogStagedTable
+StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema,
+										const char *requestedLocation)
 {
 	const char *relationName = GetRestCatalogTableName(relationId);
 
@@ -169,21 +181,20 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 	appendStringInfoChar(body, '{');	/* start body */
 	appendJsonString(body, "name", relationName);
 
+	if (requestedLocation != NULL)
+	{
+		appendStringInfoString(body, ", ");
+		appendJsonString(body, "location", requestedLocation);
+	}
+
 	appendStringInfoString(body, ", ");
-	appendJsonKey(body, "schema");
+	int			lastColumnId = 0;
+	IcebergTableSchema *schema =
+		RebuildIcebergSchemaFromDataFileSchema(relationId, dataFileSchema, &lastColumnId);
 
-	appendStringInfoChar(body, '{');	/* start schema object */
-
-	appendJsonString(body, "type", "struct");
-	appendStringInfoString(body, ", ");
-	appendJsonKey(body, "fields");
-	appendStringInfoString(body, "[]"); /* empty fields array, we don't know
-										 * the schema yet */
-
-	appendStringInfoChar(body, '}');	/* close schema object */
-	appendStringInfoString(body, ", ");
-
-	appendJsonString(body, "stage-create", "true");
+	AppendIcebergTableSchemaForRestCatalog(body, schema, 1);
+	/* pg_lake's metadata-file reader currently expects uncompressed JSON. */
+	appendStringInfoString(body, ",\"stage-create\":true,\"properties\":{\"format-version\":\"2\",\"write.metadata.compression-codec\":\"none\"}");
 
 	appendStringInfoChar(body, '}');	/* close body */
 
@@ -204,13 +215,28 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 		headers = lappend(headers, vendedCreds);
 	}
 
-	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body->data,
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_CREATE_TABLE, HTTP_POST, postUrl, body->data,
 													  headers);
 
 	if (httpResult.status != 200)
 	{
 		ReportHTTPError(httpResult, ERROR);
 	}
+
+	RestCatalogStagedTable staged = {0};
+
+	staged.uuid = JsonbGetOptionalStringByPath(httpResult.body, 2, "metadata", "table-uuid");
+	staged.location = JsonbGetOptionalStringByPath(httpResult.body, 2, "metadata", "location");
+	if (staged.uuid == NULL || staged.uuid[0] == '\0' ||
+		staged.location == NULL || staged.location[0] == '\0')
+		ereport(ERROR,
+				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
+				 errmsg("REST stage-create response must include a table UUID and location")));
+	/* Validate before saving the UUID for the post-commit create request. */
+	(void) DirectFunctionCall1(uuid_in, CStringGetDatum(staged.uuid));
+
+	ValidateStorageURL(staged.location);
+	ErrorIfURLLeavesObjectStorage(staged.location, NULL);
 
 	/*
 	 * If the stage-create response includes vended credentials, cache them
@@ -229,6 +255,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 									  catalogName, namespaceName,
 									  relationName);
 	}
+	return staged;
 }
 
 
@@ -238,7 +265,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId)
 * catalog.
 */
 char *
-FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs)
+FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs, const char *stagedUuid)
 {
 	StringInfo	body = makeStringInfo();
 
@@ -259,6 +286,16 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	appendStringInfoChar(body, '[');	/* start updates array */
 	appendStringInfoChar(body, '{');	/* start updates element */
 
+	if (stagedUuid == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("no staged REST catalog table UUID for relation %u", relationId)));
+	appendJsonString(body, "action", "assign-uuid");
+	appendStringInfoChar(body, ',');
+	appendJsonString(body, "uuid", stagedUuid);
+	appendStringInfoString(body, "},{\"action\":\"upgrade-format-version\",\"format-version\":2},{");
+	appendStringInfoString(body, "\"action\":\"set-properties\",\"updates\":{\"write.metadata.compression-codec\":\"none\"}},{");
+
 	appendJsonString(body, "action", "add-schema");
 
 	appendStringInfoChar(body, ',');
@@ -270,6 +307,14 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 
 	AppendIcebergTableSchemaForRestCatalog(body, newSchema, schemaCount);
 	appendStringInfoChar(body, '}');	/* close updates element */
+
+	/*
+	 * Make the schema just added current. A catalog that keeps the staged
+	 * metadata (Lakekeeper) has already renumbered the staged schema's field
+	 * IDs; without this, that copy stays current and nested field IDs no
+	 * longer match the data files pg_lake writes.
+	 */
+	appendStringInfoString(body, ",{\"action\":\"set-current-schema\",\"schema-id\":-1}");
 
 	appendStringInfoChar(body, ',');
 	appendStringInfoChar(body, '{');	/* start add-sort-order */
@@ -295,15 +340,11 @@ FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSche
 	appendJsonString(body, "action", "set-location");
 	appendStringInfoChar(body, ',');
 
-	/* construct location */
-	StringInfo	location = makeStringInfo();
-	const char *catalogName = GetRestCatalogName(relationId);
-	const char *namespaceName = GetRestCatalogNamespace(relationId);
-	const char *relationName = GetRestCatalogTableName(relationId);
-	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
+	ForeignTable *table = GetForeignTable(relationId);
+	const char *location = GetStringOption(table->options, "location", false);
 
-	appendStringInfo(location, "%s/%s/%s/%s/%d", opts->locationPrefix, catalogName, namespaceName, relationName, relationId);
-	appendJsonString(body, "location", location->data);
+	Assert(location != NULL);
+	appendJsonString(body, "location", location);
 	appendStringInfoChar(body, '}');	/* end set-location */
 
 	/* add partition spec */
@@ -354,7 +395,7 @@ RestCatalogExists(RestCatalogOptions * opts, const char *catalogName)
 		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
 				 URLEncodePrefix(catalogName));
 	HttpResult	catalogResult =
-		SendRequestToRestCatalog(opts, HTTP_GET, catalogUrl, NULL,
+		SendRequestToRestCatalog(opts, REST_CATALOG_OP_LIST_NAMESPACES, HTTP_GET, catalogUrl, NULL,
 								 GetHeadersWithAuth(opts));
 
 	if (catalogResult.status == 200)
@@ -373,8 +414,11 @@ RestCatalogExists(RestCatalogOptions * opts, const char *catalogName)
 * an error is raised. This  is used to ensure that the same
 * namespace is not registered multiple times as we define
 * allowed locations as part of the namespace.
+*
+* Returns the namespace's "location" property when the catalog reports one,
+* else NULL.
 */
-void
+char *
 RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
 {
 	/*
@@ -385,7 +429,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 opts->baseUri, URLEncodePrefix(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_GET_NAMESPACE, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
 
 	switch (httpResult.status)
@@ -416,8 +460,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 				/*
 				 * Does not exists, we'll create it.
 				 */
-				CreateNamespaceOnRestCatalog(opts, catalogName, namespaceName);
-				break;
+				return CreateNamespaceOnRestCatalog(opts, catalogName, namespaceName);
 			}
 
 			/* namespace already exists */
@@ -455,7 +498,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 					}
 				}
 
-				break;
+				return serverAllowedLocation;
 			}
 
 		default:
@@ -472,6 +515,7 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 			}
 
 	}
+	return NULL;
 }
 
 
@@ -486,7 +530,7 @@ RestNamespaceExists(RestCatalogOptions * opts, const char *catalogName, const ch
 		psprintf(REST_CATALOG_NAMESPACE_NAME,
 				 opts->baseUri, URLEncodePrefix(catalogName),
 				 URLEncodePath(namespaceName));
-	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL,
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_GET_NAMESPACE, HTTP_GET, getUrl, NULL,
 													  GetHeadersWithAuth(opts));
 
 	if (httpResult.status == 200)
@@ -643,12 +687,8 @@ FreeCachedVendedCredentials(VendedCredentials * creds)
 		pfree(creds->sessionToken);
 	if (creds->region != NULL)
 		pfree(creds->region);
-	if (creds->endpoint != NULL)
-		pfree(creds->endpoint);
 	if (creds->urlStyle != NULL)
 		pfree(creds->urlStyle);
-	if (creds->useSsl != NULL)
-		pfree(creds->useSsl);
 	if (creds->accountName != NULL)
 		pfree(creds->accountName);
 	if (creds->sasToken != NULL)
@@ -796,12 +836,8 @@ StoreVendedCredentialsInCache(List *credentials,
 			pstrdup(creds->sessionToken) : NULL;
 		cached->region = creds->region ?
 			pstrdup(creds->region) : NULL;
-		cached->endpoint = creds->endpoint ?
-			pstrdup(creds->endpoint) : NULL;
 		cached->urlStyle = creds->urlStyle ?
 			pstrdup(creds->urlStyle) : NULL;
-		cached->useSsl = creds->useSsl ?
-			pstrdup(creds->useSsl) : NULL;
 		cached->accountName = creds->accountName ?
 			pstrdup(creds->accountName) : NULL;
 		cached->sasToken = creds->sasToken ?
@@ -857,6 +893,7 @@ StoreVendedCredentialsInCache(List *credentials,
  * If vended credentials are obtained, they are also stored in the
  * vended credentials cache, so a resolve triggered later in the same
  * statement reuses them instead of issuing a second REST round-trip.
+ * A response without them evicts what the cache held for the table.
  */
 RestCatalogLoadTableResult
 LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
@@ -892,7 +929,7 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 		headers = lappend(headers,
 						  pstrdup("X-Iceberg-Access-Delegation: vended-credentials"));
 
-	HttpResult	hr = SendRequestToRestCatalog(opts, HTTP_GET, getUrl, NULL, headers);
+	HttpResult	hr = SendRequestToRestCatalog(opts, REST_CATALOG_OP_LOAD_TABLE, HTTP_GET, getUrl, NULL, headers);
 
 	if (hr.status == 404 && missingOk)
 		return false;
@@ -904,6 +941,8 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 	if (result->metadataLocation == NULL)
 		ereport(ERROR,
 				(errmsg("key \"metadata-location\" missing in json response")));
+
+	ErrorIfURLLeavesObjectStorage(result->metadataLocation, NULL);
 
 	/*
 	 * A loadTable response carries the table's whole metadata document, and
@@ -921,11 +960,18 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 															 restCatalogName,
 															 namespaceName,
 															 relationName);
+		result->tableRoot = TableRootFromLoadTableResponse(body);
 
-		StoreVendedCredentialsInCache(result->vendedCredentials,
-									  opts->userMappingOid,
-									  restCatalogName, namespaceName,
-									  relationName);
+		if (result->vendedCredentials != NIL)
+			StoreVendedCredentialsInCache(result->vendedCredentials,
+										  opts->userMappingOid,
+										  restCatalogName, namespaceName,
+										  relationName);
+		else
+			ForgetVendedCredentialsInCache(opts->serverOid,
+										   opts->userMappingOid,
+										   restCatalogName, namespaceName,
+										   relationName);
 	}
 
 	return true;
@@ -1080,45 +1126,10 @@ ParseVendedS3CredsFromConfig(Jsonb *body, const char *mapKey,
 	creds->fetchedAt = GetCurrentTimestamp();
 
 	/*
-	 * Iceberg states the endpoint as a URL, while DuckDB wants a bare
-	 * host[:port] plus a separate USE_SSL.  Split the two apart, so a catalog
-	 * pointing at a plaintext store is honored instead of being inherited
-	 * from whatever secret happens to cover the prefix.
+	 * s3.endpoint is deliberately not read: where a vended secret sends its
+	 * requests is decided by the secret that already covers the prefix (see
+	 * PushNamedS3Secret), not by the catalog.
 	 */
-	char	   *endpointUrl = GetVendedConfigString(body, mapKey, "s3.endpoint");
-
-	if (endpointUrl != NULL)
-	{
-		if (pg_strncasecmp(endpointUrl, "https://", 8) == 0)
-		{
-			creds->endpoint = pstrdup(endpointUrl + 8);
-			creds->useSsl = pstrdup("true");
-		}
-		else if (pg_strncasecmp(endpointUrl, "http://", 7) == 0)
-		{
-			creds->endpoint = pstrdup(endpointUrl + 7);
-			creds->useSsl = pstrdup("false");
-		}
-		else
-		{
-			/* No scheme to read SSL from; leave it to be inherited. */
-			creds->endpoint = pstrdup(endpointUrl);
-		}
-
-		/* A trailing slash is part of a URL, not of a DuckDB endpoint. */
-		int			endpointLen = strlen(creds->endpoint);
-
-		while (endpointLen > 0 && creds->endpoint[endpointLen - 1] == '/')
-			creds->endpoint[--endpointLen] = '\0';
-
-		if (endpointLen == 0)
-		{
-			pfree(creds->endpoint);
-			creds->endpoint = NULL;
-		}
-
-		pfree(endpointUrl);
-	}
 
 	/*
 	 * Map the Iceberg "s3.path-style-access" boolean onto DuckDB's URL_STYLE.
@@ -1153,7 +1164,7 @@ ParseVendedS3CredsFromConfig(Jsonb *body, const char *mapKey,
  * qualified Azure URL names -- abfss://<container>@<host>/..., or
  * <host>/<container>/... after az://, azure:// or abfss:// -- and NULL
  * for any other URL.  That includes az://<container>/..., which names no
- * account at all and leaves it to the credential.
+ * account at all.
  */
 static char *
 AzureAccountHostFromLocation(const char *location)
@@ -1259,8 +1270,79 @@ AzureEndpointsFromHost(const char *host, char **blobEndpoint,
 
 
 /*
- * AzureEndpointOverride returns the endpoint a config map states for a
- * storage account under adls.connection-string.<host> or
+ * The domains Azure Storage serves its accounts under, in each cloud.
+ * Anyone can create an account in any of them.
+ */
+static const char *const AzureStorageDomains[] = {
+	".core.windows.net",
+	".core.usgovcloudapi.net",
+	".core.chinacloudapi.cn",
+	".storage.azure.net",
+};
+
+
+/*
+ * HostEndsWith returns whether the hostLen bytes at host end in suffix,
+ * with at least one byte before it.
+ */
+static bool
+HostEndsWith(const char *host, size_t hostLen, const char *suffix)
+{
+	size_t		suffixLen = strlen(suffix);
+
+	return hostLen > suffixLen &&
+		pg_strncasecmp(host + hostLen - suffixLen, suffix, suffixLen) == 0;
+}
+
+
+/*
+ * IsAccountEndpoint returns whether an endpoint IsAllowedAzureEndpoint
+ * accepted can only reach the storage account host names.  The default
+ * pg_lake.allowed_azure_host_suffixes admits every account under Azure's
+ * storage domains, including ones the catalog's operator created, so an
+ * endpoint there has to name host's account, in host's cloud, and carry
+ * no path, since a path would put the requests in another container.  A
+ * host outside those domains is one an administrator admitted, an
+ * emulator say, and is taken as is.
+ */
+static bool
+IsAccountEndpoint(const char *endpoint, const char *host)
+{
+	/* AzureEndpointOverride has checked for an http(s):// prefix */
+	const char *endpointHost = strstr(endpoint, "://") + strlen("://");
+	size_t		endpointHostLen = 0;
+
+	while (isalnum((unsigned char) endpointHost[endpointHostLen]) ||
+		   endpointHost[endpointHostLen] == '.' ||
+		   endpointHost[endpointHostLen] == '-')
+		endpointHostLen++;
+
+	for (int i = 0; i < lengthof(AzureStorageDomains); i++)
+	{
+		const char *domain = AzureStorageDomains[i];
+
+		if (!HostEndsWith(endpointHost, endpointHostLen, domain))
+			continue;
+
+		const char *rest = endpointHost + endpointHostLen;
+		size_t		accountLen = strcspn(host, ".");
+
+		if (*rest == ':')
+			rest += 1 + strspn(rest + 1, "0123456789");
+
+		return *rest == '\0' &&
+			HostEndsWith(host, strlen(host), domain) &&
+			strcspn(endpointHost, ".") == accountLen &&
+			pg_strncasecmp(endpointHost, host, accountLen) == 0;
+	}
+
+	return true;
+}
+
+
+/*
+ * AzureEndpointOverride returns the endpoint a config map states for the
+ * storage account host names, under adls.connection-string.<host> or
  * .<account>.  In Iceberg's ADLS FileIO that key holds an endpoint URL
  * rather than a connection string, and is how an emulator or a private
  * endpoint is reached.  Anything but an http(s) URL is ignored, and so
@@ -1272,18 +1354,17 @@ AzureEndpointsFromHost(const char *host, char **blobEndpoint,
  * secret carries, whatever host the URL names.  So the endpoint is held
  * to pg_lake.allowed_azure_host_suffixes, the list a user-supplied Azure
  * URL is held to, and one outside it is ignored rather than handed over:
- * it would otherwise send pgduck_server's requests to any host.
+ * it would otherwise send pgduck_server's requests to any host.  It also
+ * has to be the account's own (IsAccountEndpoint), since the secret serves
+ * every session reading under the table's location.
  */
 static char *
 AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 					  const char *accountName, Oid serverOid)
 {
-	char	   *endpoint = NULL;
-
-	if (host != NULL)
-		endpoint = GetVendedConfigString(body, mapKey,
-										 psprintf("adls.connection-string.%s",
-												  host));
+	char	   *endpoint = GetVendedConfigString(body, mapKey,
+												 psprintf("adls.connection-string.%s",
+														  host));
 
 	if (endpoint == NULL)
 		endpoint = GetVendedConfigString(body, mapKey,
@@ -1300,12 +1381,17 @@ AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 	while (endpointLen > 0 && endpoint[endpointLen - 1] == '/')
 		endpoint[--endpointLen] = '\0';
 
+	char	   *reportKey = psprintf("endpoint/%u/%s/%s", serverOid,
+									 accountName, endpoint);
+
 	if (!IsAllowedAzureEndpoint(endpoint))
 	{
-		char	   *reportKey = psprintf("endpoint/%u/%s/%s", serverOid,
-										 accountName, endpoint);
+		bool		firstReport = FirstVendedReport(reportKey);
 
-		ereport(FirstVendedReport(reportKey) ? WARNING : DEBUG2,
+		if (firstReport)
+			LogCatalogAzureEndpointNotAllowed();
+
+		ereport(firstReport ? WARNING : DEBUG2,
 				(errmsg("ignoring the endpoint the catalog vended for Azure "
 						"storage account \"%s\"", accountName),
 				 errdetail("\"%s\" does not name a host under "
@@ -1313,6 +1399,21 @@ AzureEndpointOverride(Jsonb *body, const char *mapKey, const char *host,
 						   RedactSensitiveText(endpoint)),
 				 errhint("Add the endpoint's host to "
 						 "pg_lake.allowed_azure_host_suffixes to reach it.")));
+		return NULL;
+	}
+
+	if (!IsAccountEndpoint(endpoint, host))
+	{
+		bool		firstReport = FirstVendedReport(reportKey);
+
+		if (firstReport)
+			LogCatalogAzureEndpointNotAllowed();
+
+		ereport(firstReport ? WARNING : DEBUG2,
+				(errmsg("ignoring the endpoint the catalog vended for Azure "
+						"storage account \"%s\"", accountName),
+				 errdetail("\"%s\" is not that storage account's endpoint.",
+						   RedactSensitiveText(endpoint))));
 		return NULL;
 	}
 
@@ -1388,35 +1489,40 @@ SasTokenExpiry(const char *sasToken)
 /*
  * ParseVendedAzureCredsFromConfig builds an Azure VendedCredentials from
  * the SAS token an Iceberg config map carries for the storage account
- * scope is on, or returns NULL when it carries none for that account.
+ * scope's host names, or returns NULL when it carries none for that
+ * account.
  *
  * Catalogs state one token under several keys so every client finds its
  * own spelling: adls.sas-token.<host> (Iceberg 1.8 and later),
  * adls.sas-token.<account> (Iceberg 1.7), and a bare adls.sas-token
  * paired with adls.account-name (PyIceberg).  They are tried in that
- * order.  The account is the one scope's host names, or, when scope
- * names none, adls.account-name; a bare token stated for some other
- * account is not this table's credential.  It expires when the catalog
- * says, or else when the token itself says.
+ * order, and a bare token stated for some other account is not this
+ * table's credential.  It expires when the catalog says, or else when the
+ * token itself says.
+ *
+ * A scope that names no account, az://<container>/..., gets no
+ * credential: the secret serves every session reading under scope, and
+ * the account would be whichever one the catalog states.
  */
 static VendedCredentials *
 ParseVendedAzureCredsFromConfig(Jsonb *body, const char *mapKey,
 								const char *scope, Oid serverOid)
 {
 	char	   *host = AzureAccountHostFromLocation(scope);
+
+	if (host == NULL)
+		return NULL;
+
 	char	   *statedAccount = GetVendedConfigString(body, mapKey,
 													  "adls.account-name");
-	char	   *accountName = host != NULL ?
-		pnstrdup(host, strcspn(host, ".")) : statedAccount;
+	char	   *accountName = pnstrdup(host, strcspn(host, "."));
 
 	if (!IsAzureStorageAccountName(accountName))
 		return NULL;
 
-	char	   *sasToken = NULL;
-
-	if (host != NULL)
-		sasToken = GetVendedConfigString(body, mapKey,
-										 psprintf("adls.sas-token.%s", host));
+	char	   *sasToken = GetVendedConfigString(body, mapKey,
+												 psprintf("adls.sas-token.%s",
+														  host));
 
 	if (sasToken == NULL)
 		sasToken = GetVendedConfigString(body, mapKey,
@@ -1450,7 +1556,7 @@ ParseVendedAzureCredsFromConfig(Jsonb *body, const char *mapKey,
 		creds->blobEndpoint = endpoint;
 		creds->dfsEndpoint = pstrdup(endpoint);
 	}
-	else if (host != NULL)
+	else
 	{
 		AzureEndpointsFromHost(host, &creds->blobEndpoint, &creds->dfsEndpoint);
 
@@ -1468,12 +1574,9 @@ ParseVendedAzureCredsFromConfig(Jsonb *body, const char *mapKey,
 		}
 	}
 
-	char	   *expiresMsStr = NULL;
-
-	if (host != NULL)
-		expiresMsStr = GetVendedConfigString(body, mapKey,
-											 psprintf("adls.sas-token-expires-at-ms.%s",
-													  host));
+	char	   *expiresMsStr = GetVendedConfigString(body, mapKey,
+													 psprintf("adls.sas-token-expires-at-ms.%s",
+															  host));
 
 	if (expiresMsStr == NULL)
 		expiresMsStr = GetVendedConfigString(body, mapKey,
@@ -1530,7 +1633,7 @@ static const VendedStorage S3Storage = {
 static const VendedStorage AzureStorage = {
 	"Azure Data Lake Storage", "adls.", AzureSettingKeys,
 	ParseVendedAzureCredsFromConfig,
-	"pg_lake needs a SAS token for the storage account the table is on."
+	"pg_lake needs a SAS token for the storage account the table's location names."
 };
 
 static const VendedStorage GcsStorage = {
@@ -1885,8 +1988,12 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts,
 															  relationName);
 		char	   *reportKey = psprintf("unusable/%u/%u/%s", opts->serverOid,
 										 opts->userMappingOid, identity);
+		bool		firstReport = FirstVendedReport(reportKey);
 
-		ereport(FirstVendedReport(reportKey) ? WARNING : DEBUG2,
+		if (firstReport)
+			LogCatalogUnusableVendedCredentials(opts, unusable->name);
+
+		ereport(firstReport ? WARNING : DEBUG2,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("ignoring vended credentials for %s", unusable->name),
 				 errdetail("%s  This table falls back to the credentials "
@@ -1897,8 +2004,19 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts,
 						 "table's storage location.")));
 	}
 	else if (credentials == NIL)
+	{
+		char	   *identity = BuildVendedCredentialsIdentity(restCatalogName,
+															  namespaceName,
+															  relationName);
+		char	   *reportKey = psprintf("none/%u/%u/%s", opts->serverOid,
+										 opts->userMappingOid, identity);
+
+		if (FirstVendedReport(reportKey))
+			LogCatalogNoVendedCredentials(opts);
+
 		elog(DEBUG2, "REST catalog loadTable response did not contain "
 			 "usable vended credentials");
+	}
 
 	return credentials;
 }
@@ -2025,18 +2143,66 @@ LookupVendedCredentialsInCache(Oid serverOid,
 		/*
 		 * Evict the stale entry so a fresh loadTable can repopulate it and
 		 * the cache does not grow with dead entries in long-lived backends.
-		 * Removing the entry only recycles the entry itself, so release what
-		 * it owns first.
 		 */
-		FreeCachedVendedCredentialsList(entry->credentials);
-		entry->credentials = NIL;
-		pfree(entry->identity);
-		entry->identity = NULL;
-		hash_search(VendedCredsCache, &cacheKey, HASH_REMOVE, NULL);
+		RemoveVendedCredentialsCacheEntry(entry);
 		return NIL;
 	}
 
 	return entry->credentials;
+}
+
+
+/*
+ * ForgetVendedCredentialsInCache evicts the table's cached credentials once
+ * the catalog answers a loadTable for it without any.  Credentials vended
+ * earlier may still work until they expire, but the catalog no longer
+ * delegates access to the table (say, because it now has a row filter or
+ * column mask that a client reading its files directly would bypass), so
+ * they must not serve another scan.
+ */
+static void
+ForgetVendedCredentialsInCache(Oid serverOid,
+							   Oid userMappingOid,
+							   const char *restCatalogName,
+							   const char *namespaceName,
+							   const char *tableName)
+{
+	if (VendedCredsCache == NULL)
+		return;
+
+	char	   *identity = BuildVendedCredentialsIdentity(restCatalogName,
+														  namespaceName,
+														  tableName);
+	VendedCredentialsCacheKey cacheKey =
+		BuildVendedCredentialsCacheKey(serverOid, userMappingOid, identity);
+	bool		found = false;
+	VendedCredentialsCacheEntry *entry =
+		hash_search(VendedCredsCache, &cacheKey, HASH_FIND, &found);
+
+	if (found && entry->identity != NULL &&
+		strcmp(entry->identity, identity) == 0)
+		RemoveVendedCredentialsCacheEntry(entry);
+
+	pfree(identity);
+}
+
+
+/*
+ * RemoveVendedCredentialsCacheEntry removes an entry from the vended
+ * credentials cache.  Removing it only recycles the entry itself, so what
+ * it owns is released first.
+ */
+static void
+RemoveVendedCredentialsCacheEntry(VendedCredentialsCacheEntry * entry)
+{
+	VendedCredentialsCacheKey cacheKey = entry->key;
+
+	FreeCachedVendedCredentialsList(entry->credentials);
+	entry->credentials = NIL;
+	if (entry->identity != NULL)
+		pfree(entry->identity);
+	entry->identity = NULL;
+	hash_search(VendedCredsCache, &cacheKey, HASH_REMOVE, NULL);
 }
 
 
@@ -2069,8 +2235,10 @@ LookupVendedCredentialsInCache(Oid serverOid,
  * answer, writable tables keep reaching storage the way they do without
  * vending, and are no worse off than before.
  *
- * Returns NIL for non-REST tables, writable REST tables, when vending is
- * disabled, or when the catalog vends no credentials.
+ * Returns NIL for non-REST tables, writable REST tables, or when vending
+ * is disabled.  When the catalog answers with no credentials, it returns
+ * a single withdrawn entry scoped to the table root, for the resolver to
+ * drop every secret under it.
  */
 List *
 IcebergProvideStorageCredentials(Oid relationId)
@@ -2123,6 +2291,20 @@ IcebergProvideStorageCredentials(Oid relationId)
 									 tableName);
 
 		credentials = result.vendedCredentials;
+
+		/*
+		 * The catalog no longer vends for the table, but secrets any backend
+		 * pushed for it, for any principal, may still be in pgduck_server.
+		 */
+		if (credentials == NIL && result.tableRoot != NULL)
+		{
+			sc = palloc0(sizeof(StorageCredential));
+			sc->serverOid = opts->serverOid;
+			sc->scopePrefix = result.tableRoot;
+			sc->withdrawn = true;
+
+			return list_make1(sc);
+		}
 	}
 
 	foreach(credsCell, credentials)
@@ -2162,9 +2344,7 @@ IcebergProvideStorageCredentials(Oid relationId)
 			creds->secretAccessKey ? pstrdup(creds->secretAccessKey) : NULL;
 		sc->sessionToken = creds->sessionToken ? pstrdup(creds->sessionToken) : NULL;
 		sc->region = creds->region ? pstrdup(creds->region) : NULL;
-		sc->endpoint = creds->endpoint ? pstrdup(creds->endpoint) : NULL;
 		sc->urlStyle = creds->urlStyle ? pstrdup(creds->urlStyle) : NULL;
-		sc->useSsl = creds->useSsl ? pstrdup(creds->useSsl) : NULL;
 		sc->accountName = creds->accountName ? pstrdup(creds->accountName) : NULL;
 		sc->sasToken = creds->sasToken ? pstrdup(creds->sasToken) : NULL;
 		sc->blobEndpoint = creds->blobEndpoint ? pstrdup(creds->blobEndpoint) : NULL;
@@ -2190,9 +2370,10 @@ IcebergProvideStorageCredentials(Oid relationId)
 
 /*
 * CreateNamespaceOnRestCatalog creates a namespace on the rest catalog. On any failure,
-* an error is raised.
+* an error is raised. Returns the created namespace's "location" property
+* when the response includes one, else NULL.
 */
-static void
+static char *
 CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName)
 {
 	/* POST create */
@@ -2220,13 +2401,17 @@ CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName,
 		psprintf(REST_CATALOG_NAMESPACE, opts->baseUri,
 				 URLEncodePrefix(catalogName));
 
-	HttpResult	httpResult = SendRequestToRestCatalog(opts, HTTP_POST, postUrl, body.data,
+	HttpResult	httpResult = SendRequestToRestCatalog(opts, REST_CATALOG_OP_CREATE_NAMESPACE, HTTP_POST, postUrl, body.data,
 													  PostHeadersWithAuth(opts));
 
 	if (httpResult.status != 200)
 	{
 		ReportHTTPError(httpResult, ERROR);
 	}
+
+	if (httpResult.body == NULL || *httpResult.body == '\0')
+		return NULL;
+	return JsonbGetOptionalStringByPath(httpResult.body, 2, "properties", "location");
 }
 
 
@@ -2306,9 +2491,13 @@ GetRestCatalogNamespace(Oid relationId)
 /*
  * Returns the catalog name to use for REST API calls.
  *
- * Writable tables always use the current database name so that a
- * subsequent ALTER SERVER ? ADD/SET catalog_name cannot silently
- * re-route an existing table to a different REST namespace.
+ * Writable tables use the catalog_name stored in their options at CREATE
+ * TABLE: a prefix the user gave (or pg_dump replayed) is stored as given,
+ * and a resolved one only when it differs from the database name (see
+ * ResolveWritableRestCatalogName).  Tables without it use the current
+ * database name, as they always have.  The value is fixed at CREATE and
+ * cannot be changed with ALTER, so a later ALTER SERVER ... catalog_name
+ * cannot silently re-route an existing table.
  *
  * Read-only tables always have catalog_name baked into their table
  * options at CREATE TABLE time (inherited from the server option or
@@ -2322,14 +2511,14 @@ GetRestCatalogName(Oid relationId)
 	Assert(catalogType == REST_CATALOG_READ_ONLY ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
-	if (catalogType == REST_CATALOG_READ_WRITE)
-		return get_database_name(MyDatabaseId);
-
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	char	   *catalogName = GetStringOption(foreignTable->options, "catalog_name", false);
 
 	if (catalogName != NULL)
 		return catalogName;
+
+	if (catalogType == REST_CATALOG_READ_WRITE)
+		return get_database_name(MyDatabaseId);
 
 	elog(ERROR, "catalog_name missing on read-only REST catalog table %u", relationId);
 }

@@ -363,6 +363,7 @@ typedef struct FindResultRelationScanStateContext
 
 
 PgLakeModifyValidityCheckHookType PgLakeModifyValidityCheckHook = NULL;
+PgLakeForeignScanTupleHookType PgLakeForeignScanTupleHook = NULL;
 
 
 /*
@@ -1910,6 +1911,9 @@ postgresIterateForeignScan(ForeignScanState *node)
 					   slot,
 					   false);
 
+	if (PgLakeForeignScanTupleHook != NULL)
+		PgLakeForeignScanTupleHook(node, slot);
+
 	return slot;
 }
 
@@ -2361,6 +2365,18 @@ postgresExecForeignDelete(EState *estate,
 
 	/* get the ctid value produced by RowIdRecordStringToItemPointer */
 	ItemPointer ctid = (ItemPointer) DatumGetPointer(ctidDatum);
+
+	/*
+	 * If the row was already deleted, we skip subsequent deletes in the same
+	 * command to match the behaviour of PostgreSQL. Otherwise, duplicates
+	 * would inflate the deleted row count of the file, which could cause the
+	 * whole file to be removed.
+	 */
+	if (fmstate->requiresUpdateTracking &&
+		!IsFirstUpdateOfTuple(&fmstate->updateTrackingState, ctid))
+	{
+		return NULL;
+	}
 
 	/* write a delete record for the file name and row number to a delete file */
 	DeleteSingleRow(fmstate, ctid);
@@ -3521,7 +3537,22 @@ fetch_more_data(ForeignScanState *node)
 		int			numrows;
 		int			i;
 
-		res = WaitForResult(fsstate->conn);
+		/*
+		 * The empty PGRES_TUPLES_OK ends the rows, but ReadyForQuery may
+		 * still be pending. Consume it before reporting EOF and closing the
+		 * connection.
+		 */
+		for (;;)
+		{
+			res = WaitForResult(fsstate->conn);
+			if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK ||
+				PQntuples(res) != 0)
+				break;
+
+			PQclear(res);
+			res = NULL;
+		}
+
 		if (res == NULL)
 		{
 			fsstate->eof_reached = true;
@@ -3531,10 +3562,7 @@ fetch_more_data(ForeignScanState *node)
 		{
 			numrows = PQntuples(res);
 
-			/* one way of SingleRowMode to indicate we are at the end */
-			if (PQresultStatus(res) == PGRES_TUPLES_OK && numrows == 0)
-				fsstate->eof_reached = true;
-			else if (PQresultStatus(res) != PGRES_SINGLE_TUPLE)
+			if (PQresultStatus(res) != PGRES_SINGLE_TUPLE)
 			{
 				ThrowIfPGDuckResultHasError(fsstate->conn, res);
 			}
@@ -3751,11 +3779,12 @@ create_foreign_modify(Relation rel,
 
 			/*
 			 * If our subplan is not a foreign scan (of the relation being
-			 * updated), then it may produce duplicates and we need
+			 * updated or deleted), then it may produce duplicates and we need
 			 * deduplication.
 			 */
 			fmstate->requiresUpdateTracking =
-				operation == CMD_UPDATE && !IsA(subPlan, ForeignScan);
+				(operation == CMD_UPDATE || operation == CMD_DELETE) &&
+				!IsA(subPlan, ForeignScan);
 		}
 
 		/*

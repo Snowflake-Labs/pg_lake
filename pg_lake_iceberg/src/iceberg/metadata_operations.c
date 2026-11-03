@@ -309,6 +309,19 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 		}
 	}
 
+	/*
+	 * The manifests and manifest list written below go under the table
+	 * location.  For a writable REST catalog table that location comes from
+	 * the metadata the catalog's loadTable answers with, so hold it to the
+	 * same rules as the staged location the catalog answered with when the
+	 * table was created.
+	 */
+	if (writableRestCatalogTable)
+	{
+		ValidateStorageURL(metadata->location);
+		ErrorIfURLLeavesObjectStorage(metadata->location, NULL);
+	}
+
 	/* whether to create a new version of the Iceberg table */
 	bool		createNewSnapshot = false;
 
@@ -966,11 +979,26 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 	 * Always create a new manifest file for the new data and positional
 	 * delete file(s) and append it to the existing data files in the current
 	 * snapshot.
+	 *
+	 * Read the manifest list once and split it by content type, rather than
+	 * fetching it once per content type: every fetch is a read of the same
+	 * immutable file.
 	 */
-	const List *existingDataManifests =
-		FetchManifestsFromSnapshot(currentSnapshot, IsManifestOfFileContentAdd);
-	const List *existingDeleteManifests =
-		FetchManifestsFromSnapshot(currentSnapshot, IsManifestOfFileContentDeletes);
+	List	   *existingDataManifests = NIL;
+	List	   *existingDeleteManifests = NIL;
+
+	List	   *existingManifests = FetchManifestsFromSnapshot(currentSnapshot, NULL);
+	ListCell   *existingManifestCell = NULL;
+
+	foreach(existingManifestCell, existingManifests)
+	{
+		IcebergManifest *manifest = lfirst(existingManifestCell);
+
+		if (IsManifestOfFileContentAdd(manifest))
+			existingDataManifests = lappend(existingDataManifests, manifest);
+		else if (IsManifestOfFileContentDeletes(manifest))
+			existingDeleteManifests = lappend(existingDeleteManifests, manifest);
+	}
 
 	/* do not modify existing manifests */
 	List	   *finalDataManifestList = list_copy(existingDataManifests);
@@ -1339,7 +1367,9 @@ CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation * operati
 							&manifestEntry->data_file.lower_bounds,
 							&manifestEntry->data_file.lower_bounds_length,
 							&manifestEntry->data_file.upper_bounds,
-							&manifestEntry->data_file.upper_bounds_length);
+							&manifestEntry->data_file.upper_bounds_length,
+							&manifestEntry->data_file.nan_value_counts,
+							&manifestEntry->data_file.nan_value_counts_length);
 
 	return manifestEntry;
 }

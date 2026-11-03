@@ -28,11 +28,12 @@ extern PGDLLEXPORT void SetIcebergDataFileStats(const DataFileStats * dataFileSt
 												ColumnBound * *lowerBounds,
 												size_t *nLowerBounds,
 												ColumnBound * *upperBounds,
-												size_t *nUpperBounds);
+												size_t *nUpperBounds,
+												ColumnStat * *nanValueCounts,
+												size_t *nNanValueCounts);
 extern PGDLLEXPORT unsigned char *IcebergSerializeColumnBoundText(char *columnBoundText,
 																  Field * field,
 																  size_t *binaryLen);
 extern PGDLLEXPORT bool CanSerializeColumnBound(char *boundText, Field * field);
 extern PGDLLEXPORT Datum ColumnBoundDatum(char *columnBoundText, PGType pgType);
-extern PGDLLEXPORT bool GetIcebergColumnBounds(DataFile * dataFile, int fieldId, Field * field, PGType pgType,
-											   Datum *lowerValue, Datum *upperValue);
+extern PGDLLEXPORT List *GetIcebergDataFileColumnStats(DataFile * dataFile, List *leafFields);

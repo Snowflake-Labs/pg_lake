@@ -49,6 +49,7 @@ extern int	pgserver_init(PGServer * pgServer,
 						  char *unixSocketOwningGroup,
 						  int unixSocketPermissions,
 						  int port);
+extern int	pgserver_block_shutdown_signals(void);
 extern int	pgserver_run(PGServer * pgServer);
 extern void pgserver_destroy(PGServer * pgServer);
 

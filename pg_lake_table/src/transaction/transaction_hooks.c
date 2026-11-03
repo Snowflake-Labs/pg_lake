@@ -31,6 +31,7 @@ void
 IcebergRegisterCallbacks(void)
 {
 	RegisterXactCallback(IcebergXactCallback, NULL);
+	RegisterSubXactCallback(IcebergMetadataSubXactCallback, NULL);
 }
 
 

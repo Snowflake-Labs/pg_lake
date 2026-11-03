@@ -208,7 +208,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 										 isResultRelation, NULL, snapshot);
 
 		/* prune the data files based on the filters in the query execution */
-		List	   *prunedDataFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH, NULL);
+		List	   *prunedDataFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);
 
 		/* for the pruned dataFiles, read the corresponding deletion files */
 		List	   *positionDeleteFiles =
@@ -226,7 +226,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 * Iceberg, since we only have statistics for Iceberg.
 		 */
 		if (isResultRelation)
-			fullMatches = PruneDataFiles(relationId, prunedDataFiles, baseRestrictInfoList, FULL_MATCH, NULL);
+			fullMatches = PruneDataFiles(relationId, prunedDataFiles, baseRestrictInfoList, FULL_MATCH);
 
 		/*
 		 * fullMatches is produced by filtering prunedDataFiles in order, so
@@ -274,18 +274,23 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 	}
 	else if (IsExternalIcebergTable(relationId))
 	{
+		char	   *path = GetIcebergMetadataLocation(relationId, false);
+
 		/*
 		 * Single choke point for storage credentials on the read path: both
 		 * the plain FDW scan path and the query-pushdown path funnel through
 		 * CreatePgLakeScanSnapshot -> here, and a table pg_lake did not
 		 * create is the only kind whose files a catalog vends credentials
 		 * for.  It has to happen before the metadata read just below, which
-		 * is itself a read of that storage.  The resolver no-ops for
-		 * everything but a read-only REST-catalog table.
+		 * is itself a read of that storage, and after the catalog lookup
+		 * above, whose answer decides whether credentials vended earlier
+		 * still stand.  Under REPEATABLE READ and SERIALIZABLE that lookup is
+		 * answered once per transaction, so the answer its first statement
+		 * got stands until the transaction ends, or until those credentials
+		 * near expiry.  The resolver no-ops for everything but a read-only
+		 * REST-catalog table.
 		 */
 		EnsureStorageCredentialsForRelation(relationId);
-
-		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
 		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(path);
 
@@ -644,7 +649,7 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 
 	FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
 
-	List	   *retainedFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH, metadata);
+	List	   *retainedFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);
 
 	ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, fileScans, positionDeleteScans);
 	*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles, deleteFiles,

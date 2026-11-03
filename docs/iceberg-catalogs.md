@@ -131,6 +131,8 @@ of its own catalog, and other engines using that catalog see them immediately. p
 attach tables that other engines created there. It speaks the
 [Iceberg REST catalog protocol](https://iceberg.apache.org/rest-catalog-spec/) with OAuth2
 client credentials, and has been tested with [Apache Polaris](https://polaris.apache.org/).
+Its requests carry the header `User-Agent: pg_lake/<version>` with the major and minor
+version, such as `pg_lake/3.6`.
 
 {: .note }
 Writing to an external catalog is still experimental. See
@@ -193,8 +195,9 @@ CREATE SERVER polaris TYPE 'rest'
 | Option | Where | Description |
 |:--|:--|:--|
 | `rest_endpoint` | server | Base URL of the REST catalog API. |
-| `location_prefix` | server | Storage location for tables pg_lake creates in this catalog. pg_lake adds the database, schema and table name to it. |
-| `catalog_name` | server | Catalog (warehouse) to attach existing tables from. Without it, pg_lake uses the prefix the catalog advertises, or the database name. A server with `catalog_name` can only be used to attach tables, see [below](#create-tables-in-an-external-catalog). |
+| `location_prefix` | server | Storage location pg_lake requests for new writable tables in this catalog. pg_lake adds the database, schema, table name and table OID to it; the catalog may assign a different location. |
+| `catalog_name` | server | Catalog (warehouse) that tables use. Without it, pg_lake uses the prefix the catalog advertises, or the database name. A table created by pg_lake keeps the catalog it was created in, even if this option changes later, see [below](#create-tables-in-an-external-catalog). |
+| `warehouse` | server | Warehouse to name when pg_lake asks the catalog for its prefix (`GET /v1/config?warehouse=...`). Polaris and Lakekeeper need it to advertise a prefix: use the catalog name on Polaris and the warehouse name on Lakekeeper, which returns the warehouse ID. `catalog_name` still wins if set. |
 | `oauth_endpoint` | server | OAuth2 token endpoint URL, if the catalog does not serve it at `<rest_endpoint>/v1/oauth/tokens`. |
 | `enable_vended_credentials` | server | Ask the catalog for temporary storage credentials instead of using pgduck_server's own. |
 | `scope` | server or user mapping | OAuth2 scope. Default `PRINCIPAL_ROLE:ALL`. The user mapping wins if both set it. |
@@ -256,6 +259,15 @@ uppercase letters, and names set later with `ALTER`, are used as given.
 
 An attached table always reads the catalog's current version, so queries see new commits from
 other engines without any changes in PostgreSQL. Dropping it only removes it from PostgreSQL.
+
+A statement reads one version of the catalog: every reference to a table, every table of one
+`object_store` catalog, and every query the statement runs in functions, `DO` blocks, procedures
+and triggers reads the same version. Under `READ COMMITTED`, the next statement reads the version
+that stands by then, and a cursor, including the one a PL/pgSQL `FOR` loop opens, reads the
+version that stands when it opens. A procedure that commits reads the catalog anew after each
+commit, so a procedure that polls an attached table for new commits should commit between polls.
+`REPEATABLE READ` and `SERIALIZABLE` hold a transaction to the version its first read of an
+attached table used.
 
 To attach many tables from one catalog, set `catalog_name` on the server and mirror the
 namespaces as schemas. The other catalog options then follow from the names you use:
@@ -321,13 +333,44 @@ WITH (catalog = 'polaris')
 AS SELECT region, sum(amount) AS total FROM orders GROUP BY region;
 ```
 
-pg_lake names the table in the catalog after the database, schema and table you used. Here
-that is the catalog (warehouse) named after the current database, namespace `public` and table
-`order_summary`, so the REST catalog needs a catalog with the same name as the database, and it
-must allow writes under the server's `location_prefix`. pg_lake creates the namespace if it
-does not exist. The catalog options of attached tables are not accepted, and neither is a
-server with `catalog_name`, so that the location of a table in the catalog cannot change after
-it was created. For the same reason, these tables cannot be renamed or moved to another schema.
+pg_lake names the table in the catalog after the schema and table you used: here namespace
+`public` and table `order_summary`. An explicit table `catalog_name` takes precedence;
+otherwise the catalog (warehouse) is the server's `catalog_name`, then the prefix the
+catalog advertises, then the current database name. pg_lake picks it
+once, when the table is created, and the table keeps it: changing the server's `catalog_name`
+later does not move existing tables, and the table's own `catalog_name` cannot be changed.
+A nondefault prefix is stored in the table's options. Explicit prefixes are always
+preserved, including when replaying `pg_dump` DDL, and do not follow a database rename.
+Tables without a stored prefix continue to use the database name. Writable tables do not
+accept `catalog_namespace` or `catalog_table_name` overrides and cannot be renamed or
+moved to another schema. One transaction may modify only one REST server and prefix;
+rolling back a savepoint discards its pending catalog work and restores the prior binding.
+
+pg_lake creates the namespace if it does not exist, then stages table creation with its
+schema. When `location_prefix` (or `pg_lake_iceberg.default_location_prefix`) is set,
+the staging request asks for pg_lake's usual location, the prefix followed by the
+database, schema and table name and the table OID. The OID keeps a re-created table
+off a dropped table's files. If the namespace reports a `location` and that path is not
+under it (Polaris names namespace locations after the raw schema name, so a schema name
+that needs URL-encoding falls outside), the same database/schema/table/OID tail is
+requested under the namespace location instead. The catalog must return a table UUID and storage location,
+and pg_lake uses the returned location for both data and metadata. Polaris and
+Lakekeeper keep the requested location; Nessie assigns its own; a catalog that rejects
+the location fails the
+`CREATE TABLE`. Without a prefix, the catalog chooses the location. An explicit
+`location` option, including one in replayed DDL, is requested as given; if the
+catalog assigns a different location, pg_lake reports it with a NOTICE and uses the
+catalog's. As for other Iceberg tables, the chosen location must be empty, so
+replaying DDL whose old location still holds files fails. Existing tables retain their
+storage locations.
+
+Storage access for writable tables must be configured directly in pgduck_server: pg_lake
+does not use catalog-vended credentials for writable REST tables, because their files
+(including queued deletions) outlive any vended credential. The chosen
+location must be empty and satisfy the configured managed-storage-region restriction.
+New writable tables request Iceberg format version 2 and uncompressed metadata JSON,
+which the current metadata-file reader requires. The catalog must support staged creation
+and the commit operations used by pg_lake; REST catalog support alone is not sufficient.
 
 {: .warning }
 pg_lake sends its changes to the catalog after the PostgreSQL transaction commits. If the
@@ -381,25 +424,6 @@ When the table is registered in a REST catalog, attaching it with `read_only = t
 avoids this manual step. The same `lowercase_column_names` option is accepted by `CREATE TABLE`
 with `load_from` or `definition_from`, and by `COPY ... FROM` an Iceberg metadata file. See the
 [file formats reference](file-formats-reference.md#external-iceberg-format) for those forms.
-
-## Data file pruning for external Iceberg tables
-
-For filters on top-level `int`, `long`, `date`, and `decimal` columns, pg_lake
-uses lower and upper bounds from the scan's Iceberg manifests before requesting
-Parquet footer statistics. Files whose bounds prove that they cannot match the
-filter are excluded from the scan.
-
-When all filtered columns have usable manifest bounds, no additional footer
-statistics are requested for that file during pruning. Missing, duplicate,
-malformed, or unsupported bounds fall back to the existing footer statistics
-path unless the available constraints already exclude the file. Pruning
-preserves possible NULL matches and duplicate rows.
-
-Manifest bounds may be wider than footer bounds, so this optimization does not
-guarantee fewer retained files. Execution, or obtaining a DuckDB physical plan,
-may still read footers of retained files. The existing
-`pg_lake_table.enable_data_file_pruning` setting controls this optimization;
-internal-table pruning and whole-file matching for writes are unchanged.
 
 ## Reading external equality deletes
 
@@ -471,6 +495,96 @@ The existing `Deletion Files Scanned` EXPLAIN metric counts referenced equality
 files once per table scan, regardless of how many groups reference them. It does
 not count physical reader executions or object-storage requests. Footer reads
 and repeated group reads can cause additional I/O.
+
+## Catalog error log
+
+pg_lake writes a line to the PostgreSQL server log, never to the client, when a catalog
+request fails, when no catalog credential can be obtained, when storage credentials from a
+catalog cannot be used, and when a table uses something pg_lake cannot handle. Each line is
+`pg_lake_catalog: ` followed by one of the sentences below. The sentences carry no table,
+schema, namespace or catalog names, no URLs or paths, no SQL text and no error messages from
+the catalog, so the lines can be collected in places where the rest of the server log should
+not go.
+
+```
+LOG:  pg_lake_catalog: could not load a table from the Horizon catalog: HTTP 403 (ForbiddenException)
+LOG:  pg_lake_catalog: a table uses Iceberg deletion vectors, which pg_lake does not support
+```
+
+To collect them, match on the prefix. Set `pg_lake_iceberg.log_catalog_events` to `off` to
+turn the lines off.
+
+Where a sentence names the catalog, it is one of:
+
+- `the Horizon catalog`: the [built-in `rest` catalog](#configure-the-built-in-rest-catalog)
+  when `pg_lake_iceberg.rest_catalog_auth_type` is `horizon`.
+- `the built-in REST catalog`: the built-in `rest` catalog with any other authentication.
+- `a catalog server`: a catalog defined with [CREATE SERVER](#external-catalogs-with-create-server).
+
+### Failed catalog requests
+
+```
+could not <request> <catalog>: HTTP <status> (<error type>)
+could not <request> <catalog>: HTTP <status>
+could not <request> <catalog>: <network problem>
+```
+
+`<request>` is one of `get the configuration of`, `get an access token from`,
+`list namespaces in`, `look up a namespace in`, `create a namespace in`, `load a table from`
+and `create a table in`, or, for the changes sent to the catalog after a transaction
+commits, `publish a new table to`, `publish a table drop to` and
+`publish committed changes to`. A failed publish means PostgreSQL committed a change that the
+catalog does not have.
+
+The error type is the Iceberg exception type or OAuth2 error code the catalog answered with.
+It is left out when the response names none, or one pg_lake does not know. When no response
+arrived, the network problem is one of `host not found`, `connection failed`, `timed out`,
+`TLS error`, `connection lost`, `out of memory` or `network error`.
+
+A request is logged once its retries are over. A 404 is not logged, because pg_lake looks up
+namespaces and tables that may not exist as part of creating and attaching tables, except
+when publishing a new table or committed changes: there it means the catalog lost the
+namespace or table. A request interrupted by a cancel is not logged either.
+
+### Authentication failures
+
+```
+could not authenticate to <catalog> (SQLSTATE <code>)
+```
+
+No credential could be obtained for the catalog, either from pg_lake's own OAuth2 token
+request or from a credential provider supplied by another extension.
+
+### Vended credentials
+
+```
+<catalog> returned no vended credentials for a table
+ignoring vended credentials for <storage> from <catalog> that pg_lake cannot use
+ignoring a vended Azure endpoint that is not allowed
+could not resolve storage credentials for a table (SQLSTATE <code>)
+```
+
+The first is logged when a table asks its catalog for vended credentials and gets none.
+`<storage>` is `S3`, `Azure Data Lake Storage`, `Google Cloud Storage` or
+`an unrecognized kind of storage`. An Azure endpoint is not allowed when its host is not
+under `pg_lake.allowed_azure_host_suffixes` or is not the storage account's own. Each of these
+three is logged once per session for each table or endpoint. The last is logged when
+resolving the credentials a query needs fails.
+
+### Unsupported Iceberg features
+
+```
+a table uses Iceberg deletion vectors, which pg_lake does not support
+a table uses Iceberg column default values, which pg_lake does not support
+a table uses Iceberg format version <version>, which pg_lake cannot read
+a table uses Iceberg format version <version>, which pg_lake cannot write
+a table uses the Iceberg type <type>, which pg_lake does not support
+a table uses an Iceberg type pg_lake does not support
+```
+
+`<type>` is `geography`, `geometry`, `timestamp_ns`, `timestamptz_ns`, `unknown` or
+`variant`; any other type gets the last sentence. Each is logged along with the error that
+refuses the table.
 
 ## Snowflake
 

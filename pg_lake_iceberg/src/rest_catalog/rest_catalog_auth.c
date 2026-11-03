@@ -40,6 +40,7 @@
 #include "utils/timestamp.h"
 
 #include "pg_lake/http/http_client.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/url_encode.h"
 
@@ -123,6 +124,62 @@ InvalidateRestTokenCache(Datum arg, int cacheid, uint32 hashvalue)
 	}
 
 	InvalidateVendedCredentialsCache();
+}
+
+
+/*
+ * Assign hooks for the GUCs the built-in pg_lake_rest_catalog draws its
+ * credentials from.  Changing one of them does not go through the syscache,
+ * so without these a token minted from the previous credentials would be
+ * served until it expires (#418).
+ *
+ * Assign hooks run at postmaster start and on every SIGHUP, so they must not
+ * throw, and they flush only when the value actually changes; otherwise every
+ * reload would empty the cache.  At assign time the GUC variable still holds
+ * the old value.  rest_catalog_host is not hooked: it names the catalog, not
+ * the OAuth endpoint, so changing it does not invalidate an issued token.
+ */
+static void
+InvalidateRestTokenCacheIfChanged(const char *oldval, const char *newval)
+{
+	/* both NULL, or the same string: nothing to do */
+	if (oldval == newval)
+		return;
+	if (oldval != NULL && newval != NULL && strcmp(oldval, newval) == 0)
+		return;
+
+	InvalidateRestTokenCache((Datum) 0, 0, 0);
+}
+
+void
+AssignRestCatalogClientId(const char *newval, void *extra)
+{
+	InvalidateRestTokenCacheIfChanged(RestCatalogClientId, newval);
+}
+
+void
+AssignRestCatalogClientSecret(const char *newval, void *extra)
+{
+	InvalidateRestTokenCacheIfChanged(RestCatalogClientSecret, newval);
+}
+
+void
+AssignRestCatalogOauthHostPath(const char *newval, void *extra)
+{
+	InvalidateRestTokenCacheIfChanged(RestCatalogOauthHostPath, newval);
+}
+
+void
+AssignRestCatalogScope(const char *newval, void *extra)
+{
+	InvalidateRestTokenCacheIfChanged(RestCatalogScope, newval);
+}
+
+void
+AssignRestCatalogAuthType(int newval, void *extra)
+{
+	if (newval != RestCatalogAuthType)
+		InvalidateRestTokenCache((Datum) 0, 0, 0);
 }
 
 
@@ -306,6 +363,9 @@ RestCatalogAuthProviderIsRegistered(void)
  * rest_endpoint, so consulting the provider there would hand that role a
  * token minted for the deployment.  User-created servers authenticate with
  * their own user mapping credentials instead.
+ *
+ * A failure from either source is logged (see catalog_log.h) before it
+ * propagates.
  */
 static void
 FetchRestCatalogAuthorization(RestCatalogOptions * opts,
@@ -325,19 +385,31 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts,
 			.forceRefresh = forceRefresh,
 		};
 		RestCatalogAuthMaterial material = {0};
+		bool		claimed = false;
 
-		if (provider(&request, &material))
+		PG_TRY();
 		{
-			if (material.authorization == NULL || *material.authorization == '\0')
+			claimed = provider(&request, &material);
+
+			if (claimed && (material.authorization == NULL || *material.authorization == '\0'))
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 errmsg("REST catalog credential provider returned an empty authorization")));
 
-			if (material.expiresIn < 0)
+			if (claimed && material.expiresIn < 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_INTERNAL_ERROR),
 						 errmsg("REST catalog credential provider returned a negative lifetime")));
+		}
+		PG_CATCH();
+		{
+			LogCatalogAuthFailure(opts, geterrcode());
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
 
+		if (claimed)
+		{
 			*authorization = material.authorization;
 			*expiresIn = material.expiresIn;
 			return;
@@ -346,7 +418,16 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts,
 
 	char	   *accessToken = NULL;
 
-	FetchOAuth2AccessToken(opts, &accessToken, expiresIn);
+	PG_TRY();
+	{
+		FetchOAuth2AccessToken(opts, &accessToken, expiresIn);
+	}
+	PG_CATCH();
+	{
+		LogCatalogAuthFailure(opts, geterrcode());
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	*authorization = psprintf("Bearer %s", accessToken);
 }

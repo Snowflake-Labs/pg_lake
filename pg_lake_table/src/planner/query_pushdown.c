@@ -1681,20 +1681,29 @@ QueryPushdownScanNextInternal(CustomScanState *node)
 		return NULL;
 	}
 
-	PGresult   *result = WaitForResult(scanState->connection);
+	PGresult   *result = NULL;
+
+	/*
+	 * The empty PGRES_TUPLES_OK ends the rows, but ReadyForQuery may still be
+	 * pending. Consume it before reporting EOF and releasing the connection.
+	 */
+	for (;;)
+	{
+		result = WaitForResult(scanState->connection);
+		if (result == NULL || PQresultStatus(result) != PGRES_TUPLES_OK ||
+			PQntuples(result) != 0)
+			break;
+
+		PQclear(result);
+		result = NULL;
+	}
 
 	if (result == NULL)
 	{
 		return NULL;
 	}
 
-	/* one way of SingleRowMode to indicate we are at the end */
-	if (PQresultStatus(result) == PGRES_TUPLES_OK && PQntuples(result) == 0)
-	{
-		PQclear(result);
-		return NULL;
-	}
-	else if (PQresultStatus(result) != PGRES_SINGLE_TUPLE)
+	if (PQresultStatus(result) != PGRES_SINGLE_TUPLE)
 	{
 		CheckPGDuckResult(scanState->connection, result);
 	}

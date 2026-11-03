@@ -61,7 +61,7 @@ The query engine itself, pgduck_server, is configured with command-line options;
 | Parameter | Description |
 |:--|:--|
 | `pg_lake_table.enable_full_query_pushdown`<span class="pglake-meta">Default `on`, set by user</span> | Push whole queries down to DuckDB when every part of the query can run there. |
-| `pg_lake_table.enable_strict_pushdown`<span class="pglake-meta">Default `on`, set by user</span> | Only push down functions, operators and types whose DuckDB behavior is known to match PostgreSQL. |
+| `pg_lake_table.enable_strict_pushdown`<span class="pglake-meta">Default `on`, set by superuser</span> | Only push down functions, operators and types whose DuckDB behavior is known to match PostgreSQL. |
 | `pg_lake_table.enable_data_file_pruning`<span class="pglake-meta">Default `on`, set by superuser</span> | Skip Iceberg data files whose column statistics rule out a match. |
 | `pg_lake_table.enable_partition_pruning`<span class="pglake-meta">Default `on`, set by superuser</span> | Skip Iceberg data files whose partition values rule out a match. |
 
@@ -94,6 +94,7 @@ See [performance](performance.md) for how these affect queries.
 | `pg_lake_iceberg.enable_object_store_catalog`<span class="pglake-meta">Default `on`, set by reload</span> | Publish tables to the object store catalog. |
 | `pg_lake_iceberg.object_store_catalog_location_prefix`<span class="pglake-meta">Default none, set by reload</span> | Storage location of the object store catalog. |
 | `pg_lake_iceberg.object_store_catalog_max_age`<span class="pglake-meta">Default `1min`, set by reload</span> | Time after which the object store catalog file is rewritten even without changes. |
+| `pg_lake_iceberg.log_catalog_events`<span class="pglake-meta">Default `on`, set by superuser</span> | Write the [catalog error log](iceberg-catalogs.md#catalog-error-log) to the server log. |
 
 ## Security
 

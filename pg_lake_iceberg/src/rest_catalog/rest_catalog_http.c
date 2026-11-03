@@ -39,13 +39,19 @@
 
 #include "fmgr.h"
 #include "lib/stringinfo.h"
+#include "nodes/miscnodes.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
 
 #include "pg_extension_base/base_workers.h"
 #include "pg_lake/http/http_client.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+
+/* error bodies are small; anything larger or deeper is not worth parsing */
+#define MAX_ERROR_BODY_LENGTH (64 * 1024)
+#define MAX_ERROR_BODY_DEPTH 32
 
 
 /*
@@ -141,11 +147,14 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo,
  * canRefreshCredential is false only for the credential request itself
  * (see SendCredentialRequestToRestCatalog), both to avoid recursion and so
  * that its own 401 is reported as the authentication failure it is.
+ *
+ * A failure is logged under op once retries are over; logging must not
+ * throw, for the same post-commit reason.
  */
 static HttpResult
-SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
-					   HttpMethod method, const char *url,
-					   const char *body, List *headers)
+SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
+					   bool canRefreshCredential, HttpMethod method,
+					   const char *url, const char *body, List *headers)
 {
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
 
@@ -165,8 +174,9 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
 		HTTP_TLS_DEPLOYMENT_CLIENT_CERT : HTTP_TLS_NO_CLIENT_CERT;
 
 	HttpResult	result;
+	bool		done = false;
 
-	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG; retryNo++)
+	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG && !done; retryNo++)
 	{
 		result = SendHttpRequest(method, url, body, headers, clientAuth);
 
@@ -197,9 +207,12 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
 				}
 
 			case REST_CATALOG_RETRY_STOP:
-				return result;
+				done = true;
+				break;
 		}
 	}
+
+	LogCatalogRequest(opts, op, &result);
 
 	return result;
 }
@@ -216,12 +229,14 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
  * forced false for it, same as the credential request itself below.
  */
 HttpResult
-SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
+SendRequestToRestCatalog(RestCatalogOptions * opts, RestCatalogOp op,
+						 HttpMethod method, const char *url,
 						 const char *body, List *headers)
 {
 	bool		canRefreshCredential = (opts->authType != REST_CATALOG_AUTH_TYPE_NONE);
 
-	return SendRestCatalogRequest(opts, canRefreshCredential, method, url, body, headers);
+	return SendRestCatalogRequest(opts, op, canRefreshCredential, method, url,
+								  body, headers);
 }
 
 
@@ -235,7 +250,101 @@ SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
 {
 	bool		canRefreshCredential = false;
 
-	return SendRestCatalogRequest(opts, canRefreshCredential, HTTP_POST, url, body, headers);
+	return SendRestCatalogRequest(opts, REST_CATALOG_OP_TOKEN, canRefreshCredential,
+								  HTTP_POST, url, body, headers);
+}
+
+
+/*
+ * IsParseableErrorBody returns whether an error body is short and shallow
+ * enough that jsonb_in cannot raise a hard error on it.  It counts nesting
+ * outside of strings, so it cannot raise either.
+ */
+static bool
+IsParseableErrorBody(const char *body)
+{
+	int			depth = 0;
+	bool		inString = false;
+	size_t		length = 0;
+
+	for (const char *cursor = body; *cursor != '\0'; cursor++)
+	{
+		if (++length > MAX_ERROR_BODY_LENGTH)
+			return false;
+
+		if (inString)
+		{
+			if (*cursor == '\\' && cursor[1] != '\0')
+				cursor++;
+			else if (*cursor == '"')
+				inString = false;
+		}
+		else if (*cursor == '"')
+			inString = true;
+		else if (*cursor == '{' || *cursor == '[')
+		{
+			if (++depth > MAX_ERROR_BODY_DEPTH)
+				return false;
+		}
+		else if (*cursor == '}' || *cursor == ']')
+			depth--;
+	}
+
+	return true;
+}
+
+
+/*
+ * GetRestCatalogErrorFields sets the error message and type from a REST
+ * catalog error response, or leaves them NULL.  The type is the Iceberg
+ * error envelope's, or the error code of an OAuth2 error response, which has
+ * no message.
+ *
+ * ReportHTTPError and the catalog error log also run after commit, where any
+ * ERROR becomes a PANIC, and the body can be anything a catalog or a proxy
+ * in front of it sent.  So parse it without raising errors and skip what
+ * does not fit.  A soft parse still raises on deep nesting
+ * (check_stack_depth) and on oversized jsonb, so bodies that could hit
+ * either are skipped before parsing.
+ */
+void
+GetRestCatalogErrorFields(const char *body, const char **message, const char **type)
+{
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	Datum		jsonbDatum;
+
+	if (body == NULL || !IsParseableErrorBody(body) ||
+		!DirectInputFunctionCallSafe(jsonb_in, (char *) body, InvalidOid, -1,
+									 (Node *) &escontext, &jsonbDatum))
+		return;
+
+	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
+
+	if (!JsonContainerIsObject(&jsonb->root))
+		return;
+
+	JsonbValue *error = getKeyJsonValueFromContainer(&jsonb->root, "error", strlen("error"), NULL);
+
+	if (error != NULL && error->type == jbvString)
+	{
+		*type = pnstrdup(error->val.string.val, error->val.string.len);
+		return;
+	}
+
+	if (error == NULL || error->type != jbvBinary ||
+		!JsonContainerIsObject(error->val.binary.data))
+		return;
+
+	JsonbValue *messageValue = getKeyJsonValueFromContainer(error->val.binary.data, "message",
+															strlen("message"), NULL);
+	JsonbValue *typeValue = getKeyJsonValueFromContainer(error->val.binary.data, "type",
+														 strlen("type"), NULL);
+
+	if (messageValue != NULL && messageValue->type == jbvString)
+		*message = pnstrdup(messageValue->val.string.val, messageValue->val.string.len);
+
+	if (typeValue != NULL && typeValue->type == jbvString)
+		*type = pnstrdup(typeValue->val.string.val, typeValue->val.string.len);
 }
 
 
@@ -265,8 +374,10 @@ ReportHTTPError(HttpResult httpResult, int level)
 		return;
 	}
 
-	const char *message = httpResult.body ? JsonbGetStringByPath(httpResult.body, 2, "error", "message") : NULL;
-	const char *type = httpResult.body ? JsonbGetStringByPath(httpResult.body, 2, "error", "type") : NULL;
+	const char *message = NULL;
+	const char *type = NULL;
+
+	GetRestCatalogErrorFields(httpResult.body, &message, &type);
 
 	ereport(level,
 			(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),

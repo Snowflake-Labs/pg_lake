@@ -337,6 +337,26 @@ def test_two_modifying_ctes(create_writable_tables, pg_conn):
 
     pg_conn.rollback()
 
+    # same with joins that repeat the target row, which use update tracking
+    error = run_command(
+        """
+        WITH d1 AS (
+            DELETE FROM test_table USING generate_series(1, 10) s
+            WHERE name = 'Alice' RETURNING age
+        ),
+        d2 AS (
+            UPDATE test_table SET age = age + 1 FROM generate_series(1, 10) s
+            WHERE name = 'Alice' RETURNING age
+        )
+        SELECT * FROM d1 UNION ALL SELECT * FROM d2;
+    """,
+        pg_conn,
+        raise_error=False,
+    )
+    assert "pg_lake table test_table cannot be updated by multiple operations" in error
+
+    pg_conn.rollback()
+
 
 def test_system_column(create_writable_tables, pg_conn):
     error = run_command(
@@ -360,6 +380,63 @@ def test_system_column(create_writable_tables, pg_conn):
     assert "is not supported" in error
 
     pg_conn.rollback()
+
+
+def test_delete_join_repeated_rows(pg_conn, s3, extension, with_default_location):
+    """
+    A join that matches a target row many times must delete it only once.
+    Counting the duplicates would make the deleted row count reach the live
+    row count of the file, which removes the whole file including rows that
+    the DELETE never matched.
+    """
+    location = f"s3://{TEST_BUCKET}/test_delete_join_repeated_rows/"
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_delete_repeated;
+        CREATE FOREIGN TABLE test_delete_repeated.target (id int, val int)
+        SERVER pg_lake OPTIONS (location '{location}', writable 'true', format 'parquet');
+        INSERT INTO test_delete_repeated.target VALUES (1, 0), (2, 0), (3, 0);
+
+        CREATE TABLE test_delete_repeated.target_iceberg USING iceberg
+        AS SELECT * FROM test_delete_repeated.target;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    for table_name in ["target", "target_iceberg"]:
+        # an earlier joined UPDATE in the same transaction must not affect
+        # deduplication in the DELETE
+        run_command(
+            f"""
+            UPDATE test_delete_repeated.{table_name} t SET val = t.val + 1
+            FROM generate_series(1, 10) s
+            WHERE t.id IN (1, 2)
+        """,
+            pg_conn,
+        )
+
+        result = run_query(
+            f"""
+            DELETE FROM test_delete_repeated.{table_name} t
+            USING generate_series(1, 10) s
+            WHERE t.id = 1
+            RETURNING t.id
+        """,
+            pg_conn,
+        )
+        assert [tuple(row) for row in result] == [(1,)]
+        pg_conn.commit()
+
+        result = run_query(
+            f"SELECT id, val FROM test_delete_repeated.{table_name} ORDER BY id",
+            pg_conn,
+        )
+        assert [tuple(row) for row in result] == [(2, 1), (3, 0)]
+
+    run_command("DROP SCHEMA test_delete_repeated CASCADE", pg_conn)
+    pg_conn.commit()
 
 
 def test_merge_on_read(pg_conn, extension):

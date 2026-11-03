@@ -25,6 +25,9 @@
 #include "utils/numeric.h"
 
 
+static JsonbValue *GetObjectField(JsonbContainer *json, const char *fieldName);
+
+
 bool
 JsonExtractInt32Field(JsonbContainer *json, char *fieldName, FieldRequired required, int32_t *intPointer)
 {
@@ -32,10 +35,7 @@ JsonExtractInt32Field(JsonbContainer *json, char *fieldName, FieldRequired requi
 
 	*intPointer = 0;
 
-	fieldValueJson = getKeyJsonValueFromContainer(json,
-												  fieldName,
-												  strlen(fieldName),
-												  NULL);
+	fieldValueJson = GetObjectField(json, fieldName);
 	if (fieldValueJson != NULL && fieldValueJson->type == jbvNumeric)
 	{
 		bool		haveError = false;
@@ -65,10 +65,7 @@ JsonExtractInt64Field(JsonbContainer *json, char *fieldName, FieldRequired requi
 
 	*longPointer = 0L;
 
-	fieldValueJson = getKeyJsonValueFromContainer(json,
-												  fieldName,
-												  strlen(fieldName),
-												  NULL);
+	fieldValueJson = GetObjectField(json, fieldName);
 	if (fieldValueJson != NULL && fieldValueJson->type == jbvNumeric)
 	{
 		Datum		longDatum = DirectFunctionCall1(numeric_int8,
@@ -93,10 +90,7 @@ JsonExtractBoolField(JsonbContainer *json, char *fieldName, FieldRequired requir
 
 	*boolPointer = false;
 
-	fieldValueJson = getKeyJsonValueFromContainer(json,
-												  fieldName,
-												  strlen(fieldName),
-												  NULL);
+	fieldValueJson = GetObjectField(json, fieldName);
 	if (fieldValueJson != NULL && fieldValueJson->type == jbvBool)
 	{
 		*boolPointer = fieldValueJson->val.boolean;
@@ -120,10 +114,7 @@ JsonExtractStringField(JsonbContainer *json, char *fieldName, FieldRequired requ
 	*stringPointer = NULL;
 	*lengthPointer = 0L;
 
-	fieldValueJson = getKeyJsonValueFromContainer(json,
-												  fieldName,
-												  strlen(fieldName),
-												  NULL);
+	fieldValueJson = GetObjectField(json, fieldName);
 	if (fieldValueJson != NULL && fieldValueJson->type == jbvString)
 	{
 		int			stringLength = fieldValueJson->val.string.len;
@@ -148,7 +139,7 @@ bool
 JsonExtractFieldAsJsonString(JsonbContainer *jsonbContainer, const char *fieldName, FieldRequired required,
 							 const char **stringPointer, size_t *lengthPointer)
 {
-	JsonbValue *fieldValueJson = getKeyJsonValueFromContainer(jsonbContainer, fieldName, strlen(fieldName), NULL);
+	JsonbValue *fieldValueJson = GetObjectField(jsonbContainer, fieldName);
 
 	if (fieldValueJson == NULL && required == FIELD_OPTIONAL)
 	{
@@ -180,10 +171,7 @@ JsonExtractObjectArrayField(JsonbContainer *json, char *fieldName, FieldRequired
 	*arrayPointer = NULL;
 	*lengthPointer = 0L;
 
-	fieldValueJson = getKeyJsonValueFromContainer(json,
-												  fieldName,
-												  strlen(fieldName),
-												  NULL);
+	fieldValueJson = GetObjectField(json, fieldName);
 
 	if (fieldValueJson != NULL && fieldValueJson->type == jbvArray)
 	{
@@ -199,6 +187,10 @@ JsonExtractObjectArrayField(JsonbContainer *json, char *fieldName, FieldRequired
 		{
 			JsonbValue *item = &fieldValueJson->val.array.elems[itemIndex];
 
+			if (item->type != jbvBinary)
+				ereport(ERROR, (errmsg("expected an array of objects in Iceberg table "
+									   "metadata field %s", fieldName)));
+
 			/* call parse for each array item and allocated entry */
 			parseFn(item->val.binary.data, (void *) entries);
 
@@ -209,6 +201,10 @@ JsonExtractObjectArrayField(JsonbContainer *json, char *fieldName, FieldRequired
 	}
 	else if (fieldValueJson != NULL && fieldValueJson->type == jbvBinary)
 	{
+		if (!JsonContainerIsArray(fieldValueJson->val.binary.data))
+			ereport(ERROR, (errmsg("expected an array in Iceberg table metadata "
+								   "field %s", fieldName)));
+
 		JsonbIterator *iterator = JsonbIteratorInit(fieldValueJson->val.binary.data);
 		int			itemCount = JsonContainerSize(fieldValueJson->val.binary.data);
 
@@ -234,6 +230,9 @@ JsonExtractObjectArrayField(JsonbContainer *json, char *fieldName, FieldRequired
 
 			if (token == WJB_ELEM)
 			{
+				if (content.type != jbvBinary)
+					ereport(ERROR, (errmsg("expected an array of objects in Iceberg "
+										   "table metadata field %s", fieldName)));
 
 				/* call parse for each array item and allocated entry */
 				parseFn(content.val.binary.data, (void *) entries);
@@ -264,10 +263,7 @@ JsonExtractInt32ArrayField(JsonbContainer *json, char *fieldName, FieldRequired 
 	*arrayPointer = NULL;
 	*lengthPointer = 0L;
 
-	fieldValueJson = getKeyJsonValueFromContainer(json,
-												  fieldName,
-												  strlen(fieldName),
-												  NULL);
+	fieldValueJson = GetObjectField(json, fieldName);
 	if (fieldValueJson != NULL && fieldValueJson->type == jbvArray)
 	{
 		int			itemCount = fieldValueJson->val.array.nElems;
@@ -298,6 +294,10 @@ JsonExtractInt32ArrayField(JsonbContainer *json, char *fieldName, FieldRequired 
 	}
 	else if (fieldValueJson != NULL && fieldValueJson->type == jbvBinary)
 	{
+		if (!JsonContainerIsArray(fieldValueJson->val.binary.data))
+			ereport(ERROR, (errmsg("expected an array in Iceberg table metadata "
+								   "field %s", fieldName)));
+
 		JsonbIterator *iterator = JsonbIteratorInit(fieldValueJson->val.binary.data);
 		int			itemCount = JsonContainerSize(fieldValueJson->val.binary.data);
 
@@ -363,10 +363,7 @@ JsonExtractMapField(JsonbContainer *json, char *fieldName, FieldRequired require
 	*arrayPointer = NULL;
 	*lengthPointer = 0L;
 
-	fieldValueJson = getKeyJsonValueFromContainer(json,
-												  fieldName,
-												  strlen(fieldName),
-												  NULL);
+	fieldValueJson = GetObjectField(json, fieldName);
 	if (fieldValueJson != NULL && fieldValueJson->type == jbvObject)
 	{
 		ereport(ERROR, (errmsg("jbvObject handling not yet implemented")));
@@ -374,6 +371,10 @@ JsonExtractMapField(JsonbContainer *json, char *fieldName, FieldRequired require
 	else if (fieldValueJson != NULL && fieldValueJson->type == jbvBinary)
 	{
 		char	   *key = NULL;
+
+		if (!JsonContainerIsObject(fieldValueJson->val.binary.data))
+			ereport(ERROR, (errmsg("expected an object in Iceberg table metadata "
+								   "field %s", fieldName)));
 
 		JsonbIterator *iterator = JsonbIteratorInit(fieldValueJson->val.binary.data);
 		int			itemCount = JsonContainerSize(fieldValueJson->val.binary.data);
@@ -423,4 +424,23 @@ JsonExtractMapField(JsonbContainer *json, char *fieldName, FieldRequired require
 	}
 
 	return true;
+}
+
+
+/*
+ * GetObjectField returns the value of the given key in a JSON object, or
+ * NULL when the key is not there.
+ *
+ * getKeyJsonValueFromContainer only asserts that it got an object, and reads
+ * an array's entries as if they were keys and values.  Metadata comes from
+ * files and catalogs we do not control, so check the type here.
+ */
+static JsonbValue *
+GetObjectField(JsonbContainer *json, const char *fieldName)
+{
+	if (!JsonContainerIsObject(json))
+		ereport(ERROR, (errmsg("expected a JSON object in Iceberg table metadata "
+							   "when reading field %s", fieldName)));
+
+	return getKeyJsonValueFromContainer(json, fieldName, strlen(fieldName), NULL);
 }

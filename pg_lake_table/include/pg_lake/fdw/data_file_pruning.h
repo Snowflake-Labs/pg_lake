@@ -20,7 +20,6 @@
 #include "postgres.h"
 
 #include "nodes/pg_list.h"
-#include "pg_lake/iceberg/metadata_spec.h"
 
 
 /*
@@ -42,6 +41,6 @@ typedef enum PruneType
 extern bool EnableDataFilePruning;
 extern bool EnablePartitionPruning;
 
-List	   *PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, PruneType pruneType, IcebergTableMetadata * metadata);
+List	   *PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, PruneType pruneType);
 Var		   *GetFilenameFilterColumn(Oid relationId, List *baseRestrictInfoList);
 List	   *PruneByFilename(List *paths, Oid relationId, List *baseRestrictInfoList);

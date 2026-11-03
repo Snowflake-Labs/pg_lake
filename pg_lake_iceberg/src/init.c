@@ -32,6 +32,7 @@
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
@@ -201,6 +202,17 @@ _PG_init(void)
 
 
 	DefineCustomBoolVariable(
+							 "pg_lake_iceberg.log_catalog_events",
+							 gettext_noop("Log catalog errors, such as failed catalog requests "
+										  "and authentication failures, in the server log."),
+							 gettext_noop("The lines carry no names, locations or SQL text."),
+							 &LogCatalogEvents,
+							 true,
+							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
 							 "pg_lake_iceberg.http_client_trace_traffic",
 							 gettext_noop("When set to true, HTTP client logging is enabled."),
 							 gettext_noop("The trace reports request URLs and bodies of catalog "
@@ -224,6 +236,18 @@ _PG_init(void)
 							   PGC_SIGHUP,
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							   CheckHttpClientTlsFile, NULL, NULL);
+
+	DefineCustomStringVariable("pg_lake_iceberg.horizon_tls_ca_path",
+							   gettext_noop("Path to an OpenSSL hashed certificate directory "
+											"trusted alongside pg_lake_iceberg.horizon_tls_ca_file "
+											"when verifying catalogs reached with rest_auth_type "
+											"'horizon'. Optional."),
+							   NULL,
+							   &HttpClientTlsCaPath,
+							   "",
+							   PGC_SIGHUP,
+							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
+							   CheckHttpClientTlsDirectory, NULL, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.horizon_tls_cert_file",
 							   gettext_noop("Path to the client certificate presented to catalogs "
@@ -346,7 +370,7 @@ _PG_init(void)
 							 RestCatalogAuthTypeOptions,
 							 PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							 NULL, NULL, NULL);
+							 NULL, AssignRestCatalogAuthType, NULL);
 
 	DefineCustomEnumVariable("pg_lake_iceberg.default_compatibility_mode",
 							 gettext_noop("Downstream-engine storage compatibility mode that new "
@@ -379,7 +403,7 @@ _PG_init(void)
 							   "",
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, AssignRestCatalogOauthHostPath, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_client_id",
 							   NULL,
@@ -388,7 +412,7 @@ _PG_init(void)
 							   NULL,
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, AssignRestCatalogClientId, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_client_secret",
 							   NULL,
@@ -397,7 +421,7 @@ _PG_init(void)
 							   NULL,
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, AssignRestCatalogClientSecret, NULL);
 
 	DefineCustomStringVariable("pg_lake_iceberg.rest_catalog_scope",
 							   NULL,
@@ -406,7 +430,7 @@ _PG_init(void)
 							   "PRINCIPAL_ROLE:ALL",
 							   PGC_SUSET,
 							   GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
-							   NULL, NULL, NULL);
+							   NULL, AssignRestCatalogScope, NULL);
 
 	DefineCustomBoolVariable("pg_lake_iceberg.rest_catalog_enable_vended_credentials",
 							 gettext_noop("Request vended credentials from the Iceberg REST catalog."),

@@ -1,0 +1,27 @@
+diff --git a/src/aws_secret.cpp b/src/aws_secret.cpp
+index e6e7b06..3687800 100644
+--- a/src/aws_secret.cpp
++++ b/src/aws_secret.cpp
+@@ -1,5 +1,7 @@
+ #include "aws_secret.hpp"
+ 
++#include <cstdlib>
++
+ #include "duckdb/common/case_insensitive_map.hpp"
+ #include "duckdb/common/exception.hpp"
+ #include "duckdb/main/extension/extension_loader.hpp"
+@@ -350,6 +352,14 @@ static unique_ptr<BaseSecret> CreateAWSSecretFromCredentialChain(ClientContext &
+ }
+ 
+ void CreateAwsSecretFunctions::InitializeCurlCertificates(DatabaseInstance &db) {
++	// CURL_CA_INFO is also what the Azure SDK's curl transport reads, so one
++	// variable points both at a CA file other than the well-known locations.
++	const char *ca_info = std::getenv("CURL_CA_INFO");
++	if (ca_info && *ca_info) {
++		SELECTED_CURL_CERT_PATH = ca_info;
++		DUCKDB_LOG_DEBUG(db, "aws.CaCertificateDetection: CA path from CURL_CA_INFO: %s", SELECTED_CURL_CERT_PATH);
++		return;
++	}
+ 	for (string &caFile : certFileLocations) {
+ 		struct stat buf;
+ 		if (stat(caFile.c_str(), &buf) == 0) {

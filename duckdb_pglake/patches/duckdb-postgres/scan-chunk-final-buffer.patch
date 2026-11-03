@@ -1,0 +1,13 @@
+diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
+index a8ae40fe939aaaf43a9815af7d9428f4c6af339e..9c8855ba3843ca3a5703a86d675fcbf744c3c0d3 100644
+--- a/src/postgres_scanner.cpp
++++ b/src/postgres_scanner.cpp
+@@ -486,5 +486,8 @@ void PostgresLocalState::ScanChunk(ClientContext &context, const PostgresBindDat
+         auto read_result = reader->Read(output);
+         if (read_result == PostgresReadResult::FINISHED) {
+             done = true;
++			if (output.size() > 0) {
++				return;
++			}
+             continue;
+         }

@@ -192,8 +192,13 @@ The `install.sh` script provides flexible installation options:
 # Build PostgreSQL 17 from source with test dependencies
 ./install.sh --build-postgres --pg-version 17 --with-test-deps
 
-# Use multiple CPU cores for faster builds
+# Set the number of parallel build jobs explicitly
 ./install.sh --jobs 16
+
+# Low-memory machine: linking DuckDB needs roughly 3 GB of RAM per job,
+# so install.sh caps the default job count at total RAM / 3 GB.
+# Lower it further if the linker is killed ("ld terminated with signal 9").
+./install.sh --jobs 2
 ```
 
 ### Common Scenarios
@@ -228,7 +233,7 @@ Run `./install.sh --help` to see all available options:
 --pg-version VERSION        PostgreSQL version to build (16, 17, 18, or 19) [default: 18]
 --prefix DIR                PostgreSQL installation prefix [default: auto-detect or $HOME/pgsql]
 --deps-dir DIR              Directory for dependencies [default: $HOME/pg_lake-deps]
---jobs N                    Number of parallel build jobs [default: nproc]
+-j, --jobs N                Number of parallel build jobs [default: auto based on CPUs and RAM]
 
 --with-system-deps          Install system build dependencies (auto-enabled with --build-postgres)
 --skip-vcpkg                Skip vcpkg and Azure SDK installation
@@ -283,7 +288,9 @@ apt-get install -y \
     jq \
     git \
     pkg-config \
-    python3-dev
+    python3-dev \
+    libkrb5-dev \
+    libnuma-dev
 ```
 
 #### RHEL/AlmaLinux/Rocky Linux
@@ -328,7 +335,9 @@ dnf -y install \
     gcc-c++ \
     git \
     pkgconfig \
-    python3-devel
+    python3-devel \
+    krb5-devel \
+    numactl-devel
 ```
 
 #### macOS

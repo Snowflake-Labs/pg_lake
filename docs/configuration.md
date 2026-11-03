@@ -58,6 +58,7 @@ pgduck_server is configured on its command line:
 | `--no_extension_install` | off | Do not install DuckDB extensions at start-up; use this when they are preinstalled. |
 | `--continue_on_oom` | off | Keep running after an out-of-memory error. |
 | `--pidfile <path>` | none | Write the process ID to this file. |
+| `--ca_cert_file <path>` | `/etc/pki/ca-trust/extracted/openssl/ca-bundle.trust.crt` if present, otherwise DuckDB's default | CA certificates used to verify TLS connections to object storage and other HTTPS endpoints. Pass an empty string to use DuckDB's default locations. |
 | `--debug`, `--verbose` | off | More logging; `--debug` includes full query text. |
 
 pgduck_server only listens on a Unix socket, so it must run on the same machine as PostgreSQL,
@@ -134,10 +135,27 @@ Keep the init file readable only by the user that runs pgduck_server. For local 
 with MinIO, see [running MinIO locally](building-from-source.md#running-s3-compatible-service-minio-locally).
 
 Credentials only go through PostgreSQL when a REST catalog vends them
-(`enable_vended_credentials`). PostgreSQL then asks the catalog for temporary S3 credentials for
-each table it reads or writes, and passes them to pgduck_server as in-memory secrets scoped to
-that table's location, where they take precedence over pgduck_server's own secrets. See
-[REST catalogs](iceberg-catalogs.md#rest-catalogs).
+(`enable_vended_credentials`). PostgreSQL then asks the catalog for temporary S3 credentials or
+Azure SAS tokens for each table it reads or writes, and passes them to pgduck_server as in-memory
+secrets scoped to that table's location, where they take precedence over pgduck_server's own
+secrets. See [REST catalogs](iceberg-catalogs.md#rest-catalogs).
+
+A vended S3 secret never takes its endpoint from the catalog (`s3.endpoint` is ignored). It
+inherits the endpoint and SSL setting from the pgduck_server secret that already covers the
+prefix, or uses the AWS default when there is none. To reach S3-compatible storage, or an AWS
+VPC interface, FIPS or dual-stack endpoint, configure the endpoint in a pgduck_server S3 secret
+scoped to the bucket.
+
+A vended Azure secret uses the endpoint the catalog states (`adls.connection-string.*`) only when
+it is an endpoint of the storage account the table's location names, in the same cloud, such as
+that account's Private Link endpoint, or when its host is one you added to
+`pg_lake.allowed_azure_host_suffixes`, such as an emulator. Otherwise the endpoints follow from
+the account in the location. A host you added is used for any table, even one whose location
+names a real Azure storage account, so add only hosts you control: a broad suffix such as `.net`
+lets a catalog send the requests for any table's location to a host its operator runs. Under
+Azure's own storage domains, such as `core.windows.net`, the endpoint still has to belong to the
+location's account, whatever you add. Vended credentials are not used for a location that names
+no account (`az://<container>/...`); configure a pgduck_server Azure secret for it instead.
 
 ### Supported storage URLs
 
@@ -148,6 +166,10 @@ that table's location, where they take precedence over pgduck_server's own secre
 | `az://`, `azure://`, `abfss://` | Azure Blob Storage and Data Lake Storage | Yes | Yes |
 | `r2://` | Cloudflare R2 | Yes | Yes |
 | `https://`, `http://` | Public web servers | Yes | No |
+
+A catalog can only point pg_lake to object storage. pg_lake refuses an `https://` or `http://`
+URL that a catalog answers with, and one inside Iceberg metadata, a manifest list or a manifest,
+unless that file was itself read from a web server.
 
 pg_lake detects the region of S3 buckets automatically. For the best performance and to avoid
 data transfer charges, keep buckets that you write to or query often in the same region as

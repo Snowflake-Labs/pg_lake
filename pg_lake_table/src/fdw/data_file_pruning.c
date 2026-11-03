@@ -26,6 +26,7 @@
 #include "catalog/pg_type_d.h"
 
 #include "catalog/pg_am_d.h"
+#include "catalog/pg_attribute.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_collation_d.h"
 #include "catalog/pg_operator.h"
@@ -110,11 +111,13 @@ typedef struct ColumnToFieldIdMapping
 static HTAB *CreateFieldIdMappingHash(void);
 static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
 								   PgLakeTableProperties tableProperties,
-								   List *columnsUsedInFilters, IcebergTableMetadata * metadata);
+								   List *columnsUsedInFilters);
 static List *GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds);
-static List *GetExternalIcebergFieldsForAttributes(Oid relationId, List *attrNos, IcebergTableMetadata * metadata);
-static List *GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdCache, List *columnStats,
+static List *GetExternalIcebergFieldsForAttributes(Oid relationId, List *attrNos);
+static List *GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
+									   HTAB *fieldIdCache, List *columnStats,
 									   List *partitionTransformsUsedInQuery, Partition * partition);
+static bool ColumnIsNotNull(Oid relationId, AttrNumber attrNo);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 													  ColumnToFieldIdMapping * entry);
 static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
@@ -181,52 +184,13 @@ static Const *TransformConstToTargetType(Const *constantClause, Oid targetTypeId
 										 int32_t targetTypMod);
 
 /*
- * GetManifestColumnStats returns usable bounds for query columns. Complete is
- * true only when every required column has a valid lower and upper bound.
- */
-static List *
-GetManifestColumnStats(DataFile * dataFile, List *queryFields, bool *complete)
-{
-	List	   *stats = NIL;
-	ListCell   *cell;
-
-	*complete = true;
-	foreach(cell, queryFields)
-	{
-		LeafField  *leaf = lfirst(cell);
-		Datum		lowerValue,
-					upperValue;
-		Oid			type = leaf->pgType.postgresTypeOid;
-
-		if (!GetIcebergColumnBounds(dataFile, leaf->fieldId, leaf->field, leaf->pgType,
-									&lowerValue, &upperValue))
-		{
-			*complete = false;
-			continue;
-		}
-		Oid			outputFunction;
-		bool		isVarlena;
-		DataFileColumnStats *stat = palloc0(sizeof(DataFileColumnStats));
-
-		getTypeOutputInfo(type, &outputFunction, &isVarlena);
-		stat->leafField = *leaf;
-		stat->lowerBoundText = OidOutputFunctionCall(outputFunction, lowerValue);
-		stat->upperBoundText = OidOutputFunctionCall(outputFunction, upperValue);
-		stats = lappend(stats, stat);
-	}
-	return stats;
-}
-
-/*
 * PruneDataFiles prunes the data files based on the filters in the query
 * execution and statistics of the data files.
 * baseRestrictInfoList is the list of RestrictInfo nodes that represent the
 * filters in the query execution for the given relationId.
-* metadata is the already loaded external Iceberg scan metadata, or NULL for
-* internal tables. Only PARTIAL_MATCH uses manifest bounds before footer stats.
 */
 List *
-PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, PruneType pruneType, IcebergTableMetadata * metadata)
+PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, PruneType pruneType)
 {
 	List	   *retainedDataFiles = NIL;
 	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
@@ -273,40 +237,13 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	 * the columns used in the filters. We do this here to avoid doing this
 	 * for each data file.
 	 */
-	bool		useManifest = EnableDataFilePruning && IsExternalIcebergTable(relationId) &&
-		pruneType == PARTIAL_MATCH && metadata != NULL;
-
 	HTAB	   *fieldIdsUsedInQuery = CreateFieldIdMappingHash();
 
-	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId, tableProperties, columnsUsedInFilters, useManifest ? metadata : NULL);
+	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId, tableProperties, columnsUsedInFilters);
 
 	/* get partition transforms for the fields used in the query */
 	List	   *partitionFieldsUsedInQuery = GetPartitionSpecFieldsUsedInQuery(relationId, fieldIdsUsedInQuery);
 	List	   *partitionTransformsUsedInQuery = GetPartitionTransformsFromSpecFields(relationId, partitionFieldsUsedInQuery);
-
-	List	   *scanLeafFields = useManifest ?
-		GetLeafFieldsForIcebergSchema(GetCurrentIcebergTableSchema(metadata)) : NIL;
-	List	   *queryFields = NIL;
-	bool		mappingComplete = true;
-	ListCell   *columnCell;
-
-	if (useManifest)
-	{
-		foreach(columnCell, columnsUsedInFilters)
-		{
-			Var		   *column = lfirst(columnCell);
-			ColumnToFieldIdMapping *entry =
-				hash_search(fieldIdsUsedInQuery, &column->varattno, HASH_FIND, NULL);
-			LeafField  *leaf = entry ? FindLeafField(scanLeafFields, entry->fieldId) : NULL;
-
-			if (leaf == NULL || leaf->level != 1 ||
-				leaf->pgType.postgresTypeOid != column->vartype ||
-				leaf->pgType.postgresTypeMod != column->vartypmod)
-				mappingComplete = false;
-			else
-				queryFields = list_append_unique_ptr(queryFields, leaf);
-		}
-	}
 
 	int			dataFileCount = list_length(dataFiles);
 
@@ -328,29 +265,10 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	Assert(isInternalIcebergTable || IsExternalIcebergTable(relationId));
 
 	if (!isInternalIcebergTable && dataFileCount > 0)
-		externalLeafFields = useManifest ? scanLeafFields : GetLeafFieldsForTable(relationId);
+		externalLeafFields = GetLeafFieldsForTable(relationId);
 
 	for (int dataFileIndex = 0; dataFileIndex < dataFileCount; ++dataFileIndex)
 	{
-		if (useManifest)
-		{
-			DataFile   *dataFile = list_nth(dataFiles, dataFileIndex);
-			bool		complete;
-			List	   *stats = GetManifestColumnStats(dataFile, queryFields, &complete);
-			List	   *bounds = GetColumnBoundConstraints(relationId, fieldIdsUsedInQuery,
-														   stats, partitionTransformsUsedInQuery, &dataFile->partition);
-			List	   *extendedClauses = ExtendClausesForBucketPartitioning(&dataFile->partition,
-																			 partitionTransformsUsedInQuery, fieldIdsUsedInQuery, clauses);
-
-			if (predicate_refuted_by(bounds, extendedClauses, false))
-				continue;
-			if (complete && mappingComplete)
-			{
-				retainedDataFiles = lappend(retainedDataFiles, dataFile);
-				continue;
-			}
-		}
-
 		List	   *columnBoundConstraints = NIL;
 		Partition  *partition = NULL;
 		List	   *columnStats =
@@ -360,7 +278,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 
 		/* calculate bound constraints */
 		columnBoundConstraints =
-			GetColumnBoundConstraints(relationId, fieldIdsUsedInQuery, columnStats,
+			GetColumnBoundConstraints(relationId, pruneType, fieldIdsUsedInQuery, columnStats,
 									  partitionTransformsUsedInQuery, partition);
 
 		bool		includeDataFile = false;
@@ -396,7 +314,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
  * The list elements have a different type per table type, so dataFile is
  * untyped: it points to a TableDataFile for internal Iceberg tables and to a
  * DataFile for external ones. externalLeafFields is only used for the latter,
- * where the stats are read from the remote Parquet footer.
+ * whose stats come from the bounds in their manifest entry.
  */
 static List *
 GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
@@ -415,10 +333,10 @@ GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
 		DataFile   *externalDataFile = (DataFile *) dataFile;
 
 		*partition = &(externalDataFile->partition);
-		return GetRemoteParquetColumnStats((char *) externalDataFile->file_path,
-										   externalLeafFields);
+		return GetIcebergDataFileColumnStats(externalDataFile, externalLeafFields);
 	}
 }
+
 
 /*
  * GetPartitionSpecFieldsUsedInQuery gets the partition spec fields that are
@@ -480,7 +398,7 @@ CreateFieldIdMappingHash(void)
 */
 static void
 AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTableProperties tableProperties,
-					   List *columnsUsedInFilters, IcebergTableMetadata * metadata)
+					   List *columnsUsedInFilters)
 {
 	List	   *attrNos = NIL;
 	ListCell   *columnCell = NULL;
@@ -508,7 +426,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 	}
 	else if (IsExternalIcebergTable(relationId))
 	{
-		fields = GetExternalIcebergFieldsForAttributes(relationId, columnsUsedInFilters, metadata);
+		fields = GetExternalIcebergFieldsForAttributes(relationId, columnsUsedInFilters);
 
 		/*
 		 * We did our best to find the field for each column used in the
@@ -633,7 +551,8 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 * query. The constraints are based on the column statistics.
 */
 static List *
-GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStats,
+GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
+						  HTAB *fieldIdMapping, List *columnStats,
 						  List *partitionTransformsUsedInQuery, Partition * partition)
 {
 	List	   *constraintList = NIL;
@@ -653,7 +572,18 @@ GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStat
 	hash_seq_init(&status, fieldIdMapping);
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
-		if (EnableDataFilePruning)
+		/*
+		 * Column min/max stats only describe the non-NULL values in a file
+		 * and say nothing about whether the file also contains NULLs. That is
+		 * fine for refuting a filter (PARTIAL_MATCH), since NULLs never
+		 * satisfy a strict filter, but it cannot prove that every row in the
+		 * file matches (FULL_MATCH). Only use the stats for that when the
+		 * column cannot be NULL.
+		 */
+		bool		useColumnStats = EnableDataFilePruning &&
+			(pruneType != FULL_MATCH || ColumnIsNotNull(relationId, entry->attrNo));
+
+		if (useColumnStats)
 		{
 			List	   *columnStatsBoundConstraints =
 				GetColumnBoundConstraintsFromColumnStats(relationId,
@@ -678,6 +608,26 @@ GetColumnBoundConstraints(Oid relationId, HTAB *fieldIdMapping, List *columnStat
 	return constraintList;
 }
 
+
+/*
+ * ColumnIsNotNull returns whether the given column has a NOT NULL constraint.
+ */
+static bool
+ColumnIsNotNull(Oid relationId, AttrNumber attrNo)
+{
+	HeapTuple	tuple = SearchSysCache2(ATTNUM,
+										ObjectIdGetDatum(relationId),
+										Int16GetDatum(attrNo));
+	bool		notNull = false;
+
+	if (HeapTupleIsValid(tuple))
+	{
+		notNull = ((Form_pg_attribute) GETSTRUCT(tuple))->attnotnull;
+		ReleaseSysCache(tuple);
+	}
+
+	return notNull;
+}
 
 /*
 * GetColumnBoundConstraintsFromColumnStats returns the constraints for the
@@ -918,11 +868,23 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 		int32		partitionValue = *(int32_t *) partitionField->value;
 		int			truncateLen = partitionTransform->truncateLen;
 
+		if (pgType.postgresTypeOid == INT2OID)
+		{
+			/* int2 operators read 16 bits, so clamp the int4 partition range */
+			int64		lastValue = (int64) partitionValue + truncateLen - 1;
+
+			return CreateConstraintWithBounds(copyObject(entry->columnBoundInclusiveUpper),
+											  entry->constByVal, entry->typLen,
+											  Int16GetDatum(Max(partitionValue, PG_INT16_MIN)),
+											  Int16GetDatum(Min(lastValue, PG_INT16_MAX)));
+		}
+
 		int32		upperBound;
 
 		if (pg_add_s32_overflow(partitionValue, truncateLen, &upperBound))
 		{
-			upperBound = INT32_MAX;
+			/* also holds values near INT32_MIN whose truncation wrapped */
+			return NULL;
 		}
 
 		Datum		lowerBoundDatum = Int32GetDatum(partitionValue);
@@ -940,7 +902,8 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 
 		if (pg_add_s64_overflow(partitionValue, truncateLen, &upperBound))
 		{
-			upperBound = INT64_MAX;
+			/* also holds values near INT64_MIN whose truncation wrapped */
+			return NULL;
 		}
 
 		Datum		lowerBoundDatum = Int64GetDatum(partitionValue);
@@ -1885,51 +1848,36 @@ TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol)
 * metadata, which is not a solution that covers all cases.
 */
 static List *
-GetExternalIcebergFieldsForAttributes(Oid relationId, List *columnsUsedInFilters,
-									  IcebergTableMetadata * metadata)
+GetExternalIcebergFieldsForAttributes(Oid relationId, List *columnsUsedInFilters)
 {
 	List	   *fields = NIL;
-	IcebergTableSchema *schema = metadata ? GetCurrentIcebergTableSchema(metadata) : NULL;
-	DataFileSchema *fallback = schema ? NULL : GetDataFileSchemaForTable(relationId);
-	DataFileSchemaField *schemaFields = schema ? schema->fields : fallback->fields;
-	size_t		count = schema ? schema->fields_length : fallback->nfields;
-	ListCell   *cell;
 
-	foreach(cell, columnsUsedInFilters)
+	DataFileSchema *schema = GetDataFileSchemaForTable(relationId);
+
+	ListCell   *columnCell = NULL;
+
+	foreach(columnCell, columnsUsedInFilters)
 	{
-		Var		   *column = lfirst(cell);
-		char	   *name = get_attname(relationId, column->varattno, false);
-		DataFileSchemaField *match = NULL;
-		bool		ambiguous = false;
+		Var		   *column = lfirst(columnCell);
+		AttrNumber	pgAttNum = column->varattno;
+		char	   *columnName = get_attname(relationId, pgAttNum, false);
 
-		for (size_t i = 0; i < count; i++)
+		for (int i = 0; i < schema->nfields; i++)
 		{
-			DataFileSchemaField *field = &schemaFields[i];
-			PGType		type = IcebergFieldToPostgresType(field->type);
+			DataFileSchemaField *field = &schema->fields[i];
+			Field	   *fieldType = field->type;
+			PGType		pgType = IcebergFieldToPostgresType(fieldType);
 
-			if (schema == NULL)
+			if (strcasecmp(field->name, columnName) == 0 &&
+				pgType.postgresTypeOid == column->vartype)
 			{
-				if (strcasecmp(field->name, name) == 0 &&
-					type.postgresTypeOid == column->vartype)
-				{
-					fields = lappend(fields, field);
-					break;
-				}
-				continue;
+				fields = lappend(fields, field);
+				break;
 			}
-			if (strcmp(field->name, name) == 0)
-			{
-				if (match != NULL)
-					ambiguous = true;
-				match = field;
-				if (type.postgresTypeOid != column->vartype ||
-					type.postgresTypeMod != column->vartypmod)
-					ambiguous = true;
-			}
+
 		}
-		if (match != NULL && !ambiguous)
-			fields = lappend(fields, match);
 	}
+
 	return fields;
 }
 

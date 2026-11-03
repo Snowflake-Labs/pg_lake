@@ -31,6 +31,7 @@
 #include "utils/backend_status.h"
 #include "utils/guc.h"
 #include "utils/memutils.h"
+#include "utils/timestamp.h"
 #include "pg_lake/pgduck/cache_worker.h"
 #include "pg_lake/pgduck/client.h"
 
@@ -39,12 +40,22 @@
 #define BACKGROUND_WORKER_NAME "pg_lake cache worker"
 #define LIBRARY_NAME "pg_lake_engine"
 
+/*
+ * pgduck_server usually starts a few seconds after postgres, so connection
+ * failures stay at DEBUG1 for this long after the worker starts.
+ */
+#define QUERY_ENGINE_STARTUP_GRACE_MS (60000)
+
+/* how often to retry while the query engine is unreachable */
+#define QUERY_ENGINE_RETRY_INTERVAL_MS (10000)
+
 
 typedef enum ManageCacheResult
 {
 	MANAGE_CACHE_SUCCESS,
 	MANAGE_CACHE_ERROR,
-	MANAGE_CACHE_DISABLED
+	MANAGE_CACHE_DISABLED,
+	MANAGE_CACHE_ENGINE_UNAVAILABLE
 }			ManageCacheResult;
 
 
@@ -127,9 +138,14 @@ PgLakeCacheWorkerMain(Datum arg)
 	ereport(LOG, (errmsg(BACKGROUND_WORKER_NAME " started")));
 
 	bool		isCachingEnabled = true;
+	bool		hasReachedEngine = false;
+	bool		warnedEngineUnavailable = false;
+	TimestampTz workerStartTime = GetCurrentTimestamp();
 
 	while (true)
 	{
+		bool		isEngineAvailable = true;
+
 		CHECK_FOR_INTERRUPTS();
 
 		if (ConfigReloadPending)
@@ -147,7 +163,26 @@ PgLakeCacheWorkerMain(Datum arg)
 
 			pgstat_report_activity(STATE_IDLE, NULL);
 
-			if (result == MANAGE_CACHE_DISABLED)
+			isEngineAvailable = result != MANAGE_CACHE_ENGINE_UNAVAILABLE;
+
+			if (!isEngineAvailable)
+			{
+				/*
+				 * Warn once per outage, unless pgduck_server is still within
+				 * its startup window.
+				 */
+				if (!warnedEngineUnavailable &&
+					(hasReachedEngine ||
+					 TimestampDifferenceExceeds(workerStartTime,
+												GetCurrentTimestamp(),
+												QUERY_ENGINE_STARTUP_GRACE_MS)))
+				{
+					ereport(WARNING, (errmsg(BACKGROUND_WORKER_NAME ": could not "
+											 "connect to query engine")));
+					warnedEngineUnavailable = true;
+				}
+			}
+			else if (result == MANAGE_CACHE_DISABLED)
 			{
 				/* emit a log message once, when caching is disabled */
 				if (isCachingEnabled)
@@ -168,6 +203,18 @@ PgLakeCacheWorkerMain(Datum arg)
 
 				isCachingEnabled = true;
 			}
+
+			if (isEngineAvailable)
+			{
+				if (warnedEngineUnavailable)
+				{
+					ereport(LOG, (errmsg(BACKGROUND_WORKER_NAME ": connected to "
+										 "query engine")));
+				}
+
+				hasReachedEngine = true;
+				warnedEngineUnavailable = false;
+			}
 		}
 
 		/* clean up any allocated memory */
@@ -183,6 +230,9 @@ PgLakeCacheWorkerMain(Datum arg)
 
 		if (isCachingEnabled)
 			delay = Max(delay, 60000);
+
+		if (!isEngineAvailable)
+			delay = QUERY_ENGINE_RETRY_INTERVAL_MS;
 
 		/* The pgduck client may have consumed the SIGHUP latch wakeup. */
 		if (!ConfigReloadPending)
@@ -220,7 +270,21 @@ ManageCache(void)
 	 */
 	StartTransactionCommand();
 
-	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	char	   *connectErrorMessage = NULL;
+	PGDuckConnection *pgDuckConn = TryGetPGDuckConnection(&connectErrorMessage);
+
+	if (pgDuckConn == NULL)
+	{
+		ereport(DEBUG1, (errmsg(BACKGROUND_WORKER_NAME ": query engine is not "
+								"available"),
+						 errdetail_internal("%s", connectErrorMessage)));
+
+		CommitTransactionCommand();
+		MemoryContextSwitchTo(savedContext);
+
+		return MANAGE_CACHE_ENGINE_UNAVAILABLE;
+	}
+
 	PGresult   *result =
 		ExecuteQueryOnPGDuckConnection(pgDuckConn, manageCacheCommand.data);
 
@@ -238,23 +302,33 @@ ManageCache(void)
 		if (columnCount < 3)
 			ereport(ERROR, (errmsg("unexpected column count %d", columnCount)));
 
+		int			filesAdded = 0;
+		int			filesRemoved = 0;
+		int64		bytesAdded = 0;
+		int64		bytesRemoved = 0;
+
 		for (int rowIndex = 0; rowIndex < rowCount; rowIndex++)
 		{
 			char	   *url = PQgetvalue(result, rowIndex, 0);
 			char	   *fileSizeStr = PQgetvalue(result, rowIndex, 1);
 			char	   *action = PQgetvalue(result, rowIndex, 2);
+			int64		fileSize = strtoll(fileSizeStr, NULL, 10);
 
 			if (strcmp(action, "added") == 0)
 			{
-				ereport(LOG, (errmsg(BACKGROUND_WORKER_NAME ": "
-									 "added %s (%s bytes) to cache",
-									 url, fileSizeStr)));
+				ereport(DEBUG1, (errmsg(BACKGROUND_WORKER_NAME ": "
+										"added %s (%s bytes) to cache",
+										url, fileSizeStr)));
+				filesAdded++;
+				bytesAdded += fileSize;
 			}
 			else if (strcmp(action, "removed") == 0)
 			{
-				ereport(LOG, (errmsg(BACKGROUND_WORKER_NAME ": "
-									 "removed %s (%s bytes) from cache",
-									 url, fileSizeStr)));
+				ereport(DEBUG1, (errmsg(BACKGROUND_WORKER_NAME ": "
+										"removed %s (%s bytes) from cache",
+										url, fileSizeStr)));
+				filesRemoved++;
+				bytesRemoved += fileSize;
 			}
 			else
 			{
@@ -263,6 +337,15 @@ ManageCache(void)
 				 * excessive noise if a large file is read frequently
 				 */
 			}
+		}
+
+		if (filesAdded > 0 || filesRemoved > 0)
+		{
+			ereport(LOG, (errmsg(BACKGROUND_WORKER_NAME ": "
+								 "added %d file(s) (" INT64_FORMAT " bytes), "
+								 "removed %d file(s) (" INT64_FORMAT " bytes)",
+								 filesAdded, bytesAdded,
+								 filesRemoved, bytesRemoved)));
 		}
 
 		manageCacheResult = MANAGE_CACHE_SUCCESS;

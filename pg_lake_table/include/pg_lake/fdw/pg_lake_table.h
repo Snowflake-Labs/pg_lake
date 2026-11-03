@@ -167,6 +167,22 @@ typedef enum PgLakeSamplingMethod
 typedef void (*PgLakeModifyValidityCheckHookType) (Oid relationId);
 extern PGDLLEXPORT PgLakeModifyValidityCheckHookType PgLakeModifyValidityCheckHook;
 
+/*
+ * Hook invoked for every tuple a pg_lake foreign scan returns, just before the
+ * tuple is handed to the plan node above it.  An extension that has to react
+ * to how much a scan is producing -- a statement that reads an object-store
+ * table and writes the rows into local storage, for one -- can use this to
+ * meter the scan from the inside, which a node above it cannot do.
+ *
+ * It is called once per row, so the no-op path has to stay cheap.  It runs
+ * inside the executor with the scan's snapshot and locks held: a hook that
+ * sleeps keeps the transaction open for that long, and one that raises an
+ * error aborts the statement.
+ */
+typedef void (*PgLakeForeignScanTupleHookType) (ForeignScanState *node,
+												TupleTableSlot *slot);
+extern PGDLLEXPORT PgLakeForeignScanTupleHookType PgLakeForeignScanTupleHook;
+
 /* in postgres_fdw.c */
 extern int	set_transmission_modes(void);
 extern void reset_transmission_modes(int nestlevel);

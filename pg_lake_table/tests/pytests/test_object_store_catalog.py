@@ -1667,6 +1667,71 @@ def test_object_store_catalog_periodic_rewrite(
         superuser_conn.autocommit = False
 
 
+# A failed catalog export must name itself. The periodic export runs in the
+# vacuum worker, which demotes the error to a WARNING, so the message text is
+# the only thing a log collector has to recognize it by, and the underlying
+# storage error says nothing about the catalog. Point the catalog at a bucket
+# that does not exist and check the prefix survives all the way out, with the
+# original storage error still attached.
+def test_catalog_export_failure_is_prefixed(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    missing_bucket = "pg-lake-no-such-bucket-for-catalog-export"
+
+    superuser_conn.autocommit = True
+    run_command(
+        "ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = "
+        f"'s3://{missing_bucket}'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    superuser_conn.autocommit = False
+    wait_for_reloaded_settings(
+        [superuser_conn],
+        {
+            "pg_lake_iceberg.object_store_catalog_location_prefix": f"s3://{missing_bucket}"
+        },
+    )
+
+    try:
+        err = run_command(
+            "SELECT lake_iceberg.force_push_object_store_catalog()",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.rollback()
+
+        assert err is not None, "pushing the catalog to a missing bucket succeeded"
+        assert "pg_lake_iceberg: object store catalog export failed" in str(
+            err
+        ), f"catalog export error is not recognizable in the log: {err}"
+        # the storage error itself has to survive the prefixing, otherwise the
+        # message says something failed without saying why
+        assert missing_bucket in str(
+            err
+        ), f"catalog export error lost the underlying storage error: {err}"
+    finally:
+        superuser_conn.autocommit = True
+        run_command(
+            "ALTER SYSTEM SET pg_lake_iceberg.object_store_catalog_location_prefix = "
+            f"'s3://{TEST_BUCKET}'",
+            superuser_conn,
+        )
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        superuser_conn.autocommit = False
+        wait_for_reloaded_settings(
+            [superuser_conn],
+            {
+                "pg_lake_iceberg.object_store_catalog_location_prefix": f"s3://{TEST_BUCKET}"
+            },
+        )
+
+
 # An Azure object that is overwritten in place must never be observable as
 # zero bytes: pg_lake rewrites catalog.json in place and never writes an empty
 # catalog, so a reader that sees 0 bytes is looking at an in-flight write. The
@@ -2300,4 +2365,87 @@ def test_read_only_lowercase_column_names(
         pg_conn.rollback()
 
     run_command("DROP SCHEMA object_store_sc1, object_store_sc2 CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_force_push_sees_latest_in_repeatable_read(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    """
+    Verify that force_push_object_store_catalog always exports the latest
+    committed catalog state, even when the caller is in a REPEATABLE READ
+    transaction that started before the newest table was committed.
+
+    The background export has already published both tables by the time the
+    force-push runs, so a force-push on a stale snapshot is visible as
+    tbl_after disappearing from catalog.json again.
+    """
+    run_command("CREATE SCHEMA object_store_sc1", pg_conn)
+    run_command(
+        "CREATE TABLE object_store_sc1.tbl_before(a int) "
+        "USING iceberg WITH (catalog='object_store')",
+        pg_conn,
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(
+        pg_conn, "object_store_sc1", "tbl_before"
+    )
+
+    # A second connection pins a REPEATABLE READ snapshot that does NOT
+    # include tbl_after.  Everything that uses it runs under try/finally: the
+    # force-push below reads lake_iceberg.tables_internal, and those locks are
+    # only released at end of transaction, so an assertion failure that left
+    # the transaction open would block this module's teardown DROP EXTENSION
+    # indefinitely rather than just failing the test.
+    rr_conn = open_pg_conn()
+    try:
+        rr_conn.autocommit = False
+        run_command("BEGIN ISOLATION LEVEL REPEATABLE READ", rr_conn)
+        # read something to pin the snapshot
+        run_query("SELECT 1", rr_conn)
+
+        # On the first connection, create a second table and commit.
+        run_command(
+            "CREATE TABLE object_store_sc1.tbl_after(a int) "
+            "USING iceberg WITH (catalog='object_store')",
+            pg_conn,
+        )
+        pg_conn.commit()
+        wait_until_object_store_writable_table_pushed(
+            pg_conn, "object_store_sc1", "tbl_after"
+        )
+
+        # Force-push from the REPEATABLE READ connection.  Before the fix this
+        # rewrote catalog.json from the stale transaction snapshot, dropping
+        # tbl_after from the exported catalog.
+        run_command("SELECT lake_iceberg.force_push_object_store_catalog()", rr_conn)
+    finally:
+        rr_conn.rollback()
+        rr_conn.close()
+
+    # Read catalog.json from storage and check both tables are present.
+    dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+    prefix = run_query(
+        "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
+    key = f"{prefix}/catalog/{dbname}/catalog.json"
+    catalog = json.loads(s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read())
+
+    table_names = {t["table-name"] for t in catalog["tables"]}
+    assert (
+        "tbl_before" in table_names
+    ), f"tbl_before missing from catalog: {table_names}"
+    assert "tbl_after" in table_names, (
+        f"tbl_after missing from catalog after force-push from REPEATABLE READ "
+        f"transaction: {table_names}"
+    )
+
+    run_command("DROP SCHEMA object_store_sc1 CASCADE", pg_conn)
     pg_conn.commit()
