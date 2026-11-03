@@ -36,6 +36,8 @@ def lk_schema(
     # Lakekeeper is only started for an isolated test cluster.
     if installcheck:
         pytest.skip("Requires an isolated test cluster")
+    if not lakekeeper_installed():
+        pytest.skip("Lakekeeper is not installed")
 
     # Start every test from an empty schema and namespace, so a test can be
     # rerun in the same session.
@@ -81,10 +83,7 @@ def _create_nested_table(
     )
 
 
-def test_config_prefix_is_the_warehouse_id(installcheck, superuser_conn, lk_schema):
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
+def test_config_prefix_is_the_warehouse_id(superuser_conn, lk_schema):
     run_command(
         f"CREATE TABLE {SCHEMA}.t (a int) USING iceberg WITH (catalog = 'lakekeeper')",
         superuser_conn,
@@ -122,11 +121,8 @@ def _attach_and_read(conn, name):
 
 
 def test_read_only_table_created_outside_pg_lake(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+    superuser_conn, lk_schema, lakekeeper_catalog
 ):
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
     # pg_lake reads only uncompressed metadata JSON, see the test below.
     _create_external_table(
         lakekeeper_catalog, "external", {"write.metadata.compression-codec": "none"}
@@ -140,14 +136,11 @@ def test_read_only_table_created_outside_pg_lake(
 
 
 def test_read_only_table_with_gzip_metadata_is_not_readable_yet(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+    superuser_conn, lk_schema, lakekeeper_catalog
 ):
     """Lakekeeper writes gzip-compressed metadata JSON by default, which
     pg_lake cannot read yet (#823). When it can, this test fails: replace the
     pytest.raises with the read-back assertion from the test above."""
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
     table = _create_external_table(lakekeeper_catalog, "external_gz", {})
     assert table.metadata_location.endswith(".gz.metadata.json")
 
@@ -157,14 +150,11 @@ def test_read_only_table_with_gzip_metadata_is_not_readable_yet(
 
 
 def test_nested_types_round_trip_through_the_catalog(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+    superuser_conn, lk_schema, lakekeeper_catalog
 ):
     """Lakekeeper renumbers the staged schema's field IDs; unless pg_lake's own
     schema becomes current, nested values written by pg_lake no longer match
     the schema other engines read them with (#745)."""
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
     map_type_name = create_map_type("text", "int")
     _create_nested_table(superuser_conn, "nested", map_type_name)
     run_command(
@@ -187,12 +177,7 @@ def test_nested_types_round_trip_through_the_catalog(
     assert [dict(r["attrs"]) for r in rows] == [{"k": 1}, {"k": 2}]
 
 
-def test_dml_is_visible_to_other_engines(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
-):
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
+def test_dml_is_visible_to_other_engines(superuser_conn, lk_schema, lakekeeper_catalog):
     run_command(
         f"""CREATE TABLE {SCHEMA}.dml (id int, v text)
             USING iceberg WITH (catalog = 'lakekeeper');
@@ -214,11 +199,8 @@ def test_dml_is_visible_to_other_engines(
 
 
 def test_location_is_the_requested_per_relation_path(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+    superuser_conn, lk_schema, lakekeeper_catalog
 ):
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
     run_command(
         f"CREATE TABLE {SCHEMA}.loc (a int) USING iceberg WITH (catalog = 'lakekeeper')",
         superuser_conn,
@@ -237,11 +219,8 @@ def test_location_is_the_requested_per_relation_path(
 
 
 def test_create_in_a_namespace_the_catalog_has_not_seen(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+    superuser_conn, lk_schema, lakekeeper_catalog
 ):
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
     schema = "lk_new_namespace"
     _drop_namespace(lakekeeper_catalog, schema)
     try:
@@ -262,13 +241,10 @@ def test_create_in_a_namespace_the_catalog_has_not_seen(
 
 
 def test_server_without_location_prefix_uses_catalog_location(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+    superuser_conn, lk_schema, lakekeeper_catalog
 ):
     """Without location_prefix (and without the default-prefix GUC), pg_lake
     sends no location and the table lives where Lakekeeper puts it."""
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
     create_lakekeeper_server(
         superuser_conn, "lakekeeper_noprefix", location_prefix=None
     )
@@ -294,11 +270,8 @@ def test_server_without_location_prefix_uses_catalog_location(
 
 
 def test_drop_table_removes_it_from_the_catalog(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+    superuser_conn, lk_schema, lakekeeper_catalog
 ):
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
     run_command(
         f"""CREATE TABLE {SCHEMA}.dropped (a int) USING iceberg WITH (catalog = 'lakekeeper');
             INSERT INTO {SCHEMA}.dropped VALUES (1)""",
@@ -315,11 +288,8 @@ def test_drop_table_removes_it_from_the_catalog(
 
 
 def test_create_rolled_back_to_a_savepoint_leaves_no_table(
-    installcheck, superuser_conn, lk_schema, lakekeeper_catalog
+    superuser_conn, lk_schema, lakekeeper_catalog
 ):
-    if installcheck:
-        pytest.skip("Requires an isolated test cluster")
-
     run_command(
         f"""CREATE TABLE {SCHEMA}.kept (a int) USING iceberg WITH (catalog = 'lakekeeper');
             SAVEPOINT s;

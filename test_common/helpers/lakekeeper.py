@@ -6,6 +6,7 @@ it through a server with rest_auth_type 'none' and no user mapping.
 """
 
 import atexit
+import functools
 import os
 import subprocess
 from pathlib import Path
@@ -27,6 +28,14 @@ from utils_pytest import (
 
 LAKEKEEPER_URI = f"http://localhost:{server_params.LAKEKEEPER_PORT}/catalog"
 LAKEKEEPER_LOCATION_PREFIX = f"s3://{TEST_BUCKET}/lakekeeper"
+
+
+@functools.cache
+def lakekeeper_installed():
+    # There is no Lakekeeper build for Intel macOS, so it may be absent.
+    pg_config = os.environ.get("PG_CONFIG", "pg_config")
+    bindir = subprocess.check_output([pg_config, "--bindir"], text=True).strip()
+    return Path(bindir, "lakekeeper").exists()
 
 
 def get_lakekeeper_server_path():
@@ -138,7 +147,7 @@ _lakekeeper_started = False
 @pytest.fixture(scope="session", autouse=True)
 def start_lakekeeper(postgres, s3, installcheck):
     global _lakekeeper_started
-    if installcheck or _lakekeeper_started:
+    if installcheck or _lakekeeper_started or not lakekeeper_installed():
         yield
         return
     start_lakekeeper_server_in_background()
@@ -150,7 +159,7 @@ def start_lakekeeper(postgres, s3, installcheck):
 @pytest.fixture(scope="module")
 def lakekeeper_server(superuser_conn, iceberg_extension, installcheck):
     """A REST server named 'lakekeeper' with the default location prefix."""
-    if installcheck:
+    if installcheck or not lakekeeper_installed():
         yield None
         return
     create_lakekeeper_server(superuser_conn, "lakekeeper")
@@ -160,6 +169,6 @@ def lakekeeper_server(superuser_conn, iceberg_extension, installcheck):
 
 @pytest.fixture(scope="module")
 def lakekeeper_catalog(installcheck):
-    if installcheck:
+    if installcheck or not lakekeeper_installed():
         return None
     return create_lakekeeper_catalog()

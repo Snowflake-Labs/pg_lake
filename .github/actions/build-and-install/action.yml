@@ -50,7 +50,7 @@ runs:
 
     - uses: actions/cache@v5
       id: cache_polaris
-      name: Cache Polaris and Lakekeeper
+      name: Cache Polaris
       with:
         # Key includes polaris/version.txt so that a submodule-only bump
         # (without touching the Makefile) still invalidates the jar cache
@@ -59,7 +59,6 @@ runs:
         path: |
           /home/postgres/pgsql-${{ inputs.pg_version }}/bin/polaris-admin.jar
           /home/postgres/pgsql-${{ inputs.pg_version }}/bin/polaris-server.jar
-          /home/postgres/pgsql-${{ inputs.pg_version }}/bin/lakekeeper
 
     - name: Compile and install all extensions and pgduck_server
       shell: bash
@@ -79,6 +78,13 @@ runs:
       shell: bash
       run: |
         make -j16 install-rest_catalog
+
+    # Not cached: the download takes seconds, and a version bump should not
+    # rebuild Polaris.
+    - name: Install Lakekeeper
+      shell: bash
+      run: |
+        make install-lakekeeper
 
     - name: Install the test extensions
       shell: bash
