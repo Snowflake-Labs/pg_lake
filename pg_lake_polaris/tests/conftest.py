@@ -110,3 +110,27 @@ def polaris_extension(polaris_schema, extension, superuser_conn, app_user):
         superuser_conn,
     )
     superuser_conn.commit()
+
+
+@pytest.fixture(scope="function")
+def without_external_write_sync(superuser_conn):
+    """
+    Disable pg_lake_table's external-write sync trigger on tables_internal.
+    Tests that point a placeholder heap table at a fake metadata_location
+    need this, since the sync would try to read that table as Iceberg.
+    """
+    run_command(
+        "ALTER TABLE lake_iceberg.tables_internal "
+        "DISABLE TRIGGER sync_external_write_trg",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    yield
+
+    run_command(
+        "ALTER TABLE lake_iceberg.tables_internal "
+        "ENABLE TRIGGER sync_external_write_trg",
+        superuser_conn,
+    )
+    superuser_conn.commit()

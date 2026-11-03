@@ -168,7 +168,9 @@ def test_inbound_insert_without_metadata_location_is_skipped(
     assert link_count == 0
 
 
-def test_outbound_inbound_no_loop(polaris_extension, superuser_conn):
+def test_outbound_inbound_no_loop(
+    polaris_extension, without_external_write_sync, superuser_conn
+):
     """
     A pg_lake-originated metadata change must be reflected in Polaris
     exactly once — entity_version goes 1 -> 2, not 1 -> 3 — proving the
