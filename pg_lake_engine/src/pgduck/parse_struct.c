@@ -37,6 +37,7 @@
 #include "access/xlogutils.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
+#include "common/pg_prng.h"
 #include "common/string.h"
 #include "commands/typecmds.h"
 #include "executor/spi.h"
@@ -777,12 +778,21 @@ FindOrCreatePGCompositeType(CompositeType * type)
 			"    GROUP BY attrelid) atts "
 			"ON pg_type.typrelid = atts.attrelid AND "
 			"    atts.names = $1 AND atts.types = $2 "
-			"WHERE typnamespace :: regnamespace in "
-			"    ('pg_catalog','" STRUCT_TYPES_SCHEMA "') LIMIT 1";
+			"WHERE typnamespace = 'pg_catalog'::regnamespace OR "
+			"    (typnamespace = '" STRUCT_TYPES_SCHEMA "'::regnamespace AND "
+			"     typowner = $3) "
+			"ORDER BY typnamespace = 'pg_catalog'::regnamespace DESC LIMIT 1";
 
-		Oid			argTypes[2] = {NAMEARRAYOID, OIDARRAYOID};
-		Datum		argValues[2] = {PointerGetDatum(nameArr),
-		PointerGetDatum(oidArr)};
+		/*
+		 * Only reuse struct types owned by the current user. Any role can
+		 * create types in the struct types schema, and a column that depends
+		 * on a type owned by another role can be dropped by that role via
+		 * DROP TYPE .. CASCADE.
+		 */
+		Oid			argTypes[3] = {NAMEARRAYOID, OIDARRAYOID, OIDOID};
+		Datum		argValues[3] = {PointerGetDatum(nameArr),
+			PointerGetDatum(oidArr),
+		ObjectIdGetDatum(GetUserId())};
 
 		Oid			foundOid = InvalidOid;
 		Oid			foundArrayOid = InvalidOid;
@@ -790,7 +800,7 @@ FindOrCreatePGCompositeType(CompositeType * type)
 
 		SPI_START();
 
-		int			ret = SPI_execute_with_args(findTypeQuery, 2, argTypes,
+		int			ret = SPI_execute_with_args(findTypeQuery, 3, argTypes,
 												argValues, NULL, false, 1);
 
 		if (ret == SPI_OK_SELECT && SPI_processed >= 1)
@@ -896,6 +906,25 @@ CreatePGCompositeType(CompositeType * type)
 		coldeflist = lappend(coldeflist, newColNode);
 
 		ReleaseSysCache(tup);
+	}
+
+	/*
+	 * Type names are derived from the struct definition, so another role may
+	 * already own a type with the same name. Reuse is decided by ownership
+	 * rather than name, so pick a random suffix that another role cannot
+	 * create in advance.
+	 */
+	Oid			structNamespaceId = get_namespace_oid(STRUCT_TYPES_SCHEMA, false);
+	char	   *baseName = type->typeName;
+
+	while (OidIsValid(GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+									  CStringGetDatum(type->typeName),
+									  ObjectIdGetDatum(structNamespaceId))))
+	{
+		type->typeName = psprintf("%s_%08x", baseName,
+								  pg_prng_uint32(&pg_global_prng_state));
+		type->isFinalized = false;
+		FinalizeCompositeTypeName(type);
 	}
 
 	typevar = makeRangeVar(STRUCT_TYPES_SCHEMA, type->typeName, -1);
