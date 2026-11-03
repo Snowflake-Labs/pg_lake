@@ -37,6 +37,7 @@
 #include "access/xlogutils.h"
 #include "catalog/pg_type.h"
 #include "catalog/namespace.h"
+#include "common/pg_prng.h"
 #include "common/string.h"
 #include "commands/typecmds.h"
 #include "executor/spi.h"
@@ -909,16 +910,19 @@ CreatePGCompositeType(CompositeType * type)
 
 	/*
 	 * Type names are derived from the struct definition, so another role may
-	 * already own a type with the same name. In that case, derive a different
-	 * name that includes the current user.
+	 * already own a type with the same name. Reuse is decided by ownership
+	 * rather than name, so pick a random suffix that another role cannot
+	 * create in advance.
 	 */
 	Oid			structNamespaceId = get_namespace_oid(STRUCT_TYPES_SCHEMA, false);
+	char	   *baseName = type->typeName;
 
-	if (OidIsValid(GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
-								   CStringGetDatum(type->typeName),
-								   ObjectIdGetDatum(structNamespaceId))))
+	while (OidIsValid(GetSysCacheOid2(TYPENAMENSP, Anum_pg_type_oid,
+									  CStringGetDatum(type->typeName),
+									  ObjectIdGetDatum(structNamespaceId))))
 	{
-		type->typeName = psprintf("%s_%u", type->typeName, GetUserId());
+		type->typeName = psprintf("%s_%08x", baseName,
+								  pg_prng_uint32(&pg_global_prng_state));
 		type->isFinalized = false;
 		FinalizeCompositeTypeName(type);
 	}
