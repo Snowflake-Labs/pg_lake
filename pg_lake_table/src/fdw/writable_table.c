@@ -89,6 +89,24 @@
 /* start above the locktag classes used in postgres and Citus */
 #define ADV_LOCKTAG_CLASS_PG_LAKE_TABLE_UPDATE 101
 
+/* table option: cache data files on write (default true) */
+#define CACHE_DATA_ON_WRITE_OPTION "cache_data_on_write"
+
+
+/*
+ * ShouldSkipDataCacheOnWrite returns whether a table's data-file writes should
+ * bypass the pgduck cache-on-write.  A table whose data files are only ever
+ * written on this instance and read elsewhere can set
+ * cache_data_on_write=false so those files do not evict hotter cache entries.
+ * Metadata files are unaffected: they are read back to build the next Iceberg
+ * generation, so they stay cached regardless.
+ */
+static inline bool
+ShouldSkipDataCacheOnWrite(List *options)
+{
+	return !GetBoolOption(options, CACHE_DATA_ON_WRITE_OPTION, true);
+}
+
 
 /*
  * CompactionDataFileHashEntry is used to compact data files of the same
@@ -292,7 +310,8 @@ PrepareCSVInsertion(Oid relationId, char *insertCSV, int64 rowCount,
 						 compression,
 						 options,
 						 schema,
-						 leafFields);
+						 leafFields,
+						 ShouldSkipDataCacheOnWrite(options));
 
 	ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
@@ -603,7 +622,8 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			List	   *leafFields = GetLeafFieldsForTable(relationId);
 			StatsCollector *statsCollector = PerformDeleteFromParquet(sourcePath, existingPositionDeletes,
 																	  deleteFile, newDataFilePath, compression,
-																	  schema, &stats, leafFields);
+																	  schema, &stats, leafFields,
+																	  ShouldSkipDataCacheOnWrite(options));
 
 			ApplyColumnStatsModeForAllFileStats(relationId, statsCollector->dataFileStats);
 
@@ -665,7 +685,8 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			/* write the deletion file (no temporal validation needed) */
 			StatsCollector *statsCollector =
 				ConvertCSVFileTo(deleteFile, deleteTupleDesc, -1, deletionFilePath,
-								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields);
+								 DATA_FORMAT_PARQUET, compression, copyOptions, schema, leafFields,
+								 ShouldSkipDataCacheOnWrite(options));
 
 			ereport(WriteLogLevel, (errmsg("adding deletion file %s with " INT64_FORMAT " rows ",
 										   deletionFilePath, deletedRowCount)));
@@ -1088,6 +1109,7 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 {
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
+	bool		skipCacheOnWrite = ShouldSkipDataCacheOnWrite(options);
 
 	bool		isPrefix = false;
 
@@ -1150,7 +1172,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   outOfRangePolicy,
 						   compatibilityMode,
 						   wrapNativeTypes,
-						   partitionByExprs);
+						   partitionByExprs,
+						   skipCacheOnWrite);
 
 	/*
 	 * Drop (and queue for deletion) any zero-row files DuckDB produced, so
