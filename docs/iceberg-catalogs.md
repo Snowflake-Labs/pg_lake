@@ -434,16 +434,11 @@ projecting that key as NULL. Incompatible physical key types are also rejected.
 pg_lake does not write equality delete files.
 
 Both query pushdown and Foreign Scan apply the same deletion rules, including
-when a query projects only non-key columns or uses `count(*)`. When equality
-delete files remain after pruning, plain `EXPLAIN` reports the PostgreSQL plan
-and omits the DuckDB physical plan and equality-delete footer validation.
-Data file pruning may still read footers when manifest bounds are insufficient.
-`EXPLAIN VERBOSE` also reports vectorized SQL and file counts. When all equality
-deletes are pruned, the DuckDB physical plan remains available. Queries and
-`EXPLAIN ANALYZE` validate referenced delete file footers through
-the existing file access and credential path, reusing successful validation for
-rescans of the same snapshot. When pruning removes all data files, delete files
-are not opened.
+when a query projects only non-key columns or uses `count(*)`. Plain `EXPLAIN`
+does not scan delete contents, but may inspect file footers, as for other
+Parquet scans. Read-query construction validates referenced delete file footers
+through the existing file access and credential path. When pruning removes all
+data files, delete files are not opened.
 
 `pg_lake_table.enable_equality_delete_validation` defaults to `on`. Set it to
 `off` to skip the additional Parquet footer validation when the external writer

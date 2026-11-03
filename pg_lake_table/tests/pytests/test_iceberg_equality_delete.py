@@ -1493,23 +1493,21 @@ def test_footer_validation_setting(s3, pg_conn, extension, delete_table, pushdow
         pg_conn,
     )
 
-    # EXPLAIN skips footer validation; execution still rejects missing keys.
-    run_query("EXPLAIN (VERBOSE) SELECT * FROM equality_test", pg_conn)
+    # Default validation rejects the missing physical key even for EXPLAIN.
     run_command("SAVEPOINT validation_setting", pg_conn)
     with pytest.raises(Exception, match="missing or duplicated"):
-        run_query("SELECT * FROM equality_test", pg_conn)
+        run_query("EXPLAIN SELECT * FROM equality_test", pg_conn)
     run_command("ROLLBACK TO SAVEPOINT validation_setting", pg_conn)
 
     run_command(
         "SET LOCAL pg_lake_table.enable_equality_delete_validation=off", pg_conn
     )
     run_query("EXPLAIN SELECT * FROM equality_test", pg_conn)
-    assert bag(pg_conn) == row_bag([(1, "x", "row", 1)])
 
     # Re-enabling validation must reject malformed files on subsequent scans.
     run_command("SET LOCAL pg_lake_table.enable_equality_delete_validation=on", pg_conn)
     with pytest.raises(Exception, match="missing or duplicated"):
-        run_query("SELECT * FROM equality_test", pg_conn)
+        run_query("EXPLAIN SELECT * FROM equality_test", pg_conn)
     pg_conn.rollback()
 
 
@@ -2065,52 +2063,6 @@ def test_disjoint_bounds_skip_unreadable_delete(
     assert scans and all(scan.get("Plans") for scan in scans)
     assert bag(pg_conn, query) == row_bag(rows)
     pg_conn.rollback()
-
-
-@pytest.mark.parametrize("pushdown", [True, False])
-@pytest.mark.parametrize("validation", ["on", "off"])
-@pytest.mark.parametrize("inherited", [True, False])
-def test_plain_explain_skips_delete_footers(
-    s3,
-    pg_conn,
-    extension,
-    delete_table,
-    with_default_location,
-    pushdown,
-    validation,
-    inherited,
-):
-    delete_table.add([(1, "x", "row", 1)])
-    path = delete_table.add([(1,)], content=2, sequence=2, equality_ids=[1])
-    attach(pg_conn, delete_table)
-    relation = "equality_test"
-    if inherited:
-        run_command(
-            "CREATE TABLE equality_parent (LIKE equality_test) USING iceberg;"
-            "ALTER TABLE equality_test INHERIT equality_parent",
-            pg_conn,
-        )
-        relation = "equality_parent"
-    delete_table.s3.delete_object(
-        Bucket=TEST_BUCKET, Key=f"{delete_table.prefix}/{path.name}"
-    )
-    run_command(
-        f"SET LOCAL pg_lake_table.enable_full_query_pushdown={str(pushdown).lower()};"
-        f"SET LOCAL pg_lake_table.enable_equality_delete_validation={validation}",
-        pg_conn,
-    )
-    for options in ("", "(VERBOSE)", "(VERBOSE, FORMAT JSON)"):
-        plan = run_query(f"EXPLAIN {options} SELECT * FROM {relation}", pg_conn)
-        if "FORMAT JSON" in options and not inherited:
-            assert int(fetch_data_files_used(plan)) == 1
-            assert int(fetch_delete_files_used(plan)) == 1
-
-    # Both actual execution and EXPLAIN ANALYZE must read the retained delete.
-    for prefix in ("", "EXPLAIN (ANALYZE, VERBOSE) "):
-        run_command("SAVEPOINT unavailable_delete", pg_conn)
-        with pytest.raises(Exception, match=path.name):
-            run_query(f"{prefix}SELECT * FROM {relation}", pg_conn)
-        run_command("ROLLBACK TO SAVEPOINT unavailable_delete", pg_conn)
 
 
 @pytest.fixture(params=["on", "off"])

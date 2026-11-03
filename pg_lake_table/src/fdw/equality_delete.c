@@ -82,8 +82,6 @@ static DataFileSchema * EqualityKeySchema(IcebergTableMetadata * metadata, DataF
 static bool KeySchemasEqual(DataFileSchema * left, DataFileSchema * right);
 static void AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile);
 static bool IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion);
-static void ValidateEqualityDeletesForTableScan(PgLakeTableScan * tableScan);
-static bool TableScanHasEqualityDeletes(PgLakeTableScan * tableScan);
 static void ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan, int startRow, int endRow);
 static bool EqualityDeleteKeyTypeMatches(const char *icebergType, const char *parquetType);
 
@@ -743,68 +741,6 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
 	hash_destroy(candidates);
 	hash_destroy(groups);
 	return result;
-}
-
-/*
- * TableScanHasEqualityDeletes includes inherited child scans when deciding
- * whether plain EXPLAIN must avoid physical equality delete files.
- */
-static bool
-TableScanHasEqualityDeletes(PgLakeTableScan * tableScan)
-{
-	if (tableScan->equalityDeleteScans != NIL)
-		return true;
-
-	foreach_ptr(PgLakeTableScan, childScan, tableScan->childScans)
-	{
-		if (TableScanHasEqualityDeletes(childScan))
-			return true;
-	}
-
-	return false;
-}
-
-/*
- * SnapshotHasEqualityDeletes returns whether any table or inherited child
- * in the snapshot has retained equality delete files.
- */
-bool
-SnapshotHasEqualityDeletes(PgLakeScanSnapshot * snapshot)
-{
-	if (snapshot == NULL)
-		return false;
-
-	foreach_ptr(PgLakeTableScan, tableScan, snapshot->tableScans)
-	{
-		if (TableScanHasEqualityDeletes(tableScan))
-			return true;
-	}
-
-	return false;
-}
-
-/* Validate at execution time; SQL generation and EXPLAIN need no footer I/O. */
-void
-ValidateEqualityDeletesForSnapshot(PgLakeScanSnapshot * snapshot)
-{
-	if (!EnableEqualityDeleteValidation)
-		return;
-
-	foreach_ptr(PgLakeTableScan, tableScan, snapshot->tableScans)
-		ValidateEqualityDeletesForTableScan(tableScan);
-}
-
-static void
-ValidateEqualityDeletesForTableScan(PgLakeTableScan * tableScan)
-{
-	if (!tableScan->equalityDeleteFilesValidated)
-	{
-		ValidateEqualityDeleteFiles(tableScan->equalityDeleteScans);
-		tableScan->equalityDeleteFilesValidated = true;
-	}
-
-	foreach_ptr(PgLakeTableScan, childScan, tableScan->childScans)
-		ValidateEqualityDeletesForTableScan(childScan);
 }
 
 /*
