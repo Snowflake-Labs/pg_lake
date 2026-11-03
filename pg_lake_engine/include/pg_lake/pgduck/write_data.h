@@ -32,6 +32,12 @@
  */
 #define PARTITION_COLUMN_PREFIX "__pglake_part_"
 
+/*
+ * Iceberg table property prefix that enables a Parquet bloom filter for the
+ * column named by the rest of the option name.
+ */
+#define PARQUET_BLOOM_FILTER_ENABLED_COLUMN_PREFIX "write.parquet.bloom-filter-enabled.column."
+
 /* pg_lake_table.target_row_group_size_mb */
 #define DEFAULT_TARGET_ROW_GROUP_SIZE_MB 128
 extern PGDLLEXPORT int TargetRowGroupSizeMB;
@@ -68,6 +74,7 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   bool wrapNativeTypes,
 													   List *partitionByExprs);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
+extern PGDLLEXPORT const char *GetBloomFilterOptionColumnName(const char *optionName);
 extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
 extern PGDLLEXPORT char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
 														   CopyDataFormat destinationFormat);
