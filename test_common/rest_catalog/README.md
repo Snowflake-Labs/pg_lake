@@ -59,7 +59,7 @@ Granting catalog privileges...
 
 # Lakekeeper server for testing
 
-[Lakekeeper](https://github.com/lakekeeper/lakekeeper) is a second REST catalog the tests run against, so behaviour that differs from Polaris is caught in CI: its prefix is a warehouse ID that `/v1/config` only returns when given the warehouse, and it keeps the staged metadata of a staged create. `make install-rest_catalog` installs a pinned release binary as `$(pg_config --bindir)/lakekeeper`; to upgrade it, change `LAKEKEEPER_VERSION` and the SHA-256 values in the `Makefile` together.
+[Lakekeeper](https://github.com/lakekeeper/lakekeeper) is a second REST catalog the tests run against, so behaviour that differs from Polaris is caught in CI: its prefix is a warehouse ID that `/v1/config` only returns when given the warehouse, and it keeps the staged metadata of a staged create. `make install-rest_catalog` installs a pinned release binary as `$(pg_config --bindir)/lakekeeper`; to upgrade it, change `LAKEKEEPER_VERSION` and the SHA-256 values in `lakekeeper.mk` together. There is no Lakekeeper build for Intel macOS, so there it is skipped, as are its tests.
 
 Tests that do `from helpers.lakekeeper import *` start it on port 8282 with authentication disabled and create a warehouse named `pglake` on the moto S3 server (`s3://testbucketcdw/lakekeeper`). pg_lake reaches it through a server with `rest_auth_type 'none'`, see `test_lakekeeper_catalog.py`.
 
