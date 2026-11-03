@@ -49,10 +49,18 @@ typedef struct ReadGroupBucket
 	List	   *groups;
 }			ReadGroupBucket;
 
+typedef struct EqualityDeleteBounds
+{
+	bool		valid;
+	int64		lower;
+	int64		upper;
+} EqualityDeleteBounds;
+
 typedef struct EqualityDeleteFile
 {
 	DataFile   *file;
 	DataFileSchema *schema;
+	EqualityDeleteBounds *bounds;
 	int			index;
 	bool		isGlobal;
 }			EqualityDeleteFile;
@@ -81,6 +89,7 @@ static bool AvroTypesEqual(IcebergScalarAvroType left, IcebergScalarAvroType rig
 static DataFileSchema * EqualityKeySchema(IcebergTableMetadata * metadata, DataFile * file);
 static bool KeySchemasEqual(DataFileSchema * left, DataFileSchema * right);
 static void AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile);
+static void PrepareEqualityDeleteBounds(EqualityDeleteFile * deletion);
 static bool IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion);
 static void ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan, int startRow, int endRow);
 static bool EqualityDeleteKeyTypeMatches(const char *icebergType, const char *parquetType);
@@ -522,14 +531,16 @@ AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile)
 }
 
 /*
- * One disjoint component proves a composite equality key cannot match.
- * Bounds omit NULLs, so require an explicit zero delete null count for that
- * component. Otherwise NULL-safe equality could still delete NULL data keys.
+ * Prepare integer bounds once per delete file. Bounds omit NULLs, so require
+ * an explicit zero delete null count for each usable component. Otherwise
+ * NULL-safe equality could still delete NULL data keys.
  */
-static bool
-IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion)
+static void
+PrepareEqualityDeleteBounds(EqualityDeleteFile * deletion)
 {
 	DataFile   *deleteFile = deletion->file;
+
+	deletion->bounds = palloc0(sizeof(EqualityDeleteBounds) * deletion->schema->nfields);
 
 	for (size_t i = 0; i < deletion->schema->nfields; i++)
 	{
@@ -557,23 +568,46 @@ IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion)
 			continue;
 
 		PGType		pgType = MakePGTypeOid(isLong ? INT8OID : INT4OID);
-		Datum		dataLowerValue,
-					dataUpperValue,
-					deleteLowerValue,
+		Datum		deleteLowerValue,
 					deleteUpperValue;
 
-		if (!GetIcebergColumnBounds(dataFile, key->id, key->type, pgType,
-									&dataLowerValue, &dataUpperValue) ||
-			!GetIcebergColumnBounds(deleteFile, key->id, key->type, pgType,
+		if (!GetIcebergColumnBounds(deleteFile, key->id, key->type, pgType,
 									&deleteLowerValue, &deleteUpperValue))
+			continue;
+
+		EqualityDeleteBounds *bounds = &deletion->bounds[i];
+
+		bounds->lower = isLong ? DatumGetInt64(deleteLowerValue) : DatumGetInt32(deleteLowerValue);
+		bounds->upper = isLong ? DatumGetInt64(deleteUpperValue) : DatumGetInt32(deleteUpperValue);
+		bounds->valid = true;
+	}
+}
+
+/* One disjoint component proves a composite equality key cannot match. */
+static bool
+IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion)
+{
+	for (size_t i = 0; i < deletion->schema->nfields; i++)
+	{
+		EqualityDeleteBounds *bounds = &deletion->bounds[i];
+
+		if (!bounds->valid)
+			continue;
+
+		DataFileSchemaField *key = &deletion->schema->fields[i];
+		bool		isLong = strcmp(key->type->field.scalar.typeName, "long") == 0;
+		PGType		pgType = MakePGTypeOid(isLong ? INT8OID : INT4OID);
+		Datum		dataLowerValue,
+					dataUpperValue;
+
+		if (!GetIcebergColumnBounds(dataFile, key->id, key->type, pgType,
+									&dataLowerValue, &dataUpperValue))
 			continue;
 
 		int64		dataLower = isLong ? DatumGetInt64(dataLowerValue) : DatumGetInt32(dataLowerValue);
 		int64		dataUpper = isLong ? DatumGetInt64(dataUpperValue) : DatumGetInt32(dataUpperValue);
-		int64		deleteLower = isLong ? DatumGetInt64(deleteLowerValue) : DatumGetInt32(deleteLowerValue);
-		int64		deleteUpper = isLong ? DatumGetInt64(deleteUpperValue) : DatumGetInt32(deleteUpperValue);
 
-		if (dataUpper < deleteLower || deleteUpper < dataLower)
+		if (dataUpper < bounds->lower || bounds->upper < dataLower)
 			return true;
 	}
 	return false;
@@ -632,6 +666,7 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
 		}
 		if (!list_member_ptr(schemas, plan->schema))
 			schemas = lappend(schemas, plan->schema);
+		PrepareEqualityDeleteBounds(plan);
 		deletePlans = lappend(deletePlans, plan);
 		IcebergPartitionSpec *spec = ValidatePartition(metadata, file);
 

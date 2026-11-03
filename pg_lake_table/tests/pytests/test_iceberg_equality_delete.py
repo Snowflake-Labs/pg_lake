@@ -1998,8 +1998,10 @@ def test_bounds_pruning_key_scope(s3, pg_conn, extension, delete_table, keys):
 def test_bounds_pruning_is_per_data_file(s3, pg_conn, extension, delete_table):
     low_rows = [(10, "x", "gone", 1), (11, "x", "keep", 1)]
     high_rows = [(20, "x", "gone", 1), (21, "x", "keep", 1)]
+    higher_rows = [(30, "x", "gone", 1), (31, "x", "keep", 1)]
     low_path = delete_table.add(low_rows, metrics=integer_metrics(1, 10, 11))
     delete_table.add(high_rows, metrics=integer_metrics(1, 20, 21))
+    delete_table.add(higher_rows, metrics=integer_metrics(1, 30, 31))
     delete_table.add(
         [(20,)],
         content=2,
@@ -2007,10 +2009,22 @@ def test_bounds_pruning_is_per_data_file(s3, pg_conn, extension, delete_table):
         equality_ids=[1],
         metrics=integer_metrics(1, 20, 20),
     )
+    delete_table.add(
+        [(30,)],
+        content=2,
+        sequence=2,
+        equality_ids=[1],
+        metrics=integer_metrics(1, 30, 30),
+    )
     delete_table.add([(str(low_path), 0)], content=1, sequence=2)
     attach(pg_conn, delete_table)
-    # Keep the equality delete in the overlapping group and position deletes in both.
-    assert_paths(pg_conn, [low_rows[1], high_rows[1]], data_files=2, delete_files=2)
+    # Deletes sharing a key schema retain independent bounds for each data group.
+    assert_paths(
+        pg_conn,
+        [low_rows[1], high_rows[1], higher_rows[1]],
+        data_files=3,
+        delete_files=3,
+    )
 
 
 @pytest.mark.parametrize("pushdown", [True, False])
