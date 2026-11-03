@@ -356,13 +356,12 @@ FOR EACH ROW EXECUTE FUNCTION lake_polaris.outbound_trigger();
  * Three cases, keyed off the trigger event:
  *
  *   1. INSERT of a TABLE_LIKE entity not already in entity_link -> a new
- *      Iceberg table appeared in Polaris that pg_lake doesn't know about.
- *      Create a foreign table that points at it and run the existing
- *      sync_iceberg_metadata_from_external_write() function.
+ *      Iceberg table appeared in Polaris. It is not mirrored into pg_lake;
+ *      the trigger only raises a warning.
  *
  *   2. UPDATE of a TABLE_LIKE entity already in entity_link, where the
- *      metadata-location changed -> external commit. Update
- *      lake_iceberg.tables_internal.metadata_location and re-run sync.
+ *      metadata-location changed -> external commit. Apply it through the
+ *      iceberg_tables view, which syncs the pg_lake catalog.
  *
  *   3. DELETE of a TABLE_LIKE entity in entity_link -> external client
  *      dropped the table. Drop the corresponding foreign table.
@@ -374,10 +373,9 @@ FOR EACH ROW EXECUTE FUNCTION lake_polaris.outbound_trigger();
 
 /*
  * inbound_sync_update applies a metadata_location change from Polaris to
- * the pg_lake catalog. The PG_LAKE_TABLE function
- * sync_iceberg_metadata_from_external_write() does the actual schema +
- * data file resync; we just push the new location into tables_internal
- * so it has somewhere to read from.
+ * the pg_lake catalog. It goes through the iceberg_tables view, which checks
+ * ownership and that the new metadata is in the table's metadata directory,
+ * and then syncs schema and data files from it.
  */
 CREATE FUNCTION lake_polaris.inbound_sync_update(
     p_table_oid regclass,
@@ -386,12 +384,21 @@ CREATE FUNCTION lake_polaris.inbound_sync_update(
     LANGUAGE plpgsql
     AS $function$
 BEGIN
-    UPDATE lake_iceberg.tables_internal
-       SET previous_metadata_location = metadata_location,
-           metadata_location = p_metadata_location
-     WHERE table_name = p_table_oid;
+    UPDATE pg_catalog.iceberg_tables t
+       SET metadata_location = p_metadata_location,
+           previous_metadata_location = ti.metadata_location
+      FROM lake_iceberg.tables_internal ti
+      JOIN pg_class c ON c.oid = ti.table_name
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE ti.table_name = p_table_oid
+       AND t.catalog_name = current_database()
+       AND t.table_namespace = n.nspname
+       AND t.table_name = c.relname;
 
-    /* the sync_external_write_trg trigger on tables_internal runs the sync */
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'pg_lake_polaris: table % is not in iceberg_tables',
+            p_table_oid;
+    END IF;
 
     UPDATE lake_polaris.entity_link
        SET last_seen_metadata_location = p_metadata_location
@@ -433,130 +440,6 @@ BEGIN
     END IF;
 
     DELETE FROM lake_polaris.entity_link WHERE pg_table_oid = p_table_oid;
-END;
-$function$;
-
-
-/*
- * inbound_sync_insert creates a new pg_lake foreign table for an Iceberg
- * table that just appeared in Polaris. Reads the schema from the Iceberg
- * metadata file and translates the columns to Postgres types.
- *
- * v0.1 limitation: only top-level scalar columns are supported. Tables
- * whose Iceberg schema includes nested types (struct/list/map) will fail
- * here; the user has to register them through pg_lake's normal
- * CREATE TABLE flow first.
- */
-CREATE FUNCTION lake_polaris.inbound_sync_insert(
-    p_namespace_name text,
-    p_table_name text,
-    p_metadata_location text,
-    p_polaris_entity_id bigint,
-    p_polaris_namespace_id bigint)
-    RETURNS regclass
-    LANGUAGE plpgsql
-    AS $function$
-DECLARE
-    v_metadata jsonb;
-    v_current_schema_id int;
-    v_schema jsonb;
-    v_field jsonb;
-    v_columns text := '';
-    v_column_def text;
-    v_pg_type text;
-    v_iceberg_type text;
-    v_new_oid regclass;
-BEGIN
-    /* read the Iceberg metadata file */
-    v_metadata := lake_iceberg.metadata(p_metadata_location);
-
-    v_current_schema_id := (v_metadata->>'current-schema-id')::int;
-
-    /* find the current schema */
-    FOR v_schema IN SELECT jsonb_array_elements(v_metadata->'schemas')
-    LOOP
-        IF (v_schema->>'schema-id')::int = v_current_schema_id THEN
-            EXIT;
-        END IF;
-    END LOOP;
-
-    IF v_schema IS NULL THEN
-        RAISE EXCEPTION 'pg_lake_polaris: could not find current schema in %',
-            p_metadata_location;
-    END IF;
-
-    FOR v_field IN SELECT jsonb_array_elements(v_schema->'fields')
-    LOOP
-        IF jsonb_typeof(v_field->'type') <> 'string' THEN
-            RAISE EXCEPTION 'pg_lake_polaris: nested types not supported in v0.1 (column %)',
-                v_field->>'name';
-        END IF;
-
-        v_iceberg_type := v_field->>'type';
-        v_pg_type := CASE v_iceberg_type
-            WHEN 'boolean' THEN 'boolean'
-            WHEN 'int' THEN 'integer'
-            WHEN 'long' THEN 'bigint'
-            WHEN 'float' THEN 'real'
-            WHEN 'double' THEN 'double precision'
-            WHEN 'date' THEN 'date'
-            WHEN 'time' THEN 'time'
-            WHEN 'timestamp' THEN 'timestamp'
-            WHEN 'timestamptz' THEN 'timestamptz'
-            WHEN 'string' THEN 'text'
-            WHEN 'uuid' THEN 'uuid'
-            WHEN 'binary' THEN 'bytea'
-            ELSE NULL
-        END;
-
-        IF v_pg_type IS NULL THEN
-            RAISE EXCEPTION 'pg_lake_polaris: unsupported Iceberg type % for column %',
-                v_iceberg_type, v_field->>'name';
-        END IF;
-
-        v_column_def := format('%I %s', v_field->>'name', v_pg_type);
-
-        IF v_columns = '' THEN
-            v_columns := v_column_def;
-        ELSE
-            v_columns := v_columns || ', ' || v_column_def;
-        END IF;
-    END LOOP;
-
-    /*
-     * Create the foreign table. The catalog_name option points at the
-     * database so pg_lake_iceberg recognizes this as a managed catalog
-     * table. v0.1 doesn't enforce read-only on the pg_lake side — that
-     * would need a server option that doesn't exist yet for this FDW.
-     */
-    EXECUTE format(
-        'CREATE FOREIGN TABLE %I.%I (%s) SERVER pg_lake_iceberg',
-        p_namespace_name, p_table_name, v_columns);
-
-    v_new_oid := format('%I.%I', p_namespace_name, p_table_name)::regclass;
-
-    /*
-     * pg_lake's CREATE FOREIGN TABLE hook already inserted a tables_internal
-     * row pointing at a fresh metadata location it just created. Overwrite
-     * that with the metadata file the external client wrote, then run the
-     * sync to populate schema and data files from it.
-     */
-    UPDATE lake_iceberg.tables_internal
-       SET previous_metadata_location = metadata_location,
-           metadata_location = p_metadata_location
-     WHERE table_name = v_new_oid;
-
-    /* the sync_external_write_trg trigger on tables_internal runs the sync */
-
-    /* link */
-    INSERT INTO lake_polaris.entity_link
-        (pg_table_oid, polaris_entity_id, polaris_namespace_id,
-         last_seen_metadata_location)
-    VALUES
-        (v_new_oid, p_polaris_entity_id, p_polaris_namespace_id,
-         p_metadata_location);
-
-    RETURN v_new_oid;
 END;
 $function$;
 
@@ -610,19 +493,16 @@ BEGIN
             /* a new TABLE_LIKE entity. If we already linked it, this was
              * our own outbound write; suppression should have prevented
              * the trigger anyway, so just no-op. */
+            /*
+             * Tables created through Polaris are not mirrored into pg_lake:
+             * creating a pg_lake table and syncing it from external metadata
+             * in the same transaction is rejected, so they stay Polaris-only.
+             */
             PERFORM 1 FROM lake_polaris.entity_link
              WHERE polaris_entity_id = NEW.id;
             IF NOT FOUND THEN
-                v_new_internal := NEW.internal_properties::jsonb;
-                v_metadata_location := v_new_internal->>'metadata-location';
-                IF v_metadata_location IS NOT NULL THEN
-                    PERFORM lake_polaris.inbound_sync_insert(
-                        v_new_internal->>'parent-namespace',
-                        NEW.name,
-                        v_metadata_location,
-                        NEW.id,
-                        NEW.parent_id);
-                END IF;
+                RAISE WARNING 'pg_lake_polaris: table "%" was created in Polaris and is not mirrored into pg_lake',
+                    NEW.name;
             END IF;
 
         ELSIF TG_OP = 'UPDATE' THEN

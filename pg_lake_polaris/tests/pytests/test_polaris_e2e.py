@@ -3,15 +3,10 @@ End-to-end tests against real Iceberg metadata files.
 
 These exercise outbound through pg_lake's full CREATE TABLE / INSERT /
 DROP path (so real metadata files are written to the storage backend,
-the trigger flow on real regclass values), and exercise inbound INSERT
-by reusing a metadata file that pg_lake itself wrote earlier — that
-simulates an external Polaris-routed client without needing a Polaris
-REST server.
-
-The full inbound UPDATE path (where an external client commits new
-metadata) is covered functionally by the dispatch tests in
-test_polaris_inbound.py — driving it end-to-end here would require
-pyiceberg-core or a real Polaris instance, both out of scope for v0.1.
+the trigger flow on real regclass values), and exercise inbound UPDATE
+by pointing the Polaris entity at a metadata file that pg_lake itself
+wrote earlier. That simulates an external Polaris-routed commit without
+needing a Polaris REST server.
 """
 
 import pytest
@@ -168,3 +163,73 @@ def test_outbound_drop_removes_entity(
 # enough to read by inspection. A real Polaris+Spark integration test
 # is the right place to lock down the full inbound INSERT path; that
 # belongs in a separate harness, post-v0.1.
+
+
+def test_inbound_update_e2e_syncs_data_files(
+    polaris_extension,
+    pg_conn,
+    superuser_conn,
+    with_default_location,
+    s3,
+):
+    """
+    A Polaris commit that moves the table to different metadata must
+    resync pg_lake's data files. Point the entity back at the metadata
+    from the first INSERT, as an external rollback would, and expect the
+    second INSERT's row to disappear.
+    """
+    tbl = "public.e2e_inbound"
+
+    run_command(f"CREATE TABLE {tbl} (a int) USING iceberg", pg_conn)
+    run_command(f"INSERT INTO {tbl} VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    try:
+        first_location = run_query(
+            "SELECT last_seen_metadata_location FROM lake_polaris.entity_link "
+            f"WHERE pg_table_oid = '{tbl}'::regclass",
+            superuser_conn,
+        )[0][0]
+
+        run_command(f"INSERT INTO {tbl} VALUES (2)", pg_conn)
+        pg_conn.commit()
+
+        version_before = run_query(
+            "SELECT entity_version FROM polaris_schema.entities "
+            "WHERE name = 'e2e_inbound'",
+            superuser_conn,
+        )[0][0]
+
+        run_command(
+            f"""
+            UPDATE polaris_schema.entities
+               SET internal_properties = jsonb_set(
+                       internal_properties, '{{metadata-location}}',
+                       to_jsonb('{first_location}'::text)),
+                   entity_version = entity_version + 1
+             WHERE name = 'e2e_inbound'
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        assert run_query(f"SELECT a FROM {tbl} ORDER BY a", pg_conn) == [[1]]
+
+        catalog_location = run_query(
+            "SELECT metadata_location FROM lake_iceberg.tables_internal "
+            f"WHERE table_name = '{tbl}'::regclass",
+            superuser_conn,
+        )[0][0]
+        assert catalog_location == first_location
+
+        # applying the commit must not echo a write back out to Polaris
+        version_after = run_query(
+            "SELECT entity_version FROM polaris_schema.entities "
+            "WHERE name = 'e2e_inbound'",
+            superuser_conn,
+        )[0][0]
+        assert version_after == version_before + 1
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP TABLE IF EXISTS {tbl}", pg_conn)
+        pg_conn.commit()

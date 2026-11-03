@@ -3,10 +3,8 @@ Inbound (Polaris -> pg_lake) sync tests.
 
 These simulate Polaris-side commits by directly modifying
 polaris_schema.entities and assert that the pg_lake catalog state catches
-up. The INSERT path (synthesizing CREATE FOREIGN TABLE for a table that
-appears in Polaris first) requires reading a real Iceberg metadata file,
-so the deeper coverage there belongs in an e2e test against PyIceberg —
-here we only validate the dispatch path.
+up. An inbound UPDATE against real metadata files is covered in
+test_polaris_e2e.py.
 """
 
 import pytest
@@ -132,13 +130,10 @@ def test_inbound_update_no_change_is_noop(polaris_extension, superuser_conn):
     assert last_seen == "s3://localbucket/in_noop/metadata/v1.metadata.json"
 
 
-def test_inbound_insert_without_metadata_location_is_skipped(
-    polaris_extension, superuser_conn
-):
+def test_inbound_insert_is_not_mirrored(polaris_extension, superuser_conn):
     """
-    A new TABLE_LIKE entity with no `metadata-location` in
-    internal_properties must not produce a foreign table — Polaris hasn't
-    finished registering the table yet.
+    A table created through Polaris must not produce a pg_lake table or a
+    link, even when its entity already carries a metadata-location.
     """
     _seed_namespace(superuser_conn, ns_id=2200)
 
@@ -146,17 +141,19 @@ def test_inbound_insert_without_metadata_location_is_skipped(
         f"""
         INSERT INTO polaris_schema.entities VALUES
             ('{POLARIS_REALM}', {POLARIS_CATALOG_ID}, 4200, 2200,
-             'in_pending', 1, 7, 2,
-             0, 0, 0, 0, 0, '{{}}', '{{}}', 1);
+             'in_external', 1, 7, 2,
+             0, 0, 0, 0, 0, '{{}}',
+             '{{"parent-namespace": "public",
+                "metadata-location":
+                  "s3://localbucket/in_external/metadata/v1.metadata.json"}}',
+             1);
         """,
         superuser_conn,
     )
     superuser_conn.commit()
 
     rows = run_query(
-        """
-        SELECT count(*) FROM pg_class WHERE relname = 'in_pending';
-        """,
+        "SELECT count(*) FROM pg_class WHERE relname = 'in_external'",
         superuser_conn,
     )
     assert rows[0][0] == 0
@@ -168,9 +165,7 @@ def test_inbound_insert_without_metadata_location_is_skipped(
     assert link_count == 0
 
 
-def test_outbound_inbound_no_loop(
-    polaris_extension, without_external_write_sync, superuser_conn
-):
+def test_outbound_inbound_no_loop(polaris_extension, superuser_conn):
     """
     A pg_lake-originated metadata change must be reflected in Polaris
     exactly once — entity_version goes 1 -> 2, not 1 -> 3 — proving the

@@ -89,9 +89,7 @@ def test_outbound_insert_creates_namespace_and_table(polaris_extension, superuse
         superuser_conn.commit()
 
 
-def test_outbound_update_bumps_entity_version(
-    polaris_extension, without_external_write_sync, superuser_conn
-):
+def test_outbound_update_bumps_entity_version(polaris_extension, superuser_conn):
     """
     Updating metadata_location must increment entity_version exactly once
     per outbound write — regression check for the round-trip loop.
@@ -218,9 +216,7 @@ def test_outbound_delete_removes_entity_keeps_namespace(
         superuser_conn.commit()
 
 
-def test_outbound_no_metadata_location_is_skipped(
-    polaris_extension, without_external_write_sync, superuser_conn
-):
+def test_outbound_no_metadata_location_is_skipped(polaris_extension, superuser_conn):
     """
     Inserting a tables_internal row with NULL metadata_location (the
     state right after CREATE TABLE before the first metadata write) must
