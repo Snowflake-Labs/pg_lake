@@ -54,7 +54,7 @@ typedef struct EqualityDeleteBounds
 	bool		valid;
 	int64		lower;
 	int64		upper;
-} EqualityDeleteBounds;
+}			EqualityDeleteBounds;
 
 typedef struct EqualityDeleteFile
 {

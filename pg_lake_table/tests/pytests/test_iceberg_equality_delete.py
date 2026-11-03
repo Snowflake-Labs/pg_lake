@@ -1794,9 +1794,9 @@ def test_integer_bounds_null_keys(s3, pg_conn, extension, delete_table, null_cou
     assert_paths(pg_conn, rows[1:], data_files=1, delete_files=1)
 
 
-@pytest.mark.parametrize("pushdown", [True, False])
-def test_integer_bounds_reject_null_metric_value(
-    s3, pg_conn, extension, delete_table, pushdown
+@pytest.mark.parametrize("null_field", ["key", "value"])
+def test_integer_bounds_ignore_null_metric(
+    s3, pg_conn, extension, delete_table, null_field
 ):
     delete_table.add(
         [(None, "x", "gone", 1), (10, "x", "keep", 1)],
@@ -1820,26 +1820,15 @@ def test_integer_bounds_reject_null_metric_value(
         for f in data_schema["fields"]
         if f["name"] == "null_value_counts"
     )
-    next(f for f in stats_schema["fields"] if f["name"] == "value")["type"] = [
-        "null",
-        "long",
-    ]
-    records[0]["data_file"]["null_value_counts"][0]["value"] = None
+    field = next(f for f in stats_schema["fields"] if f["name"] == null_field)
+    field["type"] = ["null", field["type"]]
+    records[0]["data_file"]["null_value_counts"][0][null_field] = None
     with path.open("wb") as output:
         fastavro.writer(output, schema, records)
     delete_table.manifests[1]["manifest_length"] = path.stat().st_size
-    run_command(
-        f"SET LOCAL pg_lake_table.enable_full_query_pushdown={str(pushdown).lower()}",
-        pg_conn,
-    )
     # An invalid NULL metric must not become zero and hide a real NULL delete.
-    with pytest.raises(
-        Exception, match="Iceberg column metrics require non-null key and value"
-    ):
-        attach(pg_conn, delete_table)
-        bag(pg_conn)
-    pg_conn.rollback()
-    assert run_query("SELECT 1", pg_conn) == [[1]]
+    attach(pg_conn, delete_table)
+    assert_paths(pg_conn, [(10, "x", "keep", 1)], data_files=1, delete_files=1)
 
 
 @pytest.mark.parametrize(

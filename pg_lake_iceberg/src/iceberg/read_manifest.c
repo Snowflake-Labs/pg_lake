@@ -73,6 +73,8 @@ typedef struct ManifestReaderContext
 
 
 static void ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary * summary, void *context);
+static void ReadColumnStatsFromAvro(avro_value_t * record, char *fieldName,
+									ColumnStat * *stats, size_t *length, void *context);
 static void ReadColumnStatFromAvro(avro_value_t * record, ColumnStat * stat, void *context);
 static void ReadColumnBoundFromAvro(avro_value_t * record, ColumnBound * bound, void *context);
 static void ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderContext * context);
@@ -338,25 +340,13 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 	AvroGetRecordField(record, "partition", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadPartitionFromAvro, &dataFile->partition, context);
 	AvroGetInt64Field(record, "record_count", AVRO_FIELD_REQUIRED, &dataFile->record_count);
 	AvroGetInt64Field(record, "file_size_in_bytes", AVRO_FIELD_REQUIRED, &dataFile->file_size_in_bytes);
-	AvroGetObjectArrayField(record, "column_sizes", AVRO_FIELD_OPTIONAL,
-							(AvroParseFunction) ReadColumnStatFromAvro,
-							sizeof(ColumnStat),
-							(void **) &dataFile->column_sizes,
+	ReadColumnStatsFromAvro(record, "column_sizes", &dataFile->column_sizes,
 							&dataFile->column_sizes_length, context);
-	AvroGetObjectArrayField(record, "value_counts", AVRO_FIELD_OPTIONAL,
-							(AvroParseFunction) ReadColumnStatFromAvro,
-							sizeof(ColumnStat),
-							(void **) &dataFile->value_counts,
+	ReadColumnStatsFromAvro(record, "value_counts", &dataFile->value_counts,
 							&dataFile->value_counts_length, context);
-	AvroGetObjectArrayField(record, "null_value_counts", AVRO_FIELD_OPTIONAL,
-							(AvroParseFunction) ReadColumnStatFromAvro,
-							sizeof(ColumnStat),
-							(void **) &dataFile->null_value_counts,
+	ReadColumnStatsFromAvro(record, "null_value_counts", &dataFile->null_value_counts,
 							&dataFile->null_value_counts_length, context);
-	AvroGetObjectArrayField(record, "nan_value_counts", AVRO_FIELD_OPTIONAL,
-							(AvroParseFunction) ReadColumnStatFromAvro,
-							sizeof(ColumnStat),
-							(void **) &dataFile->nan_value_counts,
+	ReadColumnStatsFromAvro(record, "nan_value_counts", &dataFile->nan_value_counts,
 							&dataFile->nan_value_counts_length, context);
 	AvroGetObjectArrayField(record, "lower_bounds", AVRO_FIELD_OPTIONAL,
 							(AvroParseFunction) ReadColumnBoundFromAvro,
@@ -824,17 +814,39 @@ ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary * summary, void *co
 	AvroGetBinaryField(record, "upper_bound", AVRO_FIELD_OPTIONAL, (const void **) &summary->upper_bound, &summary->upper_bound_length);
 }
 
+/* ReadColumnStatsFromAvro drops unusable optional metrics. */
+static void
+ReadColumnStatsFromAvro(avro_value_t * record, char *fieldName,
+						ColumnStat * *stats, size_t *length, void *context)
+{
+	AvroGetObjectArrayField(record, fieldName, AVRO_FIELD_OPTIONAL,
+							(AvroParseFunction) ReadColumnStatFromAvro,
+							sizeof(ColumnStat), (void **) stats, length, context);
+
+	size_t		validCount = 0;
+
+	for (size_t i = 0; i < *length; i++)
+	{
+		/* Iceberg field IDs are positive; zero marks an unreadable entry. */
+		if ((*stats)[i].column_id > 0)
+			(*stats)[validCount++] = (*stats)[i];
+	}
+	*length = validCount;
+}
+
+
 static void
 ReadColumnStatFromAvro(avro_value_t * record, ColumnStat * stat, void *context)
 {
+	memset(stat, '\0', sizeof(ColumnStat));
+
 	/*
-	 * A missing metric must not become zero and prove that a file has no
-	 * NULLs.
+	 * A missing count must remain unknown, not prove the absence of NULLs or
+	 * NaNs.
 	 */
 	if (!AvroFieldExists(record, "key") || !AvroFieldExists(record, "value"))
-		ereport(ERROR, (errmsg("Iceberg column metrics require non-null key and value")));
+		return;
 
-	memset(stat, '\0', sizeof(ColumnStat));
 	AvroGetInt32Field(record, "key", AVRO_FIELD_REQUIRED, &stat->column_id);
 	AvroGetInt64Field(record, "value", AVRO_FIELD_REQUIRED, &stat->value);
 }
