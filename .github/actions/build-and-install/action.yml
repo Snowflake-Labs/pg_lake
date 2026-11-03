@@ -71,7 +71,7 @@ runs:
           export DUCKDB_BUILD_USE_CACHE=0;
         fi
 
-        make install-pgduck_server && make install-pg_lake_spatial && make install-pg_lake_benchmark
+        make install-pgduck_server && make install-pg_lake_spatial && make install-pg_lake_benchmark && make install-pg_lake_polaris
 
     - name: Build Polaris if not already in the cache
       if: steps.cache_polaris.outputs.cache-hit != 'true'
