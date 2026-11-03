@@ -12,9 +12,9 @@ POLARIS_CATALOG_ID = 1000
 def polaris_schema(superuser_conn):
     """
     Create a minimal port of Apache Polaris's relational-jdbc schema. Just
-    enough to exercise the lake_polaris triggers. Mirrors
-    test_common/rest_catalog/polaris/persistence/relational-jdbc/src/main/
-    resources/h2/schema-v1.sql, ported to Postgres syntax.
+    enough to exercise the lake_polaris triggers. Mirrors the entities table
+    in test_common/rest_catalog/polaris/persistence/relational-jdbc/src/main/
+    resources/postgres/schema-v6.sql, including its jsonb property columns.
 
     The schema is module-scoped so multiple tests can share the catalog
     row; each test cleans up its own table/namespace entities.
@@ -37,8 +37,8 @@ def polaris_schema(superuser_conn):
             purge_timestamp bigint NOT NULL,
             to_purge_timestamp bigint NOT NULL,
             last_update_timestamp bigint NOT NULL,
-            properties text NOT NULL DEFAULT '{}',
-            internal_properties text NOT NULL DEFAULT '{}',
+            properties jsonb NOT NULL DEFAULT '{}',
+            internal_properties jsonb NOT NULL DEFAULT '{}',
             grant_records_version int NOT NULL,
             PRIMARY KEY (realm_id, id),
             CONSTRAINT entities_unique UNIQUE

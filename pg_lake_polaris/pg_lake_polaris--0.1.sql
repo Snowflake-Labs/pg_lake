@@ -125,8 +125,8 @@ BEGIN
         p_realm_id, p_catalog_id, v_namespace_id, p_catalog_id,
         p_namespace_name, 1, lake_polaris.type_code_namespace(), 0,
         v_now, 0, 0, 0, v_now,
-        jsonb_build_object('location', p_location)::text,
-        '{}'::text, 1);
+        jsonb_build_object('location', p_location),
+        '{}'::jsonb, 1);
 
     RETURN v_namespace_id;
 END;
@@ -220,9 +220,9 @@ BEGIN
             lake_polaris.type_code_table_like(),
             lake_polaris.sub_type_iceberg(),
             v_now, 0, 0, 0, v_now,
-            jsonb_build_object('location', v_location)::text,
+            jsonb_build_object('location', v_location),
             jsonb_build_object('parent-namespace', v_namespace_name,
-                               'metadata-location', v_metadata_location)::text,
+                               'metadata-location', v_metadata_location),
             1);
 
         INSERT INTO lake_polaris.entity_link
@@ -235,8 +235,8 @@ BEGIN
            SET entity_version = entity_version + 1,
                internal_properties = jsonb_build_object(
                     'parent-namespace', v_namespace_name,
-                    'metadata-location', v_metadata_location)::text,
-               properties = jsonb_build_object('location', v_location)::text,
+                    'metadata-location', v_metadata_location),
+               properties = jsonb_build_object('location', v_location),
                last_update_timestamp = v_now
          WHERE realm_id = v_mapping.polaris_realm_id
            AND id = v_table_id;
@@ -391,7 +391,7 @@ BEGIN
            metadata_location = p_metadata_location
      WHERE table_name = p_table_oid;
 
-    PERFORM lake_table.sync_iceberg_metadata_from_external_write(p_table_oid);
+    /* the sync_external_write_trg trigger on tables_internal runs the sync */
 
     UPDATE lake_polaris.entity_link
        SET last_seen_metadata_location = p_metadata_location
@@ -546,7 +546,7 @@ BEGIN
            metadata_location = p_metadata_location
      WHERE table_name = v_new_oid;
 
-    PERFORM lake_table.sync_iceberg_metadata_from_external_write(v_new_oid);
+    /* the sync_external_write_trg trigger on tables_internal runs the sync */
 
     /* link */
     INSERT INTO lake_polaris.entity_link
