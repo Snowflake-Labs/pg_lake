@@ -16,15 +16,14 @@
  */
 
 #include "postgres.h"
+#include "catalog/pg_type_d.h"
 
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/iceberg/data_file_stats.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_binary_serde.h"
-#include "pg_lake/iceberg/iceberg_type_numeric_binary_serde.h"
 #include "pg_lake/parquet/leaf_field.h"
 
-#include "port/pg_bswap.h"
 #include "utils/builtins.h"
 #include "utils/date.h"
 #include "utils/lsyscache.h"
@@ -258,37 +257,10 @@ DecodeColumnBound(Field * field, PGType pgType, ColumnBound * bound, Datum *valu
 		(type == INT8OID && strcmp(name, "long") == 0 && (length == 4 || length == 8)) ||
 		(type == DATEOID && strcmp(name, "date") == 0 && length == 4))
 	{
-		/* Bounds are little-endian; memcpy avoids alignment assumptions. */
-		if (length == 4)
-		{
-			uint32		raw;
-
-			memcpy(&raw, bound->value, 4);
-#ifdef WORDS_BIGENDIAN
-			raw = pg_bswap32(raw);
-#endif
-			*integer = (int32) raw;
-		}
-		else
-		{
-			uint64		raw;
-
-			memcpy(&raw, bound->value, 8);
-#ifdef WORDS_BIGENDIAN
-			raw = pg_bswap64(raw);
-#endif
-			*integer = (int64) raw;
-		}
-		if (type == DATEOID)
-		{
-			*integer -= POSTGRES_EPOCH_JDATE - UNIX_EPOCH_JDATE;
-			if (!IS_VALID_DATE(*integer))
-				return false;
-			*value = DateADTGetDatum((DateADT) *integer);
-		}
-		else
-			*value = type == INT4OID ? Int32GetDatum((int32) *integer) : Int64GetDatum(*integer);
-		return true;
+		*value = PGIcebergBinaryDeserialize(bound->value, length, field, pgType);
+		*integer = type == INT8OID ? DatumGetInt64(*value) :
+			type == DATEOID ? DatumGetDateADT(*value) : DatumGetInt32(*value);
+		return type != DATEOID || IS_VALID_DATE(*integer);
 	}
 	if (type != NUMERICOID || length < 1 || length > 16 ||
 		sscanf(name, "decimal(%d,%d)%n", &precision, &scale, &consumed) != 2 ||
@@ -304,7 +276,7 @@ DecodeColumnBound(Field * field, PGType pgType, ColumnBound * bound, Datum *valu
 	PGType		temporaryType = pgType;
 
 	temporaryType.postgresTypeMod = ((39 << 16) | scale) + VARHDRSZ;
-	*value = PGNumericIcebergBinaryDeserialize(bound->value, length, temporaryType);
+	*value = PGIcebergBinaryDeserialize(bound->value, length, field, temporaryType);
 	Datum		limit = DirectFunctionCall3(numeric_in,
 											CStringGetDatum(psprintf("1e%d", precision - scale)),
 											ObjectIdGetDatum(InvalidOid), Int32GetDatum(-1));
