@@ -461,6 +461,130 @@ def test_interval_infinity(pg_conn, s3, with_default_location):
     pg_conn.commit()
 
 
+def test_interval_infinity_clamp(pg_conn, s3, with_default_location):
+    if get_pg_version_num(pg_conn) < 170000:
+        pytest.skip("infinity intervals require PostgreSQL 17+")
+
+    run_command(
+        """
+        CREATE SCHEMA test_interval_inf_clamp;
+        SET search_path TO test_interval_inf_clamp;
+        CREATE TYPE iv_pair AS (label text, iv interval);
+        CREATE DOMAIN iv_domain AS interval;
+        CREATE TABLE test (
+            id int,
+            iv interval,
+            ivs interval[],
+            pair iv_pair,
+            dom iv_domain
+        ) USING iceberg WITH (out_of_range_values = 'clamp');
+        INSERT INTO test VALUES
+            (1, 'infinity', ARRAY['1 day', '-infinity']::interval[],
+             ROW('a', 'infinity')::iv_pair, '-infinity'),
+            (2, '2 hours', ARRAY['3 days']::interval[],
+             ROW('b', '1 hour')::iv_pair, '5 minutes');
+        RESET search_path;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        """
+        SELECT id, iv, ivs::text, (pair).label, (pair).iv, dom
+        FROM test_interval_inf_clamp.test ORDER BY id
+    """,
+        pg_conn,
+    )
+    assert list(result[0]) == [1, None, '{"1 day",NULL}', "a", None, None]
+    assert result[1][2] == '{"3 days"}'
+    assert result[1][1] == datetime.timedelta(hours=2)
+    assert result[1][4] == datetime.timedelta(hours=1)
+    assert result[1][5] == datetime.timedelta(minutes=5)
+
+    run_command("DROP SCHEMA test_interval_inf_clamp CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "column_type,value",
+    [
+        ("interval[]", "ARRAY['1 day', 'infinity']::interval[]"),
+        ("iv_pair_err", "ROW('a', '-infinity')::iv_pair_err"),
+    ],
+)
+def test_interval_infinity_nested_error(
+    pg_conn, s3, with_default_location, column_type, value
+):
+    if get_pg_version_num(pg_conn) < 170000:
+        pytest.skip("infinity intervals require PostgreSQL 17+")
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_interval_inf_err;
+        CREATE TYPE test_interval_inf_err.iv_pair_err AS (label text, iv interval);
+        SET search_path TO test_interval_inf_err;
+        CREATE TABLE test (id int, col {column_type}) USING iceberg;
+        RESET search_path;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        run_command("SET search_path TO test_interval_inf_err", pg_conn)
+        with pytest.raises(psycopg2.errors.DatetimeFieldOverflow) as error:
+            run_command(f"INSERT INTO test VALUES (1, {value})", pg_conn)
+        assert "+-Infinity intervals are not allowed" in str(error.value)
+    finally:
+        pg_conn.rollback()
+        run_command("DROP SCHEMA test_interval_inf_err CASCADE", pg_conn)
+        pg_conn.commit()
+
+
+def test_interval_infinity_clamp_update_and_insert_select(
+    pg_conn, s3, with_default_location
+):
+    if get_pg_version_num(pg_conn) < 170000:
+        pytest.skip("infinity intervals require PostgreSQL 17+")
+
+    run_command(
+        """
+        CREATE SCHEMA test_interval_inf_dml;
+        SET search_path TO test_interval_inf_dml;
+        CREATE TABLE source (id int, iv interval) USING iceberg;
+        INSERT INTO source VALUES (1, '1 day'), (2, '2 days');
+        CREATE TABLE clamped (id int, iv interval) USING iceberg
+        WITH (out_of_range_values = 'clamp');
+        CREATE TABLE strict (id int, iv interval) USING iceberg;
+        INSERT INTO clamped SELECT id, 'infinity'::interval FROM source;
+        INSERT INTO clamped VALUES (3, '3 days');
+        UPDATE clamped SET iv = '-infinity' WHERE id = 3;
+        INSERT INTO strict SELECT id, iv FROM source;
+        RESET search_path;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    result = run_query(
+        "SELECT id, iv FROM test_interval_inf_dml.clamped ORDER BY id", pg_conn
+    )
+    assert [list(row) for row in result] == [[1, None], [2, None], [3, None]]
+
+    for command in [
+        "UPDATE test_interval_inf_dml.strict SET iv = 'infinity' WHERE id = 1",
+        "INSERT INTO test_interval_inf_dml.strict "
+        "SELECT id, '-infinity'::interval FROM test_interval_inf_dml.source",
+    ]:
+        with pytest.raises(psycopg2.errors.DatetimeFieldOverflow):
+            run_command(command, pg_conn)
+        pg_conn.rollback()
+
+    run_command("DROP SCHEMA test_interval_inf_dml CASCADE", pg_conn)
+    pg_conn.commit()
+
+
 def test_interval_infinity_predicate(pg_conn, s3, with_default_location):
     if get_pg_version_num(pg_conn) < 170000:
         pytest.skip("infinity intervals require PostgreSQL 17+")
