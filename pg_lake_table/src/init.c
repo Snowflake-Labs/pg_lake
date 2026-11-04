@@ -56,6 +56,8 @@ PG_MODULE_MAGIC;
 void		_PG_init(void);
 
 static bool CheckTargetFileSizeMB(int *newval, void **extra, GucSource source);
+static bool ErrorIfDiscardTempWithIcebergChanges(ProcessUtilityParams * processUtilityParams,
+												 void *arg);
 
 
 static const struct config_enum_entry LogLevelOptions[] = {
@@ -447,6 +449,7 @@ _PG_init(void)
 	RegisterUtilityStatementHandler(ProcessAlterTypeAttributeRename, NULL);
 	RegisterUtilityStatementHandler(ProcessEnumStatement, NULL);
 	RegisterUtilityStatementHandler(ProcessDropPgLakeTable, NULL);
+	RegisterUtilityStatementHandler(ErrorIfDiscardTempWithIcebergChanges, NULL);
 
 	/*
 	 * Add as the last handler, execute as the first. Don't worry, you'll have
@@ -482,4 +485,31 @@ CheckTargetFileSizeMB(int *newval, void **extra, GucSource source)
 {
 	return *newval <= 0 || *newval >= MIN_TARGET_FILE_SIZE_MB ||
 		(IsTransactionState() && superuser());
+}
+
+
+/*
+ * ErrorIfDiscardTempWithIcebergChanges blocks DISCARD TEMP while the
+ * transaction has Iceberg changes, since it would drop the temp table that
+ * records which files the transaction added and leave those files out of the
+ * commit.
+ */
+static bool
+ErrorIfDiscardTempWithIcebergChanges(ProcessUtilityParams * processUtilityParams,
+									 void *arg)
+{
+	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
+
+	if (!IsA(parsetree, DiscardStmt))
+		return false;
+
+	DiscardStmt *discardStmt = (DiscardStmt *) parsetree;
+
+	if (discardStmt->target == DISCARD_TEMP && HasAnyTrackedIcebergMetadataChanges())
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot run DISCARD TEMP in a transaction that modified "
+						"Iceberg tables")));
+
+	return false;
 }

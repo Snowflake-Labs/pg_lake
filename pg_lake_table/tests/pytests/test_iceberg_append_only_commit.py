@@ -26,8 +26,17 @@ def generate_table_name():
 
 
 @pytest.fixture
-def create_iceberg_table(pg_conn, s3, with_default_location, generate_table_name):
+def create_iceberg_table(
+    pg_conn, superuser_conn, s3, with_default_location, generate_table_name
+):
     table_name = generate_table_name
+
+    # assert_iceberg_s3_file_consistency calls it as the app user
+    run_command(
+        "GRANT EXECUTE ON FUNCTION lake_iceberg.find_all_referenced_files(text) TO public",
+        superuser_conn,
+    )
+    superuser_conn.commit()
 
     run_command(f"CREATE SCHEMA {TEST_TABLE_NAMESPACE}", pg_conn)
     run_command(
@@ -325,42 +334,83 @@ def test_files_added_in_released_savepoints_land_in_metadata(
     )
 
 
-def test_session_temp_objects_do_not_affect_commit(
+def test_session_temp_objects_are_rejected(
     s3,
     pg_conn,
+    superuser_conn,
+    app_user,
     extension,
     create_iceberg_table,
 ):
-    """The files a transaction added are tracked outside of anything the
-    session user can create or drop, since they are read as the extension
-    owner at commit."""
+    """The tracker temp table lives in the session user's temp schema but is
+    written and read as the extension owner, so anything the user puts in its
+    place must be rejected."""
 
     table_name = create_iceberg_table
     qualified_name = f"{TEST_TABLE_NAMESPACE}.{table_name}"
+    tracker_error = "was not created by pg_lake_table"
 
-    # a temp table with the name the tracker used to have must not be used
-    run_command(
-        """
-        CREATE TEMP TABLE pg_lake_tx_data_file_ids (id bigint);
-        CREATE FUNCTION pg_temp.fail_tracker_insert() RETURNS trigger
-        LANGUAGE plpgsql AS $$ BEGIN RAISE 'tracker table was written'; END $$;
-        CREATE TRIGGER fail_tracker_insert BEFORE INSERT ON pg_temp.pg_lake_tx_data_file_ids
-        FOR EACH ROW EXECUTE FUNCTION pg_temp.fail_tracker_insert();
-        """,
-        pg_conn,
-    )
-    run_command(f"INSERT INTO {qualified_name} VALUES (1)", pg_conn)
+    # allowed while the transaction has no Iceberg changes
+    run_command("DISCARD TEMP", pg_conn)
     pg_conn.commit()
 
-    # dropping the session's temp objects mid-transaction must not lose files
+    run_command("CREATE TEMP TABLE pg_lake_tx_data_file_ids (id bigint)", pg_conn)
+    pg_conn.commit()
+    error = run_command(
+        f"INSERT INTO {qualified_name} VALUES (1)", pg_conn, raise_error=False
+    )
+    assert tracker_error in str(error)
+    pg_conn.rollback()
+    run_command("DROP TABLE pg_temp.pg_lake_tx_data_file_ids", pg_conn)
+    pg_conn.commit()
+
+    # default privileges can give the user TRIGGER on our own table
+    extension_owner = run_query(
+        "SELECT extowner::regrole FROM pg_extension WHERE extname = 'pg_lake_table'",
+        superuser_conn,
+    )[0][0]
+    default_privileges = (
+        f"DEFAULT PRIVILEGES FOR ROLE {extension_owner} "
+        f"%s TRIGGER ON TABLES %s {app_user}"
+    )
+    run_command("ALTER " + default_privileges % ("GRANT", "TO"), superuser_conn)
+    superuser_conn.commit()
+
+    try:
+        run_command(f"INSERT INTO {qualified_name} VALUES (1)", pg_conn)
+        run_command(
+            """
+            CREATE FUNCTION pg_temp.fail_tracker_insert() RETURNS trigger
+            LANGUAGE plpgsql AS $$ BEGIN RAISE 'tracker table was written'; END $$;
+            CREATE TRIGGER fail_tracker_insert BEFORE INSERT ON pg_temp.pg_lake_tx_data_file_ids
+            FOR EACH ROW EXECUTE FUNCTION pg_temp.fail_tracker_insert();
+            """,
+            pg_conn,
+        )
+
+        # the commit-time read checks the table as well
+        error = run_command("COMMIT", pg_conn, raise_error=False)
+        assert tracker_error in str(error)
+        pg_conn.rollback()
+    finally:
+        run_command("ALTER " + default_privileges % ("REVOKE", "FROM"), superuser_conn)
+        superuser_conn.commit()
+        run_command("DISCARD TEMP", pg_conn)
+        pg_conn.commit()
+
+    # dropping the tracker mid-transaction would lose the files added so far
+    run_command(f"INSERT INTO {qualified_name} VALUES (1)", pg_conn)
+    error = run_command("DISCARD TEMP", pg_conn, raise_error=False)
+    assert "cannot run DISCARD TEMP" in str(error)
+    pg_conn.rollback()
+
+    run_command(f"INSERT INTO {qualified_name} VALUES (1)", pg_conn)
     run_command(f"INSERT INTO {qualified_name} VALUES (2)", pg_conn)
-    run_command("DISCARD TEMP", pg_conn)
-    run_command(f"INSERT INTO {qualified_name} VALUES (3)", pg_conn)
     pg_conn.commit()
 
     assert run_query(
         f"SELECT array_agg(id ORDER BY id) FROM {qualified_name}", pg_conn
-    )[0][0] == [1, 2, 3]
+    )[0][0] == [1, 2]
     assert_iceberg_metadata_matches_storage(
         pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
     )

@@ -37,15 +37,19 @@
 #include "pg_lake/fdw/data_files_catalog_internal.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/partition_transform.h"
-#include "pg_lake/fdw/tx_data_file_ids.h"
 #include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/path_hash.h"
 
+#include "access/htup_details.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "executor/spi.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #if PG_VERSION_NUM < 190000
 #include "utils/dynahash.h"
 #endif
@@ -87,7 +91,9 @@ static void ExecInsertDataFilePartitionValues(Oid relationId,
 											  ArrayType *partitionFieldIdArray,
 											  ArrayType *valueArray);
 static bool AddOpHasPartitionValues(TableMetadataOperation * operation);
-static void TrackAddedFileIds(List *addOps, HTAB *pathToFileId);
+static void BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId);
+static void ExecInsertTrackedFileIds(ArrayType *fileIdArray);
+static void CreateTxDataFileIdsTempTableIfNotExists(void);
 #ifdef USE_ASSERT_CHECKING
 static void AssertAllOpsAreType(List *ops, TableMetadataOperationType type);
 #endif
@@ -134,8 +140,8 @@ BatchableType(TableMetadataOperationType type)
 
 /*
  * Apply a run of DATA_FILE_ADD ops via bulk INSERTs into the three lake_table
- * catalogs (files, data_file_column_stats, data_file_partition_values), and
- * remember the added file ids for the commit path. Pays O(catalogs) SPI round
+ * catalogs (files, data_file_column_stats, data_file_partition_values) plus
+ * the tx-scoped tracked-file-ids temp table. Pays O(catalogs) SPI round
  * trips instead of O(files * (1 + columns + partition_fields)).
  */
 static void
@@ -158,7 +164,7 @@ FlushDataFileAddBatch(Oid relationId, List *addOps)
 
 	BulkInsertDataFileColumnStats(relationId, addOps);
 	BulkInsertDataFilePartitionValues(relationId, addOps, pathToFileId);
-	TrackAddedFileIds(addOps, pathToFileId);
+	BulkInsertTrackedFileIds(addOps, pathToFileId);
 	hash_destroy(pathToFileId);
 }
 
@@ -599,13 +605,21 @@ AddOpHasPartitionValues(TableMetadataOperation * operation)
 
 
 /*
- * Record the id of every file this batch added, regardless of content type.
- * Ids are resolved via pathToFileId rather than a JOIN back to
- * lake_table.files.
+ * Record the id of every file this batch added into the tx-scoped temp
+ * table, regardless of content type. Ids are resolved via pathToFileId
+ * rather than a JOIN back to lake_table.files.
+ *
+ * Unconditional: earlier this only ran when a sibling extension opted in
+ * via PgLakeAddDataFileHook, which meant the temp table -- and therefore
+ * every newFilesOnly read, including the append-only commit path in
+ * track_iceberg_metadata_changes.c -- silently saw no rows by default.
  */
 static void
-TrackAddedFileIds(List *addOps, HTAB *pathToFileId)
+BulkInsertTrackedFileIds(List *addOps, HTAB *pathToFileId)
 {
+	int			fileCount = list_length(addOps);
+	Datum	   *fileIdDatums = palloc(sizeof(Datum) * fileCount);
+	int			trackedFileCount = 0;
 	ListCell   *operationCell = NULL;
 
 	foreach(operationCell, addOps)
@@ -616,8 +630,105 @@ TrackAddedFileIds(List *addOps, HTAB *pathToFileId)
 			PathHashSearch(pathToFileId, operation->path, HASH_FIND, NULL);
 
 		Assert(entry != NULL);
-		TrackAddedDataFileId(entry->fileId);
+		fileIdDatums[trackedFileCount++] = Int64GetDatum(entry->fileId);
 	}
+
+	Assert(trackedFileCount == fileCount);
+
+	CreateTxDataFileIdsTempTableIfNotExists();
+
+	ArrayType  *fileIdArray = MakeArrayFromDatums(fileIdDatums, NULL,
+												  trackedFileCount, INT8OID);
+
+	ExecInsertTrackedFileIds(fileIdArray);
+}
+
+
+/* INSERT into the tx-scoped temp table via unnest. */
+static void
+ExecInsertTrackedFileIds(ArrayType *fileIdArray)
+{
+	char	   *query =
+		"INSERT INTO " TX_DATA_FILES_TABLE_NAME " (id) "
+		"SELECT id FROM pg_catalog.unnest($1) AS t(id)";
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, INT8ARRAYOID, fileIdArray, false);
+
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+	SPI_EXECUTE(query, /* readOnly = */ false);
+	SPI_END();
+}
+
+
+/*
+ * Lazily create the per-tx tracker temp table; rows are auto-dropped at COMMIT.
+ *
+ * PostgreSQL forbids CREATE TEMP TABLE under SECURITY_RESTRICTED_OPERATION,
+ * so we use the SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS variant which
+ * omits the restricted-op flag.  The search_path lockdown stays in effect;
+ * the DDL is a fixed string with no caller-supplied input.
+ */
+static void
+CreateTxDataFileIdsTempTableIfNotExists(void)
+{
+	if (TxDataFileIdsTableExists())
+		return;
+
+	const char *query =
+		"create temporary table " TX_DATA_FILES_TABLE_NAME " "
+		"(id bigint primary key) USING heap ON COMMIT DELETE ROWS;";
+
+	SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS(PgLakeTable);
+	SPI_execute(query, /* readOnly = */ false, 0);
+	SPI_END();
+}
+
+
+/*
+ * TxDataFileIdsTableExists returns whether the session already has the
+ * tracker temp table, and errors if a relation by that name exists that
+ * pg_lake_table did not create.
+ *
+ * The table lives in the session user's temp schema but is written and read
+ * as the extension owner, so a table, view or trigger the user put there
+ * would be used with the owner's privileges. Triggers are checked even on our
+ * own table, since default privileges can give the user TRIGGER on it.
+ */
+bool
+TxDataFileIdsTableExists(void)
+{
+	Oid			tempNamespaceId = LookupExplicitNamespace("pg_temp", true);
+
+	if (!OidIsValid(tempNamespaceId))
+		return false;
+
+	Oid			relationId = get_relname_relid(TX_DATA_FILES_TABLE_RELNAME,
+											   tempNamespaceId);
+
+	if (!OidIsValid(relationId))
+		return false;
+
+	HeapTuple	classTuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relationId));
+
+	if (!HeapTupleIsValid(classTuple))
+		elog(ERROR, "cache lookup failed for relation %u", relationId);
+
+	Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTuple);
+	bool		isOurs = classForm->relowner == ExtensionOwnerId(PgLakeTable) &&
+		classForm->relkind == RELKIND_RELATION &&
+		!classForm->relhastriggers;
+
+	ReleaseSysCache(classTuple);
+
+	if (!isOurs)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("relation \"%s\" was not created by pg_lake_table",
+						TX_DATA_FILES_TABLE_NAME),
+				 errhint("Drop the relation or start a new session.")));
+
+	return true;
 }
 
 

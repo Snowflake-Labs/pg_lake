@@ -36,7 +36,7 @@ typedef struct TableDataFileHashEntry
 }			TableDataFileHashEntry;
 
 
-/* no longer consulted: the files a transaction added are always tracked */
+/* external control of whether to add to in-transaction temp table */
 typedef bool (*PgLakeAddDataFileHookType) (void);
 extern PGDLLEXPORT PgLakeAddDataFileHookType PgLakeAddDataFileHook;
 
