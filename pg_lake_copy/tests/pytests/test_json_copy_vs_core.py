@@ -196,8 +196,8 @@ def test_json_to_stdout_duckdb_differences(
 def test_json_to_stdout_multidim_array_unsupported(superuser_conn, tmp_path):
     """Multi-dimensional arrays cannot round-trip through pg_lake's CSV stage.
 
-    Core handles them natively; pg_lake raises a clear DuckDB conversion error.
-    This documents the known gap so a future fix flips the assertion.
+    Core handles them natively; pg_lake rejects them up front (#407) instead of
+    failing later with a DuckDB conversion error.
     """
     _skip_pre_pg19(superuser_conn)
 
@@ -209,7 +209,7 @@ def test_json_to_stdout_multidim_array_unsupported(superuser_conn, tmp_path):
     finally:
         superuser_conn.rollback()
 
-    assert "Could not convert string" in lake
+    assert "multidimensional arrays are not supported in COPY TO" in lake
 
     try:
         core = _copy_to_stdout_json(superuser_conn, source, tmp_path, "core.json", True)
