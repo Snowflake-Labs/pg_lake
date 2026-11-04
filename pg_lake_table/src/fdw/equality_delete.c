@@ -23,6 +23,7 @@
 #include "catalog/pg_type_d.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "nodes/bitmapset.h"
+#include "pg_lake/iceberg/iceberg_type_binary_serde.h"
 #include "pg_extension_base/pg_compat.h"
 #include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/fdw/partition_transform.h"
@@ -48,10 +49,18 @@ typedef struct ReadGroupBucket
 	List	   *groups;
 }			ReadGroupBucket;
 
+typedef struct EqualityDeleteBounds
+{
+	bool		valid;
+	int64		lower;
+	int64		upper;
+}			EqualityDeleteBounds;
+
 typedef struct EqualityDeleteFile
 {
 	DataFile   *file;
 	DataFileSchema *schema;
+	EqualityDeleteBounds *bounds;
 	int			index;
 	bool		isGlobal;
 }			EqualityDeleteFile;
@@ -80,6 +89,11 @@ static bool AvroTypesEqual(IcebergScalarAvroType left, IcebergScalarAvroType rig
 static DataFileSchema * EqualityKeySchema(IcebergTableMetadata * metadata, DataFile * file);
 static bool KeySchemasEqual(DataFileSchema * left, DataFileSchema * right);
 static void AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile);
+static ColumnBound * FindColumnBound(ColumnBound * bounds, size_t count, int fieldId);
+static bool GetIntegerBounds(DataFile * file, DataFileSchemaField * key, bool isLong,
+							 int64 *lowerValue, int64 *upperValue);
+static void PrepareEqualityDeleteBounds(EqualityDeleteFile * deletion);
+static bool IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion);
 static void ValidateEqualityDeleteFile(PGresult *result, PgLakeEqualityDeleteScan * scan, int startRow, int endRow);
 static bool EqualityDeleteKeyTypeMatches(const char *icebergType, const char *parquetType);
 
@@ -502,6 +516,7 @@ KeySchemasEqual(DataFileSchema * left, DataFileSchema * right)
 	return true;
 }
 
+/* Keep only older data files whose known integer bounds may overlap. */
 static void
 AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile)
 {
@@ -512,10 +527,119 @@ AddCandidates(Bitmapset **mask, List *candidates, DataFile * dataFile)
 		if (dataFile->data_sequence_number < file->data_sequence_number &&
 			(deletion->isGlobal ||
 			 (dataFile->partition_spec_id == file->partition_spec_id &&
-			  PartitionsEqual(&dataFile->partition, &file->partition))))
+			  PartitionsEqual(&dataFile->partition, &file->partition))) &&
+			!IntegerBoundsDisjoint(dataFile, deletion))
 			*mask = bms_add_member(*mask, deletion->index);
 	}
 }
+
+/* FindColumnBound rejects absent or duplicated optional metric IDs. */
+static ColumnBound *
+FindColumnBound(ColumnBound * bounds, size_t count, int fieldId)
+{
+	ColumnBound *result = NULL;
+
+	for (size_t i = 0; bounds != NULL && i < count; i++)
+	{
+		if (bounds[i].column_id != fieldId)
+			continue;
+		if (result != NULL)
+			return NULL;
+		result = &bounds[i];
+	}
+	return result;
+}
+
+/* GetIntegerBounds returns ordered bounds, including promoted int values. */
+static bool
+GetIntegerBounds(DataFile * file, DataFileSchemaField * key, bool isLong,
+				 int64 *lowerValue, int64 *upperValue)
+{
+	ColumnBound *lower = FindColumnBound(file->lower_bounds, file->lower_bounds_length, key->id);
+	ColumnBound *upper = FindColumnBound(file->upper_bounds, file->upper_bounds_length, key->id);
+	PGType		pgType = MakePGTypeOid(isLong ? INT8OID : INT4OID);
+
+	if (lower == NULL || upper == NULL || lower->value == NULL || upper->value == NULL ||
+		lower->value_length != upper->value_length ||
+		!IcebergBinaryLengthIsValid(lower->value_length, key->type, pgType))
+		return false;
+
+	Datum		lowerDatum = PGIcebergBinaryDeserialize(lower->value, lower->value_length, key->type, pgType);
+	Datum		upperDatum = PGIcebergBinaryDeserialize(upper->value, upper->value_length, key->type, pgType);
+
+	*lowerValue = isLong ? DatumGetInt64(lowerDatum) : DatumGetInt32(lowerDatum);
+	*upperValue = isLong ? DatumGetInt64(upperDatum) : DatumGetInt32(upperDatum);
+	return *lowerValue <= *upperValue;
+}
+
+/*
+ * Prepare integer bounds once per delete file. Bounds omit NULLs, so require
+ * an explicit zero delete null count for each usable component. Otherwise
+ * NULL-safe equality could still delete NULL data keys.
+ */
+static void
+PrepareEqualityDeleteBounds(EqualityDeleteFile * deletion)
+{
+	DataFile   *deleteFile = deletion->file;
+
+	deletion->bounds = palloc0(sizeof(EqualityDeleteBounds) * deletion->schema->nfields);
+
+	for (size_t i = 0; i < deletion->schema->nfields; i++)
+	{
+		DataFileSchemaField *key = &deletion->schema->fields[i];
+		const char *type = key->type->field.scalar.typeName;
+		bool		isLong = strcmp(type, "long") == 0;
+
+		if (!isLong && strcmp(type, "int") != 0)
+			continue;
+
+		int			nullStats = 0;
+		bool		noDeleteNulls = false;
+
+		for (size_t j = 0; j < deleteFile->null_value_counts_length; j++)
+		{
+			ColumnStat *stat = &deleteFile->null_value_counts[j];
+
+			if (stat->column_id == key->id)
+			{
+				nullStats++;
+				noDeleteNulls = stat->value == 0;
+			}
+		}
+		if (nullStats != 1 || !noDeleteNulls)
+			continue;
+
+		EqualityDeleteBounds *bounds = &deletion->bounds[i];
+
+		bounds->valid = GetIntegerBounds(deleteFile, key, isLong, &bounds->lower, &bounds->upper);
+	}
+}
+
+/* One disjoint component proves a composite equality key cannot match. */
+static bool
+IntegerBoundsDisjoint(DataFile * dataFile, EqualityDeleteFile * deletion)
+{
+	for (size_t i = 0; i < deletion->schema->nfields; i++)
+	{
+		EqualityDeleteBounds *bounds = &deletion->bounds[i];
+
+		if (!bounds->valid)
+			continue;
+
+		DataFileSchemaField *key = &deletion->schema->fields[i];
+		bool		isLong = strcmp(key->type->field.scalar.typeName, "long") == 0;
+		int64		dataLower,
+					dataUpper;
+
+		if (!GetIntegerBounds(dataFile, key, isLong, &dataLower, &dataUpper))
+			continue;
+
+		if (dataUpper < bounds->lower || bounds->upper < dataLower)
+			return true;
+	}
+	return false;
+}
+
 
 List *
 PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
@@ -569,6 +693,7 @@ PlanIcebergEqualityDeletes(IcebergTableMetadata * metadata, List *dataFiles,
 		}
 		if (!list_member_ptr(schemas, plan->schema))
 			schemas = lappend(schemas, plan->schema);
+		PrepareEqualityDeleteBounds(plan);
 		deletePlans = lappend(deletePlans, plan);
 		IcebergPartitionSpec *spec = ValidatePartition(metadata, file);
 
