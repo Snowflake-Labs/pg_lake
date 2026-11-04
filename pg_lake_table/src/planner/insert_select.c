@@ -26,6 +26,7 @@
 #include "pg_lake/fdw/partition_pushdown.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
+#include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
@@ -558,6 +559,19 @@ RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceForma
 {
 	TupleDesc	tableDescriptor = RelationGetDescr(relation);
 
+#if PG_VERSION_NUM >= 170000
+
+	/*
+	 * A CSV or JSON source can hold 'infinity' for an interval, which the
+	 * DuckDB INTERVAL cast rejects.  A clamp table must store NULL instead,
+	 * so it writes through PostgreSQL.  In error mode both paths raise.
+	 */
+	bool		textIntervalsNeedClamp =
+		(sourceFormat == DATA_FORMAT_CSV || sourceFormat == DATA_FORMAT_JSON) &&
+		GetIcebergOutOfRangePolicyForTable(RelationGetRelid(relation)) ==
+		ICEBERG_OOR_CLAMP;
+#endif
+
 	for (int columnIndex = 0; columnIndex < tableDescriptor->natts; columnIndex++)
 	{
 		Form_pg_attribute column = TupleDescAttr(tableDescriptor, columnIndex);
@@ -566,6 +580,17 @@ RelationColumnsSuitableForPushdown(Relation relation, CopyDataFormat sourceForma
 			continue;
 
 		Oid			typeId = column->atttypid;
+
+#if PG_VERSION_NUM >= 170000
+		if (textIntervalsNeedClamp && typeId == INTERVALOID)
+		{
+			ereport(DEBUG4,
+					(errmsg("Interval type is not pushdownable from a text "
+							"source into a clamp table")));
+
+			return false;
+		}
+#endif
 
 		/*
 		 * We only support nested types when the source is Parquet or Iceberg.

@@ -193,6 +193,57 @@ def test_csv(pg_conn, extension, s3, copy_from_pushdown_setup, with_default_loca
     pg_conn.rollback()
 
 
+# Test CSV with infinite intervals: a clamp table skips pushdown so they become NULL
+def test_csv_interval_infinity(
+    pg_conn, extension, s3, copy_from_pushdown_setup, with_default_location
+):
+    if get_pg_version_num(pg_conn) < 170000:
+        pytest.skip("infinity intervals require PostgreSQL 17+")
+
+    csv_url = f"s3://{TEST_BUCKET}/test_iceberg_copy_from_with_pushdown/interval.csv"
+    finite_csv_url = (
+        f"s3://{TEST_BUCKET}/test_iceberg_copy_from_with_pushdown/interval_finite.csv"
+    )
+
+    run_command(
+        f"""
+        COPY (VALUES (1, '1 day'::interval), (2, 'infinity'), (3, '-infinity'))
+        TO '{csv_url}' WITH (header);
+        COPY (SELECT 1 id, '1 day'::interval iv) TO '{finite_csv_url}' WITH (header);
+
+        CREATE TABLE interval_clamp (id int, iv interval) USING iceberg
+        WITH (out_of_range_values = 'clamp');
+        CREATE TABLE interval_error (id int, iv interval) USING iceberg;
+        COPY interval_clamp FROM '{csv_url}' WITH (header);
+    """,
+        pg_conn,
+    )
+
+    result = run_query(
+        "SELECT pg_lake_last_copy_pushed_down_test() pushed_down", pg_conn
+    )
+    assert not result[0]["pushed_down"]
+
+    result = run_query("SELECT id, iv::text FROM interval_clamp ORDER BY id", pg_conn)
+    assert [list(row) for row in result] == [[1, "1 day"], [2, None], [3, None]]
+
+    # error mode keeps pushdown, since both paths raise an error anyway
+    run_command(f"COPY interval_error FROM '{finite_csv_url}' WITH (header)", pg_conn)
+    result = run_query(
+        "SELECT pg_lake_last_copy_pushed_down_test() pushed_down", pg_conn
+    )
+    assert result[0]["pushed_down"]
+
+    error = run_command(
+        f"COPY interval_error FROM '{csv_url}' WITH (header)",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "infinity" in str(error).lower()
+
+    pg_conn.rollback()
+
+
 # Test with a constraint
 def test_constraint(
     pg_conn, extension, s3, copy_from_pushdown_setup, with_default_location
