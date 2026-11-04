@@ -1522,7 +1522,8 @@ GetMetadataLocationPrefixForRelationId(Oid relationId)
 	else
 	{
 		char	   *metadataLocation = GetIcebergMetadataLocation(relationId, false);
-		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataLocation);
+		IcebergTableMetadata *metadata =
+			ReadIcebergTableMetadataForRelation(relationId, metadataLocation);
 
 		/* cast (const char *) to (char *) */
 		return (char *) metadata->location;

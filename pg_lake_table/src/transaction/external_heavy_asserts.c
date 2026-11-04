@@ -1081,7 +1081,7 @@ AssertInternalAndExternalTableSchemaMatch(Oid relationId, DataFileSchema * inter
 
 	char	   *metadataPath = GetIcebergMetadataLocation(relationId, false);
 	DataFileSchema *externalSchema =
-		GetDataFileSchemaForExternalIcebergTable(metadataPath,
+		GetDataFileSchemaForExternalIcebergTable(relationId, metadataPath,
 												 LowercasesColumnNames(relationId));
 
 	if (internalSchema->nfields != externalSchema->nfields)
@@ -1175,7 +1175,7 @@ static void
 AssertInternalAndExternalLeafFieldsMatch(Oid relationId, List *internalLeafFields)
 {
 	char	   *metadataPath = GetIcebergMetadataLocation(relationId, false);
-	List	   *externalLeafFields = GetLeafFieldsForExternalIcebergTable(metadataPath);
+	List	   *externalLeafFields = GetLeafFieldsForExternalIcebergTable(relationId, metadataPath);
 
 	int			internalLeafFieldsCount = list_length(internalLeafFields);
 	int			externalLeafFieldsCount = list_length(externalLeafFields);

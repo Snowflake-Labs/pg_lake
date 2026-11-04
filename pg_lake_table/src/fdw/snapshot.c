@@ -292,7 +292,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 */
 		EnsureStorageCredentialsForRelation(relationId);
 
-		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(path);
+		IcebergTableMetadata *metadata = ReadIcebergTableMetadataForRelation(relationId, path);
 
 		/* fold names before the schema check, which looks them up as attnames */
 		if (LowercasesColumnNames(relationId))

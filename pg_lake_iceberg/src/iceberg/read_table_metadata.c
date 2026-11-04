@@ -66,26 +66,39 @@ static bool JsonExtractField(JsonbContainer *topLevelJsonContainer,
  * ReadIcebergTableMetadata reads the Iceberg table metadata from the given URI.
  * The URI can come from a catalog, so it is held to ValidateStorageURL like
  * the manifest paths read out of the metadata.
- *
- * When a REST catalog already sent the document at this location in the
- * current version scope, parse that instead of reading the file, which may be
- * compressed in a way pg_lake cannot read (#823).
  */
 IcebergTableMetadata *
 ReadIcebergTableMetadata(const char *tableMetadataPath)
 {
 	ValidateStorageURL(tableMetadataPath);
 
-	Jsonb	   *catalogMetadata = FindHeldRestCatalogMetadata(tableMetadataPath);
-
-	if (catalogMetadata != NULL)
-		return ParseIcebergTableMetadata(catalogMetadata);
-
 	char	   *tableMetadataText = GetTextFromURI(tableMetadataPath);
 	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, PointerGetDatum(tableMetadataText));
 	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
 
 	return ParseIcebergTableMetadataReadFrom(jsonb, tableMetadataPath);
+}
+
+
+/*
+ * ReadIcebergTableMetadataForRelation reads the Iceberg metadata of a table
+ * at the given location.  When the REST catalog of a read-only table already
+ * sent the document at this location in the current version scope, parse
+ * that instead of reading the file, which may be compressed in a way pg_lake
+ * cannot read (#823).
+ */
+IcebergTableMetadata *
+ReadIcebergTableMetadataForRelation(Oid relationId, const char *tableMetadataPath)
+{
+	ValidateStorageURL(tableMetadataPath);
+
+	Jsonb	   *catalogMetadata =
+		FindHeldRestCatalogMetadata(relationId, tableMetadataPath);
+
+	if (catalogMetadata != NULL)
+		return ParseIcebergTableMetadata(catalogMetadata);
+
+	return ReadIcebergTableMetadata(tableMetadataPath);
 }
 
 

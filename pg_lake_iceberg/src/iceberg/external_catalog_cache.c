@@ -33,12 +33,13 @@
  *
  * A REST catalog answers per table, so we hold the metadata location of each
  * relation asked about, along with the metadata document the catalog inlined
- * in the same answer.  ReadIcebergTableMetadata uses that document instead of
- * reading the file, which may be in a format pg_lake cannot read, such as
- * gzip (#823).  A metadata file is never rewritten, so the document stays
- * valid for its location.  An object store catalog publishes all of its tables
- * as one document, so we hold the document, which keeps its tables
- * consistent with each other.
+ * in the same answer.  ReadIcebergTableMetadataForRelation uses that document
+ * for the same relation instead of reading the file, which may be in a format
+ * pg_lake cannot read, such as gzip (#823).  A metadata file is never
+ * rewritten, so the document stays valid for its location.  It is not used
+ * for other tables, since the catalog chooses the location.  An object store
+ * catalog publishes all of its tables as one document, so we hold the
+ * document, which keeps its tables consistent with each other.
  *
  * Held answers live in TopTransactionContext and are dropped when Postgres
  * releases the resource owner they were held for.
@@ -68,8 +69,8 @@
 /*
  * An answer an external catalog gave, held until scopeOwner is released.
  * The key is "rest:<relation oid>" for a REST table location,
- * "rest-metadata:<metadata location>" for the document a REST catalog
- * inlined for that location, or the path of an object store catalog document.
+ * "rest-metadata:<relation oid>:<metadata location>" for the document a REST
+ * catalog inlined for that location, or the path of an object store catalog document.
  */
 typedef struct HeldAnswer
 {
@@ -148,7 +149,8 @@ ResolveRestCatalogTable(Oid relationId)
 		/* the field is required, but a catalog that omits it still works */
 		if (result.metadata != NULL)
 		{
-			char	   *metadataKey = psprintf("rest-metadata:%s", metadataLocation);
+			char	   *metadataKey = psprintf("rest-metadata:%u:%s", relationId,
+											   metadataLocation);
 
 			if (FindHeldAnswer(scopeOwner, metadataKey) == NULL)
 				HoldAnswer(scopeOwner, metadataKey,
@@ -163,17 +165,21 @@ ResolveRestCatalogTable(Oid relationId)
 
 
 /*
- * FindHeldRestCatalogMetadata returns the metadata document a REST catalog
- * inlined for metadataLocation in the current version scope, or NULL if no
- * catalog answer in this scope carried it.
+ * FindHeldRestCatalogMetadata returns the metadata document the REST catalog
+ * of a read-only table inlined for metadataLocation in the current version
+ * scope, or NULL if no catalog answer for that table in this scope carried it.
+ *
+ * The document is only used for the relation it was loaded for, since the
+ * catalog chooses the location it is held under.
  */
 Jsonb *
-FindHeldRestCatalogMetadata(const char *metadataLocation)
+FindHeldRestCatalogMetadata(Oid relationId, const char *metadataLocation)
 {
 	if (HeldAnswers == NIL || !IsTransactionState())
 		return NULL;
 
-	char	   *metadataKey = psprintf("rest-metadata:%s", metadataLocation);
+	char	   *metadataKey = psprintf("rest-metadata:%u:%s", relationId,
+									   metadataLocation);
 	char	   *document = FindHeldAnswer(GetVersionScopeOwner(), metadataKey);
 
 	pfree(metadataKey);

@@ -126,7 +126,8 @@ find_all_referenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 
 	HTAB	   *fileHash = CreateFilesHash();
 
-	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(currentMetadataPath);
+	IcebergTableMetadata *metadata =
+		ReadIcebergTableMetadataForRelation(relationId, currentMetadataPath);
 
 	ListCell   *snapshotIdCell = NULL;
 	List	   *snapshotIdList = Int64ArrayToList(snapshotIds);
@@ -223,7 +224,8 @@ find_unreferenced_files_via_snapshot_ids(PG_FUNCTION_ARGS)
 	/* see find_all_referenced_files_via_snapshot_ids */
 	EnsureStorageCredentialsForRelation(relationId);
 
-	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(currentMetadataPath);
+	IcebergTableMetadata *metadata =
+		ReadIcebergTableMetadataForRelation(relationId, currentMetadataPath);
 
 	IcebergSnapshot *prevSnapshots = GetIcebergSnapshotsViaSnapshotIdList(metadata, prevSnapshotIdList);
 	IcebergSnapshot *currentSnapshots = GetIcebergSnapshotsViaSnapshotIdList(metadata, currentSnapshotIdList);
