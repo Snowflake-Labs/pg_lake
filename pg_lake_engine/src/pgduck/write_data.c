@@ -37,6 +37,7 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/pgduck/iceberg_query_validation.h"
+#include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/util/numeric.h"
 #include "nodes/pg_list.h"
@@ -46,6 +47,7 @@
 
 static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
+static void AppendNamedFields(StringInfo map, DataFileSchema * schema, bool duckNames);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
 
@@ -79,13 +81,15 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 
 	/* project columns into target format */
 	appendStringInfo(&command, "SELECT %s FROM ",
-					 TupleDescToProjectionListForWrite(csvTupleDesc, destinationFormat));
+					 TupleDescToProjectionListForWrite(csvTupleDesc, destinationFormat,
+													   schema));
 
 	/* build the read_csv(...) clause */
 	char	   *columnsMap = NULL;
 
 	if (csvTupleDesc != NULL && csvTupleDesc->natts > 0)
-		columnsMap = TupleDescToColumnMapForWrite(csvTupleDesc, destinationFormat);
+		columnsMap = TupleDescToColumnMapForWrite(csvTupleDesc, destinationFormat,
+												  schema);
 
 	bool		includeHeader = true;
 
@@ -134,17 +138,21 @@ WriteQueryResultTo(char *query,
 				   bool wrapNativeTypes,
 				   List *partitionByExprs)
 {
+	ErrorOnNestedCaseCollision(schema);
+
 	if (outOfRangePolicy != ICEBERG_OOR_NONE)
 	{
 		query = IcebergWrapQueryWithErrorOrClampChecks(query, queryTupleDesc,
 													   outOfRangePolicy,
-													   queryHasRowId);
+													   queryHasRowId,
+													   schema);
 	}
 
 	query = IcebergWrapQueryWithSizeClampChecks(query, queryTupleDesc,
 												compatibilityMode,
 												outOfRangePolicy,
-												queryHasRowId);
+												queryHasRowId,
+												schema);
 
 	if (destinationFormat == DATA_FORMAT_ICEBERG)
 	{
@@ -265,7 +273,7 @@ WriteQueryResultTo(char *query,
 				if (queryTupleDesc != NULL)
 				{
 					char	   *geoParquetMeta =
-						GetGeoParquetMetadataForTupleDesc(queryTupleDesc);
+						GetGeoParquetMetadataForTupleDesc(queryTupleDesc, schema);
 
 					if (geoParquetMeta != NULL)
 					{
@@ -467,7 +475,8 @@ WriteQueryResultTo(char *query,
  * projection list in string form that can be used for writes.
  */
 char *
-TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat)
+TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat,
+								  DataFileSchema * schema)
 {
 	Assert(tupleDesc != NULL);
 
@@ -476,6 +485,7 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 	initStringInfo(&projection);
 
 	bool		hasColumns = false;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	for (int attnum = 1; attnum <= tupleDesc->natts; attnum++)
 	{
@@ -484,7 +494,8 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 		if (column->attisdropped)
 			continue;
 
-		char	   *columnName = NameStr(column->attname);
+		char	   *columnName = DuckDBNameForColumn(schema, NameStr(column->attname),
+													 hasCollision);
 		Oid			columnTypeId = column->atttypid;
 
 		if (hasColumns)
@@ -542,7 +553,8 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
  * a DuckDB columns map in string form.
  */
 char *
-TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat)
+TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat,
+							 DataFileSchema * schema)
 {
 	StringInfoData map;
 
@@ -551,6 +563,8 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
 	bool		hasColumns = false;
 
 	appendStringInfoString(&map, "{");
+
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	for (int attnum = 1; attnum <= tupleDesc->natts; attnum++)
 	{
@@ -568,7 +582,8 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
 
 		appendStringInfo(&map, "%s%s:%s",
 						 hasColumns ? "," : "",
-						 quote_literal_cstr(columnName),
+						 quote_literal_cstr(DuckDBNameForColumn(schema, columnName,
+																hasCollision)),
 						 quote_literal_cstr(duckdbType.typeName));
 
 		hasColumns = true;
@@ -587,12 +602,23 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
 void
 AppendFields(StringInfo map, DataFileSchema * schema)
 {
+	AppendNamedFields(map, schema, true);
+}
+
+
+/* Only top-level fields get DuckDB names; nested fields keep their Iceberg names. */
+static void
+AppendNamedFields(StringInfo map, DataFileSchema * schema, bool duckNames)
+{
 	bool		addComma = false;
+	bool		hasCollision = duckNames && DataFileSchemaHasCaseCollision(schema);
 
 	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
 	{
 		DataFileSchemaField *field = &schema->fields[fieldIdx];
-		const char *fieldName = field->name;
+		const char *fieldName = duckNames ?
+			DuckDBNameForFieldId(field->name, field->id, hasCollision) :
+			(field->name != NULL ? field->name : "");
 
 		appendStringInfo(map, "%s%s: ",
 						 addComma ? ", " : "",
@@ -655,7 +681,7 @@ AppendFieldIdValue(StringInfo fieldIdsStr, Field * field, int fieldId)
 			DataFileSchema *structField = &field->field.structType;
 
 			appendStringInfoString(fieldIdsStr, ", ");
-			AppendFields(fieldIdsStr, structField);
+			AppendNamedFields(fieldIdsStr, structField, false);
 
 			appendStringInfoString(fieldIdsStr, "}");
 			break;

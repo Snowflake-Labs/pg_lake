@@ -25,6 +25,7 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/client.h"
+#include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "commands/defrem.h"
@@ -409,10 +410,12 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 	List	   *columnStatsList = NIL;
 
 	Assert(schema != NULL);
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
+
 	for (int fieldIndex = 0; fieldIndex < schema->nfields; fieldIndex++)
 	{
 		DataFileSchemaField *field = &schema->fields[fieldIndex];
-		const char *fieldName = field->name;
+		char	   *fieldName = DuckDBNameForFieldId(field->name, field->id, hasCollision);
 		int			fieldId = field->id;
 
 		int			nameIndex = FindIndexInStringList(names, fieldName);

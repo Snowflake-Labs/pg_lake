@@ -52,6 +52,7 @@
 #include "pg_lake/fdw/deparse_ruleutils.h"
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/equality_delete.h"
+#include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
@@ -261,7 +262,7 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 	else
 		readCall = ReadDataSourceQuery(dataFilePaths, positionDeletePaths,
 									   format, compression, readTupleDesc, options,
-									   schema, &stats, readFlags);
+									   schema, NULL, &stats, readFlags);
 
 	StringInfoData command;
 
@@ -348,10 +349,11 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 	/* Preserve Iceberg storage-to-surface conversions for non-key columns. */
 	char	   *dataQuery = ReadDataSourceQuery(paths, positionDeletePaths, DATA_FORMAT_ICEBERG,
 												DATA_COMPRESSION_INVALID, dataDesc, options,
-												schema, &stats, 0);
+												schema, NULL, &stats, 0);
 
 	appendStringInfoString(command, "SELECT ");
 	bool		first = true;
+	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 
 	for (int i = 0; i < projection->natts; i++)
 	{
@@ -360,7 +362,9 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 		if (attribute->attisdropped)
 			continue;
 		appendStringInfo(command, "%sd.%s", first ? "" : ", ",
-						 duckdb_quote_identifier(NameStr(attribute->attname)));
+						 duckdb_quote_identifier(DuckDBNameForColumn(schema,
+																	 NameStr(attribute->attname),
+																	 hasCollision)));
 		first = false;
 	}
 	appendStringInfo(command, " FROM (%s) AS d", dataQuery);
@@ -369,16 +373,24 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 	{
 		char	   *deleteQuery = ReadDataSourceQuery(deletion->paths, NIL, DATA_FORMAT_PARQUET,
 													  DATA_COMPRESSION_INVALID, NULL, NIL,
-													  deletion->schema, NO_STATISTICS, 0);
+													  deletion->schema, NULL, NO_STATISTICS, 0);
 
 		appendStringInfo(command, "%s NOT EXISTS (SELECT 1 FROM (%s) AS e WHERE ",
 						 first ? " WHERE" : " AND", deleteQuery);
+		bool		deleteCollision = DataFileSchemaHasCaseCollision(deletion->schema);
+
 		for (size_t i = 0; i < deletion->schema->nfields; i++)
 		{
-			const char *name = duckdb_quote_identifier(deletion->schema->fields[i].name);
+			DataFileSchemaField *field = &deletion->schema->fields[i];
+			const char *dataName =
+				duckdb_quote_identifier(DuckDBNameForFieldId(field->name, field->id,
+															 hasCollision));
+			const char *deleteName =
+				duckdb_quote_identifier(DuckDBNameForFieldId(field->name, field->id,
+															 deleteCollision));
 
 			appendStringInfo(command, "%sd.%s IS NOT DISTINCT FROM e.%s",
-							 i == 0 ? "" : " AND ", name, name);
+							 i == 0 ? "" : " AND ", dataName, deleteName);
 		}
 		appendStringInfoChar(command, ')');
 		first = false;

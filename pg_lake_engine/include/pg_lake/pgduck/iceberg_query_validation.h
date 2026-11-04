@@ -37,7 +37,8 @@
 extern PGDLLEXPORT char *IcebergWrapQueryWithErrorOrClampChecks(char *query,
 																TupleDesc tupleDesc,
 																IcebergOutOfRangePolicy policy,
-																bool queryHasRowId);
+																bool queryHasRowId,
+																DataFileSchema * schema);
 
 /*
  * IcebergWrapQueryWithSizeClampChecks wraps a query so that values
@@ -60,7 +61,8 @@ extern PGDLLEXPORT char *IcebergWrapQueryWithSizeClampChecks(char *query,
 															 TupleDesc tupleDesc,
 															 IcebergCompatibilityMode compatibilityMode,
 															 IcebergOutOfRangePolicy policy,
-															 bool queryHasRowId);
+															 bool queryHasRowId,
+															 DataFileSchema * schema);
 
 /*
  * IcebergRewriteKind is a bitmask of independent per-leaf rewrites the write

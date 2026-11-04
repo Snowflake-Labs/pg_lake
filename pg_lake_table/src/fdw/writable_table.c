@@ -983,6 +983,7 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 							tupleDescriptor,
 							formatOptions,
 							schema,
+							NULL,
 							&stats,
 							readFlags);
 

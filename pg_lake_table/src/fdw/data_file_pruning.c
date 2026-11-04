@@ -1868,7 +1868,7 @@ GetExternalIcebergFieldsForAttributes(Oid relationId, List *columnsUsedInFilters
 			Field	   *fieldType = field->type;
 			PGType		pgType = IcebergFieldToPostgresType(fieldType);
 
-			if (strcasecmp(field->name, columnName) == 0 &&
+			if (strcmp(field->name, columnName) == 0 &&
 				pgType.postgresTypeOid == column->vartype)
 			{
 				fields = lappend(fields, field);

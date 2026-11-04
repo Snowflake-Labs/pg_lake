@@ -120,6 +120,7 @@ static char *GenerateReadDataSourceQuery(char *sourcePath,
 										 TupleDesc tupleDesc,
 										 List *options,
 										 DataFileSchema * schema,
+										 DataFileSchema * columnNameSchema,
 										 int readFlags);
 static List *FindCopyFromWriteOptions(CopyDataFormat format, List *options);
 static void ProcessPgLakeCopyTo(CopyStmt *copyStmt, ParseState *pstate,
@@ -646,6 +647,7 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 		GenerateReadDataSourceQuery(sourcePath, sourceFormat,
 									sourceCompression, tupleDesc,
 									copyStmt->options, schema,
+									GetDataFileSchemaForTable(relationId),
 									readFlags);
 
 	/*
@@ -800,7 +802,8 @@ static char *
 GenerateReadDataSourceQuery(char *sourcePath, CopyDataFormat sourceFormat,
 							CopyDataCompression sourceCompression,
 							TupleDesc tupleDesc, List *options,
-							DataFileSchema * schema, int readFlags)
+							DataFileSchema * schema,
+							DataFileSchema * columnNameSchema, int readFlags)
 {
 
 	List	   *dataFileList = NIL;
@@ -826,6 +829,7 @@ GenerateReadDataSourceQuery(char *sourcePath, CopyDataFormat sourceFormat,
 							   tupleDesc,
 							   options,
 							   schema,
+							   columnNameSchema,
 							   NO_STATISTICS,
 							   readFlags);
 

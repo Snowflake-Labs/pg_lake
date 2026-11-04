@@ -51,6 +51,8 @@ USING iceberg;
 INSERT INTO measurements VALUES ('Istanbul', 18.5);
 ```
 
+If two top-level columns differ only by letter case, such as `"a"` and `"A"`, the Parquet files store them as `c<field-id>`. Other Iceberg readers find those columns by field id, and queries in PostgreSQL still use the original names.
+
 The table's files go under `pg_lake_iceberg.default_location_prefix`, in a path derived from
 the database, schema and table name. You can set the prefix for a session, a user or the
 whole server (setting it requires superuser), or give one table an explicit `location`:

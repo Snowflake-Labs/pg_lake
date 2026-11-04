@@ -35,6 +35,8 @@ WARNINGs = "WARNINGs"
 # QueryProgress::GetRowsProcesseed is misspelled in DuckDB itself
 # (duckdb/common/progress_bar/progress_bar.hpp); we cannot rename it here.
 GetRowsProcesseed = "GetRowsProcesseed"
+# JoinExpr.larg is the left-hand argument in PostgreSQL.
+larg = "larg"
 
 [default.extend-words]
 inh = "inh"
