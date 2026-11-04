@@ -187,7 +187,11 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 		appendStringInfo(&metadataQuery, " and content OPERATOR(pg_catalog.=) %d", (int) CONTENT_DATA);
 
 	if (newFilesOnly)
+	{
+		/* never read a tracker table the session user made */
+		(void) TxDataFileIdsTableExists();
 		appendStringInfoString(&metadataQuery, " and id IN (select id from " TX_DATA_FILES_TABLE_NAME ")");
+	}
 
 	if (forUpdate)
 		appendStringInfoString(&metadataQuery, " for update");

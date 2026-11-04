@@ -43,8 +43,13 @@
 #include "pg_lake/util/array_utils.h"
 #include "pg_lake/util/path_hash.h"
 
+#include "access/htup_details.h"
+#include "catalog/namespace.h"
+#include "catalog/pg_class.h"
 #include "executor/spi.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
+#include "utils/syscache.h"
 #if PG_VERSION_NUM < 190000
 #include "utils/dynahash.h"
 #endif
@@ -663,31 +668,67 @@ ExecInsertTrackedFileIds(ArrayType *fileIdArray)
  * so we use the SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS variant which
  * omits the restricted-op flag.  The search_path lockdown stays in effect;
  * the DDL is a fixed string with no caller-supplied input.
- *
- * This runs once per session and every write after that hits the IF NOT
- * EXISTS no-op, which would otherwise put a "relation ... already exists,
- * skipping" NOTICE in front of every ordinary INSERT. Drop the message down
- * to WARNING for this one statement, the same way EnsureExtensionIsUpdated
- * quiets ALTER EXTENSION's own notice.
  */
 static void
 CreateTxDataFileIdsTempTableIfNotExists(void)
 {
+	if (TxDataFileIdsTableExists())
+		return;
+
 	const char *query =
-		"create temporary table if not exists " TX_DATA_FILES_TABLE_NAME " "
+		"create temporary table " TX_DATA_FILES_TABLE_NAME " "
 		"(id bigint primary key) USING heap ON COMMIT DELETE ROWS;";
 
 	SPI_START_EXTENSION_OWNER_ALLOWING_TEMP_OBJECTS(PgLakeTable);
-
-	if (client_min_messages == NOTICE)
-	{
-		(void) set_config_option("client_min_messages", "warning",
-								 PGC_USERSET, PGC_S_SESSION,
-								 GUC_ACTION_SAVE, true, 0, false);
-	}
-
 	SPI_execute(query, /* readOnly = */ false, 0);
 	SPI_END();
+}
+
+
+/*
+ * TxDataFileIdsTableExists returns whether the session already has the
+ * tracker temp table, and errors if a relation by that name exists that
+ * pg_lake_table cannot safely use.
+ *
+ * The table lives in the session user's temp schema but is written and read
+ * as the extension owner, so a table, view or trigger the user put there
+ * would be used with the owner's privileges. Triggers are checked even on our
+ * own table, since default privileges can give the user TRIGGER on it.
+ */
+bool
+TxDataFileIdsTableExists(void)
+{
+	Oid			tempNamespaceId = LookupExplicitNamespace("pg_temp", true);
+
+	if (!OidIsValid(tempNamespaceId))
+		return false;
+
+	Oid			relationId = get_relname_relid(TX_DATA_FILES_TABLE_RELNAME,
+											   tempNamespaceId);
+
+	if (!OidIsValid(relationId))
+		return false;
+
+	HeapTuple	classTuple = SearchSysCache1(RELOID, ObjectIdGetDatum(relationId));
+
+	if (!HeapTupleIsValid(classTuple))
+		elog(ERROR, "cache lookup failed for relation %u", relationId);
+
+	Form_pg_class classForm = (Form_pg_class) GETSTRUCT(classTuple);
+	bool		isOurs = classForm->relowner == ExtensionOwnerId(PgLakeTable) &&
+		classForm->relkind == RELKIND_RELATION &&
+		!classForm->relhastriggers;
+
+	ReleaseSysCache(classTuple);
+
+	if (!isOurs)
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("relation \"%s\" cannot be used by pg_lake_table",
+						TX_DATA_FILES_TABLE_NAME),
+				 errhint("Run DISCARD TEMP or start a new session.")));
+
+	return true;
 }
 
 
