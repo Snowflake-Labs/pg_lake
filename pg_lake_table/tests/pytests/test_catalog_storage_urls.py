@@ -489,3 +489,66 @@ def test_table_with_web_manifest_list_can_be_dropped(
     )[0][0]
     assert remaining == 0
     assert web_server.connections == 0
+
+
+def test_catalog_metadata_document_applies_only_to_its_table(
+    superuser_conn, s3, schema
+):
+    """The metadata document a catalog inlines in loadTable is only used for
+    the table it was loaded for, even when the catalog names the metadata
+    location of another table."""
+    location = f"s3://{TEST_BUCKET}/catalog_urls/{uuid.uuid4()}"
+    run_command(
+        f"""
+        CREATE TABLE {SCHEMA}.own (id bigint) USING iceberg
+            WITH (location = '{location}');
+        INSERT INTO {SCHEMA}.own VALUES (1), (2);
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    metadata_location = run_query(
+        "SELECT metadata_location FROM iceberg_tables WHERE table_name = 'own'",
+        superuser_conn,
+    )[0][0]
+
+    metadata = json.loads(_read(s3, metadata_location))
+    metadata["properties"]["catalog_urls_marker"] = "from-catalog"
+    catalog = _Server(
+        _CatalogHandler,
+        {"metadata-location": metadata_location, "metadata": metadata},
+    )
+    try:
+        run_command(
+            f"""
+            CREATE SERVER catalog_urls_rest TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint 'http://{catalog.host}',
+                         enable_vended_credentials 'false');
+            CREATE USER MAPPING FOR PUBLIC SERVER catalog_urls_rest
+                OPTIONS (client_id 'client', client_secret 'secret');
+            CREATE TABLE {SCHEMA}.t () USING iceberg
+                WITH (catalog = 'catalog_urls_rest', read_only = true,
+                      catalog_table_name = 't');
+            """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # the version scope holds catalog answers until the transaction ends
+        run_command("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ", superuser_conn)
+        run_query(f"SELECT count(*) FROM {SCHEMA}.t", superuser_conn)
+        run_command(f"INSERT INTO {SCHEMA}.own VALUES (3)", superuser_conn)
+        superuser_conn.commit()
+    finally:
+        superuser_conn.rollback()
+        catalog.stop()
+
+    new_metadata_location = run_query(
+        "SELECT metadata_location FROM iceberg_tables WHERE table_name = 'own'",
+        superuser_conn,
+    )[0][0]
+    new_metadata = json.loads(_read(s3, new_metadata_location))
+    assert "catalog_urls_marker" not in new_metadata["properties"]
+    assert run_query(f"SELECT count(*) FROM {SCHEMA}.own", superuser_conn) == [[3]]
+    superuser_conn.commit()

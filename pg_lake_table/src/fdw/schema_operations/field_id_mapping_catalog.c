@@ -514,7 +514,7 @@ static AttrNumber
 GetAttributeForFieldIdForExternalIcebergTable(char *metadataPath, Oid relationId, int fieldId)
 {
 	DataFileSchema *schema =
-		GetDataFileSchemaForExternalIcebergTable(metadataPath,
+		GetDataFileSchemaForExternalIcebergTable(relationId, metadataPath,
 												 LowercasesColumnNames(relationId));
 
 	DataFileSchemaField *schemaField = GetDataFileSchemaFieldById(schema, fieldId);

@@ -326,7 +326,7 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
 	DataFileSchema *schema =
-		GetDataFileSchemaForExternalIcebergTable(currentMetadataPath,
+		GetDataFileSchemaForExternalIcebergTable(relationId, currentMetadataPath,
 												 LowercasesColumnNames(relationId));
 
 	Relation	rel = RelationIdGetRelation(relationId);
@@ -416,7 +416,7 @@ GetDataFileSchemaForTableInternal(Oid relationId)
 
 		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
-		return GetDataFileSchemaForExternalIcebergTable(path,
+		return GetDataFileSchemaForExternalIcebergTable(relationId, path,
 														LowercasesColumnNames(relationId));
 	}
 }
@@ -435,11 +435,14 @@ GetDataFileSchemaForTable(Oid relationId)
 /*
  * GetDataFileSchemaForExternalIcebergTable gets a table schema field based
  * on the current Iceberg metadata, with names lowercased if requested.
+ * relationId is the table the metadata belongs to, or InvalidOid if none.
  */
 DataFileSchema *
-GetDataFileSchemaForExternalIcebergTable(char *metadataPath, bool lowercaseNames)
+GetDataFileSchemaForExternalIcebergTable(Oid relationId, char *metadataPath,
+										 bool lowercaseNames)
 {
-	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+	IcebergTableMetadata *metadata =
+		ReadIcebergTableMetadataForRelation(relationId, metadataPath);
 
 	if (lowercaseNames)
 		LowercaseIcebergTableMetadataNames(metadata);
@@ -460,9 +463,10 @@ GetDataFileSchemaForExternalIcebergTable(char *metadataPath, bool lowercaseNames
  * Iceberg table.
  */
 List *
-GetLeafFieldsForExternalIcebergTable(char *metadataPath)
+GetLeafFieldsForExternalIcebergTable(Oid relationId, char *metadataPath)
 {
-	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+	IcebergTableMetadata *metadata =
+		ReadIcebergTableMetadataForRelation(relationId, metadataPath);
 
 	return GetLeafFieldsFromIcebergMetadata(metadata);
 }
@@ -487,7 +491,7 @@ GetLeafFieldsForTable(Oid relationId)
 
 		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
-		return GetLeafFieldsForExternalIcebergTable(path);
+		return GetLeafFieldsForExternalIcebergTable(relationId, path);
 	}
 }
 
