@@ -688,7 +688,7 @@ CreateTxDataFileIdsTempTableIfNotExists(void)
 /*
  * TxDataFileIdsTableExists returns whether the session already has the
  * tracker temp table, and errors if a relation by that name exists that
- * pg_lake_table did not create.
+ * pg_lake_table cannot safely use.
  *
  * The table lives in the session user's temp schema but is written and read
  * as the extension owner, so a table, view or trigger the user put there
@@ -724,9 +724,9 @@ TxDataFileIdsTableExists(void)
 	if (!isOurs)
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-				 errmsg("relation \"%s\" was not created by pg_lake_table",
+				 errmsg("relation \"%s\" cannot be used by pg_lake_table",
 						TX_DATA_FILES_TABLE_NAME),
-				 errhint("Drop the relation or start a new session.")));
+				 errhint("Run DISCARD TEMP or start a new session.")));
 
 	return true;
 }

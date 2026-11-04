@@ -348,7 +348,7 @@ def test_session_temp_objects_are_rejected(
 
     table_name = create_iceberg_table
     qualified_name = f"{TEST_TABLE_NAMESPACE}.{table_name}"
-    tracker_error = "was not created by pg_lake_table"
+    tracker_error = "cannot be used by pg_lake_table"
 
     # allowed while the transaction has no Iceberg changes
     run_command("DISCARD TEMP", pg_conn)
