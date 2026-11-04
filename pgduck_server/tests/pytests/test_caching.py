@@ -1,3 +1,4 @@
+import http.client
 import os
 import pytest
 import socket
@@ -1686,6 +1687,80 @@ def test_pg_lake_remove_file_azure_batch_after_idle(azure, pgduck_conn):
 
     assert elapsed < 30
     assert not any(azure.list_blobs(name_starts_with=prefix))
+
+    pgduck_conn.rollback()
+
+
+def test_pg_lake_remove_file_azure_batch_per_secret(azure, pgduck_conn):
+    """Paths in one container share a batch request when they use the same
+    secret, and get separate requests when they do not.
+
+    The paths under one prefix are routed through a proxy by a secret scoped to
+    that prefix, so the proxy sees exactly the batch requests sent with that
+    secret.
+    """
+    prefix = "test_remove_file_azure_batch_per_secret"
+    proxied_urls = [
+        f"az://{TEST_BUCKET}/{prefix}/proxied/data_{index}.csv" for index in range(3)
+    ]
+    direct_urls = [
+        f"az://{TEST_BUCKET}/{prefix}/direct/data_{index}.csv" for index in range(3)
+    ]
+    batch_requests = []
+
+    class Proxy(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if "comp=batch" in self.path:
+                batch_requests.append(body.count(b"DELETE "))
+
+            upstream = http.client.HTTPConnection("127.0.0.1", 10000, timeout=10)
+            try:
+                upstream.request("POST", self.path, body, headers=dict(self.headers))
+                response = upstream.getresponse()
+                response_body = response.read()
+                self.send_response(response.status)
+                for name, value in response.getheaders():
+                    if name.lower() not in ("connection", "transfer-encoding"):
+                        self.send_header(name, value)
+                self.end_headers()
+                self.wfile.write(response_body)
+            finally:
+                upstream.close()
+
+    for url in proxied_urls + direct_urls:
+        run_command(f"COPY (SELECT 1) TO '{url}';", pgduck_conn)
+
+    proxy = HTTPServer(("127.0.0.1", 0), Proxy)
+    thread = threading.Thread(target=proxy.serve_forever)
+    thread.start()
+    connection_string = AZURITE_CONNECTION_STRING.replace(
+        "127.0.0.1:10000", f"127.0.0.1:{proxy.server_port}"
+    )
+    try:
+        run_command(
+            "CREATE SECRET azure_batch_proxy (TYPE AZURE, "
+            f"CONNECTION_STRING '{connection_string}', "
+            f"SCOPE 'az://{TEST_BUCKET}/{prefix}/proxied/')",
+            pgduck_conn,
+        )
+
+        # interleave the paths so that grouping cannot rely on input order
+        values = ", ".join(
+            f"('{url}')" for pair in zip(direct_urls, proxied_urls) for url in pair
+        )
+        run_command(
+            f"SELECT pg_lake_remove_file(file) FROM (VALUES {values}) AS batch(file);",
+            pgduck_conn,
+        )
+
+        assert batch_requests == [len(proxied_urls)]
+        assert not any(azure.list_blobs(name_starts_with=prefix))
+    finally:
+        run_command("DROP SECRET IF EXISTS azure_batch_proxy", pgduck_conn)
+        proxy.shutdown()
+        thread.join(timeout=10)
+        proxy.server_close()
 
     pgduck_conn.rollback()
 
