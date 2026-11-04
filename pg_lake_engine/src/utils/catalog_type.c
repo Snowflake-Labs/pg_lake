@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 #include "miscadmin.h"
+#include "access/xact.h"
 #include "foreign/foreign.h"
 #include "catalog/pg_foreign_table.h"
 
@@ -25,6 +26,9 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/util/catalog_type.h"
 #include "pg_lake/util/rel_utils.h"
+
+
+static void WarnIfSnowflakeServerIsShadowed(void);
 
 
 /*
@@ -204,7 +208,8 @@ IsRestCatalog(const char *catalog)
  *
  * For the four reserved short names ('postgres', 'object_store', 'rest',
  * 'snowflake') the result is the corresponding pre-created built-in
- * server name.  'snowflake' is an alias for 'rest'.
+ * server name.  'snowflake' is an alias for 'rest', and takes priority
+ * over a user-created server with that name.
  * Any other input is returned unchanged (user-created server names match
  * their catalog= option value verbatim).
  *
@@ -217,8 +222,12 @@ ResolveCatalogServerName(const char *catalog)
 	if (catalog == NULL)
 		return NULL;
 
-	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0 ||
-		pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
+	if (pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
+	{
+		WarnIfSnowflakeServerIsShadowed();
+		return PG_LAKE_REST_CATALOG_SERVER_NAME;
+	}
+	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
 		return PG_LAKE_REST_CATALOG_SERVER_NAME;
 	if (pg_strcasecmp(catalog, POSTGRES_CATALOG_NAME) == 0)
 		return PG_LAKE_POSTGRES_CATALOG_SERVER_NAME;
@@ -226,6 +235,43 @@ ResolveCatalogServerName(const char *catalog)
 		return PG_LAKE_OBJECT_STORE_CATALOG_SERVER_NAME;
 
 	return catalog;
+}
+
+
+/*
+ * WarnIfSnowflakeServerIsShadowed warns once per session when an
+ * iceberg_catalog server created before 'snowflake' became reserved is
+ * now ignored in favour of the built-in REST catalog.
+ */
+static void
+WarnIfSnowflakeServerIsShadowed(void)
+{
+	static bool warned = false;
+
+	if (warned || !IsTransactionState())
+		return;
+
+	bool		missingOK = true;
+	ForeignServer *server = GetForeignServerByName(SNOWFLAKE_CATALOG_NAME,
+												   missingOK);
+
+	if (server == NULL)
+		return;
+
+	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
+
+	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
+		return;
+
+	warned = true;
+
+	ereport(WARNING,
+			(errmsg("iceberg_catalog server \"%s\" is ignored",
+					SNOWFLAKE_CATALOG_NAME),
+			 errdetail("catalog '%s' refers to the built-in REST catalog.",
+					   SNOWFLAKE_CATALOG_NAME),
+			 errhint("Create a server with a different name and recreate "
+					 "the tables that should use it.")));
 }
 
 
