@@ -25,7 +25,6 @@ import pytest
 
 from utils_pytest import *
 
-
 # ---------------------------------------------------------------------------
 # Mock REST catalog server
 # ---------------------------------------------------------------------------
@@ -240,6 +239,58 @@ def test_no_prefix_returns_null(
     finally:
         _drop_server(superuser_conn, server_name)
         httpd.shutdown()
+
+
+def test_builtin_catalog_takes_priority_over_snowflake_server(
+    create_config_helper, superuser_conn, extension
+):
+    """catalog='snowflake' refers to the built-in REST catalog even when a
+    server named snowflake predates the alias, and a warning says the server
+    is ignored."""
+    server_body = json.dumps({"defaults": {"prefix": "from-snowflake-server"}})
+    server_httpd, server_port = _start_mock_server({"/v1/config": (200, server_body)})
+    builtin_body = json.dumps({"defaults": {"prefix": "from-builtin-catalog"}})
+    builtin_httpd, builtin_port = _start_mock_server(
+        {"/v1/config": (200, builtin_body)}
+    )
+
+    # the warning is raised once per session, so use a fresh one
+    conn = open_pg_conn()
+
+    try:
+        _create_server(
+            superuser_conn, "cfg_disc_test_legacy", f"http://127.0.0.1:{server_port}"
+        )
+
+        # the name is reserved now, so rename the server the way a 3.5
+        # install would have left it
+        run_command(
+            "UPDATE pg_foreign_server SET srvname = 'snowflake' "
+            "WHERE srvname = 'cfg_disc_test_legacy'",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        run_command(
+            f"""
+            SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:{builtin_port}';
+            SET pg_lake_iceberg.rest_catalog_client_id TO 'test_id';
+            SET pg_lake_iceberg.rest_catalog_client_secret TO 'test_secret';
+            """,
+            conn,
+        )
+
+        result = _call_fetch(conn, "snowflake")
+        assert result == "from-builtin-catalog", result
+        assert any(
+            'iceberg_catalog server "snowflake" is ignored' in notice
+            for notice in conn.notices
+        ), conn.notices
+    finally:
+        conn.close()
+        _drop_server(superuser_conn, "snowflake")
+        server_httpd.shutdown()
+        builtin_httpd.shutdown()
 
 
 def test_non_200_returns_null(create_config_helper, superuser_conn, pg_conn, extension):
