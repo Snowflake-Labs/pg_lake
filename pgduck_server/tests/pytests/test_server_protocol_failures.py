@@ -187,3 +187,22 @@ def test_describe_message_without_type(pgduck_server):
 
     # A truncated describe must not affect other connections.
     run_simple_command(server_params.PGDUCK_UNIX_DOMAIN_PATH, server_params.PGDUCK_PORT)
+
+
+def test_describe_message_without_name(pgduck_server):
+    socket_path_str = str(
+        Path(server_params.PGDUCK_UNIX_DOMAIN_PATH)
+        / f".s.PGSQL.{server_params.PGDUCK_PORT}"
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+        s.settimeout(5)
+        s.connect(socket_path_str)
+        send_startup_message(s)
+        _read_until_message(s, "Z")
+
+        # a type byte with no NUL-terminated statement name after it
+        send_message(s, "D", b"S")
+        assert s.recv(1) == b""
+
+    # the server is still up for other connections
+    run_simple_command(server_params.PGDUCK_UNIX_DOMAIN_PATH, server_params.PGDUCK_PORT)

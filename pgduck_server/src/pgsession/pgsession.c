@@ -286,6 +286,13 @@ pgsession_handle_connection(void *input)
 
 					const char *preparedStmtName = pq_getmsgstring(&inputMessage);
 
+					if (preparedStmtName == NULL)
+					{
+						PGDUCK_SERVER_ERROR("could not read prepared statement name for connection %d",
+											pgSession.pgClient->clientSocket);
+						goto finally;
+					}
+
 					if (strlen(preparedStmtName) != 0)
 					{
 						PGDUCK_SERVER_ERROR("pgduck_server currently does not support named prepared statements: %s",
