@@ -30,6 +30,10 @@
 
 #include "commands/defrem.h"
 #include "foreign/foreign.h"
+#include "fmgr.h"
+#include "nodes/miscnodes.h"
+#include "utils/builtins.h"
+#include "utils/jsonb.h"
 #include "utils/memutils.h"
 
 #include "pg_lake/http/http_client.h"
@@ -92,8 +96,9 @@ ResolveRestCatalogBaseUri(const char *endpoint)
  * spec's ?warehouse= query parameter.
  *
  * Returns a palloc'd string, or NULL when:
- *   - the endpoint is unreachable or returns a non-200 status, or
- *   - the response carries neither overrides.prefix nor defaults.prefix.
+ *   - the endpoint is unreachable or returns a non-200 status,
+ *   - the body is empty or not JSON, or
+ *   - the response carries no string overrides.prefix or defaults.prefix.
  *
  * Callers should treat NULL as "no auto-detected prefix" and fall back to
  * get_database_name() or whatever default they need.
@@ -125,14 +130,24 @@ FetchRestCatalogConfigPrefix(RestCatalogOptions * opts)
 	HttpResult	hr = SendRequestToRestCatalog(opts, REST_CATALOG_OP_CONFIG, HTTP_GET, configUrl,
 											  NULL, headers);
 
-	if (hr.status != 200)
+	if (hr.status != 200 || hr.body == NULL)
 		return NULL;
 
+	/* an empty or non-JSON body, say from a proxy, also has no prefix */
+	ErrorSaveContext escontext = {T_ErrorSaveContext};
+	Datum		configDatum;
+
+	if (!DirectInputFunctionCallSafe(jsonb_in, hr.body, InvalidOid, -1,
+									 (Node *) &escontext, &configDatum))
+		return NULL;
+
+	Jsonb	   *config = DatumGetJsonbP(configDatum);
+
 	/* overrides.prefix takes precedence over defaults.prefix */
-	char	   *prefix = JsonbGetStringByPath(hr.body, 2, "overrides", "prefix");
+	char	   *prefix = JsonbGetOptionalString(config, 2, "overrides", "prefix");
 
 	if (prefix == NULL)
-		prefix = JsonbGetStringByPath(hr.body, 2, "defaults", "prefix");
+		prefix = JsonbGetOptionalString(config, 2, "defaults", "prefix");
 
 	return prefix;
 }
