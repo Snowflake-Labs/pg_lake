@@ -72,6 +72,7 @@ extern PGDLLEXPORT void ResetTrackedIcebergMetadataOperation(void);
 extern PGDLLEXPORT void ResetRestCatalogRequests(void);
 extern PGDLLEXPORT HTAB *GetTrackedIcebergMetadataOperations(void);
 extern PGDLLEXPORT bool HasAnyTrackedIcebergMetadataChanges(void);
+extern PGDLLEXPORT bool HasTrackedIcebergMetadataChangesForRelation(Oid relationId);
 extern PGDLLEXPORT bool IsIcebergTableCreatedInCurrentTransaction(Oid relation);
 extern PGDLLEXPORT void BindRelationToXactRestCatalog(Oid relationId);
 extern PGDLLEXPORT void RegisterRestCatalogXactCaptureCallback(void);

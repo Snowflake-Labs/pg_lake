@@ -2113,6 +2113,7 @@ def test_data_file_pruning_after_type_promotion(
     post_val,
     prune_filter_pre,
     prune_filter_post,
+    create_helper_functions,
 ):
     """Verify data file pruning still works after an Iceberg type promotion."""
     explain_prefix = "EXPLAIN (analyze, verbose, format json) "

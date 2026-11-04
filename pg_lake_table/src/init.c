@@ -44,6 +44,7 @@
 #include "pg_lake/planner/query_pushdown.h"
 #include "pg_lake/util/s3_file_utils.h"
 #include "pg_lake/test/hide_lake_objects.h"
+#include "pg_lake/sync/sync_external_metadata.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "utils/guc.h"
@@ -470,6 +471,9 @@ _PG_init(void)
 	 * credential capture in track_iceberg_metadata_changes.c.
 	 */
 	RegisterRestCatalogXactCaptureCallback();
+
+	/* sync our catalog when an external client writes to an internal table */
+	RegisterIcebergExternalWriteCallback();
 }
 
 
