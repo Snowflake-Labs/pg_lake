@@ -77,6 +77,7 @@ The Iceberg specification defines strict boundaries for temporal types that are 
 | `timestamp` | Range: `0001-01-01 00:00:00` to `9999-12-31 23:59:59.999999` |
 | `timestamptz` | Range: `0001-01-01 00:00:00+00` to `9999-12-31 23:59:59.999999+00` |
 | `numeric(p,s)` (precision ≤ 38) | NaN is not representable in Iceberg decimals |
+| `interval` (PostgreSQL 17+) | `infinity` and `-infinity` are not representable in the Iceberg struct |
 | Array columns (e.g. `int[]`, `text[]`) | Multidimensional arrays are not representable (Iceberg maps `int[]` to a flat `list`) |
 
 PostgreSQL supports dates and timestamps well beyond year 9999, as well as special values like `infinity`, `-infinity`, and `NaN` for numerics. These values cannot be stored in Iceberg decimal columns (Parquet). Similarly, PostgreSQL allows multidimensional values in a plain array type (e.g. `ARRAY[ARRAY[1,2]]` in an `int[]` column), but Iceberg only supports flat lists.
@@ -88,8 +89,8 @@ Unbounded `numeric` and `numeric` with precision > 38 are stored as `double prec
 
 The `out_of_range_values` option accepts two values:
 
-- **`error`** (default): An error is raised if any value falls outside the Iceberg-representable range, including out-of-range temporals, NaN in bounded numerics, and multidimensional arrays. The write is aborted entirely.
-- **`clamp`**: Out-of-range temporal values are silently adjusted to the nearest Iceberg boundary. `NaN` values in bounded `numeric(p,s)` columns (precision ≤ 38) are replaced with `NULL`. Multidimensional array values are replaced with `NULL`. **No error is raised and no warning is emitted.** This means your stored data may differ from what was inserted.
+- **`error`** (default): An error is raised if any value falls outside the Iceberg-representable range, including out-of-range temporals, NaN in bounded numerics, infinite intervals, and multidimensional arrays. The write is aborted entirely.
+- **`clamp`**: Out-of-range temporal values are silently adjusted to the nearest Iceberg boundary. `NaN` values in bounded `numeric(p,s)` columns (precision ≤ 38) are replaced with `NULL`. `infinity` and `-infinity` intervals are replaced with `NULL`. Multidimensional array values are replaced with `NULL`. **No error is raised and no warning is emitted.** This means your stored data may differ from what was inserted.
 
 ### Example
 
