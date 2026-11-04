@@ -164,14 +164,14 @@ def test_storage_type(pg_type, expected, superuser_conn, iceberg_representation_
 def test_storage_type_unsupported_numeric_guc_off(
     superuser_conn, iceberg_representation_fns
 ):
-    """With unsupported_numeric_as_double off there is no double rewrite, so an
-    oversized numeric falls through to the `string` default -- a shape CREATE
-    never actually stores, because it rejects such a column instead.  Pinned here
-    because it is precisely why a caller must not read a `string` match as "same
-    representation" (see test_unsupported_numeric_not_representable_when_disabled).
+    """With unsupported_numeric_as_double off CREATE rejects an oversized numeric,
+    but the leaf still derives to `double`, the type a table created with the GUC
+    on stores it as: turning the GUC off later must not change how that table is
+    read.  The comparison still says "not the same" for such a numeric (see
+    test_unsupported_numeric_not_representable_when_disabled).
     """
-    assert _storage_type(superuser_conn, "numeric(50,2)", False) == "string"
-    assert _storage_type(superuser_conn, "numeric(50,2)[]", False) == "list<string>"
+    assert _storage_type(superuser_conn, "numeric(50,2)", False) == "double"
+    assert _storage_type(superuser_conn, "numeric(50,2)[]", False) == "list<double>"
     # a bounded numeric is a genuine Iceberg decimal either way
     assert _storage_type(superuser_conn, "numeric(10,2)", False) == "decimal(10,2)"
 
@@ -202,15 +202,23 @@ def test_storage_type_composite_and_interval(
 ):
     """Composites derive to a struct and the rules apply to their fields; interval
     has no native Iceberg type and is modelled as a struct of longs.
+
+    A field is never rewritten to double -- that would mean declaring a composite
+    type the user did not write -- but a numeric no decimal can hold is still
+    stored as one, so the struct looks exactly like a float8 field's.
     """
-    run_command("DROP TYPE IF EXISTS rep_num, rep_dbl, rep_txt;", superuser_conn)
+    run_command(
+        "DROP TYPE IF EXISTS rep_num, rep_unb, rep_dbl, rep_txt;", superuser_conn
+    )
     run_command("CREATE TYPE rep_num AS (a numeric(50,2), b int);", superuser_conn)
+    run_command("CREATE TYPE rep_unb AS (a numeric, b int);", superuser_conn)
     run_command("CREATE TYPE rep_dbl AS (a double precision, b int);", superuser_conn)
     run_command("CREATE TYPE rep_txt AS (a text, b int);", superuser_conn)
     superuser_conn.commit()
 
     try:
         assert _storage_type(superuser_conn, "rep_num") == "struct<a:double,b:int>"
+        assert _storage_type(superuser_conn, "rep_unb") == "struct<a:double,b:int>"
         assert _storage_type(superuser_conn, "rep_dbl") == "struct<a:double,b:int>"
         assert _storage_type(superuser_conn, "rep_txt") == "struct<a:string,b:int>"
         assert (
@@ -218,7 +226,9 @@ def test_storage_type_composite_and_interval(
             == "struct<months:long,days:long,microseconds:long>"
         )
     finally:
-        run_command("DROP TYPE IF EXISTS rep_num, rep_dbl, rep_txt;", superuser_conn)
+        run_command(
+            "DROP TYPE IF EXISTS rep_num, rep_unb, rep_dbl, rep_txt;", superuser_conn
+        )
         superuser_conn.commit()
 
 
@@ -367,20 +377,28 @@ def test_compatibility_auto_keeps_uuid_native(
 def test_composite_unsupported_numeric_matches_float8_composite(
     superuser_conn, iceberg_representation_fns
 ):
-    """The recursion also descends into composites: a composite whose field is an
-    unsupported numeric is stored as the same struct<double, ...> the create path
-    produces for a float8 field, so it matches a float8 composite but not a text
-    one."""
-    run_command("DROP TYPE IF EXISTS rep_num, rep_dbl, rep_txt;", superuser_conn)
+    """The recursion also descends into composites: the field keeps its declared
+    PostgreSQL type, but a numeric no decimal can hold is stored as the same
+    struct<double, ...> the create path produces for a float8 field, so it matches
+    a float8 composite but not a text one."""
+    run_command(
+        "DROP TYPE IF EXISTS rep_num, rep_unb, rep_dbl, rep_txt;", superuser_conn
+    )
     run_command("CREATE TYPE rep_num AS (a numeric(50,2), b int);", superuser_conn)
+    run_command("CREATE TYPE rep_unb AS (a numeric, b int);", superuser_conn)
     run_command("CREATE TYPE rep_dbl AS (a double precision, b int);", superuser_conn)
     run_command("CREATE TYPE rep_txt AS (a text, b int);", superuser_conn)
     superuser_conn.commit()
     try:
         # numeric field -> double, matches a genuine float8 composite
         assert _same(superuser_conn, "rep_num", "rep_dbl", True) is True
+        assert _same(superuser_conn, "rep_unb", "rep_dbl", True) is True
+        assert _same(superuser_conn, "rep_unb", "rep_num", True) is True
         # but not a composite whose field is text (`string`)
         assert _same(superuser_conn, "rep_num", "rep_txt", True) is False
+        assert _same(superuser_conn, "rep_unb", "rep_txt", True) is False
     finally:
-        run_command("DROP TYPE IF EXISTS rep_num, rep_dbl, rep_txt;", superuser_conn)
+        run_command(
+            "DROP TYPE IF EXISTS rep_num, rep_unb, rep_dbl, rep_txt;", superuser_conn
+        )
         superuser_conn.commit()
