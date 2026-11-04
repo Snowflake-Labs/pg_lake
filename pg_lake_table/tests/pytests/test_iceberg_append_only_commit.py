@@ -293,3 +293,74 @@ def test_every_write_shape_lands_in_metadata(
         ]
         == 0
     )
+
+
+def test_files_added_in_released_savepoints_land_in_metadata(
+    s3,
+    pg_conn,
+    extension,
+    create_iceberg_table,
+):
+    table_name = create_iceberg_table
+    qualified_name = f"{TEST_TABLE_NAMESPACE}.{table_name}"
+
+    run_command(f"INSERT INTO {qualified_name} VALUES (1)", pg_conn)
+    run_command("SAVEPOINT s1", pg_conn)
+    run_command(f"INSERT INTO {qualified_name} VALUES (2)", pg_conn)
+    run_command("SAVEPOINT s2", pg_conn)
+    run_command(f"INSERT INTO {qualified_name} VALUES (3)", pg_conn)
+    run_command("RELEASE SAVEPOINT s2", pg_conn)
+    run_command("SAVEPOINT s3", pg_conn)
+    run_command(f"INSERT INTO {qualified_name} VALUES (999)", pg_conn)
+    run_command("ROLLBACK TO SAVEPOINT s3", pg_conn)
+    run_command("RELEASE SAVEPOINT s1", pg_conn)
+    run_command(f"INSERT INTO {qualified_name} VALUES (4)", pg_conn)
+    pg_conn.commit()
+
+    assert run_query(
+        f"SELECT array_agg(id ORDER BY id) FROM {qualified_name}", pg_conn
+    )[0][0] == [1, 2, 3, 4]
+    assert_iceberg_metadata_matches_storage(
+        pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
+    )
+
+
+def test_session_temp_objects_do_not_affect_commit(
+    s3,
+    pg_conn,
+    extension,
+    create_iceberg_table,
+):
+    """The files a transaction added are tracked outside of anything the
+    session user can create or drop, since they are read as the extension
+    owner at commit."""
+
+    table_name = create_iceberg_table
+    qualified_name = f"{TEST_TABLE_NAMESPACE}.{table_name}"
+
+    # a temp table with the name the tracker used to have must not be used
+    run_command(
+        """
+        CREATE TEMP TABLE pg_lake_tx_data_file_ids (id bigint);
+        CREATE FUNCTION pg_temp.fail_tracker_insert() RETURNS trigger
+        LANGUAGE plpgsql AS $$ BEGIN RAISE 'tracker table was written'; END $$;
+        CREATE TRIGGER fail_tracker_insert BEFORE INSERT ON pg_temp.pg_lake_tx_data_file_ids
+        FOR EACH ROW EXECUTE FUNCTION pg_temp.fail_tracker_insert();
+        """,
+        pg_conn,
+    )
+    run_command(f"INSERT INTO {qualified_name} VALUES (1)", pg_conn)
+    pg_conn.commit()
+
+    # dropping the session's temp objects mid-transaction must not lose files
+    run_command(f"INSERT INTO {qualified_name} VALUES (2)", pg_conn)
+    run_command("DISCARD TEMP", pg_conn)
+    run_command(f"INSERT INTO {qualified_name} VALUES (3)", pg_conn)
+    pg_conn.commit()
+
+    assert run_query(
+        f"SELECT array_agg(id ORDER BY id) FROM {qualified_name}", pg_conn
+    )[0][0] == [1, 2, 3]
+    assert_iceberg_metadata_matches_storage(
+        pg_conn, s3, TEST_TABLE_NAMESPACE, table_name
+    )

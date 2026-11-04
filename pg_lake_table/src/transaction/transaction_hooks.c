@@ -20,6 +20,7 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
+#include "pg_lake/fdw/tx_data_file_ids.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 
@@ -32,6 +33,7 @@ IcebergRegisterCallbacks(void)
 {
 	RegisterXactCallback(IcebergXactCallback, NULL);
 	RegisterSubXactCallback(IcebergMetadataSubXactCallback, NULL);
+	RegisterSubXactCallback(TrackedDataFileIdsSubXactCallback, NULL);
 }
 
 

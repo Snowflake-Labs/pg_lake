@@ -35,6 +35,7 @@
 #include "pg_lake/fdw/catalog/row_id_mappings.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/fdw/data_files_catalog_internal.h"
+#include "pg_lake/fdw/tx_data_file_ids.h"
 #include "pg_lake/fdw/data_file_stats_catalog.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/fdw/writable_table.h"
@@ -187,7 +188,7 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 		appendStringInfo(&metadataQuery, " and content OPERATOR(pg_catalog.=) %d", (int) CONTENT_DATA);
 
 	if (newFilesOnly)
-		appendStringInfoString(&metadataQuery, " and id IN (select id from " TX_DATA_FILES_TABLE_NAME ")");
+		appendStringInfoString(&metadataQuery, " and id OPERATOR(pg_catalog.=) ANY($2)");
 
 	if (forUpdate)
 		appendStringInfoString(&metadataQuery, " for update");
@@ -234,8 +235,11 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
-	DECLARE_SPI_ARGS(1);
+	DECLARE_SPI_ARGS(2);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, INT8ARRAYOID,
+				  newFilesOnly ? GetTrackedDataFileIdArray() : NULL,
+				  !newFilesOnly);
 
 	if (!snapshot)
 	{
