@@ -88,6 +88,92 @@ def test_create_deregister_worker(superuser_conn):
     superuser_conn.commit()
 
 
+def test_register_worker_repairs_stale_worker_id_sequence(superuser_conn):
+    sequence = "extension_base.workers_worker_id_seq"
+    scheduler_worker = "pg_extension_base_test_scheduler_main_worker"
+    hibernate_worker = "pg_extension_base_test_hibernate_main_worker"
+
+    def worker_id(worker_name):
+        rows = run_query(
+            "SELECT worker_id FROM extension_base.workers "
+            f"WHERE worker_name = '{worker_name}'",
+            superuser_conn,
+        )
+        assert len(rows) == 1
+        return rows[0]["worker_id"]
+
+    def register_hibernate_and_expect(expected_id):
+        run_command(
+            "CREATE EXTENSION pg_extension_base_test_hibernate CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        assert worker_id(hibernate_worker) == expected_id
+        assert worker_id(scheduler_worker) == existing_worker_id
+        run_command(
+            "DROP EXTENSION pg_extension_base_test_hibernate CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+    try:
+        # Leave room below the first id so the sequence can sit strictly behind it.
+        run_command(
+            f"SELECT pg_catalog.setval('{sequence}', 10, true)",
+            superuser_conn,
+        )
+        run_command(
+            "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        existing_worker_id = worker_id(scheduler_worker)
+        assert existing_worker_id == 11
+
+        # nextval() would return the existing id.
+        run_command(
+            "SELECT pg_catalog.setval(" f"'{sequence}', {existing_worker_id}, false)",
+            superuser_conn,
+        )
+        register_hibernate_and_expect(existing_worker_id + 1)
+
+        # Fork shape: the copied row is ahead of the sequence.
+        # Unrepaired nextval() returns existing_worker_id.
+        run_command(
+            "SELECT pg_catalog.setval("
+            f"'{sequence}', {existing_worker_id - 1}, true)",
+            superuser_conn,
+        )
+        register_hibernate_and_expect(existing_worker_id + 1)
+
+        # Already ahead and consumed: do not rewind.
+        run_command(
+            "SELECT pg_catalog.setval("
+            f"'{sequence}', {existing_worker_id + 10}, true)",
+            superuser_conn,
+        )
+        register_hibernate_and_expect(existing_worker_id + 11)
+
+        # Already ahead and not yet consumed: hand out last_value itself.
+        run_command(
+            "SELECT pg_catalog.setval("
+            f"'{sequence}', {existing_worker_id + 20}, false)",
+            superuser_conn,
+        )
+        register_hibernate_and_expect(existing_worker_id + 20)
+    finally:
+        superuser_conn.rollback()
+        run_command(
+            "DROP EXTENSION IF EXISTS pg_extension_base_test_hibernate CASCADE",
+            superuser_conn,
+        )
+        run_command(
+            "DROP EXTENSION IF EXISTS pg_extension_base_test_scheduler CASCADE",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
 def test_create_deregister_worker_id(superuser_conn):
     run_command(
         "CREATE EXTENSION pg_extension_base_test_scheduler CASCADE", superuser_conn
