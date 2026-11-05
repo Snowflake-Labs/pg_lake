@@ -2375,6 +2375,37 @@ IcebergProvideStorageCredentials(Oid relationId)
 
 
 /*
+ * ErrorIfVendedCredentialsWithheld raises an error for a read-only table of
+ * the built-in catalog with horizon authentication, for the resolver to call
+ * when the catalog vended no credential for it.  Such a server has no
+ * credentials of its own for the catalog's storage, so falling back to the
+ * ones pgduck_server holds only ends in an access denied error from object
+ * storage that names the server's cloud identity instead of the table.
+ */
+void
+ErrorIfVendedCredentialsWithheld(Oid relationId)
+{
+	if (GetIcebergCatalogType(relationId) != REST_CATALOG_READ_ONLY ||
+		!RestCatalogVendingEnabledForRelation(relationId))
+		return;
+
+	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
+
+	if (!opts->enableVendedCredentials || !opts->isBuiltin ||
+		opts->authType != REST_CATALOG_AUTH_TYPE_HORIZON)
+		return;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+			 errmsg("the REST catalog did not provide storage credentials for table \"%s.%s.%s\"",
+					GetRestCatalogName(relationId),
+					GetRestCatalogNamespace(relationId),
+					GetRestCatalogTableName(relationId)),
+			 errdetail("This server can read the table's files only with credentials from the catalog.")));
+}
+
+
+/*
 * CreateNamespaceOnRestCatalog creates a namespace on the rest catalog. On any failure,
 * an error is raised. Returns the created namespace's "location" property
 * when the response includes one, else NULL.

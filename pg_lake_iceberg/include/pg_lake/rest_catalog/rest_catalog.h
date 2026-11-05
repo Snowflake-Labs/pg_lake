@@ -454,6 +454,7 @@ extern PGDLLEXPORT bool RestCatalogVendingEnabledForRelation(Oid relationId);
  * (storage/storage_credentials.c) on the way to pgduck_server.
  */
 extern PGDLLEXPORT List *IcebergProvideStorageCredentials(Oid relationId);
+extern void ErrorIfVendedCredentialsWithheld(Oid relationId);
 extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);
 extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level, RestCatalogOp op,
 										const char *catalogName,
