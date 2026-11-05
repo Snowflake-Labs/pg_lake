@@ -220,7 +220,8 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFil
 
 	if (httpResult.status != 200)
 	{
-		ReportHTTPError(httpResult, ERROR);
+		ReportHTTPError(httpResult, ERROR, REST_CATALOG_OP_CREATE_TABLE,
+						catalogName, namespaceName, relationName);
 	}
 
 	RestCatalogStagedTable staged = {0};
@@ -403,7 +404,8 @@ RestCatalogExists(RestCatalogOptions * opts, const char *catalogName)
 	else if (catalogResult.status == 404)
 		return false;
 
-	ReportHTTPError(catalogResult, ERROR);
+	ReportHTTPError(catalogResult, ERROR, REST_CATALOG_OP_LIST_NAMESPACES,
+					catalogName, NULL, NULL);
 	return false;
 }
 
@@ -440,7 +442,8 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 				/*
 				 * For debugging purposes
 				 */
-				ReportHTTPError(httpResult, DEBUG2);
+				ReportHTTPError(httpResult, DEBUG2, REST_CATALOG_OP_GET_NAMESPACE,
+								catalogName, namespaceName, NULL);
 
 				/*
 				 * A 404 could mean the namespace doesn't exist, or the
@@ -509,7 +512,8 @@ RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogNam
 				 * Credentials timed out 503 - Slowdown 5XX - Internal Server
 				 * Error
 				 */
-				ReportHTTPError(httpResult, ERROR);
+				ReportHTTPError(httpResult, ERROR, REST_CATALOG_OP_GET_NAMESPACE,
+								catalogName, namespaceName, NULL);
 
 				break;
 			}
@@ -538,7 +542,8 @@ RestNamespaceExists(RestCatalogOptions * opts, const char *catalogName, const ch
 	else if (httpResult.status == 404)
 		return false;
 
-	ReportHTTPError(httpResult, ERROR);
+	ReportHTTPError(httpResult, ERROR, REST_CATALOG_OP_GET_NAMESPACE,
+					catalogName, namespaceName, NULL);
 	return false;
 }
 
@@ -935,7 +940,8 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 		return false;
 
 	if (hr.status != 200)
-		ReportHTTPError(hr, ERROR);
+		ReportHTTPError(hr, ERROR, REST_CATALOG_OP_LOAD_TABLE,
+						restCatalogName, namespaceName, relationName);
 
 	result->metadataLocation = JsonbGetStringByPath(hr.body, 1, "metadata-location");
 	if (result->metadataLocation == NULL)
@@ -2406,7 +2412,8 @@ CreateNamespaceOnRestCatalog(RestCatalogOptions * opts, const char *catalogName,
 
 	if (httpResult.status != 200)
 	{
-		ReportHTTPError(httpResult, ERROR);
+		ReportHTTPError(httpResult, ERROR, REST_CATALOG_OP_CREATE_NAMESPACE,
+						catalogName, namespaceName, NULL);
 	}
 
 	if (httpResult.body == NULL || *httpResult.body == '\0')
