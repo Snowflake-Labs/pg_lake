@@ -63,6 +63,7 @@ import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import psycopg2
 from utils_pytest import *
 
 try:
@@ -524,6 +525,85 @@ def test_scan_denied_without_vended_credentials(
 
     finally:
         server.relax()
+        run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
+        superuser_conn.commit()
+        _stop_mock_catalog(httpd, thread, conn=superuser_conn)
+
+
+_TEST_AUTH_PROVIDER_FNS = """
+CREATE OR REPLACE FUNCTION set_test_rest_catalog_auth_provider(BOOL)
+RETURNS void LANGUAGE C VOLATILE STRICT
+AS 'pg_lake_iceberg', 'set_test_rest_catalog_auth_provider';
+
+CREATE OR REPLACE FUNCTION set_test_rest_catalog_auth_response(TEXT, INT, BOOL)
+RETURNS void LANGUAGE C VOLATILE STRICT
+AS 'pg_lake_iceberg', 'set_test_rest_catalog_auth_response';
+"""
+
+
+def test_horizon_scan_without_vended_credentials_names_the_table(
+    superuser_conn, pgduck_conn, extension, installcheck, enforcing_s3_server
+):
+    """
+    A server reaching the built-in catalog with horizon authentication has
+    no storage credentials of its own, so when the catalog vends none the
+    scan fails before it reads storage, naming the table rather than
+    surfacing the store's access denied error.
+    """
+    if installcheck or not _HAVE_PYICEBERG:
+        return
+
+    server = enforcing_s3_server
+    schema = "mv_horizon"
+    table = "vc_horizon_novend"
+
+    meta_loc, location, prefix = _materialize_iceberg_table(server, schema, table, 10)
+
+    tables = {
+        table: {"metadata_location": meta_loc, "location": location, "vended": None}
+    }
+
+    httpd, thread = _serve_mock_catalog(
+        tables, server, enable_vended=True, conn=superuser_conn
+    )
+    run_command(_TEST_AUTH_PROVIDER_FNS, superuser_conn)
+    run_command(
+        "SELECT set_test_rest_catalog_auth_response('Bearer horizon-test', 3600, true)",
+        superuser_conn,
+    )
+    run_command("SELECT set_test_rest_catalog_auth_provider(true)", superuser_conn)
+    run_command(
+        "SET pg_lake_iceberg.rest_catalog_auth_type TO 'horizon'", superuser_conn
+    )
+    superuser_conn.commit()
+    server.enforce()
+
+    try:
+        run_command(f"CREATE SCHEMA IF NOT EXISTS {schema}", superuser_conn)
+        superuser_conn.commit()
+        run_command(
+            f"""CREATE TABLE {schema}.{table} ()
+                USING iceberg
+                WITH (catalog='rest', read_only=True, catalog_table_name='{table}')""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege) as exc_info:
+            run_query(f"SELECT count(*) FROM {schema}.{table}", superuser_conn)
+        superuser_conn.rollback()
+
+        err = exc_info.value.pgerror
+        assert "did not provide storage credentials for table" in err, err
+        assert f'.{schema}.{table}"' in err, err
+        assert not _denied(err), err
+
+    finally:
+        server.relax()
+        superuser_conn.rollback()
+        run_command("RESET pg_lake_iceberg.rest_catalog_auth_type", superuser_conn)
+        run_command("SELECT set_test_rest_catalog_auth_provider(false)", superuser_conn)
         run_command(f"DROP TABLE IF EXISTS {schema}.{table}", superuser_conn)
         run_command(f"DROP SCHEMA IF EXISTS {schema} CASCADE", superuser_conn)
         superuser_conn.commit()

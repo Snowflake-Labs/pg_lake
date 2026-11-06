@@ -645,8 +645,9 @@ def test_register_existing_table_renames(
         pg_conn,
         raise_error=False,
     )
-    assert "HTTP request failed (HTTP 404)" in str(res)
+    assert "could not load table" in str(res)
     assert "Table does not exist" in str(res)
+    assert "The REST catalog returned HTTP 404 (NoSuchTableException)." in str(res)
     pg_conn.rollback()
 
     # now, set catalog_table_name
