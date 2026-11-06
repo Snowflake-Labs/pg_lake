@@ -18,6 +18,8 @@
 /*
  * pg_lake_iceberg extension entry-point.
  */
+#include <limits.h>
+
 #include "postgres.h"
 #include "fmgr.h"
 #include "miscadmin.h"
