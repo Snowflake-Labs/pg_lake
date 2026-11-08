@@ -6,7 +6,6 @@ that /v1/config only returns when given the warehouse, it keeps the staged
 metadata of a staged create (#745), and it runs without authentication here.
 """
 
-import psycopg2
 import pyarrow
 import pytest
 from pyiceberg.exceptions import NoSuchNamespaceError, NoSuchTableError
@@ -123,7 +122,6 @@ def _attach_and_read(conn, name):
 def test_read_only_table_created_outside_pg_lake(
     superuser_conn, lk_schema, lakekeeper_catalog
 ):
-    # pg_lake reads only uncompressed metadata JSON, see the test below.
     _create_external_table(
         lakekeeper_catalog, "external", {"write.metadata.compression-codec": "none"}
     )
@@ -135,18 +133,20 @@ def test_read_only_table_created_outside_pg_lake(
     superuser_conn.commit()
 
 
-def test_read_only_table_with_gzip_metadata_is_not_readable_yet(
+def test_read_only_table_with_gzip_metadata(
     superuser_conn, lk_schema, lakekeeper_catalog
 ):
-    """Lakekeeper writes gzip-compressed metadata JSON by default, which
-    pg_lake cannot read yet (#823). When it can, this test fails: replace the
-    pytest.raises with the read-back assertion from the test above."""
+    """Lakekeeper writes gzip-compressed metadata JSON by default, which pg_lake
+    reads from the copy the catalog inlines in its loadTable response (#823)."""
     table = _create_external_table(lakekeeper_catalog, "external_gz", {})
     assert table.metadata_location.endswith(".gz.metadata.json")
 
-    with pytest.raises(psycopg2.Error, match="valid UTF-8"):
-        _attach_and_read(superuser_conn, "external_gz")
-    superuser_conn.rollback()
+    assert _attach_and_read(superuser_conn, "external_gz") == [
+        (1, "a"),
+        (2, "b"),
+        (3, "c"),
+    ]
+    superuser_conn.commit()
 
 
 def test_nested_types_round_trip_through_the_catalog(
