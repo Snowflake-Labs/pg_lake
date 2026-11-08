@@ -27,6 +27,7 @@
 
 #include "access/relation.h"
 #include "access/table.h"
+#include "access/xact.h"
 #include "common/int.h"
 #include "commands/comment.h"
 #include "commands/defrem.h"
@@ -111,8 +112,13 @@ GetRegisteredFieldForAttributes(Oid relationId, List *attrNos)
 	 *
 	 * So we trick the SPI_EXECUTE function to think that the query is not
 	 * read-only and read the transaction snapshot.
+	 *
+	 * That also advances the command counter, which parallel mode refuses
+	 * once the command has written, as CREATE TABLE AS has by the time its
+	 * parallel plan reads this table. Nothing can change the field id catalog
+	 * during a parallel operation, so the query snapshot is enough.
 	 */
-	bool		readOnly = false;
+	bool		readOnly = IsInParallelMode();
 
 	SPI_EXECUTE(query->data, readOnly);
 
@@ -169,7 +175,8 @@ ApplyPersistedStorageOverridesToFields(Oid relationId, List *fields)
 
 	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
-	bool		readOnly = false;
+	/* see GetRegisteredFieldForAttributes */
+	bool		readOnly = IsInParallelMode();
 
 	SPI_EXECUTE("SELECT field_id, field_storage_pg_type, field_storage_pg_typemod FROM "
 				MAPPING_TABLE_NAME
