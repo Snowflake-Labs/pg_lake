@@ -47,6 +47,7 @@
 
 static DuckDBTypeInfo ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 													 CopyDataFormat destinationFormat);
+static bool IsJSONArrayType(Oid typeId);
 static void AppendNamedFields(StringInfo map, DataFileSchema * schema, bool duckNames);
 static void AppendFieldIdValue(StringInfo map, Field * field, int fieldId);
 static const char *ParquetVersionToString(ParquetVersion version);
@@ -510,6 +511,16 @@ TupleDescToProjectionListForWrite(TupleDesc tupleDesc, CopyDataFormat destinatio
 							 duckdb_quote_identifier(columnName));
 
 		/*
+		 * A json[] or jsonb[] column is parsed as VARCHAR[] by read_csv (see
+		 * ChooseDuckDBEngineTypeForWrite), so convert it to JSON[] here. The
+		 * cast from VARCHAR[] parses each element on its own and keeps a NULL
+		 * element NULL.
+		 */
+		if (destinationFormat != DATA_FORMAT_CSV && IsJSONArrayType(columnTypeId))
+			appendStringInfo(&projection, "CAST(%s AS JSON[]) AS ",
+							 duckdb_quote_identifier(columnName));
+
+		/*
 		 * In case of geometry, we write WKT in csv_writer.c and parse it as
 		 * GEOMETRY via read_csv. Just before writing to the destination, we
 		 * convert to a form that makes sense for the destination format,
@@ -778,6 +789,19 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 		 */
 		duckTypeId = DUCKDB_TYPE_VARCHAR;
 	}
+	else if (duckTypeId == DUCKDB_TYPE_JSON && isArrayType)
+	{
+		/*
+		 * csv_writer.c writes a json[] or jsonb[] value as a list of quoted
+		 * strings, ["{\"a\": 1}", NULL]. DuckDB does not read that as a list:
+		 * casting a string to JSON[] parses the whole string as one JSON
+		 * document. Each element would come out as a JSON string holding the
+		 * element's text, and a NULL element is not valid JSON, so the read
+		 * fails. Read the list as VARCHAR[] instead, and let
+		 * TupleDescToProjectionListForWrite cast it to JSON[].
+		 */
+		duckTypeId = DUCKDB_TYPE_VARCHAR;
+	}
 	else if (duckTypeId == DUCKDB_TYPE_DECIMAL)
 	{
 		/*
@@ -885,4 +909,24 @@ ChooseDuckDBEngineTypeForWrite(PGType postgresType,
 	};
 
 	return typeInfo;
+}
+
+
+/*
+ * IsJSONArrayType returns whether the type is an array of json or jsonb, with
+ * or without a domain over the array or over its element.
+ */
+static bool
+IsJSONArrayType(Oid typeId)
+{
+	int32		typeMod = -1;
+	Oid			baseTypeId = ResolveDomainBaseTypeAndTypmod(typeId, &typeMod);
+	Oid			elementTypeId = get_element_type(baseTypeId);
+
+	if (!OidIsValid(elementTypeId))
+		return false;
+
+	elementTypeId = ResolveDomainBaseTypeAndTypmod(elementTypeId, &typeMod);
+
+	return elementTypeId == JSONOID || elementTypeId == JSONBOID;
 }

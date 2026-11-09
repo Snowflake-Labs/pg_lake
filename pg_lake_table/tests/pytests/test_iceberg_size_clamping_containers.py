@@ -370,13 +370,6 @@ def test_nested_array_of_composite_clamps_both_paths(
 # jsonb leaf inside a container: a structured-string leaf can't be truncated,
 # so an oversize leaf is raised (error) or NULLed (clamp) in place, while the
 # container and its other leaves survive.  Mirrors the top-level jsonb rule.
-#
-# Note: clamp mode is covered for a jsonb *field of a composite* but not for a
-# jsonb *array element*.  NULLing an oversize element would leave a NULL inside
-# a jsonb[], and pg_lake cannot write a NULL element in a jsonb[] at all (a
-# pre-existing limitation, independent of size clamping -- the CSV staging path
-# fails to convert it back to JSON[]).  So for jsonb arrays only the error path,
-# which raises before producing that value, is exercised here.
 # ---------------------------------------------------------------------------
 
 
@@ -404,6 +397,35 @@ def test_jsonb_array_element_over_cap_errors_per_tuple(
 
     run_command("RESET search_path;", pg_conn)
     run_command("DROP SCHEMA test_size_jsonb_arr_err CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
+def test_jsonb_array_element_over_cap_nulls_per_tuple(
+    pg_conn, extension, s3, with_default_location
+):
+    """An oversize jsonb[] element is NULLed under 'clamp'; the sibling
+    element survives."""
+    run_command(
+        "CREATE SCHEMA test_size_jsonb_arr_pt;"
+        "SET search_path TO test_size_jsonb_arr_pt;"
+        "CREATE TABLE t (id int, v jsonb[]) USING iceberg "
+        "WITH (compatibility_mode = 'snowflake', out_of_range_values = 'clamp');",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    big = json.dumps("x" * _just_over(STRING_CAP))
+    with pg_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO t VALUES (1, ARRAY[%s, '{\"a\": 1}']::jsonb[]);", (big,)
+        )
+    pg_conn.commit()
+
+    result = run_query("SELECT id, v[1] IS NULL, v[2]::text FROM t;", pg_conn)
+    assert [[r[0], r[1], r[2]] for r in result] == [[1, True, '{"a": 1}']]
+
+    run_command("RESET search_path;", pg_conn)
+    run_command("DROP SCHEMA test_size_jsonb_arr_pt CASCADE;", pg_conn)
     pg_conn.commit()
 
 
