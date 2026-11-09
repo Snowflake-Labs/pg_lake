@@ -28,7 +28,7 @@
  */
 #include "c.h"
 
-#include <assert.h>
+#include <math.h>
 #include <string.h>
 
 #include "catalog/pg_type_d.h"
@@ -37,7 +37,9 @@
 
 #include "duckdb.h"
 #include "duckdb/binary_transmit.h"
+#include "duckdb/type_conversion.h"
 #include "pgsession/pqformat.h"
+#include "utils/pgduck_log_utils.h"
 
 /* PostgreSQL dates and timestamps count from 2000-01-01, DuckDB from 1970 */
 #define POSTGRES_EPOCH_DAYS_SINCE_UNIX_EPOCH (10957)
@@ -48,6 +50,13 @@
 #define NUMERIC_DEC_DIGITS (4)
 #define NUMERIC_SIGN_POS (0x0000)
 #define NUMERIC_SIGN_NEG (0x4000)
+
+/* canonical NaN bit patterns, as produced by float4in and float8in */
+#define FLOAT4_CANONICAL_NAN_BITS ((uint32) 0x7fc00000)
+#define FLOAT8_CANONICAL_NAN_BITS (UINT64CONST(0x7ff8000000000000))
+
+/* upper bound on the size of any field that is not a string */
+#define MAX_FIXED_FIELD_SIZE (64)
 
 /* a 128-bit integer has at most 39 decimal digits */
 #define MAX_INT128_DECIMAL_DIGITS (39)
@@ -65,8 +74,9 @@ static void append_int32(StringInfo buf, int32 value);
 static void append_int64(StringInfo buf, int64 value);
 static void append_numeric(StringInfo buf, int128 value, int scale);
 static int	numeric_group_of_power(int power);
-static void append_string(StringInfo buf, duckdb_string_t * value,
-						  bool stopAtNul, bool jsonbVersion);
+static DuckDBStatus append_string(StringInfo buf, duckdb_string_t * value,
+								  bool stopAtNul, bool jsonbVersion);
+static DuckDBStatus field_too_large(size_t fieldSize);
 
 
 /*
@@ -237,10 +247,13 @@ binary_transmit_append_trailer(StringInfo buf)
  * binary_transmit_append_value appends a non-NULL value as a length-prefixed
  * field in the binary send format of the writer's target type.
  */
-void
+DuckDBStatus
 binary_transmit_append_value(StringInfo buf, BinaryColumnWriter * writer,
 							 void *data, idx_t row)
 {
+	if (!StringInfoHasRoomFor(buf, MAX_FIXED_FIELD_SIZE))
+		return field_too_large(MAX_FIXED_FIELD_SIZE);
+
 	switch (writer->kind)
 	{
 		case BINARY_WRITER_BOOL:
@@ -265,9 +278,15 @@ binary_transmit_append_value(StringInfo buf, BinaryColumnWriter * writer,
 
 		case BINARY_WRITER_FLOAT4:
 			{
+				float		value = ((float *) data)[row];
 				uint32		bits;
 
-				memcpy(&bits, &((float *) data)[row], sizeof(bits));
+				/* float4in on the text path always produces the same NaN */
+				if (isnan(value))
+					bits = FLOAT4_CANONICAL_NAN_BITS;
+				else
+					memcpy(&bits, &value, sizeof(bits));
+
 				append_int32(buf, 4);
 				append_int32(buf, (int32) bits);
 				break;
@@ -275,9 +294,14 @@ binary_transmit_append_value(StringInfo buf, BinaryColumnWriter * writer,
 
 		case BINARY_WRITER_FLOAT8:
 			{
+				double		value = ((double *) data)[row];
 				uint64		bits;
 
-				memcpy(&bits, &((double *) data)[row], sizeof(bits));
+				if (isnan(value))
+					bits = FLOAT8_CANONICAL_NAN_BITS;
+				else
+					memcpy(&bits, &value, sizeof(bits));
+
 				append_int32(buf, 8);
 				append_int64(buf, (int64) bits);
 				break;
@@ -294,22 +318,24 @@ binary_transmit_append_value(StringInfo buf, BinaryColumnWriter * writer,
 			 * The text path hands the value over as a C string, so it ends at
 			 * the first NUL byte. Do the same to produce identical values.
 			 */
-			append_string(buf, &((duckdb_string_t *) data)[row], true, false);
-			break;
+			return append_string(buf, &((duckdb_string_t *) data)[row], true, false);
 
 		case BINARY_WRITER_JSONB:
-			append_string(buf, &((duckdb_string_t *) data)[row], true, true);
-			break;
+			return append_string(buf, &((duckdb_string_t *) data)[row], true, true);
 
 		case BINARY_WRITER_BYTEA:
-			append_string(buf, &((duckdb_string_t *) data)[row], false, false);
-			break;
+			return append_string(buf, &((duckdb_string_t *) data)[row], false, false);
 
 		case BINARY_WRITER_DATE:
 			{
 				int32		days = ((duckdb_date *) data)[row].days;
 				int32		result;
 
+				/*
+				 * DuckDB stores infinity as INT_MAX and -infinity as
+				 * -INT_MAX. test_binary_transmit_scalar_types covers these,
+				 * check it after a DuckDB upgrade.
+				 */
 				if (days == PG_INT32_MAX)
 					result = PG_INT32_MAX;	/* infinity */
 				else if (days == -PG_INT32_MAX)
@@ -337,6 +363,7 @@ binary_transmit_append_value(StringInfo buf, BinaryColumnWriter * writer,
 				int64		micros = ((duckdb_timestamp *) data)[row].micros;
 				int64		result;
 
+				/* same encoding of infinities as dates */
 				if (micros == PG_INT64_MAX)
 					result = PG_INT64_MAX;	/* infinity */
 				else if (micros == -PG_INT64_MAX)
@@ -378,9 +405,12 @@ binary_transmit_append_value(StringInfo buf, BinaryColumnWriter * writer,
 
 		case BINARY_WRITER_NONE:
 			/* writers are only used if all columns have one */
-			assert(false);
-			break;
+			PGDUCK_SERVER_ERROR("no binary writer for DuckDB type %d",
+								writer->sourceType);
+			return DUCKDB_TYPE_CONVERSION_ERROR;
 	}
+
+	return DUCKDB_SUCCESS;
 }
 
 
@@ -596,7 +626,7 @@ numeric_group_of_power(int power)
  * optionally ending at the first NUL byte and optionally prefixed with the
  * jsonb binary format version.
  */
-static void
+static DuckDBStatus
 append_string(StringInfo buf, duckdb_string_t * value, bool stopAtNul,
 			  bool jsonbVersion)
 {
@@ -611,10 +641,32 @@ append_string(StringInfo buf, duckdb_string_t * value, bool stopAtNul,
 			length = nul - bytes;
 	}
 
+	/* length word, jsonb version and the value itself */
+	size_t		fieldSize = sizeof(int32) + 1 + (size_t) length;
+
+	if (!StringInfoHasRoomFor(buf, fieldSize))
+		return field_too_large(fieldSize);
+
 	append_int32(buf, (int32) (length + (jsonbVersion ? 1 : 0)));
 
 	if (jsonbVersion)
 		pq_sendbyte(buf, 1);
 
 	appendBinaryStringInfo(buf, bytes, length);
+
+	return DUCKDB_SUCCESS;
+}
+
+
+/*
+ * field_too_large reports that a field would push the message past
+ * MAX_RESULT_BUFFER_SIZE, where enlargeStringInfo() would exit().
+ */
+static DuckDBStatus
+field_too_large(size_t fieldSize)
+{
+	PGDUCK_SERVER_ERROR("binary field of %zu bytes would exceed the maximum message size of %zu bytes",
+						fieldSize, MAX_RESULT_BUFFER_SIZE - 1);
+
+	return DUCKDB_RESULT_TOO_LARGE_ERROR;
 }

@@ -4,7 +4,8 @@ into a regular table uses to receive rows from pgduck_server.
 
 The binary format should produce exactly the same values as the CSV format,
 so most tests load the same file twice, once with each format, and compare
-the text representation of every row.
+every row both as text and as PostgreSQL's own binary send format, which
+also catches differences that text hides, like numeric display scale.
 """
 
 import datetime
@@ -53,6 +54,13 @@ def rows_as_text(conn, table):
     ]
 
 
+def rows_as_send_bytes(conn, table):
+    return [
+        bytes(row[0])
+        for row in run_query(f"SELECT record_send(t) FROM {table} t ORDER BY id", conn)
+    ]
+
+
 def assert_same_load(
     conn, table_ddl, path, expect_binary=True, columns="", options="format 'parquet'"
 ):
@@ -71,6 +79,7 @@ def assert_same_load(
 
     assert len(binary_rows) > 0
     assert binary_rows == csv_rows
+    assert rows_as_send_bytes(conn, "via_binary") == rows_as_send_bytes(conn, "via_csv")
 
     conn.rollback()
     return binary_rows
@@ -123,6 +132,10 @@ def test_binary_transmit_scalar_types(superuser_conn, duckdb_conn, tmp_path):
            '23:59:59.999999'::time,
            NULL::uuid),
           (5, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+           NULL, NULL, NULL, NULL, NULL, NULL),
+          -- the text path canonicalizes the sign bit of NaN
+          (6, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+           -('nan'::float), -('nan'::double), NULL, NULL,
            NULL, NULL, NULL, NULL, NULL, NULL)
         ) AS t(id, c_bool, c_tinyint, c_smallint, c_int, c_utinyint, c_usmallint,
                c_uint, c_float, c_double, c_varchar, c_varchar2, c_blob, c_date,
@@ -143,7 +156,7 @@ def test_binary_transmit_scalar_types(superuser_conn, duckdb_conn, tmp_path):
         """,
         path,
     )
-    assert len(rows) == 5
+    assert len(rows) == 6
 
 
 def test_binary_transmit_numeric(superuser_conn, duckdb_conn, tmp_path):
@@ -224,6 +237,8 @@ def test_binary_transmit_text_variants(superuser_conn, duckdb_conn, tmp_path):
         ("INTERVAL 1 DAY", "interval"),
         # a narrowing conversion is left to the int4 input function
         ("1000::bigint", "int4"),
+        # an unsigned type needs a strictly wider target
+        ("1::ubigint", "int8"),
         # widening a float to float8 differs from the text round trip
         ("1.1::float", "float8"),
         # a timestamp is interpreted in the session time zone
@@ -304,23 +319,69 @@ def test_binary_transmit_domain(superuser_conn, duckdb_conn, tmp_path):
     superuser_conn.rollback()
 
 
-def test_binary_transmit_out_of_range(superuser_conn, duckdb_conn, tmp_path):
-    """Values outside the PostgreSQL range fail in both formats."""
-    for value, column_type in [
-        ("'5874898-01-01'::date", "date"),
-        ("'-5000-01-01'::date", "date"),
-        ("'5000-01-01 (BC)'::timestamp", "timestamp"),
-    ]:
-        path = tmp_path / "out_of_range.parquet"
-        write_parquet(duckdb_conn, path, f"SELECT {value} AS v")
+@pytest.mark.parametrize(
+    "value, column_type, error, expect_binary",
+    [
+        (
+            "'5874898-01-01'::date",
+            "date",
+            psycopg2.errors.DatetimeFieldOverflow,
+            True,
+        ),
+        ("'-5000-01-01'::date", "date", psycopg2.errors.DatetimeFieldOverflow, True),
+        (
+            "'5000-01-01 (BC)'::timestamp",
+            "timestamp",
+            psycopg2.errors.DatetimeFieldOverflow,
+            True,
+        ),
+        (
+            "'abcd'::varchar",
+            "varchar(3)",
+            psycopg2.errors.StringDataRightTruncation,
+            True,
+        ),
+        # varchar length is in characters, not bytes
+        (
+            "'éééé'::varchar",
+            "varchar(3)",
+            psycopg2.errors.StringDataRightTruncation,
+            True,
+        ),
+        (
+            "100000000::decimal(18,0)",
+            "numeric(10,2)",
+            psycopg2.errors.NumericValueOutOfRange,
+            True,
+        ),
+        (
+            "18446744073709551615::ubigint",
+            "int8",
+            psycopg2.errors.NumericValueOutOfRange,
+            False,
+        ),
+    ],
+)
+def test_binary_transmit_value_errors(
+    superuser_conn, duckdb_conn, tmp_path, value, column_type, error, expect_binary
+):
+    """Values that do not fit the target type fail in both formats."""
+    path = tmp_path / "value_error.parquet"
+    write_parquet(duckdb_conn, path, f"SELECT {value} AS v")
 
-        for binary in [True, False]:
-            run_command(f"CREATE TEMP TABLE oor (v {column_type})", superuser_conn)
+    for binary in [True, False]:
+        run_command(f"CREATE TEMP TABLE value_error (v {column_type})", superuser_conn)
 
-            with pytest.raises(psycopg2.errors.DatetimeFieldOverflow):
-                copy_from_file(superuser_conn, "oor", path, binary)
+        with pytest.raises(error) as excinfo:
+            copy_from_file(superuser_conn, "value_error", path, binary)
 
-            superuser_conn.rollback()
+        used_binary = any(BINARY_NOTICE in notice for notice in superuser_conn.notices)
+        assert used_binary == (binary and expect_binary)
+
+        # binary errors cannot show the value, so they say how to see it
+        assert ("enable_binary_transmit" in str(excinfo.value)) == used_binary
+
+        superuser_conn.rollback()
 
 
 def test_binary_transmit_client_encoding(superuser_conn, duckdb_conn, tmp_path):
@@ -384,6 +445,113 @@ def test_binary_transmit_large(superuser_conn, duckdb_conn, tmp_path):
     rows = run_query("SELECT count(*) FROM big_binary", superuser_conn)
     assert rows[0][0] == 200000
     superuser_conn.rollback()
+
+
+def test_binary_transmit_large_values(superuser_conn, duckdb_conn, tmp_path):
+    """Single values that span multiple CopyData messages."""
+    path = tmp_path / "large_values.parquet"
+
+    write_parquet(
+        duckdb_conn,
+        path,
+        """
+        SELECT i AS id, repeat(chr((65 + i)::int), 200000 + i) AS s,
+               repeat('\\x01\\xfe'::blob, 100000 + i) AS b
+        FROM range(0, 3) r(i)
+        """,
+    )
+
+    rows = assert_same_load(
+        superuser_conn,
+        "CREATE TEMP TABLE {name} (id bigint, s text, b bytea)",
+        path,
+    )
+    assert len(rows) == 3
+
+
+def test_binary_transmit_random(superuser_conn, duckdb_conn, tmp_path):
+    """Random values and special constants of every type with a writer."""
+    path = tmp_path / "random.parquet"
+
+    # DuckDB requires a constant decimal scale, hence one column per scale
+    write_parquet(
+        duckdb_conn,
+        path,
+        """
+        SELECT
+          i AS id,
+          CASE WHEN i % 13 = 0 THEN NULL ELSE (random() < 0.5) END AS c_bool,
+          (i % 256 - 128)::tinyint AS c_i1,
+          (i * 65537)::uinteger AS c_u32,
+          CASE i % 9
+            WHEN 0 THEN 'nan'::float
+            WHEN 1 THEN 'inf'::float
+            WHEN 2 THEN '-inf'::float
+            WHEN 3 THEN '-0.0'::float
+            ELSE (random() * pow(10, (i % 30) - 15))::float
+          END AS c_f4,
+          CASE i % 8
+            WHEN 0 THEN 'nan'::double
+            WHEN 1 THEN 'inf'::double
+            WHEN 2 THEN '-inf'::double
+            ELSE random()::double
+          END AS c_f8,
+          CAST(((i % 2) * 2 - 1) * (10000 * (i % 1000) + (i % 9999))
+               AS DECIMAL(38,0)) AS c_n0,
+          CAST(((i % 2) * 2 - 1) * (pow(10, i % 18)::DECIMAL(38,0) * 10000 + i)
+               AS DECIMAL(38,0)) * 0.0001::DECIMAL(5,4) AS c_n4,
+          CAST(((i % 2) * 2 - 1) * (pow(10, i % 20)::DECIMAL(38,0) + i)
+               AS DECIMAL(38,18)) AS c_n18,
+          CASE i % 15
+            WHEN 0 THEN 'infinity'::date
+            WHEN 1 THEN '-infinity'::date
+            WHEN 2 THEN DATE '0001-01-01'
+            WHEN 3 THEN DATE '5874897-12-31'
+            ELSE DATE '1970-01-01' + (i % 40000)::int
+          END AS c_date,
+          CASE i % 11
+            WHEN 0 THEN 'infinity'::timestamp
+            WHEN 1 THEN '-infinity'::timestamp
+            ELSE TIMESTAMP '2000-01-01'
+                 + to_microseconds(i * 1000003)
+          END AS c_ts,
+          TIME '00:00:00' + to_microseconds((i % 86400) * 1000000 + i % 1000000)
+              AS c_time,
+          CASE i % 20
+            WHEN 0 THEN '00000000-0000-0000-0000-000000000000'::uuid
+            WHEN 1 THEN 'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid
+            ELSE uuid()
+          END AS c_uuid,
+          CASE i % 7
+            WHEN 0 THEN chr(0) || 'nul'
+            WHEN 1 THEN repeat('x', 12)
+            WHEN 2 THEN repeat('y', 13)
+            WHEN 3 THEN 'quotes " and, commas' || chr(10)
+            WHEN 4 THEN 'ünïcødé ✓ 日本'
+            ELSE repeat(chr((32 + i % 90)::int), i % 80)
+          END AS c_text,
+          '{"k":' || i || ',"a":[1,null,{"b":"' || i || '"}]}' AS c_json,
+          repeat('\\x00'::blob, i % 20) || '\\xff'::blob AS c_blob
+        FROM range(5000) t(i)
+        """,
+    )
+
+    # numeric(24,2) and timestamp(3) round in both paths, 12 vs 13 byte
+    # strings are DuckDB's inlined vs pointer strings
+    rows = assert_same_load(
+        superuser_conn,
+        """
+        CREATE TEMP TABLE {name} (
+          id bigint, c_bool bool, c_i1 int2, c_u32 int8,
+          c_f4 float4, c_f8 float8,
+          c_n0 numeric, c_n4 numeric(24,2), c_n18 numeric(38,18),
+          c_date date, c_ts timestamp(3), c_time time,
+          c_uuid uuid, c_text text, c_json jsonb, c_blob bytea
+        )
+        """,
+        path,
+    )
+    assert len(rows) == 5000
 
 
 def test_binary_transmit_iceberg_source(superuser_conn, iceberg_catalog):

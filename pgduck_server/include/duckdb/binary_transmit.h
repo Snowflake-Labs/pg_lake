@@ -22,6 +22,8 @@
 #include "c.h"
 #include "lib/stringinfo.h"
 
+#include "duckdb/duckdb.h"
+
 /*
  * BinaryWriterKind describes how a DuckDB result column is serialized into
  * the binary send format of a PostgreSQL target type for TRANSMIT BINARY.
@@ -62,8 +64,8 @@ extern bool binary_transmit_choose_writer(duckdb_logical_type logicalType,
 										  BinaryColumnWriter * writer);
 extern void binary_transmit_append_header(StringInfo buf);
 extern void binary_transmit_append_trailer(StringInfo buf);
-extern void binary_transmit_append_value(StringInfo buf,
-										 BinaryColumnWriter * writer,
-										 void *data, idx_t row);
+extern DuckDBStatus binary_transmit_append_value(StringInfo buf,
+												 BinaryColumnWriter * writer,
+												 void *data, idx_t row);
 
 #endif

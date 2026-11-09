@@ -1765,7 +1765,15 @@ choose_binary_writers(duckdb_result * duckResult, DuckDBResultColumn * resultCol
 		duckdb_destroy_logical_type(&logicalType);
 
 		if (!canWriteBinary)
+		{
+			/* the client only sees that we fell back, so say why */
+			PGDUCK_SERVER_DEBUG("using CSV transmit format because column \"%s\" of "
+								"DuckDB type %d cannot be sent as PostgreSQL type %u",
+								duckdb_column_name(duckResult, columnIndex),
+								duckdb_column_type(duckResult, columnIndex),
+								responseFormat->targetTypeIds[columnIndex]);
 			return false;
+		}
 	}
 
 	return true;
@@ -1810,6 +1818,12 @@ process_data_chunk_binary(duckdb_data_chunk chunk, StringInfoData *buf,
 			pq_beginmessage_reuse(buf, 'd');
 		}
 
+		if (!StringInfoHasRoomFor(buf, sizeof(int16)))
+		{
+			status = result_row_too_large();
+			goto done;
+		}
+
 		/* tuple field count */
 		pq_sendint16(buf, (uint16) columnCount);
 
@@ -1819,13 +1833,22 @@ process_data_chunk_binary(duckdb_data_chunk chunk, StringInfoData *buf,
 
 			if (validity != NULL && !duckdb_validity_row_is_valid(validity, rowInChunk))
 			{
+				if (!StringInfoHasRoomFor(buf, sizeof(int32)))
+				{
+					status = result_row_too_large();
+					goto done;
+				}
+
 				/* -1 length indicates NULL */
 				pq_sendint32(buf, (uint32) -1);
 				continue;
 			}
 
-			binary_transmit_append_value(buf, &resultColumns[columnIndex].binaryWriter,
-										 columnData[columnIndex], rowInChunk);
+			status = binary_transmit_append_value(buf,
+												  &resultColumns[columnIndex].binaryWriter,
+												  columnData[columnIndex], rowInChunk);
+			if (status != DUCKDB_SUCCESS)
+				goto done;
 		}
 	}
 

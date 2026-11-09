@@ -148,6 +148,7 @@ static bool ReceiveCopyData(PGDuckConnection * pgDuckConn, StringInfo buffer);
 static bool CanUseBinaryTransmit(void);
 static List *TransmitFormatOptions(bool isBinaryTransmit);
 static char *AddBinaryTransmitTypes(char *transmitQuery, TupleDesc tupleDesc);
+static void BinaryTransmitErrorCallback(void *arg);
 
 PG_FUNCTION_INFO_V1(pg_lake_last_copy_pushed_down_test);
 
@@ -176,6 +177,13 @@ const struct config_enum_entry json_copy_mode_options[] = {
  */
 static PGDuckConnection * CurrentCopyFromConnection = NULL;
 static StringInfoData CopyFromBuffer;
+
+/*
+ * Whether the current COPY receives binary data, and whether the last
+ * CopyData message was the binary trailer.
+ */
+static bool CopyFromIsBinaryTransmit = false;
+static bool CopyFromTrailerReceived = false;
 
 
 /*
@@ -713,6 +721,8 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 * might trigger a reconnect, causing lots of confusion.
 	 */
 	CurrentCopyFromConnection = pgDuckConn;
+	CopyFromIsBinaryTransmit = isBinaryTransmit;
+	CopyFromTrailerReceived = false;
 
 	/*
 	 * Some compilers get confused by using writeOptions after PG_TRY, even
@@ -730,6 +740,14 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	 */
 	PG_TRY();
 	{
+		ErrorContextCallback errorCallback = {
+			.callback = BinaryTransmitErrorCallback,
+			.previous = error_context_stack
+		};
+
+		if (isBinaryTransmit)
+			error_context_stack = &errorCallback;
+
 		CopyFromState cstate = BeginCopyFrom(pstate, relation, whereClause,
 											 NULL, copyStmt->is_program,
 											 CopyReceivedTransmitDataToBuffer,
@@ -738,6 +756,9 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 
 		*rowsProcessed = CopyFrom(cstate);
 		EndCopyFrom(cstate);
+
+		if (isBinaryTransmit)
+			error_context_stack = errorCallback.previous;
 	}
 	PG_FINALLY();
 	{
@@ -1698,9 +1719,22 @@ CopyReceivedTransmitDataToBuffer(void *outbuf, int minread, int maxread)
 
 		if (!ReceiveCopyData(CurrentCopyFromConnection, &CopyFromBuffer))
 		{
+			/*
+			 * Binary COPY treats EOF without a trailer as a normal end, so
+			 * check it ourselves to never silently lose rows.
+			 */
+			if (CopyFromIsBinaryTransmit && !CopyFromTrailerReceived)
+				ereport(ERROR,
+						(errcode(ERRCODE_CONNECTION_FAILURE),
+						 errmsg("binary COPY data from pgduck_server ended without a trailer")));
+
 			/* no more tuples */
 			return 0;
 		}
+
+		/* pgduck_server sends the trailer as a separate message */
+		CopyFromTrailerReceived = CopyFromBuffer.len == sizeof(int16) &&
+			memcmp(CopyFromBuffer.data, "\377\377", sizeof(int16)) == 0;
 
 		/* count how many bytes we have available */
 		bytesInBuffer = CopyFromBuffer.len - CopyFromBuffer.cursor;
@@ -1782,6 +1816,22 @@ CanUseBinaryTransmit(void)
 	 * convert from the client encoding, so we require both to be UTF-8.
 	 */
 	return GetDatabaseEncoding() == PG_UTF8 && pg_get_client_encoding() == PG_UTF8;
+}
+
+
+/*
+ * BinaryTransmitErrorCallback explains why a data error does not show the
+ * input value, since binary COPY has no text form of the value to report.
+ */
+static void
+BinaryTransmitErrorCallback(void *arg)
+{
+	int			category = ERRCODE_TO_CATEGORY(geterrcode());
+
+	if (category == ERRCODE_DATA_EXCEPTION ||
+		category == ERRCODE_INTEGRITY_CONSTRAINT_VIOLATION)
+		errcontext("rows were received in binary format, set "
+				   "pg_lake_copy.enable_binary_transmit to off to see the input value");
 }
 
 
