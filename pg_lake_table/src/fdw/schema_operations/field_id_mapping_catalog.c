@@ -1234,7 +1234,8 @@ GetAllRegisteredAttnumsForTopLevelColumns(Oid relationId)
 	/* switch to schema owner */
 	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
-	bool		readOnly = false;
+	/* see GetRegisteredFieldForAttributes */
+	bool		readOnly = IsInParallelMode();
 
 	SPI_EXECUTE(query->data, readOnly);
 
