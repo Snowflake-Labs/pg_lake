@@ -375,7 +375,7 @@ def test_partition_field_name_length_limit(
         table.append(arrow_data)
         return table
 
-    maximum_length_name = "p" * 99
+    maximum_length_name = "p" * 511
     valid_table = create_partitioned_table(
         "valid_partition_field_name_length", maximum_length_name
     )
@@ -388,13 +388,13 @@ def test_partition_field_name_length_limit(
     )
     assert valid_fields == [[maximum_length_name]]
 
-    too_long_name = "p" * 100
+    too_long_name = "p" * 512
     invalid_table = create_partitioned_table(
         "invalid_partition_field_name_length", too_long_name
     )
     with pytest.raises(
         psycopg2.InternalError,
-        match="Partition field name length must be between 1 and 99, got 100",
+        match="Partition field name length must be between 1 and 511, got 512",
     ):
         run_query(
             f"""

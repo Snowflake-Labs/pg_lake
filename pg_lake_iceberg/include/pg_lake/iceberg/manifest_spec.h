@@ -245,3 +245,4 @@ extern PGDLLEXPORT List *ReadManifestEntries(const char *manifestPath);
 extern PGDLLEXPORT void WriteIcebergManifestList(const char *manifestListPath, List *manifests);
 extern PGDLLEXPORT void WriteIcebergManifest(const char *manifestPath, List *manifestEntries,
 											 List *metadataEntries);
+extern PGDLLEXPORT char *MakeAvroCompatibleName(const char *name);

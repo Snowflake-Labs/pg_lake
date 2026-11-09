@@ -39,8 +39,12 @@
 #include "pg_extension_base/spi_helpers.h"
 
 
-/* 63 is the identifier length limit in Postgres. */
-#define	PARTITION_FIELD_NAME_MAX_LENGTH 100
+/*
+ * 63 is the identifier length limit in Postgres. A partition field name in a
+ * manifest also has the transform suffix, and can be four times as long after
+ * escaping for Avro.
+ */
+#define	PARTITION_FIELD_NAME_MAX_LENGTH 512
 
 /*
  * PartitionFieldIdMapEntry represents a mapping between a partition field name
