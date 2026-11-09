@@ -305,6 +305,12 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"abs", 'f', 1, {"float4"}, NULL},
 	{"abs", 'f', 1, {"float8"}, NULL},
 	{"abs", 'f', 1, {"numeric"}, NULL},
+
+	/*
+	 * sign(numeric) omitted: Postgres returns numeric NaN for NaN input,
+	 * which needs separate semantic validation.
+	 */
+	{"sign", 'f', 1, {"float8"}, NULL},
 	{"cbrt", 'f', 1, {"float8"}, NULL},
 	{"ceil", 'f', 1, {"float8"}, NULL},
 	{"ceil", 'f', 1, {"numeric"}, NULL},
@@ -454,6 +460,7 @@ static const PGDuckShippableFunction ShippableBuiltinProcs[] =
 	{"ltrim", 'f', 1, {"text"}, NULL},
 	{"ltrim", 'f', 2, {"text", "text"}, NULL},
 	{"md5", 'f', 1, {"text"}, NULL},
+	{"md5", 'f', 1, {"bytea"}, NULL},
 	{"position", 'f', 2, {"text", "text"}, NULL},
 	{"regexp_like", 'f', 2, {"text", "text"}, NULL},
 	{"regexp_like", 'f', 3, {"text", "text", "text"}, NULL},

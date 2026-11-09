@@ -207,6 +207,12 @@ test_agg_cases = [
         '"atanh_pg"(',
         True,
     ),
+    (
+        "sign(double precision)",
+        "WHERE sign(col_double) >= 0",
+        '"sign"(',
+        True,
+    ),
 ]
 
 
@@ -380,6 +386,68 @@ def test_hyperbolic_functions_specific_values(
         f"(SELECT {func}(col_val) FROM hyperbolic_vals.fdw_tbl) fdw",
         f"(SELECT {func}(col_val) FROM hyperbolic_vals.heap_tbl) heap",
     )
+
+
+def test_sign_float8_pushdown(create_hyperbolic_values_table, pg_conn):
+    """Push down sign(float8) and match Postgres on IEEE specials.
+
+    Covers positive/negative finite values, +/-0, NULL, +/-infinity, and NaN
+    (both engines return 0 for NaN). Also checks an FDW predicate with full
+    query pushdown off.
+    """
+    select_query = "SELECT sign(col_val)::text AS sign_val FROM {table}"
+    pushed_query = select_query.format(table="hyperbolic_vals.fdw_tbl")
+    assert_query_pushdownable(pushed_query, pg_conn)
+    assert_remote_query_contains_expression(pushed_query, '"sign"(', pg_conn)
+
+    # Compare the pushed query's own rows with Postgres. Wrapping both sides in
+    # EXCEPT ALL would run sign() in Postgres on the foreign table side.
+    pushed_rows = run_query(pushed_query, pg_conn)
+    heap_rows = run_query(
+        select_query.format(table="hyperbolic_vals.heap_tbl"), pg_conn
+    )
+    sort_key = lambda value: (value is None, value or "")
+    assert sorted((row["sign_val"] for row in pushed_rows), key=sort_key) == sorted(
+        (row["sign_val"] for row in heap_rows), key=sort_key
+    )
+
+    # Same check without the text cast: DuckDB returns an integer here and the
+    # value must come back as double precision. sign() never returns NaN.
+    plain_query = "SELECT sign(col_val) AS sign_val FROM {table}"
+    plain_pushed = run_query(
+        plain_query.format(table="hyperbolic_vals.fdw_tbl"), pg_conn
+    )
+    plain_heap = run_query(
+        plain_query.format(table="hyperbolic_vals.heap_tbl"), pg_conn
+    )
+    float_key = lambda value: (value is None, value or 0.0)
+    assert all(
+        isinstance(row["sign_val"], float) or row["sign_val"] is None
+        for row in plain_pushed
+    )
+    assert sorted((row["sign_val"] for row in plain_pushed), key=float_key) == sorted(
+        (row["sign_val"] for row in plain_heap), key=float_key
+    )
+
+    run_command(
+        "SET pg_lake_table.enable_full_query_pushdown TO false;",
+        pg_conn,
+    )
+    try:
+        predicate_query = (
+            "SELECT col_val FROM hyperbolic_vals.fdw_tbl WHERE sign(col_val) = 1"
+        )
+        assert_query_not_pushdownable(predicate_query, pg_conn)
+        assert_remote_query_contains_expression(predicate_query, '"sign"(', pg_conn)
+        assert_table_contents_match(
+            pg_conn,
+            "(SELECT col_val FROM hyperbolic_vals.fdw_tbl "
+            "WHERE sign(col_val) = 1) fdw",
+            "(SELECT col_val FROM hyperbolic_vals.heap_tbl "
+            "WHERE sign(col_val) = 1) heap",
+        )
+    finally:
+        run_command("RESET pg_lake_table.enable_full_query_pushdown;", pg_conn)
 
 
 @pytest.fixture(scope="module")
