@@ -12,14 +12,18 @@ ONE_GB = 1024 * 1024 * 1024
 HALF_GB_PLUS = 600 * 1000 * 1000
 
 
-def _assert_query_fails(query, transmit=False):
+def _assert_query_fails(query, transmit=False, binary_types=None):
     conn = psycopg2.connect(
         host=server_params.PGDUCK_UNIX_DOMAIN_PATH, port=server_params.PGDUCK_PORT
     )
     try:
         cur = conn.cursor()
         with pytest.raises(psycopg2.Error):
-            if transmit:
+            if binary_types is not None:
+                cur.copy_expert(
+                    f"transmit binary ({binary_types}) " + query, io.BytesIO()
+                )
+            elif transmit:
                 cur.copy_expert("transmit " + query, io.StringIO())
             else:
                 cur.execute(query)
@@ -51,6 +55,19 @@ def test_large_result_value(pgduck_server, query):
 def test_large_result_value_transmit(pgduck_server):
     # CSV escaping doubles the size of every quote
     _assert_query_fails(f"SELECT repeat('\"', {HALF_GB_PLUS})", transmit=True)
+
+
+@pytest.mark.parametrize(
+    "query, binary_types",
+    [
+        # 25 is text, 17 is bytea
+        (f"SELECT repeat('a', {ONE_GB})", "25"),
+        (f"SELECT repeat('a'::blob, {ONE_GB})", "17"),
+        (f"SELECT repeat('a', {HALF_GB_PLUS}), repeat('b', {HALF_GB_PLUS})", "25,25"),
+    ],
+)
+def test_large_result_value_transmit_binary(pgduck_server, query, binary_types):
+    _assert_query_fails(query, binary_types=binary_types)
 
 
 # Largest value the per-value check admits in a DataRow (2-byte column count,
