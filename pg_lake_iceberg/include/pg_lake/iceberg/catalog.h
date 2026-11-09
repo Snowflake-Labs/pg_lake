@@ -67,6 +67,14 @@ extern PGDLLEXPORT char *GetIcebergCatalogPreviousMetadataLocation(Oid relationI
 extern PGDLLEXPORT void UpdateExternalCatalogMetadataLocation(char *catalogName, char *schemaName, char *tableName, const char *metadataLocation,
 															  const char *previousMetadataLocation);
 extern PGDLLEXPORT void UpdateInternalCatalogMetadataLocation(Oid relationId, const char *metadataLocation, const char *previousMetadataLocation);
+
+/*
+ * Called after an external client points an internal table at new metadata
+ * through the iceberg_tables view. Set by pg_lake_table at _PG_init time to
+ * sync its catalog from the new metadata.
+ */
+typedef void (*IcebergExternalWriteCallback) (Oid relationId, const char *metadataLocation);
+extern PGDLLEXPORT IcebergExternalWriteCallback PgLake_IcebergExternalWriteCallback;
 extern PGDLLEXPORT void UpdateAllInternalIcebergTablesToReadOnly(void);
 extern PGDLLEXPORT char *GetIcebergDefaultLocationPrefix(void);
 extern PGDLLEXPORT bool IcebergTablesCatalogExists(void);
