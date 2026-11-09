@@ -30,6 +30,7 @@
 #include "utils/json.h"
 #include "utils/jsonb.h"
 #include "utils/builtins.h"
+#include "utils/hsearch.h"
 
 static void AppendProperties(StringInfo command, Property * properties, size_t properties_length);
 static void AppendField(StringInfo command, Field * field);
@@ -346,6 +347,19 @@ AppendIcebergPartitionSpecs(StringInfo command, IcebergPartitionSpec * specs, si
 static void
 AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t snapshots_length)
 {
+	HASHCTL		hashCtl;
+
+	memset(&hashCtl, 0, sizeof(hashCtl));
+	hashCtl.keysize = sizeof(int64_t);
+	hashCtl.entrysize = sizeof(int64_t);
+	hashCtl.hcxt = CurrentMemoryContext;
+
+	HTAB	   *snapshotIds = hash_create("snapshot ids", 32, &hashCtl,
+										  HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+	for (size_t i = 0; i < snapshots_length; i++)
+		hash_search(snapshotIds, &snapshots[i].snapshot_id, HASH_ENTER, NULL);
+
 	appendStringInfoString(command, "[");
 
 	for (size_t i = 0; i < snapshots_length; i++)
@@ -355,8 +369,12 @@ AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t s
 		/* Append snapshot_id */
 		appendJsonInt64(command, "snapshot-id", snapshots[i].snapshot_id);
 
-		/* Append parent_snapshot_id */
-		if (snapshots[i].parent_snapshot_id != 0)
+		/*
+		 * Only write a parent that is among the snapshots, since readers may
+		 * look it up. Expiry can remove the parent of a kept snapshot, and a
+		 * table's first snapshot has -1 as its parent.
+		 */
+		if (hash_search(snapshotIds, &snapshots[i].parent_snapshot_id, HASH_FIND, NULL) != NULL)
 		{
 			appendStringInfoString(command, ", ");
 			appendJsonInt64(command, "parent-snapshot-id", snapshots[i].parent_snapshot_id);
