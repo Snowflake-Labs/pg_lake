@@ -25,6 +25,7 @@ def create_md5_pushdown_tables(pg_conn, s3, extension):
             UNION ALL SELECT '\\x00'::bytea, 'has-zero-byte'::text
             UNION ALL SELECT '\\xff'::bytea, 'ff'::text
             UNION ALL SELECT '\\x0001ff'::bytea, '0001ff'::text
+            UNION ALL SELECT decode(repeat('ff', 65536), 'hex'), 'large-ff'::text
         ) TO '{url}' WITH (FORMAT 'parquet');
 
         CREATE SCHEMA md5_pushdown;

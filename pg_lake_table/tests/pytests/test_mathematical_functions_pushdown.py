@@ -337,6 +337,8 @@ def create_hyperbolic_values_table(pg_conn, s3, extension):
             UNION ALL SELECT 'infinity'::double precision
             UNION ALL SELECT '-infinity'::double precision
             UNION ALL SELECT 'nan'::double precision
+            UNION ALL SELECT '1e-320'::double precision
+            UNION ALL SELECT '-1e-320'::double precision
         ) TO '{url}' WITH (FORMAT 'parquet');
         """,
         pg_conn,
