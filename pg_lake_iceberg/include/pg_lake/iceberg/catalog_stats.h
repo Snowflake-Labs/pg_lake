@@ -21,7 +21,9 @@
  *
  * Like the catalog log lines, they carry no names: only the kind of catalog
  * (horizon, builtin or user), the request, and fixed words for the outcome.
- * Counting never throws, so it is safe after commit.
+ * Counting a request, retry, authentication failure or vended credential
+ * never throws, so it is safe after commit.  Table scans are counted when a
+ * scan starts, by looking up the table's catalog.
  */
 #pragma once
 

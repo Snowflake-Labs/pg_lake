@@ -1358,30 +1358,36 @@ def test_rest_catalog_read_only_scans_are_counted(
     authorization = polaris_session.headers["Authorization"]
 
     run_command(_TEST_AUTH_PROVIDER_FNS, superuser_conn)
-    run_command(
-        f"SELECT set_test_rest_catalog_auth_response('{authorization}', 3600, true)",
-        superuser_conn,
-    )
-    run_command("SELECT set_test_rest_catalog_auth_provider(true)", superuser_conn)
-    run_command(
-        "SET pg_lake_iceberg.rest_catalog_auth_type TO 'horizon'", superuser_conn
-    )
-
-    result = run_query(
-        f"""SELECT count(*) FROM "{namespace}".scanned""", superuser_conn
-    )
-    assert result == [[2]]
-    assert _table_scans(superuser_conn, "horizon") == horizon_scans + 1
-    assert _table_scans(superuser_conn) == scans + 4
-
-    run_command("RESET pg_lake_iceberg.rest_catalog_auth_type", superuser_conn)
-    run_command("SELECT set_test_rest_catalog_auth_provider(false)", superuser_conn)
-    run_command(
-        """DROP FUNCTION set_test_rest_catalog_auth_provider(BOOL);
-           DROP FUNCTION set_test_rest_catalog_auth_response(TEXT, INT, BOOL)""",
-        superuser_conn,
-    )
     superuser_conn.commit()
+
+    # superuser_conn serves the rest of the module, so it must not be left
+    # authenticating through the provider
+    try:
+        run_command(
+            f"SELECT set_test_rest_catalog_auth_response('{authorization}', 3600, true)",
+            superuser_conn,
+        )
+        run_command("SELECT set_test_rest_catalog_auth_provider(true)", superuser_conn)
+        run_command(
+            "SET pg_lake_iceberg.rest_catalog_auth_type TO 'horizon'", superuser_conn
+        )
+
+        result = run_query(
+            f"""SELECT count(*) FROM "{namespace}".scanned""", superuser_conn
+        )
+        assert result == [[2]]
+        assert _table_scans(superuser_conn, "horizon") == horizon_scans + 1
+        assert _table_scans(superuser_conn) == scans + 4
+    finally:
+        superuser_conn.rollback()
+        run_command("RESET pg_lake_iceberg.rest_catalog_auth_type", superuser_conn)
+        run_command("SELECT set_test_rest_catalog_auth_provider(false)", superuser_conn)
+        run_command(
+            """DROP FUNCTION set_test_rest_catalog_auth_provider(BOOL);
+               DROP FUNCTION set_test_rest_catalog_auth_response(TEXT, INT, BOOL)""",
+            superuser_conn,
+        )
+        superuser_conn.commit()
 
     run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
     pg_conn.commit()

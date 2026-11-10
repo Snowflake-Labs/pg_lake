@@ -606,8 +606,7 @@ SELECT * FROM lake_iceberg.catalog_stats();
 ```
 
 Like the [catalog error log](#catalog-error-log), the counters name no catalog, namespace or
-table. Table scans can outnumber table loads, because pg_lake asks the catalog for a table at
-most once per statement, or once per transaction under `REPEATABLE READ` and `SERIALIZABLE`. `catalog` is `horizon` for the built-in `rest` catalog when
+table. `catalog` is `horizon` for the built-in `rest` catalog when
 `pg_lake_iceberg.rest_catalog_auth_type` is `horizon`, `builtin` for the built-in `rest`
 catalog with any other authentication, and `user` for catalogs defined with
 [CREATE SERVER](#external-catalogs-with-create-server). The metrics are:
@@ -624,7 +623,9 @@ catalog with any other authentication, and `user` for catalogs defined with
   credentials, by `result`: `vended` (at least one credential pg_lake can use), `unusable`
   (only credentials pg_lake cannot use) or `none`.
 - `table_scans`: scans of read-only tables from a REST catalog that queries ran, one for each
-  time a query reads a table. `EXPLAIN` without `ANALYZE` is not counted.
+  time a query reads a table. `EXPLAIN` without `ANALYZE` is not counted. Scans can outnumber
+  `load_table` requests, because pg_lake asks the catalog for a table at most once per
+  statement, or once per transaction under `REPEATABLE READ` and `SERIALIZABLE`.
 
 `operation` is one of `config`, `token`, `list_namespaces`, `get_namespace`,
 `create_namespace`, `load_table`, `create_table`, `publish_create_table`,
