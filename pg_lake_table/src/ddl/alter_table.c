@@ -1635,6 +1635,8 @@ HandleIcebergOptionsChanges(Oid relationId, AlterTableStmt *alterStmt)
 		List	   *newOptions = (List *) subcommand->def;
 		ListCell   *optionCell = NULL;
 
+		ErrorIfInvalidBloomFilterColumnOptions(relationId, newOptions);
+
 		bool		newHasRowIds = currentlyHasRowIds;
 		bool		foundRowIdsOption = false;
 
