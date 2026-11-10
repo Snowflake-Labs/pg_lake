@@ -69,6 +69,7 @@ _RESULTS = {
     "retries": {"rate_limited", "unavailable", "auth_refresh"},
     "auth_failures": {None},
     "vended_credentials": {"vended", "none", "unusable"},
+    "table_scans": {None},
 }
 
 
@@ -470,7 +471,7 @@ def test_stats_use_a_fixed_vocabulary(installcheck, catalog_and_conn):
         assert metric in _RESULTS, metric
         assert result in _RESULTS[metric], (metric, result)
         assert catalog in {"horizon", "builtin", "user"}, catalog
-        if metric in ("auth_failures", "vended_credentials"):
+        if metric in ("auth_failures", "vended_credentials", "table_scans"):
             assert operation is None
         else:
             assert operation in _OPERATIONS, operation

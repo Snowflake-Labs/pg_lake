@@ -22,6 +22,8 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "foreign/foreign.h"
+#include "nodes/parsenodes.h"
 #include "port/atomics.h"
 #include "storage/ipc.h"
 #include "storage/lwlock.h"
@@ -30,6 +32,8 @@
 #include "utils/tuplestore.h"
 
 #include "pg_lake/iceberg/catalog_stats.h"
+#include "pg_lake/parsetree/options.h"
+#include "pg_lake/util/catalog_type.h"
 
 #define CATALOG_STATS_SHMEM_NAME "pg_lake_iceberg catalog stats"
 
@@ -62,6 +66,7 @@ typedef struct CatalogStatsData
 	pg_atomic_uint64 retries[CATALOG_STATS_CATALOG_COUNT][REST_CATALOG_OP_COUNT][CATALOG_RETRY_REASON_COUNT];
 	pg_atomic_uint64 authFailures[CATALOG_STATS_CATALOG_COUNT];
 	pg_atomic_uint64 vendedCredentials[CATALOG_STATS_CATALOG_COUNT][VENDED_CREDENTIALS_OUTCOME_COUNT];
+	pg_atomic_uint64 tableScans[CATALOG_STATS_CATALOG_COUNT];
 }			CatalogStatsData;
 
 StaticAssertDecl(sizeof(CatalogStatsData) % sizeof(pg_atomic_uint64) == 0,
@@ -126,6 +131,7 @@ static CatalogStatsData * CatalogStats = NULL;
 
 static void InitCatalogStatsCounters(void);
 static CatalogStatsCatalog CatalogKind(const RestCatalogOptions * opts);
+static CatalogStatsCatalog RelationCatalogKind(Oid relationId);
 static void AddCatalogStatsRow(ReturnSetInfo *rsinfo, const char *metric,
 							   CatalogStatsCatalog catalog, const char *operation,
 							   const char *result, pg_atomic_uint64 *counter);
@@ -315,6 +321,65 @@ CountVendedCredentials(const RestCatalogOptions * opts,
 
 
 /*
+ * CountCatalogTableScans counts a scan of each read-only REST catalog table
+ * in rteList, a list of RangeTblEntry.  Callers count only scans that are
+ * executed, not those of a plain EXPLAIN.
+ */
+void
+CountCatalogTableScans(List *rteList)
+{
+	ListCell   *rteCell = NULL;
+
+	if (CatalogStats == NULL)
+		return;
+
+	foreach(rteCell, rteList)
+	{
+		RangeTblEntry *rte = lfirst(rteCell);
+
+		if (GetIcebergCatalogType(rte->relid) != REST_CATALOG_READ_ONLY)
+			continue;
+
+		pg_atomic_fetch_add_u64(&CatalogStats->tableScans[RelationCatalogKind(rte->relid)], 1);
+	}
+}
+
+
+/*
+ * RelationCatalogKind is CatalogKind for the catalog of a REST catalog
+ * table, worked out from the catalog's server alone.  Resolving the full
+ * options validates the user mapping and can throw, and the scan being
+ * counted may not need them at all once the catalog's answer is held.
+ *
+ * As in option resolution, a rest_auth_type on the built-in server
+ * overrides pg_lake_iceberg.rest_catalog_auth_type.
+ */
+static CatalogStatsCatalog
+RelationCatalogKind(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *catalog = GetStringOption(foreignTable->options, "catalog", false);
+	const char *serverName = ResolveCatalogServerName(catalog);
+
+	if (!IsBuiltinCatalogServerName(serverName))
+		return CATALOG_STATS_USER;
+
+	bool		horizon = RestCatalogAuthType == REST_CATALOG_AUTH_TYPE_HORIZON;
+	ForeignServer *server = GetForeignServerByName(serverName, true);
+
+	if (server != NULL)
+	{
+		char	   *authType = GetStringOption(server->options, "rest_auth_type", false);
+
+		if (authType != NULL)
+			horizon = pg_strcasecmp(authType, "horizon") == 0;
+	}
+
+	return horizon ? CATALOG_STATS_HORIZON : CATALOG_STATS_BUILTIN;
+}
+
+
+/*
  * pg_lake_catalog_stats returns every counter that is not zero, one row
  * each.  The counters cover the whole server since it started.
  */
@@ -354,6 +419,9 @@ pg_lake_catalog_stats(PG_FUNCTION_ARGS)
 			AddCatalogStatsRow(rsinfo, "vended_credentials", catalog, NULL,
 							   VendedOutcomeNames[outcome],
 							   &CatalogStats->vendedCredentials[catalog][outcome]);
+
+		AddCatalogStatsRow(rsinfo, "table_scans", catalog, NULL, NULL,
+						   &CatalogStats->tableScans[catalog]);
 	}
 
 	PG_RETURN_VOID();

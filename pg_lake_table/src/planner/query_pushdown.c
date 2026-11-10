@@ -38,6 +38,7 @@
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/planner/explain.h"
 #include "pg_lake/planner/pushdown_utils.h"
@@ -1542,13 +1543,17 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 		CreatePgLakeScanSnapshot(rteList, relationRestrictionsList, paramListInfo,
 								 includeChildren, InvalidOid);
 
+	bool		explainRequested = eflags & EXEC_FLAG_EXPLAIN_ONLY;
+
+	if (!explainRequested)
+		CountCatalogTableScans(rteList);
+
 	/*
 	 * Deparse the query and replace read_table('table_name') with the
 	 * appropriate file scan functions.
 	 */
 	char	   *pgDuckSQLTemplate = PreparePGDuckSQLTemplate(scanQuery);
 
-	bool		explainRequested = eflags & EXEC_FLAG_EXPLAIN_ONLY;
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);

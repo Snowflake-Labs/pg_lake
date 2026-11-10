@@ -1265,6 +1265,130 @@ def test_rest_catalog_read_only_gzip_metadata(
     rest_catalog.drop_namespace(namespace)
 
 
+def _table_scans(superuser_conn, catalog="builtin"):
+    result = run_query(
+        f"""SELECT coalesce(sum(value), 0) FROM lake_iceberg.catalog_stats()
+            WHERE metric = 'table_scans' AND catalog = '{catalog}'""",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    return result[0][0]
+
+
+_TEST_AUTH_PROVIDER_FNS = """
+CREATE OR REPLACE FUNCTION set_test_rest_catalog_auth_provider(BOOL)
+RETURNS void LANGUAGE C VOLATILE STRICT
+AS 'pg_lake_iceberg', 'set_test_rest_catalog_auth_provider';
+
+CREATE OR REPLACE FUNCTION set_test_rest_catalog_auth_response(TEXT, INT, BOOL)
+RETURNS void LANGUAGE C VOLATILE STRICT
+AS 'pg_lake_iceberg', 'set_test_rest_catalog_auth_response';
+"""
+
+
+def test_rest_catalog_read_only_scans_are_counted(
+    pg_conn,
+    superuser_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """
+    Each executed scan of a read-only table counts in
+    lake_iceberg.catalog_stats(), whether the query is pushed down or not.
+    A plain EXPLAIN does not, and neither does a table pg_lake manages.
+    With horizon authentication the built-in catalog counts as horizon.
+    """
+    if installcheck:
+        return
+
+    namespace = "test_scan_stats"
+    table_name = "scanned"
+    rest_catalog = create_iceberg_rest_catalog(namespace)
+
+    iceberg_table = rest_catalog.create_table(
+        identifier=f"{namespace}.{table_name}",
+        schema=Schema(NestedField(1, "id", LongType(), required=False)),
+    )
+    iceberg_table.append(pyarrow.Table.from_pylist([{"id": 1}, {"id": 2}]))
+
+    run_command(f"""CREATE SCHEMA "{namespace}" """, pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE "{namespace}".scanned ()
+        USING iceberg
+        WITH (catalog='rest', read_only=True, catalog_table_name='{table_name}')
+        """,
+        pg_conn,
+    )
+    run_command(
+        f"""CREATE TABLE "{namespace}".managed (id bigint) USING iceberg""", pg_conn
+    )
+    run_command(f"""INSERT INTO "{namespace}".managed VALUES (1)""", pg_conn)
+    pg_conn.commit()
+
+    scans = _table_scans(superuser_conn)
+
+    result = run_query(f"""SELECT count(*) FROM "{namespace}".scanned""", pg_conn)
+    assert result == [[2]]
+    assert _table_scans(superuser_conn) == scans + 1
+
+    run_query(
+        f"""SELECT * FROM "{namespace}".scanned a
+            JOIN "{namespace}".scanned b USING (id)""",
+        pg_conn,
+    )
+    assert _table_scans(superuser_conn) == scans + 3
+
+    run_command("SET pg_lake_table.enable_full_query_pushdown TO off", pg_conn)
+    run_query(f"""SELECT id FROM "{namespace}".scanned""", pg_conn)
+    run_command("RESET pg_lake_table.enable_full_query_pushdown", pg_conn)
+    assert _table_scans(superuser_conn) == scans + 4
+
+    run_query(f"""EXPLAIN SELECT count(*) FROM "{namespace}".scanned""", pg_conn)
+    run_query(f"""SELECT count(*) FROM "{namespace}".managed""", pg_conn)
+    assert _table_scans(superuser_conn) == scans + 4
+    pg_conn.commit()
+
+    # the credential provider is per backend, and only a superuser can
+    # create the functions that set it up
+    horizon_scans = _table_scans(superuser_conn, "horizon")
+    authorization = polaris_session.headers["Authorization"]
+
+    run_command(_TEST_AUTH_PROVIDER_FNS, superuser_conn)
+    run_command(
+        f"SELECT set_test_rest_catalog_auth_response('{authorization}', 3600, true)",
+        superuser_conn,
+    )
+    run_command("SELECT set_test_rest_catalog_auth_provider(true)", superuser_conn)
+    run_command(
+        "SET pg_lake_iceberg.rest_catalog_auth_type TO 'horizon'", superuser_conn
+    )
+
+    result = run_query(
+        f"""SELECT count(*) FROM "{namespace}".scanned""", superuser_conn
+    )
+    assert result == [[2]]
+    assert _table_scans(superuser_conn, "horizon") == horizon_scans + 1
+    assert _table_scans(superuser_conn) == scans + 4
+
+    run_command("RESET pg_lake_iceberg.rest_catalog_auth_type", superuser_conn)
+    run_command("SELECT set_test_rest_catalog_auth_provider(false)", superuser_conn)
+    run_command(
+        """DROP FUNCTION set_test_rest_catalog_auth_provider(BOOL);
+           DROP FUNCTION set_test_rest_catalog_auth_response(TEXT, INT, BOOL)""",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
+    pg_conn.commit()
+    rest_catalog.drop_table(f"{namespace}.{table_name}")
+    rest_catalog.drop_namespace(namespace)
+
+
 def test_rest_catalog_lowercase_column_names(
     pg_conn,
     s3,

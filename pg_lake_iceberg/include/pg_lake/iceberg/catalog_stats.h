@@ -54,3 +54,4 @@ extern void CountCatalogRetry(const RestCatalogOptions * opts, RestCatalogOp op,
 extern void CountCatalogAuthFailure(const RestCatalogOptions * opts, int sqlerrcode);
 extern void CountVendedCredentials(const RestCatalogOptions * opts,
 								   VendedCredentialsOutcome outcome);
+extern PGDLLEXPORT void CountCatalogTableScans(List *rteList);
