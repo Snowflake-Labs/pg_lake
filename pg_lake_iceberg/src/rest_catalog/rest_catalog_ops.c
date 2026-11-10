@@ -53,6 +53,7 @@
 
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/iceberg/catalog_log.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/iceberg/api/table_schema.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_utils.h"
@@ -2017,6 +2018,13 @@ ExtractVendedCredentials(Jsonb *response, RestCatalogOptions * opts,
 		elog(DEBUG2, "REST catalog loadTable response did not contain "
 			 "usable vended credentials");
 	}
+
+	if (credentials != NIL)
+		CountVendedCredentials(opts, VENDED_CREDENTIALS_VENDED);
+	else if (unusable != NULL)
+		CountVendedCredentials(opts, VENDED_CREDENTIALS_UNUSABLE);
+	else
+		CountVendedCredentials(opts, VENDED_CREDENTIALS_NONE);
 
 	return credentials;
 }
