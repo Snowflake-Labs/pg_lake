@@ -250,7 +250,7 @@ SELECT region, sum(amount) FROM orders GROUP BY region;
 | `catalog_name` | Catalog (warehouse) that holds the table. Defaults to the server's `catalog_name`, then to the prefix the catalog advertises, then to the database name. |
 | `catalog_namespace` | Namespace of the table. Defaults to the PostgreSQL schema name. |
 | `catalog_table_name` | Name of the table in the catalog. Defaults to the PostgreSQL table name. |
-| `lowercase_column_names` | Fold column and struct field names to lowercase. Valid for read-only REST and `object_store` catalog tables; defaults to `false`. |
+| `lowercase_column_names` | Fold column and struct field names to lowercase. Valid for read-only REST and `object_store` catalog tables; defaults to `false`, or to `true` when the table is attached with `catalog = 'snowflake'` and the columns are inferred. |
 
 When a read-only table is created and its lowercase catalog, namespace or table name does not
 exist in a REST catalog, pg_lake tries the uppercase name, which is how Snowflake stores
