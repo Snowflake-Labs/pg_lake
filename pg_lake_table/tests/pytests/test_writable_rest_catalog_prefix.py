@@ -606,7 +606,7 @@ def test_mixed_prefix_alter_rejected_at_statement_time(
     "status,body,message",
     [
         (200, {}, "must include a table UUID and location"),
-        (422, "stage-create must be a boolean", "HTTP request failed (HTTP 422)"),
+        (422, "stage-create must be a boolean", "The REST catalog returned HTTP 422."),
         (
             200,
             {
