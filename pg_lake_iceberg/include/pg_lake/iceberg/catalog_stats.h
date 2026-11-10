@@ -28,6 +28,18 @@
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
+/*
+ * The rendezvous variable that holds pg_lake_catalog_stats while the counters
+ * exist, so another extension can return them from a database where
+ * pg_lake_iceberg is not created, without loading it:
+ *
+ *   PGFunction stats = (PGFunction) *find_rendezvous_variable(PG_LAKE_CATALOG_STATS_FUNCTION);
+ *
+ * A caller passes its own fcinfo, so it must declare the same columns as
+ * lake_iceberg.catalog_stats(), and they must not change.
+ */
+#define PG_LAKE_CATALOG_STATS_FUNCTION "pg_lake_iceberg.catalog_stats"
+
 /* why a request to a REST catalog was sent again */
 typedef enum CatalogRetryReason
 {

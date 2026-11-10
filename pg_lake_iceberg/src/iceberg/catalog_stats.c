@@ -217,6 +217,8 @@ InitializeCatalogStats(void)
 	PreviousShmemStartupHook = shmem_startup_hook;
 	shmem_startup_hook = CatalogStatsShmemStartup;
 #endif
+
+	*find_rendezvous_variable(PG_LAKE_CATALOG_STATS_FUNCTION) = (void *) pg_lake_catalog_stats;
 }
 
 
