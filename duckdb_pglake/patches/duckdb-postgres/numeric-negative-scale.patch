@@ -1,0 +1,27 @@
+diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
+index 9edeff3..f9c832d 100644
+--- a/src/postgres_utils.cpp
++++ b/src/postgres_utils.cpp
+@@ -240,9 +240,19 @@ LogicalType PostgresUtils::TypeToLogicalType(optional_ptr<PostgresTransaction> t
+ 	} else if (pgtypename == "float8") {
+ 		return LogicalType::DOUBLE;
+ 	} else if (pgtypename == "numeric") {
+-		auto width = ((type_info.type_modifier - sizeof(int32_t)) >> 16) & 0xffff;
+-		auto scale = (((type_info.type_modifier - sizeof(int32_t)) & 0x7ff) ^ 1024) - 1024;
+-		if (type_info.type_modifier == -1 || width < 0 || scale < 0 || width > 38) {
++		// Signed on purpose: with sizeof() in the expression the arithmetic is
++		// unsigned, a negative scale wraps around, and DECIMAL() narrows it to
++		// a byte, so numeric(5,-2) was read as DECIMAL(5,254).
++		int64_t typmod = type_info.type_modifier - int64_t(sizeof(int32_t));
++		int64_t width = (typmod >> 16) & 0xffff;
++		int64_t scale = ((typmod & 0x7ff) ^ 1024) - 1024;
++		if (type_info.type_modifier != -1 && scale < 0) {
++			// The binary reader scales by each value's own dscale, which is 0
++			// for a negative-scale numeric, so widen to the integral digits.
++			width -= scale;
++			scale = 0;
++		}
++		if (type_info.type_modifier == -1 || width > 38) {
+ 			// fallback to double
+ 			postgres_type.info = PostgresTypeAnnotation::NUMERIC_AS_DOUBLE;
+ 			return LogicalType::DOUBLE;
