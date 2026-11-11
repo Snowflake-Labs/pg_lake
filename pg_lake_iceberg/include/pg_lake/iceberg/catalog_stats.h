@@ -38,7 +38,8 @@
  *   PGFunction stats = (PGFunction) *find_rendezvous_variable(PG_LAKE_CATALOG_STATS_FUNCTION);
  *
  * A caller passes its own fcinfo, so it must declare the same columns as
- * lake_iceberg.catalog_stats(), and they must not change.
+ * lake_iceberg.catalog_stats(), and they must not change; a call declaring
+ * others is refused with an error.
  */
 #define PG_LAKE_CATALOG_STATS_FUNCTION "pg_lake_iceberg.catalog_stats"
 

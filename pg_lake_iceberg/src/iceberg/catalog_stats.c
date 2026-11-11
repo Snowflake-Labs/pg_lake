@@ -22,6 +22,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 #include "miscadmin.h"
+#include "catalog/pg_type_d.h"
 #include "foreign/foreign.h"
 #include "nodes/parsenodes.h"
 #include "port/atomics.h"
@@ -132,6 +133,7 @@ static CatalogStatsData * CatalogStats = NULL;
 static void InitCatalogStatsCounters(void);
 static CatalogStatsCatalog CatalogKind(const RestCatalogOptions * opts);
 static CatalogStatsCatalog RelationCatalogKind(Oid relationId);
+static void ErrorIfNotCatalogStatsColumns(TupleDesc tupleDesc);
 static void AddCatalogStatsRow(ReturnSetInfo *rsinfo, const char *metric,
 							   CatalogStatsCatalog catalog, const char *operation,
 							   const char *result, pg_atomic_uint64 *counter);
@@ -391,6 +393,7 @@ pg_lake_catalog_stats(PG_FUNCTION_ARGS)
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	InitMaterializedSRF(fcinfo, 0);
+	ErrorIfNotCatalogStatsColumns(rsinfo->setDesc);
 
 	if (CatalogStats == NULL)
 		PG_RETURN_VOID();
@@ -427,6 +430,29 @@ pg_lake_catalog_stats(PG_FUNCTION_ARGS)
 	}
 
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * ErrorIfNotCatalogStatsColumns refuses a result declared with other columns
+ * than lake_iceberg.catalog_stats() has.  Another extension may call this
+ * function with its own fcinfo (see catalog_stats.h), and rows formed against
+ * a different declaration would be read past their end or misread.
+ */
+static void
+ErrorIfNotCatalogStatsColumns(TupleDesc tupleDesc)
+{
+	static const Oid columnTypes[] = {TEXTOID, TEXTOID, TEXTOID, TEXTOID, INT8OID};
+	bool		matches = tupleDesc->natts == lengthof(columnTypes);
+
+	for (int i = 0; matches && i < lengthof(columnTypes); i++)
+		matches = TupleDescAttr(tupleDesc, i)->atttypid == columnTypes[i];
+
+	if (!matches)
+		ereport(ERROR,
+				(errcode(ERRCODE_DATATYPE_MISMATCH),
+				 errmsg("catalog stats requested with columns that do not match lake_iceberg.catalog_stats()"),
+				 errdetail("The columns are metric, catalog, operation and result of type text, and value of type bigint.")));
 }
 
 

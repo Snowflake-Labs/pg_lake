@@ -478,6 +478,38 @@ def test_stats_use_a_fixed_vocabulary(installcheck, catalog_and_conn):
         assert value > 0
 
 
+@pytest.mark.parametrize(
+    "columns",
+    [
+        "OUT metric text, OUT value bigint",
+        "OUT metric text, OUT catalog text, OUT operation text, OUT result text, "
+        "OUT value bigint, OUT extra text",
+        "OUT metric text, OUT catalog text, OUT operation text, OUT result text, "
+        "OUT value int",
+    ],
+    ids=["fewer", "more", "other_type"],
+)
+def test_stats_refuse_other_columns(postgres, iceberg_extension, columns):
+    """
+    Another extension may call the function under a declaration of its own,
+    and one with other columns is refused rather than given rows formed for
+    the wrong shape.
+    """
+    conn = open_pg_conn()
+    try:
+        run_command(
+            f"""CREATE FUNCTION mismatched_catalog_stats({columns})
+                RETURNS SETOF record LANGUAGE C
+                AS 'pg_lake_iceberg', 'pg_lake_catalog_stats'""",
+            conn,
+        )
+        with pytest.raises(psycopg2.errors.DatatypeMismatch):
+            run_query("SELECT * FROM mismatched_catalog_stats()", conn)
+    finally:
+        conn.rollback()
+        conn.close()
+
+
 def test_stats_need_server_statistics_privilege(postgres, iceberg_extension):
     conn = open_pg_conn()
     try:
