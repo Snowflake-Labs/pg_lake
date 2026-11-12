@@ -539,6 +539,25 @@ duckdb_global_init(char *databaseFilePath,
 			return DUCKDB_INITIALIZATION_ERROR;
 	}
 
+	{
+		/*
+		 * The S3 uploader sizes each multipart part as max_filesize /
+		 * max_parts_per_file, and every file being written holds at least one
+		 * part buffer.  The 800GB default makes that 76.5MiB per file, even
+		 * for a 10KB file, which a small memory_limit cannot fit even once.
+		 * 50GB brings the part to the 5MiB S3 minimum and caps a single file
+		 * at 50GB, well above the file sizes pg_lake writes.  The init file
+		 * can raise it again.
+		 */
+		if (snprintf(setCommand, 1024, "SET GLOBAL s3_uploader_max_filesize TO '50GB'") < 0)
+		{
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
 	if (memoryLimit != NULL)
 	{
 		if (snprintf(setCommand, 1024, "SET GLOBAL memory_limit TO '%s'", memoryLimit) < 0)
