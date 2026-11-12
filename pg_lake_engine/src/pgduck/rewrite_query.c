@@ -165,6 +165,7 @@ static Node *RewriteFuncExprDateBin(Node *node, void *context);
 static Node *RewriteFuncExprDateTrunc(Node *node, void *context);
 static Node *RewriteFuncExprDiv(Node *node, void *context);
 static Node *RewriteFuncExprMod(Node *node, void *context);
+static Node *RewriteFuncExprSign(Node *node, void *context);
 static Node *RewriteFuncExprSubstring(Node *node, void *context);
 static Node *RewriteFuncExprGenerateSeries(Node *node, void *context);
 static Node *RewriteFuncExprToChar(Node *node, void *context);
@@ -241,6 +242,9 @@ static FunctionCallRewriteRuleByName BuiltinFunctionCallRewriteRulesByName[] =
 	},
 	{
 		"pg_catalog", "mod", RewriteFuncExprMod, 0
+	},
+	{
+		"pg_catalog", "sign", RewriteFuncExprSign, 0
 	},
 	{
 		"pg_catalog", "rpad", RewriteFuncExprPad, 0
@@ -1558,6 +1562,32 @@ RewriteFuncExprDateTrunc(Node *node, void *context)
 	coerceExpr->resulttype = exprType(timeArg);
 	coerceExpr->resulttypmod = exprTypmod(node);
 	coerceExpr->resultcollid = exprCollation(node);
+	coerceExpr->relabelformat = COERCE_EXPLICIT_CAST;
+	coerceExpr->location = -1;
+
+	return (Node *) coerceExpr;
+}
+
+
+/*
+ * RewriteFuncExprSign casts sign(float8) back to float8. DuckDB returns an
+ * integer, whose zero loses its sign when negated, so atan2(-sign(x), -1)
+ * would give pi where PostgreSQL gives -pi.
+ */
+static Node *
+RewriteFuncExprSign(Node *node, void *context)
+{
+	FuncExpr   *funcExpr = castNode(FuncExpr, node);
+
+	if (funcExpr->funcid != F_SIGN_FLOAT8)
+		return node;
+
+	RelabelType *coerceExpr = makeNode(RelabelType);
+
+	coerceExpr->arg = (Expr *) funcExpr;
+	coerceExpr->resulttype = FLOAT8OID;
+	coerceExpr->resulttypmod = -1;
+	coerceExpr->resultcollid = InvalidOid;
 	coerceExpr->relabelformat = COERCE_EXPLICIT_CAST;
 	coerceExpr->location = -1;
 
