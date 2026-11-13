@@ -46,6 +46,7 @@
 #include "utils/syscache.h"
 
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/util/catalog_type.h"
 #include "pg_lake/util/string_utils.h"
 
 
@@ -344,12 +345,16 @@ iceberg_catalog_validator(PG_FUNCTION_ARGS)
  * ApplyServerOptionOverrides overrides the GUC-derived defaults in opts
  * with any options explicitly set on the foreign server.  Only options
  * carrying CATALOG_OPT_CTX_SERVER are applied here; the validator
- * already rejects anything else at DDL time.
+ * already rejects anything else at DDL time.  omitCatalogPrefix is not an
+ * option: it follows from the server TYPE.
  */
 void
 ApplyServerOptionOverrides(RestCatalogOptions * opts, ForeignServer *server)
 {
 	ListCell   *lc;
+
+	opts->omitCatalogPrefix = server->servertype != NULL &&
+		pg_strcasecmp(server->servertype, ICEBERG_REST_CATALOG_SERVER_TYPE) == 0;
 
 	foreach(lc, server->options)
 	{
