@@ -1202,6 +1202,102 @@ def test_rest_catalog_uppercase_columns(
     rest_catalog.drop_namespace(namespace)
 
 
+def test_rest_catalog_read_only_case_distinct_columns(
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """A read-only REST catalog table whose columns differ only by case, such as
+    the "ID" and "id" another engine can write, is read with each column intact."""
+
+    if installcheck:
+        return
+
+    namespace = "test_case_distinct_columns"
+    rest_catalog = create_iceberg_rest_catalog(namespace)
+
+    schema = Schema(
+        NestedField(1, "ID", LongType(), required=False),
+        NestedField(2, "id", LongType(), required=False),
+        NestedField(3, "Name", StringType(), required=False),
+    )
+    table_name = "case_distinct_table"
+    iceberg_table = rest_catalog.create_table(
+        identifier=f"{namespace}.{table_name}",
+        schema=schema,
+    )
+    iceberg_table.append(
+        pyarrow.Table.from_pylist(
+            [
+                {"ID": 1, "id": 100, "Name": "a"},
+                {"ID": 2, "id": 200, "Name": "b"},
+                {"ID": 3, "id": 200, "Name": "c"},
+            ],
+            schema=pyarrow.schema(
+                [
+                    ("ID", pyarrow.int64()),
+                    ("id", pyarrow.int64()),
+                    ("Name", pyarrow.string()),
+                ]
+            ),
+        )
+    )
+
+    run_command(f"""CREATE SCHEMA "{namespace}" """, pg_conn)
+    run_command(
+        f"""
+        CREATE TABLE "{namespace}".case_distinct ()
+        USING iceberg
+        WITH (
+            catalog='rest',
+            read_only=True,
+            catalog_table_name='{table_name}'
+        )
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    columns = run_query(
+        f"""
+        SELECT attname
+        FROM pg_attribute
+        WHERE attrelid = '"{namespace}".case_distinct'::regclass
+        AND attnum > 0
+        ORDER BY attnum
+        """,
+        pg_conn,
+    )
+    assert [column[0] for column in columns] == ["ID", "id", "Name"]
+
+    result = run_query(
+        f"""SELECT * FROM "{namespace}".case_distinct ORDER BY "ID" """,
+        pg_conn,
+    )
+    assert result == [[1, 100, "a"], [2, 200, "b"], [3, 200, "c"]]
+
+    result = run_query(
+        f"""SELECT "ID", "Name" FROM "{namespace}".case_distinct WHERE "id" = 200 ORDER BY "ID" """,
+        pg_conn,
+    )
+    assert result == [[2, "b"], [3, "c"]]
+
+    result = run_query(
+        f"""SELECT "id", count(*), max("ID") FROM "{namespace}".case_distinct GROUP BY "id" ORDER BY "id" """,
+        pg_conn,
+    )
+    assert result == [[100, 1, 1], [200, 2, 3]]
+
+    pg_conn.rollback()
+    run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
+    pg_conn.commit()
+    rest_catalog.drop_table(f"{namespace}.{table_name}")
+    rest_catalog.drop_namespace(namespace)
+
+
 def test_rest_catalog_read_only_gzip_metadata(
     pg_conn,
     s3,
