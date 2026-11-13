@@ -39,7 +39,6 @@
 #include <unistd.h>
 
 #include "access/attnum.h"
-#include "mb/pg_wchar.h"
 #include "lib/stringinfo.h"
 #include "catalog/pg_type_d.h"
 #include "common/fe_memutils.h"
@@ -2051,23 +2050,15 @@ append_escaped_csv(StringInfo buffer, char *value)
 			appendStringInfoCharMacro(buffer, TRANSMIT_ESCAPE_CHAR);
 			appendStringInfoCharMacro(buffer, currentChar);
 		}
-		else if (IS_HIGHBIT_SET(currentChar))
-		{
-			/*
-			 * multi-byte character, DuckDB only supports UTF-8, so must be
-			 * UTF-8
-			 */
-			int			charLength = pg_encoding_mblen(PG_UTF8, charPointer);
-
-			appendBinaryStringInfo(buffer, charPointer, charLength);
-
-			/* skip extra bytes */
-			charPointer += charLength - 1;
-		}
 		else
 		{
+			/*
+			 * DuckDB strings are UTF-8, in which every byte of a multi-byte
+			 * character has the high bit set, so copying byte by byte is
+			 * safe. Skipping ahead by pg_encoding_mblen() could step over the
+			 * terminator if the value ends in a truncated character.
+			 */
 			appendStringInfoCharMacro(buffer, currentChar);
-
 		}
 	}
 
