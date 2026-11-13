@@ -21,7 +21,9 @@
 #include "pg_lake/copy/copy_format.h"
 #include "nodes/parsenodes.h"
 #include "nodes/plannodes.h"
+#include "access/tupdesc.h"
 #include "parser/parse_node.h"
+#include "utils/relcache.h"
 #include "pg_lake/ddl/utility_hook.h"
 
 /* settings */
@@ -70,6 +72,10 @@ struct config_enum_entry;
 extern const struct config_enum_entry json_copy_mode_options[];
 
 bool		PgLakeCopyHandler(ProcessUtilityParams * params, void *arg);
+extern PGDLLEXPORT uint64 CopyFromPGDuckQuery(ParseState *pstate, Relation relation,
+											  Node *whereClause, List *attlist,
+											  char *readQuery,
+											  List *writeOptions);
 void		ProcessPgLakeCopy(ParseState *pstate, PlannedStmt *plannedStmt,
 							  const char *queryString, uint64 *rowsProcessed);
 
