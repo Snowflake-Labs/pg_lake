@@ -84,6 +84,11 @@ typedef struct RestCatalogRequestPerTable
 	RestCatalogRequest *createTableRequest;
 	RestCatalogRequest *dropTableRequest;
 
+	/*
+	 * Requirements on the table state that the changes build on, sent with
+	 * them when the catalog commits the transaction.
+	 */
+	char	   *requirements;
 
 	List	   *tableModifyRequests;
 }			RestCatalogRequestPerTable;
@@ -123,6 +128,8 @@ static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTr
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
 
 static char *IdentifierJson(const char *namespaceFlat, const char *tableName);
+static void SendRestCatalogRequests(bool catalogCommit);
+static void DropCreatedRestCatalogTables(List *createdTables);
 static int	GetEffectiveMaxSnapshotAgeInSecs(Oid relationId);
 
 
@@ -148,7 +155,12 @@ typedef struct PgLakeXactRestCatalogContext
 	char	   *catalogName;	/* REST prefix every table in this transaction
 								 * commits under, or NULL before the first
 								 * table binds */
+	int			commitMode;		/* pg_lake_iceberg.rest_catalog_commit_mode
+								 * when the first table bound, or
+								 * REST_CATALOG_COMMIT_MODE_UNSET */
 }			PgLakeXactRestCatalogContext;
+
+#define REST_CATALOG_COMMIT_MODE_UNSET (-1)
 
 static PgLakeXactRestCatalogContext * PgLakeXactRestCatalog = NULL;
 
@@ -161,6 +173,13 @@ typedef struct IcebergSubXactState
 }			IcebergSubXactState;
 
 static IcebergSubXactState * IcebergSubXactStates = NULL;
+
+/*
+ * Name of the first PostgreSQL table the transaction wrote to, if any. It is
+ * only tracked while the catalog commit mode is in play, and is not undone by
+ * ROLLBACK TO SAVEPOINT.
+ */
+static char *XactPostgresTableWriteName = NULL;
 
 /* Values in these hashes own immutable strings/requests in TopTransactionContext. */
 static HTAB *
@@ -441,12 +460,111 @@ ResetRestCatalogRequests(void)
 
 
 /*
+ * ResetPostgresTableWrites forgets the PostgreSQL table writes of the
+ * transaction that just ended.
+ */
+void
+ResetPostgresTableWrites(void)
+{
+	XactPostgresTableWriteName = NULL;
+}
+
+
+/*
+ * XactCommitsInRestCatalog returns whether the REST catalog commits the
+ * current transaction, because it modifies REST catalog tables and
+ * pg_lake_iceberg.rest_catalog_commit_mode was 'catalog' when the first of
+ * them was modified.
+ */
+bool
+XactCommitsInRestCatalog(void)
+{
+	return PgLakeXactRestCatalog != NULL &&
+		PgLakeXactRestCatalog->commitMode == REST_CATALOG_COMMIT_MODE_CATALOG;
+}
+
+
+/*
+ * RecordPostgresTableWriteInTx records that the transaction writes to a table
+ * that commits through PostgreSQL, and errors if the REST catalog commits the
+ * transaction. The PostgreSQL commit happens after the catalog commit, and if
+ * it failed the two would disagree.
+ */
+void
+RecordPostgresTableWriteInTx(Oid relationId)
+{
+	bool		catalogCommit = XactCommitsInRestCatalog();
+
+	/* only remembered while a REST catalog table could still bind */
+	if (!catalogCommit && RestCatalogCommitMode != REST_CATALOG_COMMIT_MODE_CATALOG)
+		return;
+
+	if (catalogCommit)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot write to PostgreSQL table \"%s\" in a transaction "
+						"that modifies REST catalog tables",
+						get_rel_name(relationId)),
+				 errdetail("When pg_lake_iceberg.rest_catalog_commit_mode is 'catalog', "
+						   "the REST catalog commits the transaction, so it cannot "
+						   "include writes to PostgreSQL tables."),
+				 errhint("Write to the PostgreSQL tables in a separate transaction.")));
+
+	if (XactPostgresTableWriteName == NULL)
+		XactPostgresTableWriteName =
+			MemoryContextStrdup(TopTransactionContext, get_rel_name(relationId));
+}
+
+
+/*
 * PostAllRestCatalogRequests posts all the tracked REST catalog requests
 * to the REST catalog at transaction commit time. This is called at post-commit
 * hook, meaning that ERRORS here will be FATAL, so not acceptable.
 */
 void
 PostAllRestCatalogRequests(void)
+{
+	SendRestCatalogRequests(false);
+}
+
+
+/*
+ * CommitRestCatalogRequestsBeforeCommit sends the tracked REST catalog
+ * requests from the pre-commit hook when the REST catalog commits the
+ * transaction. If the catalog rejects them, the ERROR aborts the PostgreSQL
+ * transaction too.
+ */
+void
+CommitRestCatalogRequestsBeforeCommit(void)
+{
+	if (!XactCommitsInRestCatalog())
+		return;
+
+	SendRestCatalogRequests(true);
+
+	/* the catalog has everything, nothing is left for post-commit */
+	ResetRestCatalogRequests();
+}
+
+
+/*
+ * SendRestCatalogRequests sends the tracked REST catalog requests: first the
+ * create table requests, then a single transactions/commit request with all
+ * other modifications, then the drop table requests.
+ *
+ * The create table requests need to be completed before we can add snapshots
+ * to the tables, and the REST API does not support batching requests of
+ * create table and anything else. Drops go last, so that a rejected commit
+ * does not leave a table dropped.
+ *
+ * After the PostgreSQL commit (catalogCommit is false) a rejected request
+ * only produces a WARNING. When the catalog commits the transaction, the
+ * modifications carry requirements on the table state they build on, and a
+ * rejected request drops the tables this transaction already created in the
+ * catalog and raises an ERROR.
+ */
+static void
+SendRestCatalogRequests(bool catalogCommit)
 {
 	/*
 	 * catalogOpts == NULL is reachable when the OAT_DROP capture allocated
@@ -460,22 +578,15 @@ PostAllRestCatalogRequests(void)
 		return;
 	}
 
+	int			elevel = catalogCommit ? ERROR : WARNING;
+	List	   *createdTables = NIL;
+
 	/*
 	 * Switch to commitContext to avoid palloc() in XACT_COMMIT, as
 	 * commitContext is pre-allocated before.
 	 */
 	MemoryContext oldContext = MemoryContextSwitchTo(PgLakeXactRestCatalog->commitContext);
 
-	/*
-	 * We need to iterate over the requests hash twice: 1. First, we need to
-	 * post the create table requests to create the iceberg tables in the rest
-	 * catalog. 2. Then, we need to post all the other modifications (like
-	 * adding snapshots, partition specs, etc.)
-	 *
-	 * This is because the create table requests need to be completed before
-	 * we can add snapshots to the tables. And, REST API does not support
-	 * batching requests of create table and anything else.
-	 */
 	HASH_SEQ_STATUS status;
 
 	hash_seq_init(&status, PgLakeXactRestCatalog->requestsHash);
@@ -495,65 +606,38 @@ PostAllRestCatalogRequests(void)
 		}
 
 		RestCatalogRequest *createTableRequest = requestPerTable->createTableRequest;
-		RestCatalogRequest *dropTableRequest = requestPerTable->dropTableRequest;
 
-		if (createTableRequest != NULL && dropTableRequest != NULL)
+		/*
+		 * A table that is created and dropped in the same transaction needs
+		 * neither request, essentially a no-op.
+		 */
+		if (createTableRequest == NULL || requestPerTable->dropTableRequest != NULL)
+			continue;
+
+		HttpResult	httpResult =
+			SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+									 REST_CATALOG_OP_PUBLISH_CREATE_TABLE, HTTP_POST,
+									 requestPerTable->tableRestUrl, createTableRequest->body,
+									 PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
+
+		if (httpResult.status != 200)
 		{
+			if (catalogCommit)
+				DropCreatedRestCatalogTables(createdTables);
+
+			ReportHTTPError(httpResult, elevel, REST_CATALOG_OP_PUBLISH_CREATE_TABLE,
+							requestPerTable->catalogName,
+							requestPerTable->catalogNamespace,
+							requestPerTable->catalogTableName);
+
 			/*
-			 * table is created and dropped in the same transaction, skip both
-			 * requests, essentially a no-op.
+			 * Ouch, something failed. Should we stop sending the requests?
 			 */
 			continue;
 		}
-		else if (createTableRequest != NULL || dropTableRequest != NULL)
-		{
-			if (createTableRequest != NULL)
-			{
-				HttpResult	httpResult =
-					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
-											 REST_CATALOG_OP_PUBLISH_CREATE_TABLE, HTTP_POST,
-											 requestPerTable->tableRestUrl, createTableRequest->body,
-											 PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
-				if (httpResult.status != 200)
-				{
-					ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_CREATE_TABLE,
-									requestPerTable->catalogName,
-									requestPerTable->catalogNamespace,
-									requestPerTable->catalogTableName);
-
-					/*
-					 * Ouch, something failed. Should we stop sending the
-					 * requests?
-					 */
-				}
-			}
-			else if (dropTableRequest != NULL)
-			{
-				HttpResult	httpResult =
-					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
-											 REST_CATALOG_OP_PUBLISH_DROP_TABLE, HTTP_DELETE,
-											 requestPerTable->tableRestUrl, NULL,
-											 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
-
-				if (httpResult.status != 204)
-				{
-					ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_DROP_TABLE,
-									requestPerTable->catalogName,
-									requestPerTable->catalogNamespace,
-									requestPerTable->catalogTableName);
-
-					/*
-					 * Ouch, something failed. Should we stop sending the
-					 * requests?
-					 */
-				}
-			}
-			else
-			{
-				pg_unreachable();
-			}
-		}
+		if (catalogCommit)
+			createdTables = lappend(createdTables, requestPerTable);
 	}
 
 	/*
@@ -624,7 +708,10 @@ PostAllRestCatalogRequests(void)
 		appendJsonKey(batchRequestBody, "identifier");
 		appendStringInfo(batchRequestBody, "%s", requestPerTable->tableIdentifier);
 		appendStringInfoChar(batchRequestBody, ',');
-		appendStringInfoString(batchRequestBody, "\"requirements\":[],");
+		appendStringInfoString(batchRequestBody, "\"requirements\":[");
+		if (catalogCommit && requestPerTable->requirements != NULL)
+			appendStringInfoString(batchRequestBody, requestPerTable->requirements);
+		appendStringInfoString(batchRequestBody, "],");
 		appendStringInfoString(batchRequestBody, " \"updates\":[");
 
 		ListCell   *requestCell = NULL;
@@ -675,8 +762,39 @@ PostAllRestCatalogRequests(void)
 		/* Polaris and Nessie answer 204, Lakekeeper 200 */
 		if (httpResult.status != 200 && httpResult.status != 204)
 		{
-			ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_COMMIT,
+			if (catalogCommit)
+				DropCreatedRestCatalogTables(createdTables);
+
+			ReportHTTPError(httpResult, elevel, REST_CATALOG_OP_PUBLISH_COMMIT,
 							catalogName, NULL, NULL);
+		}
+	}
+
+	hash_seq_init(&status, PgLakeXactRestCatalog->requestsHash);
+
+	while ((requestPerTable = hash_seq_search(&status)) != NULL)
+	{
+		if (!requestPerTable->isValid ||
+			requestPerTable->dropTableRequest == NULL ||
+			requestPerTable->createTableRequest != NULL)
+			continue;
+
+		HttpResult	httpResult =
+			SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+									 REST_CATALOG_OP_PUBLISH_DROP_TABLE, HTTP_DELETE,
+									 requestPerTable->tableRestUrl, NULL,
+									 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
+
+		if (httpResult.status != 204)
+		{
+			ReportHTTPError(httpResult, elevel, REST_CATALOG_OP_PUBLISH_DROP_TABLE,
+							requestPerTable->catalogName,
+							requestPerTable->catalogNamespace,
+							requestPerTable->catalogTableName);
+
+			/*
+			 * Ouch, something failed. Should we stop sending the requests?
+			 */
 		}
 	}
 
@@ -684,6 +802,35 @@ PostAllRestCatalogRequests(void)
 	 * Switch back to old context from commitContext.
 	 */
 	MemoryContextSwitchTo(oldContext);
+}
+
+
+/*
+ * DropCreatedRestCatalogTables drops the tables that a transaction the catalog
+ * commits already created in the catalog, before the rest of its changes were
+ * rejected. The transaction is about to abort, so a failure is only a WARNING.
+ */
+static void
+DropCreatedRestCatalogTables(List *createdTables)
+{
+	ListCell   *tableCell = NULL;
+
+	foreach(tableCell, createdTables)
+	{
+		RestCatalogRequestPerTable *requestPerTable = lfirst(tableCell);
+
+		HttpResult	httpResult =
+			SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+									 REST_CATALOG_OP_PUBLISH_DROP_TABLE, HTTP_DELETE,
+									 requestPerTable->tableRestUrl, NULL,
+									 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
+
+		if (httpResult.status != 204)
+			ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_DROP_TABLE,
+							requestPerTable->catalogName,
+							requestPerTable->catalogNamespace,
+							requestPerTable->catalogTableName);
+	}
 }
 
 
@@ -810,6 +957,7 @@ InitRestCatalogRequestsHashIfNeeded(void)
 	MemoryContext oldctx = MemoryContextSwitchTo(TopTransactionContext);
 
 	PgLakeXactRestCatalog = palloc0(sizeof(PgLakeXactRestCatalogContext));
+	PgLakeXactRestCatalog->commitMode = REST_CATALOG_COMMIT_MODE_UNSET;
 
 	/*
 	 * Pre-allocate 1MB memory context to avoid palloc() in XACT_COMMIT as
@@ -868,6 +1016,22 @@ InitRestCatalogRequestsHashIfNeeded(void)
 static void
 EnsureXactBoundToRestCatalog(Oid relationId)
 {
+	/* the first table that binds decides how the transaction commits */
+	if (PgLakeXactRestCatalog->commitMode == REST_CATALOG_COMMIT_MODE_UNSET)
+		PgLakeXactRestCatalog->commitMode = RestCatalogCommitMode;
+
+	if (PgLakeXactRestCatalog->commitMode == REST_CATALOG_COMMIT_MODE_CATALOG &&
+		XactPostgresTableWriteName != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot modify REST catalog table \"%s\" after writing to "
+						"PostgreSQL table \"%s\" in the same transaction",
+						get_rel_name(relationId), XactPostgresTableWriteName),
+				 errdetail("When pg_lake_iceberg.rest_catalog_commit_mode is 'catalog', "
+						   "the REST catalog commits the transaction, so it cannot "
+						   "include writes to PostgreSQL tables."),
+				 errhint("Write to the PostgreSQL tables in a separate transaction.")));
+
 	if (PgLakeXactRestCatalog->catalogOpts == NULL)
 	{
 		RestCatalogOptions *resolvedOpts =
@@ -1007,7 +1171,14 @@ BindRelationToXactRestCatalog(Oid relationId)
 {
 	if (!IsPgLakeIcebergForeignTableById(relationId) ||
 		GetIcebergCatalogType(relationId) != REST_CATALOG_READ_WRITE)
+	{
+		/*
+		 * Other lake tables commit through PostgreSQL, also when a pushdown
+		 * path writes them without the executor seeing a result relation.
+		 */
+		RecordPostgresTableWriteInTx(relationId);
 		return;
+	}
 
 	PrepareIcebergStateForWrite();
 	InitRestCatalogRequestsHashIfNeeded();
@@ -1084,6 +1255,12 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 	else if (operationType == REST_CATALOG_DROP_TABLE)
 	{
 		requestPerTable->dropTableRequest = request;
+	}
+	else if (operationType == REST_CATALOG_ASSERT_TABLE_STATE)
+	{
+		/* the catalog has not changed between rounds, keep the first */
+		if (requestPerTable->requirements == NULL)
+			requestPerTable->requirements = pstrdup(body);
 	}
 	else if (operationType == REST_CATALOG_ADD_SNAPSHOT ||
 			 operationType == REST_CATALOG_ADD_SCHEMA ||

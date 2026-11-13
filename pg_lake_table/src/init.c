@@ -25,6 +25,7 @@
 #include "miscadmin.h"
 
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "pg_lake/ddl/alter_table.h"
 #include "pg_lake/ddl/create_table.h"
 #include "pg_lake/ddl/drop_table.h"
@@ -44,6 +45,7 @@
 #include "pg_lake/planner/extensible_nodes.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/s3_file_utils.h"
 #include "pg_lake/test/hide_lake_objects.h"
 #include "pg_lake/transaction/transaction_hooks.h"
@@ -58,6 +60,8 @@ PG_MODULE_MAGIC;
 void		_PG_init(void);
 
 static bool CheckTargetFileSizeMB(int *newval, void **extra, GucSource source);
+static bool RecordCopyIntoPostgresTable(ProcessUtilityParams * processUtilityParams,
+										void *arg);
 static bool ErrorIfDiscardTempWithIcebergChanges(ProcessUtilityParams * processUtilityParams,
 												 void *arg);
 
@@ -452,6 +456,7 @@ _PG_init(void)
 	RegisterUtilityStatementHandler(ProcessEnumStatement, NULL);
 	RegisterUtilityStatementHandler(ProcessDropPgLakeTable, NULL);
 	RegisterUtilityStatementHandler(ErrorIfDiscardTempWithIcebergChanges, NULL);
+	RegisterUtilityStatementHandler(RecordCopyIntoPostgresTable, NULL);
 
 	/*
 	 * Add as the last handler, execute as the first. Don't worry, you'll have
@@ -487,6 +492,37 @@ CheckTargetFileSizeMB(int *newval, void **extra, GucSource source)
 {
 	return *newval <= 0 || *newval >= MIN_TARGET_FILE_SIZE_MB ||
 		(IsTransactionState() && superuser());
+}
+
+
+/*
+ * RecordCopyIntoPostgresTable records a COPY FROM into a table that commits
+ * through PostgreSQL. COPY writes without going through the executor, so the
+ * ExecutorStart hook does not see it.
+ */
+static bool
+RecordCopyIntoPostgresTable(ProcessUtilityParams * processUtilityParams, void *arg)
+{
+	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
+
+	if (!IsA(parsetree, CopyStmt))
+		return false;
+
+	CopyStmt   *copyStmt = (CopyStmt *) parsetree;
+
+	if (!copyStmt->is_from || copyStmt->relation == NULL)
+		return false;
+
+	if (RestCatalogCommitMode != REST_CATALOG_COMMIT_MODE_CATALOG &&
+		!XactCommitsInRestCatalog())
+		return false;
+
+	Oid			relationId = RangeVarGetRelid(copyStmt->relation, NoLock, true);
+
+	if (OidIsValid(relationId) && IsPostgresTableWrite(relationId))
+		RecordPostgresTableWriteInTx(relationId);
+
+	return false;
 }
 
 

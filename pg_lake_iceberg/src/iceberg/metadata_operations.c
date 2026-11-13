@@ -187,6 +187,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	bool		createNewTable = HasCreateTableOperation(metadataOperations);
 
 	IcebergTableMetadata *metadata = NULL;
+	RestCatalogRequest *assertTableStateRequest = NULL;
 
 	if (createNewTable)
 	{
@@ -222,6 +223,13 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 			 * held until end of transaction.
 			 */
 			metadata = GetWritableRestCatalogTableMetadata(relationId, &metadataPath);
+
+			/*
+			 * The changes below build on this version of the table, so a
+			 * commit that the catalog decides on asserts it is still current.
+			 */
+			assertTableStateRequest =
+				GetAssertTableStateCatalogRequest(relationId, metadata);
 		}
 		else
 		{
@@ -406,6 +414,9 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	{
 		if (metadataPath)
 			InsertDeletionQueueRecord(metadataPath, relationId, GetCurrentTransactionStartTimestamp());
+
+		if (assertTableStateRequest != NULL && restCatalogRequests != NIL)
+			restCatalogRequests = lcons(assertTableStateRequest, restCatalogRequests);
 
 		/*
 		 * We are done, writable rest catalog iceberg tables have their
