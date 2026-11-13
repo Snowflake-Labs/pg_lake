@@ -46,6 +46,7 @@ accepts the same options.
 | `max_snapshot_age`<span class="pglake-meta">Default `pg_lake_iceberg.max_snapshot_age`; can be changed</span> | Snapshot retention in seconds. `0` expires old snapshots on every write. |
 | `column_stats_mode`<span class="pglake-meta">Default `truncate(16)`; can be changed</span> | Which column statistics to keep for file pruning: `full`, `none`, or `truncate(N)` to keep the first `N` bytes of string bounds. |
 | `out_of_range_values`<span class="pglake-meta">Default `error`; can be changed</span> | `error` or `clamp`. See [out-of-range values](data-types.md#out-of-range-values). |
+| `commit_mode`<span class="pglake-meta">Default the catalog server's `commit_mode`, then `pg_lake_iceberg.default_rest_catalog_commit_mode`; can be changed</span> | `post_commit` or `catalog`, for writable REST catalog tables. See [commit modes](iceberg-catalogs.md#commit-modes). |
 | `compatibility_mode`<span class="pglake-meta">Default `pg_lake_iceberg.default_compatibility_mode`; fixed at creation</span> | `auto` or `snowflake`. With `snowflake`, `uuid` values nested in arrays or composites are stored as strings. |
 
 `CREATE TABLE ... USING iceberg` also accepts the options for

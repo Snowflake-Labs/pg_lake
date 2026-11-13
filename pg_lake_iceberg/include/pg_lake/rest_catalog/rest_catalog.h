@@ -39,9 +39,14 @@
  * sent before the PostgreSQL commit with requirements on the table state, a
  * rejected change aborts the transaction, and the transaction cannot also
  * write to PostgreSQL tables.
+ *
+ * A table takes its mode from its commit_mode option, then from the
+ * commit_mode option of its catalog server, then from
+ * pg_lake_iceberg.default_rest_catalog_commit_mode.
  */
 #define REST_CATALOG_COMMIT_MODE_POST_COMMIT (0)
 #define REST_CATALOG_COMMIT_MODE_CATALOG (1)
+#define REST_CATALOG_COMMIT_MODE_OPTION "commit_mode"
 
 extern PGDLLEXPORT char *RestCatalogHost;
 extern char *RestCatalogOauthHostPath;
@@ -50,7 +55,7 @@ extern char *RestCatalogClientSecret;
 extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
-extern PGDLLEXPORT int RestCatalogCommitMode;
+extern PGDLLEXPORT int DefaultRestCatalogCommitMode;
 
 /*
  * What a request to a REST catalog is for, as reported in the catalog error
@@ -185,6 +190,7 @@ typedef struct RestCatalogOptions
 								 * NULL to send no query string */
 	int			authType;
 	bool		enableVendedCredentials;
+	int			commitMode;		/* REST_CATALOG_COMMIT_MODE_* */
 	bool		isBuiltin;		/* the extension-owned built-in server, whose
 								 * endpoint no user can choose; gates every
 								 * deployment-wide credential */
@@ -460,6 +466,8 @@ extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalog(RestCatal
 extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool RestCatalogVendingEnabledForRelation(Oid relationId);
+extern PGDLLEXPORT int ParseRestCatalogCommitMode(const char *value);
+extern PGDLLEXPORT int GetRestCatalogCommitModeForRelation(Oid relationId);
 
 /*
  * Resolves a relation's REST-catalog vended credentials, returning a

@@ -45,7 +45,6 @@
 #include "pg_lake/planner/extensible_nodes.h"
 #include "pg_lake/planner/insert_select.h"
 #include "pg_lake/planner/query_pushdown.h"
-#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/s3_file_utils.h"
 #include "pg_lake/test/hide_lake_objects.h"
 #include "pg_lake/transaction/transaction_hooks.h"
@@ -496,9 +495,9 @@ CheckTargetFileSizeMB(int *newval, void **extra, GucSource source)
 
 
 /*
- * RecordCopyIntoPostgresTable records a COPY FROM into a table that commits
- * through PostgreSQL. COPY writes without going through the executor, so the
- * ExecutorStart hook does not see it.
+ * RecordCopyIntoPostgresTable records the table of a COPY FROM as written.
+ * COPY writes without going through the executor, so the ExecutorStart hook
+ * does not see it.
  */
 static bool
 RecordCopyIntoPostgresTable(ProcessUtilityParams * processUtilityParams, void *arg)
@@ -513,14 +512,10 @@ RecordCopyIntoPostgresTable(ProcessUtilityParams * processUtilityParams, void *a
 	if (!copyStmt->is_from || copyStmt->relation == NULL)
 		return false;
 
-	if (RestCatalogCommitMode != REST_CATALOG_COMMIT_MODE_CATALOG &&
-		!XactCommitsInRestCatalog())
-		return false;
-
 	Oid			relationId = RangeVarGetRelid(copyStmt->relation, NoLock, true);
 
-	if (OidIsValid(relationId) && IsPostgresTableWrite(relationId))
-		RecordPostgresTableWriteInTx(relationId);
+	if (OidIsValid(relationId))
+		RecordTableWriteInTx(relationId);
 
 	return false;
 }

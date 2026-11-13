@@ -24,7 +24,7 @@ def commit_mode_schema(pg_conn, s3, set_polaris_gucs, installcheck):
     yield
 
     pg_conn.rollback()
-    run_command("RESET pg_lake_iceberg.rest_catalog_commit_mode", pg_conn)
+    run_command("RESET pg_lake_iceberg.default_rest_catalog_commit_mode", pg_conn)
     run_command(f"DROP SCHEMA {SCHEMA} CASCADE", pg_conn)
     pg_conn.commit()
 
@@ -50,7 +50,9 @@ def test_catalog_commit(
     if installcheck:
         return
 
-    run_command("SET pg_lake_iceberg.rest_catalog_commit_mode TO 'catalog'", pg_conn)
+    run_command(
+        "SET pg_lake_iceberg.default_rest_catalog_commit_mode TO 'catalog'", pg_conn
+    )
 
     # create and load in one transaction, then modify in later ones
     run_command(
@@ -75,7 +77,7 @@ def test_catalog_commit(
     assert run_query(f"SELECT count(*) FROM {SCHEMA}.basic", pg_conn)[0][0] == 16
     assert catalog_count("basic", pg_conn) == 16
 
-    run_command("RESET pg_lake_iceberg.rest_catalog_commit_mode", pg_conn)
+    run_command("RESET pg_lake_iceberg.default_rest_catalog_commit_mode", pg_conn)
     pg_conn.commit()
 
 
@@ -98,7 +100,9 @@ def test_catalog_commit_rejects_postgres_writes(
     run_command(f"INSERT INTO {SCHEMA}.mixed VALUES (2)", pg_conn)
     pg_conn.commit()
 
-    run_command("SET pg_lake_iceberg.rest_catalog_commit_mode TO 'catalog'", pg_conn)
+    run_command(
+        "SET pg_lake_iceberg.default_rest_catalog_commit_mode TO 'catalog'", pg_conn
+    )
     pg_conn.commit()
 
     # a PostgreSQL table first
@@ -158,7 +162,7 @@ def test_catalog_commit_rejects_postgres_writes(
         0
     ] == [1, 13]
 
-    run_command("RESET pg_lake_iceberg.rest_catalog_commit_mode", pg_conn)
+    run_command("RESET pg_lake_iceberg.default_rest_catalog_commit_mode", pg_conn)
     pg_conn.commit()
 
 
@@ -197,7 +201,8 @@ def test_catalog_commit_conflict(
         conn = open_pg_conn()
         try:
             run_command(
-                "SET pg_lake_iceberg.rest_catalog_commit_mode TO 'catalog'", conn
+                "SET pg_lake_iceberg.default_rest_catalog_commit_mode TO 'catalog'",
+                conn,
             )
             run_command("SELECT public.injection_points_set_local()", conn)
             run_command(
@@ -269,3 +274,139 @@ def test_catalog_commit_conflict(
 
     rows = other_engine.load_table(f"{SCHEMA}.conflict").scan().to_arrow()
     assert rows.column("a").to_pylist() == [1]
+
+
+def test_commit_mode_options(
+    pg_conn, superuser_conn, commit_mode_schema, with_default_location, installcheck
+):
+    """commit_mode on the table wins over commit_mode on its server, which
+    wins over pg_lake_iceberg.default_rest_catalog_commit_mode."""
+    if installcheck:
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
+    server = "commit_mode_srv"
+
+    error = run_command(
+        f"""CREATE SERVER bad_commit_mode_srv TYPE 'rest' FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}', commit_mode 'eventually')""",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert 'invalid commit_mode option: "eventually"' in error
+    superuser_conn.rollback()
+
+    run_command(
+        f"""CREATE SERVER {server} TYPE 'rest' FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}', location_prefix 's3://{TEST_BUCKET}/',
+                     commit_mode 'catalog')""",
+        superuser_conn,
+    )
+    run_command(
+        f"""CREATE USER MAPPING FOR PUBLIC SERVER {server}
+            OPTIONS (client_id '{creds["credentials"]["clientId"]}',
+                     client_secret '{creds["credentials"]["clientSecret"]}')""",
+        superuser_conn,
+    )
+    run_command(f"GRANT USAGE ON FOREIGN SERVER {server} TO PUBLIC", superuser_conn)
+    superuser_conn.commit()
+
+    try:
+        run_command(
+            f"""CREATE TABLE {SCHEMA}.from_server (a int) USING iceberg
+                WITH (catalog = '{server}')""",
+            pg_conn,
+        )
+        pg_conn.commit()
+        run_command(
+            f"""CREATE TABLE {SCHEMA}.table_post_commit (a int) USING iceberg
+                WITH (catalog = '{server}', commit_mode = 'post_commit')""",
+            pg_conn,
+        )
+        pg_conn.commit()
+        run_command(
+            f"""CREATE TABLE {SCHEMA}.table_catalog (a int) USING iceberg
+                WITH (catalog = 'rest', commit_mode = 'catalog')""",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+        # the server's commit_mode applies
+        run_command(f"INSERT INTO {SCHEMA}.from_server VALUES (1)", pg_conn)
+        error = run_command(
+            f"INSERT INTO {SCHEMA}.heap VALUES (1)", pg_conn, raise_error=False
+        )
+        assert 'cannot write to PostgreSQL table "heap"' in error
+        pg_conn.rollback()
+
+        # the table's commit_mode overrides the server's
+        run_command(f"INSERT INTO {SCHEMA}.heap VALUES (2)", pg_conn)
+        run_command(f"INSERT INTO {SCHEMA}.table_post_commit VALUES (2)", pg_conn)
+        pg_conn.commit()
+
+        # and the default
+        run_command(f"INSERT INTO {SCHEMA}.heap VALUES (3)", pg_conn)
+        error = run_command(
+            f"INSERT INTO {SCHEMA}.table_catalog VALUES (3)", pg_conn, raise_error=False
+        )
+        assert (
+            'cannot modify REST catalog table "table_catalog" after writing to PostgreSQL table "heap"'
+            in error
+        )
+        pg_conn.rollback()
+
+        # all tables in a transaction need the same commit mode
+        run_command(f"INSERT INTO {SCHEMA}.from_server VALUES (4)", pg_conn)
+        error = run_command(
+            f"INSERT INTO {SCHEMA}.table_post_commit VALUES (4)",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "cannot modify REST catalog tables with different commit modes" in error
+        pg_conn.rollback()
+
+        # the table option can be changed
+        run_command(
+            f"ALTER TABLE {SCHEMA}.table_catalog OPTIONS (SET commit_mode 'post_commit')",
+            pg_conn,
+        )
+        pg_conn.commit()
+        run_command(f"INSERT INTO {SCHEMA}.heap VALUES (5)", pg_conn)
+        run_command(f"INSERT INTO {SCHEMA}.table_catalog VALUES (5)", pg_conn)
+        pg_conn.commit()
+
+        assert run_query(
+            f"SELECT array_agg(a ORDER BY a) FROM {SCHEMA}.table_post_commit", pg_conn
+        )[0][0] == [2]
+        assert run_query(
+            f"SELECT array_agg(a ORDER BY a) FROM {SCHEMA}.table_catalog", pg_conn
+        )[0][0] == [5]
+
+        # the option is only valid on writable REST catalog tables, with a known value
+        error = run_command(
+            f"""CREATE TABLE {SCHEMA}.not_rest (a int) USING iceberg
+                WITH (commit_mode = 'catalog')""",
+            pg_conn,
+            raise_error=False,
+        )
+        assert (
+            '"commit_mode" option is only valid for writable rest catalog tables'
+            in error
+        )
+        pg_conn.rollback()
+
+        error = run_command(
+            f"ALTER TABLE {SCHEMA}.from_server OPTIONS (ADD commit_mode 'later')",
+            pg_conn,
+            raise_error=False,
+        )
+        assert 'invalid commit_mode option: "later"' in error
+        pg_conn.rollback()
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP TABLE IF EXISTS {SCHEMA}.from_server", pg_conn)
+        run_command(f"DROP TABLE IF EXISTS {SCHEMA}.table_post_commit", pg_conn)
+        pg_conn.commit()
+        run_command(f"DROP SERVER {server} CASCADE", superuser_conn)
+        superuser_conn.commit()

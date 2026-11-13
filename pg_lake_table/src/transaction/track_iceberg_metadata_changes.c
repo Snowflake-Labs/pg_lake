@@ -18,6 +18,9 @@
 #include "postgres.h"
 #include "utils/hsearch.h"
 #include "utils/lsyscache.h"
+#include "utils/syscache.h"
+#include "catalog/dependency.h"
+#include "catalog/pg_class.h"
 #include "access/xact.h"
 #include "common/int.h"
 #include "utils/memutils.h"
@@ -175,11 +178,12 @@ typedef struct IcebergSubXactState
 static IcebergSubXactState * IcebergSubXactStates = NULL;
 
 /*
- * Name of the first PostgreSQL table the transaction wrote to, if any. It is
- * only tracked while the catalog commit mode is in play, and is not undone by
- * ROLLBACK TO SAVEPOINT.
+ * Relations the transaction wrote to before it was bound to a REST catalog
+ * in catalog commit mode, checked once it is. Recording is cheap; whether a
+ * relation commits through PostgreSQL is only worked out when needed. Not
+ * undone by ROLLBACK TO SAVEPOINT.
  */
-static char *XactPostgresTableWriteName = NULL;
+static List *XactWrittenRelationIds = NIL;
 
 /* Values in these hashes own immutable strings/requests in TopTransactionContext. */
 static HTAB *
@@ -466,15 +470,14 @@ ResetRestCatalogRequests(void)
 void
 ResetPostgresTableWrites(void)
 {
-	XactPostgresTableWriteName = NULL;
+	XactWrittenRelationIds = NIL;
 }
 
 
 /*
  * XactCommitsInRestCatalog returns whether the REST catalog commits the
- * current transaction, because it modifies REST catalog tables and
- * pg_lake_iceberg.rest_catalog_commit_mode was 'catalog' when the first of
- * them was modified.
+ * current transaction, because it modifies REST catalog tables in catalog
+ * commit mode (see GetRestCatalogCommitModeForRelation).
  */
 bool
 XactCommitsInRestCatalog(void)
@@ -485,34 +488,93 @@ XactCommitsInRestCatalog(void)
 
 
 /*
- * RecordPostgresTableWriteInTx records that the transaction writes to a table
- * that commits through PostgreSQL, and errors if the REST catalog commits the
- * transaction. The PostgreSQL commit happens after the catalog commit, and if
- * it failed the two would disagree.
+ * IsPostgresTableWrite returns whether a write to the given relation commits
+ * through PostgreSQL, as opposed to through the REST catalog.
+ */
+bool
+IsPostgresTableWrite(Oid relationId)
+{
+	if (IsPgLakeIcebergForeignTableById(relationId) &&
+		GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE)
+		return false;
+
+	/* temporary tables do not outlive the session */
+	if (get_rel_persistence(relationId) == RELPERSISTENCE_TEMP)
+		return false;
+
+	/* bookkeeping of pg_lake itself, such as the data files of a table */
+	if (OidIsValid(getExtensionOfObject(RelationRelationId, relationId)))
+		return false;
+
+	return true;
+}
+
+
+/*
+ * RecordTableWriteInTx records that the transaction writes to a relation, and
+ * errors if the REST catalog commits the transaction and the relation commits
+ * through PostgreSQL. The PostgreSQL commit happens after the catalog commit,
+ * and if it failed the two would disagree.
  */
 void
-RecordPostgresTableWriteInTx(Oid relationId)
+RecordTableWriteInTx(Oid relationId)
 {
-	bool		catalogCommit = XactCommitsInRestCatalog();
+	if (XactCommitsInRestCatalog())
+	{
+		if (IsPostgresTableWrite(relationId))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot write to PostgreSQL table \"%s\" in a transaction "
+							"that modifies REST catalog tables",
+							get_rel_name(relationId)),
+					 errdetail("The REST catalog commits a transaction that modifies tables "
+							   "with commit_mode 'catalog', so it cannot include writes to "
+							   "PostgreSQL tables."),
+					 errhint("Write to the PostgreSQL tables in a separate transaction.")));
+		return;
+	}
 
-	/* only remembered while a REST catalog table could still bind */
-	if (!catalogCommit && RestCatalogCommitMode != REST_CATALOG_COMMIT_MODE_CATALOG)
+	if (list_member_oid(XactWrittenRelationIds, relationId))
 		return;
 
-	if (catalogCommit)
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+	XactWrittenRelationIds = lappend_oid(XactWrittenRelationIds, relationId);
+	MemoryContextSwitchTo(oldContext);
+}
+
+
+/*
+ * ErrorIfXactWrotePostgresTables errors if the transaction already wrote to
+ * a table that commits through PostgreSQL, now that relationId binds it to a
+ * REST catalog in catalog commit mode.
+ */
+static void
+ErrorIfXactWrotePostgresTables(Oid relationId)
+{
+	ListCell   *relationCell = NULL;
+
+	foreach(relationCell, XactWrittenRelationIds)
+	{
+		Oid			writtenRelationId = lfirst_oid(relationCell);
+
+		/* dropped again later in the transaction */
+		if (!SearchSysCacheExists1(RELOID, ObjectIdGetDatum(writtenRelationId)))
+			continue;
+
+		if (!IsPostgresTableWrite(writtenRelationId))
+			continue;
+
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot write to PostgreSQL table \"%s\" in a transaction "
-						"that modifies REST catalog tables",
-						get_rel_name(relationId)),
-				 errdetail("When pg_lake_iceberg.rest_catalog_commit_mode is 'catalog', "
-						   "the REST catalog commits the transaction, so it cannot "
-						   "include writes to PostgreSQL tables."),
+				 errmsg("cannot modify REST catalog table \"%s\" after writing to "
+						"PostgreSQL table \"%s\" in the same transaction",
+						get_rel_name(relationId), get_rel_name(writtenRelationId)),
+				 errdetail("The REST catalog commits a transaction that modifies tables "
+						   "with commit_mode 'catalog', so it cannot include writes to "
+						   "PostgreSQL tables."),
 				 errhint("Write to the PostgreSQL tables in a separate transaction.")));
-
-	if (XactPostgresTableWriteName == NULL)
-		XactPostgresTableWriteName =
-			MemoryContextStrdup(TopTransactionContext, get_rel_name(relationId));
+	}
 }
 
 
@@ -997,6 +1059,36 @@ InitRestCatalogRequestsHashIfNeeded(void)
 
 
 /*
+ * BindXactRestCatalogCommitMode sets the commit mode of the transaction from
+ * the first REST catalog table it modifies, and errors if a later table has a
+ * different one: all changes go out in one commit.
+ */
+static void
+BindXactRestCatalogCommitMode(Oid relationId)
+{
+	int			relationCommitMode = GetRestCatalogCommitModeForRelation(relationId);
+
+	if (PgLakeXactRestCatalog->commitMode == REST_CATALOG_COMMIT_MODE_UNSET)
+	{
+		if (relationCommitMode == REST_CATALOG_COMMIT_MODE_CATALOG)
+			ErrorIfXactWrotePostgresTables(relationId);
+
+		PgLakeXactRestCatalog->commitMode = relationCommitMode;
+	}
+	else if (PgLakeXactRestCatalog->commitMode != relationCommitMode)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("cannot modify REST catalog tables with different commit "
+						"modes in the same transaction"),
+				 errdetail("Table \"%s\" uses commit_mode '%s', unlike the tables "
+						   "this transaction already modified.",
+						   get_rel_name(relationId),
+						   relationCommitMode == REST_CATALOG_COMMIT_MODE_CATALOG ?
+						   "catalog" : "post_commit")));
+}
+
+
+/*
  * Ensure this transaction is bound to the REST catalog that owns
  * relationId.  On the first mutation in the transaction, resolves
  * the relation's catalog options in full (including credentials)
@@ -1012,25 +1104,19 @@ InitRestCatalogRequestsHashIfNeeded(void)
  * Identity is the iceberg_catalog server OID, so two requests for
  * the same physical server collapse to the same catalog regardless
  * of how the user spelled it.
+ *
+ * Also binds the commit mode of the transaction, unless the relation is
+ * being dropped.
  */
 static void
-EnsureXactBoundToRestCatalog(Oid relationId)
+EnsureXactBoundToRestCatalog(Oid relationId, bool isDrop)
 {
-	/* the first table that binds decides how the transaction commits */
-	if (PgLakeXactRestCatalog->commitMode == REST_CATALOG_COMMIT_MODE_UNSET)
-		PgLakeXactRestCatalog->commitMode = RestCatalogCommitMode;
-
-	if (PgLakeXactRestCatalog->commitMode == REST_CATALOG_COMMIT_MODE_CATALOG &&
-		XactPostgresTableWriteName != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("cannot modify REST catalog table \"%s\" after writing to "
-						"PostgreSQL table \"%s\" in the same transaction",
-						get_rel_name(relationId), XactPostgresTableWriteName),
-				 errdetail("When pg_lake_iceberg.rest_catalog_commit_mode is 'catalog', "
-						   "the REST catalog commits the transaction, so it cannot "
-						   "include writes to PostgreSQL tables."),
-				 errhint("Write to the PostgreSQL tables in a separate transaction.")));
+	/*
+	 * A drop has nothing for the catalog to check, so it goes along with
+	 * whichever commit mode the transaction has.
+	 */
+	if (!isDrop)
+		BindXactRestCatalogCommitMode(relationId);
 
 	if (PgLakeXactRestCatalog->catalogOpts == NULL)
 	{
@@ -1176,13 +1262,13 @@ BindRelationToXactRestCatalog(Oid relationId)
 		 * Other lake tables commit through PostgreSQL, also when a pushdown
 		 * path writes them without the executor seeing a result relation.
 		 */
-		RecordPostgresTableWriteInTx(relationId);
+		RecordTableWriteInTx(relationId);
 		return;
 	}
 
 	PrepareIcebergStateForWrite();
 	InitRestCatalogRequestsHashIfNeeded();
-	EnsureXactBoundToRestCatalog(relationId);
+	EnsureXactBoundToRestCatalog(relationId, false);
 }
 
 
@@ -1206,7 +1292,8 @@ RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationT
 		memset(requestPerTable, 0, sizeof(RestCatalogRequestPerTable));
 		requestPerTable->relationId = relationId;
 
-		EnsureXactBoundToRestCatalog(relationId);
+		EnsureXactBoundToRestCatalog(relationId,
+									 operationType == REST_CATALOG_DROP_TABLE);
 
 		requestPerTable->catalogName =
 			MemoryContextStrdup(TopTransactionContext, GetRestCatalogName(relationId));
