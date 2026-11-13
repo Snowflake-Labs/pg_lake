@@ -106,6 +106,7 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 	List	   *toPush = NIL;
 	List	   *toDrop = NIL;
 	List	   *toForget = NIL;
+	bool		vended = false;
 	ListCell   *lc;
 	TimestampTz now;
 	HASH_SEQ_STATUS seq;
@@ -122,7 +123,10 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 	 * tracks them.
 	 */
 	if (creds == NIL && PushedSecrets == NULL)
+	{
+		ErrorIfVendedCredentialsWithheld(relationId);
 		return;
+	}
 
 	InitPushedSecretsIfNeeded();
 	now = GetCurrentTimestamp();
@@ -137,6 +141,8 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 			toForget = lappend(toForget, sc);
 			continue;
 		}
+
+		vended = true;
 
 		char	   *name = GenerateVendedSecretName(sc->serverOid, sc->secretId);
 		char		key[SECRET_NAME_MAXLEN];
@@ -184,6 +190,10 @@ EnsureStorageCredentialsForRelation(Oid relationId)
 
 	if (toPush != NIL || toDrop != NIL || toForget != NIL)
 		BestEffortReconcile(relationId, toPush, toDrop, toForget);
+
+	/* only now, so that the secrets the catalog withdrew are gone */
+	if (!vended)
+		ErrorIfVendedCredentialsWithheld(relationId);
 }
 
 

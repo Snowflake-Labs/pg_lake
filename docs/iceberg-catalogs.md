@@ -250,7 +250,7 @@ SELECT region, sum(amount) FROM orders GROUP BY region;
 | `catalog_name` | Catalog (warehouse) that holds the table. Defaults to the server's `catalog_name`, then to the prefix the catalog advertises, then to the database name. |
 | `catalog_namespace` | Namespace of the table. Defaults to the PostgreSQL schema name. |
 | `catalog_table_name` | Name of the table in the catalog. Defaults to the PostgreSQL table name. |
-| `lowercase_column_names` | Fold column and struct field names to lowercase. Valid for read-only REST and `object_store` catalog tables; defaults to `false`. |
+| `lowercase_column_names` | Fold column and struct field names to lowercase. Valid for read-only REST and `object_store` catalog tables; defaults to `false`, or to `true` when the table is attached with `catalog = 'snowflake'` and the columns are inferred. |
 
 When a read-only table is created and its lowercase catalog, namespace or table name does not
 exist in a REST catalog, pg_lake tries the uppercase name, which is how Snowflake stores
@@ -585,6 +585,57 @@ a table uses an Iceberg type pg_lake does not support
 `<type>` is `geography`, `geometry`, `timestamp_ns`, `timestamptz_ns`, `unknown` or
 `variant`; any other type gets the last sentence. Each is logged along with the error that
 refuses the table.
+
+## Catalog statistics
+
+`lake_iceberg.catalog_stats()` returns counters of REST catalog activity for the whole server
+since it started, one row for each counter that is not zero:
+
+```sql
+SELECT * FROM lake_iceberg.catalog_stats();
+```
+```
+        metric        | catalog |   operation   |    result    | value
+----------------------+---------+---------------+--------------+--------
+ requests             | horizon | load_table    | ok           |    412
+ requests             | horizon | load_table    | client_error |      3
+ request_microseconds | horizon | load_table    |              | 928114
+ retries              | horizon | load_table    | rate_limited |      1
+ vended_credentials   | horizon |               | vended       |    412
+ table_scans          | horizon |               |              |    530
+```
+
+Like the [catalog error log](#catalog-error-log), the counters name no catalog, namespace or
+table. `catalog` is `horizon` for the built-in `rest` catalog when
+`pg_lake_iceberg.rest_catalog_auth_type` is `horizon`, `builtin` for the built-in `rest`
+catalog with any other authentication, and `user` for catalogs defined with
+[CREATE SERVER](#external-catalogs-with-create-server). The metrics are:
+
+- `requests`: requests sent to the catalog, by `operation` and by `result`: `ok`,
+  `not_found`, `client_error` (other 4xx), `server_error` (5xx) or `network_error` (no
+  response). A request counts once, after its retries. Requests interrupted by a cancel are not
+  counted.
+- `request_microseconds`: time spent on those requests, retries included. When a retry needs
+  a fresh token, the time includes getting it, which pg_lake's own OAuth2 login also counts
+  under `token`. If getting the token fails, the request is not counted, and the failure
+  shows in `auth_failures`.
+- `retries`: requests sent again, by `operation` and by `result`: `rate_limited` (HTTP 429),
+  `unavailable` (HTTP 503) or `auth_refresh` (an expired credential was refreshed).
+- `auth_failures`: times no credential could be obtained for the catalog.
+- `vended_credentials`: table loads and creates that asked the catalog for vended
+  credentials, by `result`: `vended` (at least one credential pg_lake can use), `unusable`
+  (only credentials pg_lake cannot use) or `none`.
+- `table_scans`: scans of read-only tables from a REST catalog that queries ran, one for each
+  time a query reads a table. `EXPLAIN` without `ANALYZE` is not counted. Scans can outnumber
+  `load_table` requests, because pg_lake asks the catalog for a table at most once per
+  statement, or once per transaction under `REPEATABLE READ` and `SERIALIZABLE`.
+
+`operation` is one of `config`, `token`, `list_namespaces`, `get_namespace`,
+`create_namespace`, `load_table`, `create_table`, `publish_create_table`,
+`publish_drop_table` and `publish_commit`. The counters are kept only when pg_lake_iceberg is
+loaded at server start, which `pg_extension_base` arranges; otherwise the function returns no
+rows. They reset when the server restarts. Calling the function requires membership in
+`pg_read_all_stats`.
 
 ## Snowflake
 

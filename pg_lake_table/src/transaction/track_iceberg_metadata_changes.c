@@ -517,7 +517,10 @@ PostAllRestCatalogRequests(void)
 
 				if (httpResult.status != 200)
 				{
-					ReportHTTPError(httpResult, WARNING);
+					ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_CREATE_TABLE,
+									requestPerTable->catalogName,
+									requestPerTable->catalogNamespace,
+									requestPerTable->catalogTableName);
 
 					/*
 					 * Ouch, something failed. Should we stop sending the
@@ -535,7 +538,10 @@ PostAllRestCatalogRequests(void)
 
 				if (httpResult.status != 204)
 				{
-					ReportHTTPError(httpResult, WARNING);
+					ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_DROP_TABLE,
+									requestPerTable->catalogName,
+									requestPerTable->catalogNamespace,
+									requestPerTable->catalogTableName);
 
 					/*
 					 * Ouch, something failed. Should we stop sending the
@@ -669,7 +675,8 @@ PostAllRestCatalogRequests(void)
 		/* Polaris and Nessie answer 204, Lakekeeper 200 */
 		if (httpResult.status != 200 && httpResult.status != 204)
 		{
-			ReportHTTPError(httpResult, WARNING);
+			ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_COMMIT,
+							catalogName, NULL, NULL);
 		}
 	}
 

@@ -23,8 +23,9 @@
  * backoff), and 419 or a first 401 (force-refresh the credential via the
  * auth layer and patch the Authorization header before retrying).
  *
- * ReportHTTPError translates a non-200 HttpResult into a Postgres
- * ereport, parsing the standard REST-catalog error envelope:
+ * ReportHTTPError translates a failed HttpResult into a Postgres ereport
+ * that names the failed operation, parsing the standard REST-catalog
+ * error envelope:
  *
  *     { "error": { "message": ..., "type": ..., "code": ... } }
  *
@@ -40,6 +41,7 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "nodes/miscnodes.h"
+#include "portability/instr_time.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
@@ -47,6 +49,7 @@
 #include "pg_extension_base/base_workers.h"
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/catalog_log.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 /* error bodies are small; anything larger or deeper is not worth parsing */
@@ -175,19 +178,29 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 
 	HttpResult	result;
 	bool		done = false;
+	CatalogRetryReason retryReason = CATALOG_RETRY_RATE_LIMITED;
+	instr_time	startTime;
+	instr_time	elapsed;
+
+	INSTR_TIME_SET_CURRENT(startTime);
 
 	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG && !done; retryNo++)
 	{
+		if (retryNo > 1)
+			CountCatalogRetry(opts, op, retryReason);
+
 		result = SendHttpRequest(method, url, body, headers, clientAuth);
 
 		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG,
 												retryNo, canRefreshCredential, authAlreadyRefreshed))
 		{
 			case REST_CATALOG_RETRY_BACKOFF_SHORT:
+				retryReason = CATALOG_RETRY_RATE_LIMITED;
 				LightSleep(LinearBackoffSleepMs(500, retryNo));
 				continue;
 
 			case REST_CATALOG_RETRY_BACKOFF_LONG:
+				retryReason = CATALOG_RETRY_UNAVAILABLE;
 				LightSleep(LinearBackoffSleepMs(5000, retryNo));
 				continue;
 
@@ -203,6 +216,7 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 
 					UpdateAuthorizationHeader(headers, fresh);
 					authAlreadyRefreshed = true;
+					retryReason = CATALOG_RETRY_AUTH_REFRESH;
 					continue;
 				}
 
@@ -212,7 +226,11 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 		}
 	}
 
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, startTime);
+
 	LogCatalogRequest(opts, op, &result);
+	CountCatalogRequest(opts, op, &result, INSTR_TIME_GET_MICROSEC(elapsed));
 
 	return result;
 }
@@ -349,18 +367,105 @@ GetRestCatalogErrorFields(const char *body, const char **message, const char **t
 
 
 /*
-* Reports an HTTP error by raising an appropriate error message.
-* The error format of rest catalog is follows:
-* {
-*  "error": {
-*    "message": "Malformed request",
-*    "type": "BadRequestException",
-*    "code": 400
-*  }
-*/
-void
-ReportHTTPError(HttpResult httpResult, int level)
+ * RestCatalogRequestFailure describes the request that failed, naming the
+ * catalog object it was for.
+ */
+static char *
+RestCatalogRequestFailure(RestCatalogOp op, const char *catalogName,
+						  const char *namespaceName, const char *tableName)
 {
+	StringInfoData object;
+
+	initStringInfo(&object);
+	appendStringInfoString(&object, catalogName);
+	if (namespaceName != NULL)
+		appendStringInfo(&object, ".%s", namespaceName);
+	if (tableName != NULL)
+		appendStringInfo(&object, ".%s", tableName);
+
+	switch (op)
+	{
+		case REST_CATALOG_OP_LIST_NAMESPACES:
+			return psprintf("could not list the namespaces of catalog \"%s\" in the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_GET_NAMESPACE:
+			return psprintf("could not look up namespace \"%s\" in the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_CREATE_NAMESPACE:
+			return psprintf("could not create namespace \"%s\" in the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_LOAD_TABLE:
+			return psprintf("could not load table \"%s\" from the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_CREATE_TABLE:
+		case REST_CATALOG_OP_PUBLISH_CREATE_TABLE:
+			return psprintf("could not create table \"%s\" in the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_PUBLISH_DROP_TABLE:
+			return psprintf("could not drop table \"%s\" from the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_PUBLISH_COMMIT:
+			return psprintf("could not commit changes to catalog \"%s\" in the REST catalog",
+							object.data);
+
+		default:
+			return pstrdup("REST catalog request failed");
+	}
+}
+
+
+/*
+ * RestCatalogErrorCode picks the SQLSTATE for a failed REST catalog
+ * response, so clients can tell a missing grant or a missing object from
+ * other failures without parsing the message.
+ */
+static int
+RestCatalogErrorCode(long status, const char *type)
+{
+	if (status == HTTP_STATUS_FORBIDDEN)
+		return ERRCODE_INSUFFICIENT_PRIVILEGE;
+
+	if (status == HTTP_STATUS_NOT_FOUND && type != NULL)
+	{
+		if (strcmp(type, "NoSuchTableException") == 0)
+			return ERRCODE_UNDEFINED_TABLE;
+		if (strcmp(type, "NoSuchNamespaceException") == 0)
+			return ERRCODE_UNDEFINED_SCHEMA;
+	}
+
+	return ERRCODE_EXTERNAL_ROUTINE_EXCEPTION;
+}
+
+
+/*
+ * ReportHTTPError reports a failed REST catalog request.  The primary
+ * message names the operation and the catalog object, followed by the
+ * message from the catalog's error response:
+ *
+ * {
+ *  "error": {
+ *    "message": "Malformed request",
+ *    "type": "BadRequestException",
+ *    "code": 400
+ *  }
+ * }
+ *
+ * namespaceName and tableName are NULL for a request that is not about one.
+ */
+void
+ReportHTTPError(HttpResult httpResult, int level, RestCatalogOp op,
+				const char *catalogName, const char *namespaceName,
+				const char *tableName)
+{
+	char	   *failure = RestCatalogRequestFailure(op, catalogName, namespaceName,
+													tableName);
+
 	/*
 	 * This is a curl error, so we don't have a proper HttpResult, don't even
 	 * try to parse the response.
@@ -369,7 +474,8 @@ ReportHTTPError(HttpResult httpResult, int level)
 	{
 		ereport(level,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-				 errmsg("HTTP request failed %s", httpResult.errorMsg ? httpResult.errorMsg : "unknown error")));
+				 errmsg("%s: %s", failure,
+						httpResult.errorMsg ? httpResult.errorMsg : "unknown error")));
 
 		return;
 	}
@@ -380,10 +486,11 @@ ReportHTTPError(HttpResult httpResult, int level)
 	GetRestCatalogErrorFields(httpResult.body, &message, &type);
 
 	ereport(level,
-			(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-			 errmsg("HTTP request failed (HTTP %ld)", httpResult.status),
-			 message ? errdetail_internal("%s", message) : 0,
-			 type ? errhint("The rest catalog returned error type: %s", type) : 0));
+			(errcode(RestCatalogErrorCode(httpResult.status, type)),
+			 message ? errmsg("%s: %s", failure, message) : errmsg("%s", failure),
+			 type ? errdetail("The REST catalog returned HTTP %ld (%s).",
+							  httpResult.status, type) :
+			 errdetail("The REST catalog returned HTTP %ld.", httpResult.status)));
 }
 
 
