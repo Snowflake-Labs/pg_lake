@@ -1852,7 +1852,9 @@ append_escaped_csv(StringInfo buffer, char *value)
 	/* need quotes */
 	appendStringInfoCharMacro(buffer, TRANSMIT_QUOTE_CHAR);
 
-	for (char *charPointer = value; *charPointer != '\0'; charPointer++)
+	const char *valueEnd = value + strlen(value);
+
+	for (char *charPointer = value; charPointer < valueEnd; charPointer++)
 	{
 		char		currentChar = *charPointer;
 
@@ -1868,12 +1870,25 @@ append_escaped_csv(StringInfo buffer, char *value)
 			 * multi-byte character, DuckDB only supports UTF-8, so must be
 			 * UTF-8
 			 */
+			int			remaining = (int) (valueEnd - charPointer);
 			int			charLength = pg_encoding_mblen(PG_UTF8, charPointer);
 
-			appendBinaryStringInfo(buffer, charPointer, charLength);
+			/*
+			 * Never read past the value, and replace invalid or truncated
+			 * sequences (e.g. from unvalidated Parquet strings) with '?'.
+			 */
+			if (charLength > remaining ||
+				!pg_utf8_islegal((const unsigned char *) charPointer, charLength))
+			{
+				appendStringInfoCharMacro(buffer, '?');
+			}
+			else
+			{
+				appendBinaryStringInfo(buffer, charPointer, charLength);
 
-			/* skip extra bytes */
-			charPointer += charLength - 1;
+				/* skip extra bytes */
+				charPointer += charLength - 1;
+			}
 		}
 		else
 		{
