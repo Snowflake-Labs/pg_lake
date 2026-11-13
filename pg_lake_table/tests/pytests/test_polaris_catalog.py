@@ -1477,6 +1477,96 @@ def test_rest_catalog_uppercase_identifiers(
     rest_catalog.drop_namespace(namespace)
 
 
+def test_snowflake_catalog_lowercases_column_names_by_default(
+    pg_conn,
+    s3,
+    polaris_session,
+    set_polaris_gucs,
+    with_default_location,
+    installcheck,
+):
+    """catalog='snowflake' folds uppercase column names unless
+    lowercase_column_names is set explicitly."""
+
+    if installcheck:
+        return
+
+    namespace = "TEST_SNOWFLAKE_DEFAULT_LOWERCASE"
+    table_name = "ORDERS"
+    rest_catalog = create_iceberg_rest_catalog(namespace)
+
+    iceberg_table = rest_catalog.create_table(
+        identifier=f"{namespace}.{table_name}",
+        schema=Schema(
+            NestedField(1, "ID", LongType(), required=False),
+            NestedField(2, "AMOUNT", LongType(), required=False),
+        ),
+    )
+    iceberg_table.append(
+        pyarrow.Table.from_pylist([{"ID": 1, "AMOUNT": 10}, {"ID": 2, "AMOUNT": 20}])
+    )
+
+    run_command("CREATE SCHEMA test_snowflake_default_lowercase", pg_conn)
+
+    def column_names(table):
+        return [
+            row[0]
+            for row in run_query(
+                f"""
+                SELECT attname FROM pg_attribute
+                WHERE attrelid = 'test_snowflake_default_lowercase.{table}'::regclass
+                  AND attnum > 0 ORDER BY attnum
+                """,
+                pg_conn,
+            )
+        ]
+
+    # default: names are folded and the table is queried with plain names
+    run_command(
+        """
+        CREATE TABLE test_snowflake_default_lowercase.orders ()
+        USING iceberg
+        WITH (catalog='snowflake', read_only=True)
+        """,
+        pg_conn,
+    )
+    assert column_names("orders") == ["id", "amount"]
+    result = run_query(
+        "SELECT id, amount FROM test_snowflake_default_lowercase.orders ORDER BY id",
+        pg_conn,
+    )
+    assert result == [[1, 10], [2, 20]]
+
+    # an explicit false keeps the names as the catalog has them
+    run_command(
+        """
+        CREATE TABLE test_snowflake_default_lowercase.orders_exact ()
+        USING iceberg
+        WITH (catalog='snowflake', read_only=True, catalog_table_name='ORDERS',
+              lowercase_column_names=False)
+        """,
+        pg_conn,
+    )
+    assert column_names("orders_exact") == ["ID", "AMOUNT"]
+
+    # the rest catalog keeps the existing default
+    run_command(
+        """
+        CREATE TABLE test_snowflake_default_lowercase.orders_rest ()
+        USING iceberg
+        WITH (catalog='rest', read_only=True, catalog_table_name='ORDERS')
+        """,
+        pg_conn,
+    )
+    assert column_names("orders_rest") == ["ID", "AMOUNT"]
+
+    pg_conn.commit()
+    run_command("DROP SCHEMA test_snowflake_default_lowercase CASCADE", pg_conn)
+    pg_conn.commit()
+    rest_catalog.drop_table(f"{namespace}.{table_name}")
+    rest_catalog.drop_namespace(namespace)
+
+
 def test_rest_catalog_required_columns_autodetect(
     pg_conn,
     s3,

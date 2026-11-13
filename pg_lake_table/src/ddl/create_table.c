@@ -851,6 +851,24 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 */
 		bool		hasExternalCatalogReadOnlyOption = HasReadOnlyOption(createStmt->options);
 
+		/*
+		 * Snowflake stores unquoted identifiers in uppercase, so a table
+		 * attached through catalog='snowflake' would otherwise need every
+		 * column quoted. Fold the inferred column names by default; an
+		 * explicit lowercase_column_names option, including false, wins.
+		 */
+		DefElem    *attachCatalogOption = GetOption(createStmt->options, "catalog");
+
+		if (hasExternalCatalogReadOnlyOption &&
+			createStmt->base.tableElts == NIL &&
+			attachCatalogOption != NULL &&
+			pg_strcasecmp(strVal(attachCatalogOption->arg), SNOWFLAKE_CATALOG_NAME) == 0 &&
+			!HasOption(createStmt->options, LOWERCASE_COLUMN_NAMES_OPTION))
+			createStmt->options =
+				lappend(createStmt->options,
+						makeDefElem(LOWERCASE_COLUMN_NAMES_OPTION,
+									(Node *) makeString("true"), -1));
+
 		if (hasExternalCatalogReadOnlyOption &&
 			GetOption(createStmt->options, "partition_by") != NULL)
 			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
