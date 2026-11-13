@@ -1,4 +1,7 @@
+import psycopg2
 import pytest
+import threading
+import time
 from utils_pytest import *
 
 
@@ -89,6 +92,88 @@ def test_vacuum_failure(
 		DROP SCHEMA \"{injection_point_name}\" CASCADE """,
         pg_conn,
     )
+
+
+def test_vacuum_table_dropped_between_in_progress_passes(
+    pg_conn,
+    superuser_conn,
+    extension,
+    s3,
+    create_injection_extension,
+    with_default_location,
+):
+    """
+    Removing a table's in-progress files commits after each pass, so the
+    table can be dropped before the next pass looks up its location.  That
+    pass skips the table instead of failing on it.
+    """
+    if get_pg_version_num(pg_conn) < 170000:
+        pytest.skip("injection points 'wait' requires PostgreSQL 17+")
+
+    run_command(
+        """
+        CREATE SCHEMA vacuum_dropped_in_progress;
+        CREATE TABLE vacuum_dropped_in_progress.t (a int) USING iceberg
+        WITH (autovacuum_enabled = 'False');
+        INSERT INTO vacuum_dropped_in_progress.t VALUES (1);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # local to this session, so the autovacuum worker never waits on it
+    vacuum_conn = open_pg_conn()
+    vacuum_conn.autocommit = True
+    run_command(
+        """
+        SELECT injection_points_set_local();
+        SELECT injection_points_attach('in-progress-files', 'wait');
+        """,
+        vacuum_conn,
+    )
+    vacuum_pid = vacuum_conn.get_backend_pid()
+
+    vacuum_errors = []
+
+    def vacuum():
+        try:
+            run_command("VACUUM vacuum_dropped_in_progress.t", vacuum_conn)
+        except psycopg2.Error as error:
+            vacuum_errors.append(error)
+
+    vacuum_thread = threading.Thread(target=vacuum)
+    vacuum_thread.start()
+
+    try:
+        deadline = time.monotonic() + 60
+        while True:
+            wait_event = run_query(
+                f"SELECT wait_event FROM pg_stat_activity WHERE pid = {vacuum_pid}",
+                superuser_conn,
+            )[0][0]
+            superuser_conn.commit()
+            if wait_event == "in-progress-files":
+                break
+            assert time.monotonic() < deadline, "VACUUM never reached the wait"
+            time.sleep(0.1)
+
+        # the first pass has not looked up the location yet
+        run_command("SET lock_timeout = '10s'", pg_conn)
+        run_command("DROP TABLE vacuum_dropped_in_progress.t", pg_conn)
+        pg_conn.commit()
+    finally:
+        run_command(
+            "SELECT injection_points_wakeup('in-progress-files')", superuser_conn
+        )
+        superuser_conn.commit()
+        vacuum_thread.join(timeout=60)
+
+    assert vacuum_errors == []
+    assert not [n for n in vacuum_conn.notices if n.startswith("WARNING")]
+
+    vacuum_conn.close()
+    run_command("DROP SCHEMA vacuum_dropped_in_progress CASCADE", pg_conn)
+    pg_conn.commit()
 
 
 def test_vacuum_without_s3_access(
