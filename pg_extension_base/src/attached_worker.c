@@ -180,7 +180,12 @@ RunAttachedWorker(char *command, char *databaseName, char *userName, ReturnSetIn
 
 	PG_TRY();
 	{
-		do
+		/*
+		 * Read until the queue detaches, not until the worker stops: it sends
+		 * CommandComplete before it commits, and an error from the commit
+		 * comes after that.
+		 */
+		for (;;)
 		{
 			CHECK_FOR_INTERRUPTS();
 
@@ -199,7 +204,6 @@ RunAttachedWorker(char *command, char *databaseName, char *userName, ReturnSetIn
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 			commandId++;
 		}
-		while (IsAttachedWorkerRunning(worker));
 	}
 	PG_FINALLY();
 	{
@@ -776,8 +780,16 @@ ReadResultsFromAttachedWorker(AttachedWorker * worker, Tuplestorestate *store,
 
 	DestroyTupleQueueReader(reader);
 
-	/* Final drain to catch any trailing errors or notices */
-	ProcessProtocolMessages(worker, true, NULL);
+	/*
+	 * The tuple queue closes when the query ends, before the worker commits,
+	 * so wait here for the protocol queue to detach.  That raises an error
+	 * from the commit, and keeps EndAttachedWorker from terminating a worker
+	 * that is still committing.
+	 */
+	bool		nowait = false;
+
+	while (ProcessProtocolMessages(worker, nowait, NULL) != NULL)
+		;
 }
 
 
