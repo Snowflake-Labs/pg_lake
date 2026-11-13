@@ -373,10 +373,45 @@ which the current metadata-file reader requires. The catalog must support staged
 and the commit operations used by pg_lake; REST catalog support alone is not sufficient.
 
 {: .warning }
-pg_lake sends its changes to the catalog after the PostgreSQL transaction commits. If the
-catalog rejects a change, for example because the location is not allowed, the transaction is
-still committed in PostgreSQL and you only get a `WARNING`. Check for warnings when you start
-using a new catalog server.
+By default, pg_lake sends its changes to the catalog after the PostgreSQL transaction commits.
+If the catalog rejects a change, for example because the location is not allowed, the
+transaction is still committed in PostgreSQL and you only get a `WARNING`. Check for warnings
+when you start using a new catalog server, or use the `catalog` commit mode below.
+
+#### Commit modes
+
+`pg_lake_iceberg.rest_catalog_commit_mode` decides who commits a transaction that modifies
+writable REST catalog tables:
+
+| Mode | What it does |
+|:--|:--|
+| `post_commit` (default) | PostgreSQL commits the transaction, then pg_lake sends the changes to the catalog. A rejected change only produces a `WARNING`. |
+| `catalog` | pg_lake sends the changes to the catalog just before the PostgreSQL commit. If the catalog rejects them, the transaction aborts with an `ERROR`. |
+
+In `catalog` mode, each table change asserts that the table is still at the snapshot pg_lake
+built it on. If another engine committed to the table in the meantime, the catalog rejects
+the change with a `409` and nothing is overwritten. Because the catalog makes the decision, a
+transaction in this mode cannot also write to tables that commit through PostgreSQL: regular
+tables, Iceberg tables in the PostgreSQL or object store catalogs, and other pg_lake tables.
+Temporary tables are allowed.
+
+```sql
+SET pg_lake_iceberg.rest_catalog_commit_mode TO 'catalog';
+
+BEGIN;
+INSERT INTO order_summary VALUES ('emea', 100);
+INSERT INTO audit_log VALUES (now(), 'order_summary');
+ERROR:  cannot write to PostgreSQL table "audit_log" in a transaction that modifies REST catalog tables
+DETAIL:  When pg_lake_iceberg.rest_catalog_commit_mode is 'catalog', the REST catalog commits the transaction, so it cannot include writes to PostgreSQL tables.
+HINT:  Write to the PostgreSQL tables in a separate transaction.
+ROLLBACK;
+```
+
+The mode is read when the transaction first modifies a REST catalog table, so set it before the
+transaction starts. A transaction that creates tables sends those first, since the catalog
+commits table creation separately; if the rest of the commit is then rejected, pg_lake drops
+the new tables from the catalog again. Dropped tables are removed from the catalog after the
+other changes commit.
 
 ### Change or remove a catalog server
 

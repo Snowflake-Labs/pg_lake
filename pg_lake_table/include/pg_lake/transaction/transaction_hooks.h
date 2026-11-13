@@ -20,4 +20,5 @@
 #include "postgres.h"
 
 extern void IcebergRegisterCallbacks(void);
+extern bool IsPostgresTableWrite(Oid relationId);
 extern void ExternalHeavyAssertsOnIcebergMetadataChange(void);

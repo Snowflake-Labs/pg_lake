@@ -32,6 +32,17 @@
 #define REST_CATALOG_AUTH_TYPE_HORIZON (1)
 #define REST_CATALOG_AUTH_TYPE_NONE (2)
 
+/*
+ * When a transaction's changes to writable REST catalog tables reach the
+ * catalog.  In post_commit mode they are sent after the PostgreSQL commit
+ * and a rejected change only produces a WARNING.  In catalog mode they are
+ * sent before the PostgreSQL commit with requirements on the table state, a
+ * rejected change aborts the transaction, and the transaction cannot also
+ * write to PostgreSQL tables.
+ */
+#define REST_CATALOG_COMMIT_MODE_POST_COMMIT (0)
+#define REST_CATALOG_COMMIT_MODE_CATALOG (1)
+
 extern PGDLLEXPORT char *RestCatalogHost;
 extern char *RestCatalogOauthHostPath;
 extern char *RestCatalogClientId;
@@ -39,6 +50,7 @@ extern char *RestCatalogClientSecret;
 extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
+extern PGDLLEXPORT int RestCatalogCommitMode;
 
 /*
  * What a request to a REST catalog is for, as reported in the catalog error
@@ -211,6 +223,7 @@ typedef enum RestCatalogOperationType
 	REST_CATALOG_REMOVE_SNAPSHOT = 5,
 	REST_CATALOG_DROP_TABLE = 6,
 	REST_CATALOG_SET_DEFAULT_PARTITION_ID = 7,
+	REST_CATALOG_ASSERT_TABLE_STATE = 8,
 }			RestCatalogOperationType;
 
 
@@ -475,6 +488,7 @@ extern PGDLLEXPORT RestCatalogRequest * GetSetCurrentSchemaCatalogRequest(Oid re
 extern PGDLLEXPORT RestCatalogRequest * GetAddPartitionCatalogRequest(Oid relationId, List *partitionSpec);
 extern PGDLLEXPORT RestCatalogRequest * GetSetPartitionDefaultIdCatalogRequest(Oid relationId, int specId);
 extern PGDLLEXPORT RestCatalogRequest * GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId);
+extern PGDLLEXPORT RestCatalogRequest * GetAssertTableStateCatalogRequest(Oid relationId, IcebergTableMetadata * metadata);
 
 /* ProcessUtility handler for iceberg_catalog server DDL validation */
 extern PGDLLEXPORT bool ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams, void *arg);
