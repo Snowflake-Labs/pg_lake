@@ -32,6 +32,7 @@
 char	   *ObjectStoreCatalogLocationPrefix = NULL;
 char	   *ExternalObjectStorePrefix = "fromsf";
 char	   *InternalObjectStorePrefix = "frompg";
+char     *ObjectStoreCatalogDatabaseSuffix = NULL;
 
 PG_FUNCTION_INFO_V1(list_object_store_tables);
 PG_FUNCTION_INFO_V1(trigger_object_store_catalog_generation);
