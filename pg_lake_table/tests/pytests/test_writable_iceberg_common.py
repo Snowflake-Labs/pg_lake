@@ -4,6 +4,7 @@ from utils_pytest import *
 import json
 import re
 import random
+import time
 from pathlib import Path
 
 TABLE_NAMESPACE = "test_writable_iceberg"
@@ -75,15 +76,15 @@ def assert_snapshot_log_order(snapshot_logs):
 def assert_postgres_tmp_folder_empty():
     tmp_folder = f"{server_params.PG_DIR}/base/pgsql_tmp/"
 
-    # Check if the directory exists
-    if os.path.exists(tmp_folder):
-        # Assert that the directory is empty
-        assert not os.listdir(
-            tmp_folder
-        ), f"Temporary PostgreSQL folder '{tmp_folder}' is not empty"
-    else:
-        # If the folder does not exist, it is effectively empty
-        assert True
+    # The folder is shared with background workers, and the object store
+    # catalog export holds a temporary file while it uploads, so a file has to
+    # outlast a few seconds to count as left behind.
+    deadline = time.monotonic() + 10
+    while os.path.exists(tmp_folder) and os.listdir(tmp_folder):
+        assert (
+            time.monotonic() < deadline
+        ), f"Temporary PostgreSQL folder '{tmp_folder}' is not empty: {os.listdir(tmp_folder)}"
+        time.sleep(0.1)
 
 
 @pytest.fixture(scope="module")
