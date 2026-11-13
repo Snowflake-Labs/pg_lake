@@ -1299,7 +1299,8 @@ def test_rest_catalog_read_only_scans_are_counted(
     Each executed scan of a read-only table counts in
     lake_iceberg.catalog_stats(), whether the query is pushed down or not.
     A plain EXPLAIN does not, and neither does a table pg_lake manages.
-    With horizon authentication the built-in catalog counts as horizon.
+    With horizon authentication the built-in catalog counts as horizon, and
+    a catalog defined with CREATE SERVER counts as user.
     """
     if installcheck:
         return
@@ -1389,8 +1390,48 @@ def test_rest_catalog_read_only_scans_are_counted(
         )
         superuser_conn.commit()
 
+    # a catalog defined with CREATE SERVER counts as user
+    server = "scan_stats_polaris"
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    endpoint = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog"
+    user_scans = _table_scans(superuser_conn, "user")
+
+    run_command(f"DROP SERVER IF EXISTS {server} CASCADE", superuser_conn)
+    run_command(
+        f"""CREATE SERVER {server} TYPE 'rest'
+                FOREIGN DATA WRAPPER iceberg_catalog
+                OPTIONS (rest_endpoint '{endpoint}')""",
+        superuser_conn,
+    )
+    run_command(
+        f"""CREATE USER MAPPING FOR PUBLIC SERVER {server}
+                OPTIONS (client_id '{creds["credentials"]["clientId"]}',
+                         client_secret '{creds["credentials"]["clientSecret"]}')""",
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE TABLE "{namespace}".scanned_through_server ()
+        USING iceberg
+        WITH (catalog='{server}', read_only=True,
+              catalog_namespace='{namespace}', catalog_table_name='{table_name}')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    result = run_query(
+        f"""SELECT count(*) FROM "{namespace}".scanned_through_server""",
+        superuser_conn,
+    )
+    assert result == [[2]]
+    assert _table_scans(superuser_conn, "user") == user_scans + 1
+    assert _table_scans(superuser_conn) == scans + 4
+
     run_command(f"""DROP SCHEMA "{namespace}" CASCADE""", pg_conn)
     pg_conn.commit()
+    run_command(f"DROP SERVER {server} CASCADE", superuser_conn)
+    superuser_conn.commit()
     rest_catalog.drop_table(f"{namespace}.{table_name}")
     rest_catalog.drop_namespace(namespace)
 

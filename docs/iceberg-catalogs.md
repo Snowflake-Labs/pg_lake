@@ -199,7 +199,6 @@ CREATE SERVER polaris TYPE 'rest'
 | `catalog_name` | server | Catalog (warehouse) that tables use. Without it, pg_lake uses the prefix the catalog advertises, or the database name. A table created by pg_lake keeps the catalog it was created in, even if this option changes later, see [below](#create-tables-in-an-external-catalog). |
 | `warehouse` | server | Warehouse to name when pg_lake asks the catalog for its prefix (`GET /v1/config?warehouse=...`). Polaris and Lakekeeper need it to advertise a prefix: use the catalog name on Polaris and the warehouse name on Lakekeeper, which returns the warehouse ID. `catalog_name` still wins if set. |
 | `oauth_endpoint` | server | OAuth2 token endpoint URL, if the catalog does not serve it at `<rest_endpoint>/v1/oauth/tokens`. |
-| `rest_auth_type` | server | How pg_lake authenticates: `oauth2` (the default), `none`, or `horizon`, which only the built-in `rest` catalog accepts. On the built-in catalog it overrides `pg_lake_iceberg.rest_catalog_auth_type`. |
 | `enable_vended_credentials` | server | Ask the catalog for temporary storage credentials instead of using pgduck_server's own. |
 | `scope` | server or user mapping | OAuth2 scope. Default `PRINCIPAL_ROLE:ALL`. The user mapping wins if both set it. |
 | `client_id`, `client_secret` | user mapping | OAuth2 client credentials. |
@@ -518,8 +517,7 @@ turn the lines off.
 Where a sentence names the catalog, it is one of:
 
 - `the Horizon catalog`: the [built-in `rest` catalog](#configure-the-built-in-rest-catalog)
-  when it authenticates with `horizon`, as set by `pg_lake_iceberg.rest_catalog_auth_type` or
-  by the server's `rest_auth_type` option, which takes precedence.
+  when `pg_lake_iceberg.rest_catalog_auth_type` is `horizon`.
 - `the built-in REST catalog`: the built-in `rest` catalog with any other authentication.
 - `a catalog server`: a catalog defined with [CREATE SERVER](#external-catalogs-with-create-server).
 
@@ -608,9 +606,8 @@ SELECT * FROM lake_iceberg.catalog_stats();
 ```
 
 Like the [catalog error log](#catalog-error-log), the counters name no catalog, namespace or
-table. `catalog` is `horizon` for the built-in `rest` catalog when it authenticates with
-`horizon`, as set by `pg_lake_iceberg.rest_catalog_auth_type` or by the server's
-`rest_auth_type` option, which takes precedence. It is `builtin` for the built-in `rest`
+table. `catalog` is `horizon` for the built-in `rest` catalog when
+`pg_lake_iceberg.rest_catalog_auth_type` is `horizon`, `builtin` for the built-in `rest`
 catalog with any other authentication, and `user` for catalogs defined with
 [CREATE SERVER](#external-catalogs-with-create-server). The metrics are:
 
@@ -618,7 +615,10 @@ catalog with any other authentication, and `user` for catalogs defined with
   `not_found`, `client_error` (other 4xx), `server_error` (5xx) or `network_error` (no
   response). A request counts once, after its retries. Requests interrupted by a cancel are not
   counted.
-- `request_microseconds`: time spent on those requests, retries included.
+- `request_microseconds`: time spent on those requests, retries included. When a retry needs
+  a fresh token, the time includes getting it, which pg_lake's own OAuth2 login also counts
+  under `token`. If getting the token fails, the request is not counted, and the failure
+  shows in `auth_failures`.
 - `retries`: requests sent again, by `operation` and by `result`: `rate_limited` (HTTP 429),
   `unavailable` (HTTP 503) or `auth_refresh` (an expired credential was refreshed).
 - `auth_failures`: times no credential could be obtained for the catalog.

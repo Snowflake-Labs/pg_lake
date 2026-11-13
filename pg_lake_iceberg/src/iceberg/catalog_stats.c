@@ -351,35 +351,23 @@ CountCatalogTableScans(List *rteList)
 
 /*
  * RelationCatalogKind is CatalogKind for the catalog of a REST catalog
- * table, worked out from the catalog's server alone.  Resolving the full
- * options validates the user mapping and can throw, and the scan being
- * counted may not need them at all once the catalog's answer is held.
- *
- * As in option resolution, a rest_auth_type on the built-in server
- * overrides pg_lake_iceberg.rest_catalog_auth_type.
+ * table, worked out from the table's catalog option alone.  Resolving the
+ * full options validates the user mapping and can throw, and the scan being
+ * counted may not need them at all once the catalog's answer is held.  The
+ * built-in server carries no options, so the GUC alone decides whether it
+ * authenticates with horizon.
  */
 static CatalogStatsCatalog
 RelationCatalogKind(Oid relationId)
 {
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	char	   *catalog = GetStringOption(foreignTable->options, "catalog", false);
-	const char *serverName = ResolveCatalogServerName(catalog);
 
-	if (!IsBuiltinCatalogServerName(serverName))
+	if (!IsBuiltinCatalogServerName(ResolveCatalogServerName(catalog)))
 		return CATALOG_STATS_USER;
 
-	bool		horizon = RestCatalogAuthType == REST_CATALOG_AUTH_TYPE_HORIZON;
-	ForeignServer *server = GetForeignServerByName(serverName, true);
-
-	if (server != NULL)
-	{
-		char	   *authType = GetStringOption(server->options, "rest_auth_type", false);
-
-		if (authType != NULL)
-			horizon = pg_strcasecmp(authType, "horizon") == 0;
-	}
-
-	return horizon ? CATALOG_STATS_HORIZON : CATALOG_STATS_BUILTIN;
+	return RestCatalogAuthType == REST_CATALOG_AUTH_TYPE_HORIZON ?
+		CATALOG_STATS_HORIZON : CATALOG_STATS_BUILTIN;
 }
 
 

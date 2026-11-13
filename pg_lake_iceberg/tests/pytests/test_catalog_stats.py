@@ -510,6 +510,43 @@ def test_stats_refuse_other_columns(postgres, iceberg_extension, columns):
         conn.close()
 
 
+def test_stats_through_the_rendezvous_variable(installcheck, catalog_and_conn):
+    """
+    Another extension returns the counters by calling the function
+    pg_lake_iceberg leaves in a rendezvous variable, under a declaration of
+    its own, and gets the rows lake_iceberg.catalog_stats() returns.
+    """
+    if installcheck:
+        return
+
+    handler_class, conn = catalog_and_conn
+    handler_class.namespace_statuses = [404]
+    _register_namespace(conn, "ns_rendezvous")
+
+    run_command(
+        """CREATE FUNCTION catalog_stats_through_rendezvous(
+               OUT metric text, OUT catalog text, OUT operation text,
+               OUT result text, OUT value bigint)
+           RETURNS SETOF record LANGUAGE C
+           AS 'pg_lake_iceberg', 'catalog_stats_through_rendezvous'""",
+        conn,
+    )
+    through_slot = {
+        tuple(row)
+        for row in run_query("SELECT * FROM catalog_stats_through_rendezvous()", conn)
+    }
+    direct = {
+        tuple(row)
+        for row in run_query("SELECT * FROM lake_iceberg.catalog_stats()", conn)
+    }
+    conn.rollback()
+
+    assert ("requests", "builtin", "create_namespace", "ok") in {
+        row[:4] for row in through_slot
+    }
+    assert through_slot == direct
+
+
 def test_stats_need_server_statistics_privilege(postgres, iceberg_extension):
     conn = open_pg_conn()
     try:
