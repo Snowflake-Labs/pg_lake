@@ -304,7 +304,7 @@ def test_failed_requests_are_counted(installcheck, catalog_and_conn, status, out
 
 @pytest.mark.parametrize(
     "status, reason",
-    [(429, "rate_limited"), (401, "auth_refresh")],
+    [(429, "rate_limited"), (503, "unavailable"), (401, "auth_refresh")],
 )
 def test_retries_are_counted(installcheck, catalog_and_conn, status, reason):
     """
