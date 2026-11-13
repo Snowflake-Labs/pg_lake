@@ -678,18 +678,18 @@ CheckIfExternalObjectStoreCatalogExists(const char *catalogName)
  */
 static char *
 ObjectStoreCatalogFilePath(const char *defaultPrefix, const char *catalogPrefix,
-               const char *catalogName)
+						   const char *catalogName)
 {
-  if (ObjectStoreCatalogDatabaseSuffix != NULL &&
-    ObjectStoreCatalogDatabaseSuffix[0] != '\0')
-  {
-    return psprintf("%s/%s/catalog/%s/%s/catalog.json", defaultPrefix,
-            catalogPrefix, URLEncodePath(catalogName),
-            URLEncodePath(ObjectStoreCatalogDatabaseSuffix));
-  }
+	if (ObjectStoreCatalogDatabaseSuffix != NULL &&
+		ObjectStoreCatalogDatabaseSuffix[0] != '\0')
+	{
+		return psprintf("%s/%s/catalog/%s/%s/catalog.json", defaultPrefix,
+						catalogPrefix, URLEncodePath(catalogName),
+						URLEncodePath(ObjectStoreCatalogDatabaseSuffix));
+	}
 
-  return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
-          catalogPrefix, URLEncodePath(catalogName));
+	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
+					catalogPrefix, URLEncodePath(catalogName));
 }
 
 /*
@@ -717,8 +717,8 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
-	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
-					ExternalObjectStorePrefix, URLEncodePath(catalogName));
+	return ObjectStoreCatalogFilePath(defaultPrefix, ExternalObjectStorePrefix,
+									  catalogName);
 }
 
 static char *
@@ -742,8 +742,8 @@ GetInternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
-	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
-					InternalObjectStorePrefix, URLEncodePath(catalogName));
+	return ObjectStoreCatalogFilePath(defaultPrefix, InternalObjectStorePrefix,
+									  catalogName);
 }
 
 /*

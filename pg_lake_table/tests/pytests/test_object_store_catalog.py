@@ -1671,56 +1671,68 @@ def test_object_store_catalog_periodic_rewrite(
 # pg_lake_iceberg.catalog_database_suffix is set, and stays at
 # <database>/catalog.json when it is not
 def test_catalog_database_suffix(
-    pg_conn,
     superuser_conn,
     s3,
     extension,
     with_default_location,
     adjust_object_store_settings,
 ):
+    # The GUC is session scoped, so everything runs on one superuser session:
+    # the background export worker never sees it, a forced push does.
     suffix = "suffix_abc"
-    superuser_conn.autocommit = True
+    schema = "test_db_suffix"
+    conn = superuser_conn
+
+    run_command(f"CREATE SCHEMA {schema}", conn)
     run_command(
-        f"ALTER SYSTEM SET pg_lake_iceberg.catalog_database_suffix = '{suffix}'",
-        superuser_conn,
+        f"CREATE TABLE {schema}.wrt_tbl(a int) USING iceberg WITH (catalog='object_store')",
+        conn,
     )
-    run_command("SELECT pg_reload_conf()", superuser_conn)
-    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+    run_command(f"INSERT INTO {schema}.wrt_tbl VALUES (1), (2), (3)", conn)
+    conn.commit()
 
     try:
-        run_command("CREATE SCHEMA test_db_suffix", pg_conn)
-        run_command(
-            "CREATE TABLE test_db_suffix.tbl(a int) USING iceberg WITH (catalog='object_store')",
-            pg_conn,
-        )
-        pg_conn.commit()
-        wait_until_object_store_writable_table_pushed(pg_conn, "test_db_suffix", "tbl")
+        run_command(f"SET pg_lake_iceberg.catalog_database_suffix TO '{suffix}'", conn)
+        run_command("SELECT lake_iceberg.force_push_object_store_catalog()", conn)
+        conn.commit()
 
-        dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+        dbname = run_query("SELECT current_database()", conn)[0][0]
         prefix = run_query(
-            "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix",
-            superuser_conn,
+            "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix", conn
         )[0][0]
 
+        # write: the catalog lands under <database>/<suffix>/
         suffixed_key = f"{prefix}/catalog/{dbname}/{suffix}/catalog.json"
         body = json.loads(
             s3.get_object(Bucket=TEST_BUCKET, Key=suffixed_key)["Body"].read()
         )
         assert "catalog-snapshot-time" in body
 
-        plain_key = f"{prefix}/catalog/{dbname}/catalog.json"
-        with pytest.raises(s3.exceptions.ClientError):
-            s3.head_object(Bucket=TEST_BUCKET, Key=plain_key)
-
-        run_command("DROP SCHEMA test_db_suffix CASCADE", pg_conn)
-        pg_conn.commit()
-    finally:
+        # read: a reader resolves the table through the suffixed file
         run_command(
-            "ALTER SYSTEM RESET pg_lake_iceberg.catalog_database_suffix",
-            superuser_conn,
+            f"CREATE TABLE {schema}.read_tbl(a int) USING iceberg "
+            "WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl')",
+            conn,
         )
-        run_command("SELECT pg_reload_conf()", superuser_conn)
-        superuser_conn.autocommit = False
+        conn.commit()
+        assert run_query(f"SELECT sum(a) FROM {schema}.read_tbl", conn)[0][0] == 6
+
+        # a different suffix points at a file that does not exist
+        run_command("SET pg_lake_iceberg.catalog_database_suffix TO 'other_sfx'", conn)
+        with pytest.raises(Exception):
+            run_query(f"SELECT count(*) FROM {schema}.read_tbl", conn)
+        conn.rollback()
+    finally:
+        conn.rollback()
+        run_command("RESET pg_lake_iceberg.catalog_database_suffix", conn)
+        run_command(f"DROP SCHEMA {schema} CASCADE", conn)
+        conn.commit()
+
+
+def test_catalog_database_suffix_is_superuser_only(extension, user_conn):
+    with pytest.raises(Exception, match="permission denied"):
+        run_command("SET pg_lake_iceberg.catalog_database_suffix TO 'x'", user_conn)
+    user_conn.rollback()
 
 
 # A failed catalog export must name itself. The periodic export runs in the
