@@ -1667,6 +1667,62 @@ def test_object_store_catalog_periodic_rewrite(
         superuser_conn.autocommit = False
 
 
+# catalog.json moves under <database>/<suffix>/ when
+# pg_lake_iceberg.catalog_database_suffix is set, and stays at
+# <database>/catalog.json when it is not
+def test_catalog_database_suffix(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    suffix = "suffix_abc"
+    superuser_conn.autocommit = True
+    run_command(
+        f"ALTER SYSTEM SET pg_lake_iceberg.catalog_database_suffix = '{suffix}'",
+        superuser_conn,
+    )
+    run_command("SELECT pg_reload_conf()", superuser_conn)
+    run_command("SELECT pg_sleep(0.2)", superuser_conn)
+
+    try:
+        run_command("CREATE SCHEMA test_db_suffix", pg_conn)
+        run_command(
+            "CREATE TABLE test_db_suffix.tbl(a int) USING iceberg WITH (catalog='object_store')",
+            pg_conn,
+        )
+        pg_conn.commit()
+        wait_until_object_store_writable_table_pushed(pg_conn, "test_db_suffix", "tbl")
+
+        dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+        prefix = run_query(
+            "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix",
+            superuser_conn,
+        )[0][0]
+
+        suffixed_key = f"{prefix}/catalog/{dbname}/{suffix}/catalog.json"
+        body = json.loads(
+            s3.get_object(Bucket=TEST_BUCKET, Key=suffixed_key)["Body"].read()
+        )
+        assert "catalog-snapshot-time" in body
+
+        plain_key = f"{prefix}/catalog/{dbname}/catalog.json"
+        with pytest.raises(s3.exceptions.ClientError):
+            s3.head_object(Bucket=TEST_BUCKET, Key=plain_key)
+
+        run_command("DROP SCHEMA test_db_suffix CASCADE", pg_conn)
+        pg_conn.commit()
+    finally:
+        run_command(
+            "ALTER SYSTEM RESET pg_lake_iceberg.catalog_database_suffix",
+            superuser_conn,
+        )
+        run_command("SELECT pg_reload_conf()", superuser_conn)
+        superuser_conn.autocommit = False
+
+
 # A failed catalog export must name itself. The periodic export runs in the
 # vacuum worker, which demotes the error to a WARNING, so the message text is
 # the only thing a log collector has to recognize it by, and the underlying

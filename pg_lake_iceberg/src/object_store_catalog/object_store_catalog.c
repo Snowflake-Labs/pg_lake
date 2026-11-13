@@ -671,6 +671,28 @@ CheckIfExternalObjectStoreCatalogExists(const char *catalogName)
 }
 
 /*
+ * ObjectStoreCatalogFilePath builds the catalog.json path for the given
+ * catalog prefix. When pg_lake_iceberg.catalog_database_suffix is set, the
+ * file lives under <database>/<suffix>/catalog.json, otherwise under
+ * <database>/catalog.json.
+ */
+static char *
+ObjectStoreCatalogFilePath(const char *defaultPrefix, const char *catalogPrefix,
+               const char *catalogName)
+{
+  if (ObjectStoreCatalogDatabaseSuffix != NULL &&
+    ObjectStoreCatalogDatabaseSuffix[0] != '\0')
+  {
+    return psprintf("%s/%s/catalog/%s/%s/catalog.json", defaultPrefix,
+            catalogPrefix, URLEncodePath(catalogName),
+            URLEncodePath(ObjectStoreCatalogDatabaseSuffix));
+  }
+
+  return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
+          catalogPrefix, URLEncodePath(catalogName));
+}
+
+/*
  * GetExternalObjectStoreCatalogFilePath returns the path to use for the catalog file
  * of the current database.
  */
