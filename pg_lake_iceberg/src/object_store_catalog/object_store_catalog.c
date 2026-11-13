@@ -32,6 +32,7 @@
 char	   *ObjectStoreCatalogLocationPrefix = NULL;
 char	   *ExternalObjectStorePrefix = "fromsf";
 char	   *InternalObjectStorePrefix = "frompg";
+char	   *ObjectStoreCatalogDatabaseSuffix = NULL;
 
 PG_FUNCTION_INFO_V1(list_object_store_tables);
 PG_FUNCTION_INFO_V1(trigger_object_store_catalog_generation);
@@ -671,6 +672,28 @@ CheckIfExternalObjectStoreCatalogExists(const char *catalogName)
 }
 
 /*
+ * ObjectStoreCatalogFilePath builds the catalog.json path for the given
+ * catalog prefix. When pg_lake_iceberg.catalog_database_suffix is set, the
+ * file lives under <database>/<suffix>/catalog.json, otherwise under
+ * <database>/catalog.json.
+ */
+static char *
+ObjectStoreCatalogFilePath(const char *defaultPrefix, const char *catalogPrefix,
+						   const char *catalogName)
+{
+	if (ObjectStoreCatalogDatabaseSuffix != NULL &&
+		ObjectStoreCatalogDatabaseSuffix[0] != '\0')
+	{
+		return psprintf("%s/%s/catalog/%s/%s/catalog.json", defaultPrefix,
+						catalogPrefix, URLEncodePath(catalogName),
+						URLEncodePath(ObjectStoreCatalogDatabaseSuffix));
+	}
+
+	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
+					catalogPrefix, URLEncodePath(catalogName));
+}
+
+/*
  * GetExternalObjectStoreCatalogFilePath returns the path to use for the catalog file
  * of the current database.
  */
@@ -695,8 +718,8 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
-	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
-					ExternalObjectStorePrefix, URLEncodePath(catalogName));
+	return ObjectStoreCatalogFilePath(defaultPrefix, ExternalObjectStorePrefix,
+									  catalogName);
 }
 
 static char *
@@ -720,8 +743,8 @@ GetInternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
-	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
-					InternalObjectStorePrefix, URLEncodePath(catalogName));
+	return ObjectStoreCatalogFilePath(defaultPrefix, InternalObjectStorePrefix,
+									  catalogName);
 }
 
 /*
