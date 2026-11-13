@@ -39,11 +39,20 @@
 
 /* this should probably live in extension_base */
 
+static void RunJobs(List *commands, char *dbname, char *user,
+					AttachedWorker * *workers, int requestedWorkerCount,
+					int maxFailures);
+static void EndRunningJobs(AttachedWorker * *workers, int workerCount);
 static bool JobIsComplete(AttachedWorker * worker);
 
 /*
  * RunCommandsInParallel runs a list of commands in parallel, using at
  * most requestedWorkerCount attached workers at a time.
+ *
+ * Each command commits in its own worker.  When one fails, or the caller is
+ * interrupted, the workers still running are stopped before the error is
+ * raised, so none of them commits after it; those that had finished stay
+ * committed.
  */
 void
 RunCommandsInParallel(List *commands,
@@ -57,6 +66,29 @@ RunCommandsInParallel(List *commands,
 
 	AttachedWorker **workers = palloc0(sizeof(AttachedWorker *) * requestedWorkerCount);
 
+	PG_TRY();
+	{
+		RunJobs(commands, dbname, user, workers, requestedWorkerCount,
+				maxFailures);
+	}
+	PG_FINALLY();
+	{
+		EndRunningJobs(workers, requestedWorkerCount);
+	}
+	PG_END_TRY();
+
+	pfree(workers);
+}
+
+
+/*
+ * RunJobs runs the commands in the given worker slots until every one of them
+ * has completed.  An error leaves the jobs still running in their slots.
+ */
+static void
+RunJobs(List *commands, char *dbname, char *user,
+		AttachedWorker * *workers, int requestedWorkerCount, int maxFailures)
+{
 	int			jobCount = list_length(commands);
 	int			nextJobIndex = 0;
 	int			completedJobCount = 0;
@@ -178,8 +210,32 @@ RunCommandsInParallel(List *commands,
 		if (completedJobCount < jobCount)
 			LightSleep(sleepTime);
 	}
+}
 
-	pfree(workers);
+
+/*
+ * EndRunningJobs stops the workers a failed run left in their slots.
+ */
+static void
+EndRunningJobs(AttachedWorker * *workers, int workerCount)
+{
+	/*
+	 * Signal every worker before waiting for any: a cancel that interrupts
+	 * one of the waits then leaves none of them running on.
+	 */
+	for (int workerIndex = 0; workerIndex < workerCount; workerIndex++)
+	{
+		AttachedWorker *worker = workers[workerIndex];
+
+		if (worker != NULL && IsAttachedWorkerRunning(worker))
+			TerminateBackgroundWorker(worker->workerHandle);
+	}
+
+	for (int workerIndex = 0; workerIndex < workerCount; workerIndex++)
+	{
+		if (workers[workerIndex] != NULL)
+			EndAttachedWorker(workers[workerIndex]);
+	}
 }
 
 
