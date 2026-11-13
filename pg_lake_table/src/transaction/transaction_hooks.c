@@ -17,23 +17,17 @@
 
 #include "postgres.h"
 #include "access/xact.h"
-#include "catalog/dependency.h"
-#include "catalog/pg_class.h"
 #include "executor/executor.h"
 #include "parser/parsetree.h"
-#include "utils/lsyscache.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
-#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
-#include "pg_lake/util/catalog_type.h"
-#include "pg_lake/util/rel_utils.h"
 
 
 static void IcebergXactCallback(XactEvent event, void *arg);
-static void RecordPostgresTableWritesExecutorStart(QueryDesc *queryDesc, int eflags);
+static void RecordTableWritesExecutorStart(QueryDesc *queryDesc, int eflags);
 
 static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
 
@@ -45,46 +39,21 @@ IcebergRegisterCallbacks(void)
 	RegisterSubXactCallback(IcebergMetadataSubXactCallback, NULL);
 
 	PreviousExecutorStartHook = ExecutorStart_hook;
-	ExecutorStart_hook = RecordPostgresTableWritesExecutorStart;
+	ExecutorStart_hook = RecordTableWritesExecutorStart;
 }
 
 
 /*
- * IsPostgresTableWrite returns whether a write to the given relation commits
- * through PostgreSQL, as opposed to through the REST catalog.
- */
-bool
-IsPostgresTableWrite(Oid relationId)
-{
-	if (IsPgLakeIcebergForeignTableById(relationId) &&
-		GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE)
-		return false;
-
-	/* temporary tables do not outlive the session */
-	if (get_rel_persistence(relationId) == RELPERSISTENCE_TEMP)
-		return false;
-
-	/* bookkeeping of pg_lake itself, such as the data files of a table */
-	if (OidIsValid(getExtensionOfObject(RelationRelationId, relationId)))
-		return false;
-
-	return true;
-}
-
-
-/*
- * RecordPostgresTableWritesExecutorStart records the result relations of a
- * statement that commit through PostgreSQL, so a transaction that the REST
- * catalog commits cannot also write to them.
+ * RecordTableWritesExecutorStart records the result relations of a
+ * statement, so a transaction that the REST catalog commits cannot also write
+ * to tables that commit through PostgreSQL.
  */
 static void
-RecordPostgresTableWritesExecutorStart(QueryDesc *queryDesc, int eflags)
+RecordTableWritesExecutorStart(QueryDesc *queryDesc, int eflags)
 {
 	PlannedStmt *plannedStmt = queryDesc->plannedstmt;
 
-	if ((RestCatalogCommitMode == REST_CATALOG_COMMIT_MODE_CATALOG ||
-		 XactCommitsInRestCatalog()) &&
-		!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
 	{
 #if PG_VERSION_NUM >= 190000
 		int			rangeTableIndex = -1;
@@ -101,8 +70,7 @@ RecordPostgresTableWritesExecutorStart(QueryDesc *queryDesc, int eflags)
 #endif
 			RangeTblEntry *rangeTableEntry = rt_fetch(rangeTableIndex, plannedStmt->rtable);
 
-			if (IsPostgresTableWrite(rangeTableEntry->relid))
-				RecordPostgresTableWriteInTx(rangeTableEntry->relid);
+			RecordTableWriteInTx(rangeTableEntry->relid);
 		}
 	}
 
