@@ -35,6 +35,7 @@
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/catalog_log.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
@@ -471,6 +472,8 @@ _PG_init(void)
 	RegisterUtilityStatementHandler(RedactRestCatalogUserMappingSecrets, NULL);
 
 	InitializeIcebergCatalogObjectAccessHook();
+
+	InitializeCatalogStats();
 }
 
 

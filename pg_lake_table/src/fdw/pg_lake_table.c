@@ -85,6 +85,7 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
@@ -1742,6 +1743,9 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	fsstate->scanSnapshot =
 		CreatePgLakeScanSnapshot(rteList, restrictionList, paramListInfo,
 								 includeChildren, fsstate->resultRelationId);
+
+	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		CountCatalogTableScans(rteList);
 
 	/*
 	 * We do some extra bookkeeping for scans that are part of an

@@ -41,6 +41,7 @@
 
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/catalog_log.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/util/url_encode.h"
 
@@ -404,6 +405,7 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts,
 		PG_CATCH();
 		{
 			LogCatalogAuthFailure(opts, geterrcode());
+			CountCatalogAuthFailure(opts, geterrcode());
 			PG_RE_THROW();
 		}
 		PG_END_TRY();
@@ -425,6 +427,7 @@ FetchRestCatalogAuthorization(RestCatalogOptions * opts,
 	PG_CATCH();
 	{
 		LogCatalogAuthFailure(opts, geterrcode());
+		CountCatalogAuthFailure(opts, geterrcode());
 		PG_RE_THROW();
 	}
 	PG_END_TRY();

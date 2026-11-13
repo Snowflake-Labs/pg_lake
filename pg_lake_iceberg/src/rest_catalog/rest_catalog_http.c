@@ -41,6 +41,7 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "nodes/miscnodes.h"
+#include "portability/instr_time.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
@@ -48,6 +49,7 @@
 #include "pg_extension_base/base_workers.h"
 #include "pg_lake/http/http_client.h"
 #include "pg_lake/iceberg/catalog_log.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 /* error bodies are small; anything larger or deeper is not worth parsing */
@@ -176,19 +178,29 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 
 	HttpResult	result;
 	bool		done = false;
+	CatalogRetryReason retryReason = CATALOG_RETRY_RATE_LIMITED;
+	instr_time	startTime;
+	instr_time	elapsed;
+
+	INSTR_TIME_SET_CURRENT(startTime);
 
 	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG && !done; retryNo++)
 	{
+		if (retryNo > 1)
+			CountCatalogRetry(opts, op, retryReason);
+
 		result = SendHttpRequest(method, url, body, headers, clientAuth);
 
 		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG,
 												retryNo, canRefreshCredential, authAlreadyRefreshed))
 		{
 			case REST_CATALOG_RETRY_BACKOFF_SHORT:
+				retryReason = CATALOG_RETRY_RATE_LIMITED;
 				LightSleep(LinearBackoffSleepMs(500, retryNo));
 				continue;
 
 			case REST_CATALOG_RETRY_BACKOFF_LONG:
+				retryReason = CATALOG_RETRY_UNAVAILABLE;
 				LightSleep(LinearBackoffSleepMs(5000, retryNo));
 				continue;
 
@@ -204,6 +216,7 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 
 					UpdateAuthorizationHeader(headers, fresh);
 					authAlreadyRefreshed = true;
+					retryReason = CATALOG_RETRY_AUTH_REFRESH;
 					continue;
 				}
 
@@ -213,7 +226,11 @@ SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
 		}
 	}
 
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, startTime);
+
 	LogCatalogRequest(opts, op, &result);
+	CountCatalogRequest(opts, op, &result, INSTR_TIME_GET_MICROSEC(elapsed));
 
 	return result;
 }
