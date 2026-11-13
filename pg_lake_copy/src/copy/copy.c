@@ -665,6 +665,30 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 		return;
 	}
 
+	*rowsProcessed = CopyFromPGDuckQuery(pstate, relation, whereClause,
+										 copyStmt->attlist,
+										 readQuery, writeOptions);
+}
+
+
+/*
+ * CopyFromPGDuckQuery sends a TRANSMIT query to pgduck_server and runs COPY
+ * FROM over the rows it returns, into the attlist columns of relation, or all
+ * of them when attlist is NIL.  Returns the number of rows copied.
+ */
+uint64
+CopyFromPGDuckQuery(ParseState *pstate, Relation relation, Node *whereClause,
+					List *attlist, char *readQuery,
+					List *writeOptions)
+{
+	volatile uint64 rowsProcessed = 0;
+
+	if (CurrentCopyFromConnection != NULL)
+	{
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("pg_lake_copy: nested COPY is not supported")));
+	}
+
 	/*
 	 * Get a connection to send the query to pgduck.
 	 */
@@ -714,12 +738,12 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 	PG_TRY();
 	{
 		CopyFromState cstate = BeginCopyFrom(pstate, relation, whereClause,
-											 NULL, copyStmt->is_program,
+											 NULL, false,
 											 CopyReceivedTransmitDataToBuffer,
-											 copyStmt->attlist,
+											 attlist,
 											 (List *) writeOptionsVolatile);
 
-		*rowsProcessed = CopyFrom(cstate);
+		rowsProcessed = CopyFrom(cstate);
 		EndCopyFrom(cstate);
 	}
 	PG_FINALLY();
@@ -728,6 +752,8 @@ ProcessPgLakeCopyFrom(CopyStmt *copyStmt, ParseState *pstate, Relation relation,
 		CurrentCopyFromConnection = NULL;
 	}
 	PG_END_TRY();
+
+	return rowsProcessed;
 }
 
 
