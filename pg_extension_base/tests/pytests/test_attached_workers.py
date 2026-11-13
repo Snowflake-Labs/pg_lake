@@ -812,6 +812,43 @@ def test_error_from_commit(superuser_conn, pg_extension_base):
         superuser_conn.commit()
 
 
+def test_out_of_worker_slots(
+    superuser_conn, pg_extension_base, create_injection_extension
+):
+    # A launch the server has no worker slot for fails with that error, and
+    # the next launch works again.
+    if get_pg_version_num(superuser_conn) < 180000:
+        pytest.skip("IS_INJECTION_POINT_ATTACHED requires PostgreSQL 18+")
+
+    run_command(
+        "SELECT injection_points_attach('attached-worker-out-of-slots', 'notice')",
+        superuser_conn,
+    )
+
+    try:
+        error = run_command(
+            "SELECT * FROM extension_base.run_attached($$SELECT 1$$)",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.rollback()
+
+        assert error is not None
+        assert "out of background worker slots" in error
+    finally:
+        run_command(
+            "SELECT injection_points_detach('attached-worker-out-of-slots')",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.commit()
+
+    result = run_query(
+        "SELECT * FROM extension_base.run_attached($$SELECT 1$$)", superuser_conn
+    )
+    assert result[0]["command_tag"] == "SELECT 1"
+
+
 def test_worker_dies_before_attaching(
     superuser_conn, pg_extension_base, create_injection_extension
 ):

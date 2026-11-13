@@ -36,6 +36,7 @@
 #include "utils/rel.h"
 
 #define DEFAULT_JOB_SLEEP 500
+#define MAX_JOB_SLEEP 10000
 
 /* this should probably live in extension_base */
 
@@ -94,6 +95,7 @@ RunJobs(List *commands, char *dbname, char *user,
 	int			completedJobCount = 0;
 	int			sleepTime = DEFAULT_JOB_SLEEP;
 	int			failureCount = 0;
+	MemoryContext callerContext = CurrentMemoryContext;
 
 	/* main loop for our parallel job */
 	while (completedJobCount < jobCount)
@@ -151,33 +153,33 @@ RunJobs(List *commands, char *dbname, char *user,
 						 * background job, only those with launching.
 						 */
 
-						ErrorData  *errdata;
+						/*
+						 * The catch block runs in ErrorContext, which
+						 * FlushErrorState below resets: CopyErrorData refuses
+						 * to copy into it, and a worker started after this
+						 * would keep its state there, for the next failure to
+						 * free.
+						 */
+						MemoryContextSwitchTo(callerContext);
 
-						MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
+						ErrorData  *errdata = CopyErrorData();
 
-						errdata = CopyErrorData();
-						MemoryContextSwitchTo(oldcontext);
+						/*
+						 * Only a shortage of resources, such as worker slots,
+						 * is worth waiting out.  Anything else, a cancel
+						 * included, is raised as it is, and so is a shortage
+						 * that outlasts maxFailures (-1 for no limit).
+						 */
+						if (ERRCODE_TO_CATEGORY(errdata->sqlerrcode) != ERRCODE_INSUFFICIENT_RESOURCES ||
+							(maxFailures != -1 && ++failureCount > maxFailures))
+							PG_RE_THROW();
 
 						ereport(LOG, (errmsg("error starting job in attached worker: %s (sqlerrcode: %s)",
 											 errdata->message,
 											 unpack_sql_state(errdata->sqlerrcode))));
 
-						/*
-						 * If maxFailures is disabled, we always keep going,
-						 * otherwise see if we've exceeded the limit.
-						 */
-						if (maxFailures != -1 && ++failureCount > maxFailures)
-							ereport(ERROR, (errmsg("failed jobs more than %d times", maxFailures)));
-
-						/*
-						 * Our own cleanup; theoretically we should analyze
-						 * the specific sql state to ensure we are catching
-						 * only the one we care about and PG_RE_THROW()
-						 * otherwise.
-						 */
-
 						nextJobIndex--;
-						sleepTime *= 2;
+						sleepTime = Min(sleepTime * 2, MAX_JOB_SLEEP);
 
 
 						/* cleanup error inspection */

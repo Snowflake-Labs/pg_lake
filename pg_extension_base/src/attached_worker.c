@@ -475,7 +475,14 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	 * has been reset.  EndAttachedWorker frees it.
 	 */
 	MemoryContext callerContext = MemoryContextSwitchTo(TopMemoryContext);
-	bool		registered = RegisterDynamicBackgroundWorker(&worker, &workerHandle);
+	bool		registered = false;
+
+	/*
+	 * A test cannot fill every worker slot, so it gets to say there are none
+	 * free, without a worker being registered behind its back.
+	 */
+	if (!IS_INJECTION_POINT_ATTACHED_COMPAT("attached-worker-out-of-slots"))
+		registered = RegisterDynamicBackgroundWorker(&worker, &workerHandle);
 
 	MemoryContextSwitchTo(callerContext);
 
