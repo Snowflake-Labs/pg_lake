@@ -2777,3 +2777,38 @@ GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId)
 
 	return request;
 }
+
+
+/*
+ * GetAssertTableStateCatalogRequest creates a RestCatalogRequest whose body
+ * holds the commit requirements for a change computed from the given
+ * metadata: the table is still the same table, and its main branch still
+ * points to the same snapshot. The catalog rejects the commit if another
+ * writer committed to the table in the meantime.
+ */
+RestCatalogRequest *
+GetAssertTableStateCatalogRequest(Oid relationId, IcebergTableMetadata * metadata)
+{
+	StringInfo	body = makeStringInfo();
+
+	appendStringInfoString(body, "{\"type\":\"assert-table-uuid\",\"uuid\":");
+	appendStringInfoString(body, EscapeJson(metadata->table_uuid));
+	appendStringInfoString(body, "},");
+
+	/* a null snapshot-id asserts that the table has no main branch yet */
+	appendStringInfoString(body,
+						   "{\"type\":\"assert-ref-snapshot-id\",\"ref\":\"main\",\"snapshot-id\":");
+	if (metadata->current_snapshot_id > 0)
+		appendStringInfo(body, "%" PRId64, metadata->current_snapshot_id);
+	else
+		appendStringInfoString(body, "null");
+	appendStringInfoChar(body, '}');
+
+	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
+
+	request->relationId = relationId;
+	request->operationType = REST_CATALOG_ASSERT_TABLE_STATE;
+	request->body = body->data;
+
+	return request;
+}

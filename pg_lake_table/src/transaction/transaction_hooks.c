@@ -17,6 +17,8 @@
 
 #include "postgres.h"
 #include "access/xact.h"
+#include "executor/executor.h"
+#include "parser/parsetree.h"
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
@@ -25,6 +27,9 @@
 
 
 static void IcebergXactCallback(XactEvent event, void *arg);
+static void RecordTableWritesExecutorStart(QueryDesc *queryDesc, int eflags);
+
+static ExecutorStart_hook_type PreviousExecutorStartHook = NULL;
 
 
 void
@@ -32,6 +37,47 @@ IcebergRegisterCallbacks(void)
 {
 	RegisterXactCallback(IcebergXactCallback, NULL);
 	RegisterSubXactCallback(IcebergMetadataSubXactCallback, NULL);
+
+	PreviousExecutorStartHook = ExecutorStart_hook;
+	ExecutorStart_hook = RecordTableWritesExecutorStart;
+}
+
+
+/*
+ * RecordTableWritesExecutorStart records the result relations of a
+ * statement, so a transaction that the REST catalog commits cannot also write
+ * to tables that commit through PostgreSQL.
+ */
+static void
+RecordTableWritesExecutorStart(QueryDesc *queryDesc, int eflags)
+{
+	PlannedStmt *plannedStmt = queryDesc->plannedstmt;
+
+	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+	{
+#if PG_VERSION_NUM >= 190000
+		int			rangeTableIndex = -1;
+
+		while ((rangeTableIndex = bms_next_member(plannedStmt->resultRelationRelids,
+												  rangeTableIndex)) >= 0)
+		{
+#else
+		ListCell   *resultRelationCell = NULL;
+
+		foreach(resultRelationCell, plannedStmt->resultRelations)
+		{
+			Index		rangeTableIndex = lfirst_int(resultRelationCell);
+#endif
+			RangeTblEntry *rangeTableEntry = rt_fetch(rangeTableIndex, plannedStmt->rtable);
+
+			RecordTableWriteInTx(rangeTableEntry->relid);
+		}
+	}
+
+	if (PreviousExecutorStartHook != NULL)
+		PreviousExecutorStartHook(queryDesc, eflags);
+	else
+		standard_ExecutorStart(queryDesc, eflags);
 }
 
 
@@ -56,6 +102,12 @@ IcebergXactCallback(XactEvent event, void *arg)
 
 				ConsumeTrackedIcebergMetadataChanges(false);
 
+				/*
+				 * When the REST catalog commits the transaction, send the
+				 * changes now, while a rejection can still abort it.
+				 */
+				CommitRestCatalogRequestsBeforeCommit();
+
 				PopActiveSnapshot();
 
 				break;
@@ -66,6 +118,7 @@ IcebergXactCallback(XactEvent event, void *arg)
 			{
 				ResetTrackedIcebergMetadataOperation();
 				ResetRestCatalogRequests();
+				ResetPostgresTableWrites();
 				break;
 			}
 		case XACT_EVENT_PRE_PREPARE:
@@ -75,6 +128,7 @@ IcebergXactCallback(XactEvent event, void *arg)
 					ereport(ERROR,
 							(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							 errmsg("cannot prepare a transaction that has Iceberg metadata changes")));
+				ResetPostgresTableWrites();
 				break;
 			}
 
@@ -83,6 +137,7 @@ IcebergXactCallback(XactEvent event, void *arg)
 			{
 				PostAllRestCatalogRequests();
 				ResetRestCatalogRequests();
+				ResetPostgresTableWrites();
 				break;
 			}
 	}

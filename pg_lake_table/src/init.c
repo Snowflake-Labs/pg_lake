@@ -25,6 +25,7 @@
 #include "miscadmin.h"
 
 #include "access/xact.h"
+#include "catalog/namespace.h"
 #include "pg_lake/ddl/alter_table.h"
 #include "pg_lake/ddl/create_table.h"
 #include "pg_lake/ddl/drop_table.h"
@@ -58,6 +59,8 @@ PG_MODULE_MAGIC;
 void		_PG_init(void);
 
 static bool CheckTargetFileSizeMB(int *newval, void **extra, GucSource source);
+static bool RecordCopyIntoPostgresTable(ProcessUtilityParams * processUtilityParams,
+										void *arg);
 static bool ErrorIfDiscardTempWithIcebergChanges(ProcessUtilityParams * processUtilityParams,
 												 void *arg);
 
@@ -452,6 +455,7 @@ _PG_init(void)
 	RegisterUtilityStatementHandler(ProcessEnumStatement, NULL);
 	RegisterUtilityStatementHandler(ProcessDropPgLakeTable, NULL);
 	RegisterUtilityStatementHandler(ErrorIfDiscardTempWithIcebergChanges, NULL);
+	RegisterUtilityStatementHandler(RecordCopyIntoPostgresTable, NULL);
 
 	/*
 	 * Add as the last handler, execute as the first. Don't worry, you'll have
@@ -487,6 +491,33 @@ CheckTargetFileSizeMB(int *newval, void **extra, GucSource source)
 {
 	return *newval <= 0 || *newval >= MIN_TARGET_FILE_SIZE_MB ||
 		(IsTransactionState() && superuser());
+}
+
+
+/*
+ * RecordCopyIntoPostgresTable records the table of a COPY FROM as written.
+ * COPY writes without going through the executor, so the ExecutorStart hook
+ * does not see it.
+ */
+static bool
+RecordCopyIntoPostgresTable(ProcessUtilityParams * processUtilityParams, void *arg)
+{
+	Node	   *parsetree = processUtilityParams->plannedStmt->utilityStmt;
+
+	if (!IsA(parsetree, CopyStmt))
+		return false;
+
+	CopyStmt   *copyStmt = (CopyStmt *) parsetree;
+
+	if (!copyStmt->is_from || copyStmt->relation == NULL)
+		return false;
+
+	Oid			relationId = RangeVarGetRelid(copyStmt->relation, NoLock, true);
+
+	if (OidIsValid(relationId))
+		RecordTableWriteInTx(relationId);
+
+	return false;
 }
 
 

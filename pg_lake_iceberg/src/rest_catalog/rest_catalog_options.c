@@ -63,7 +63,8 @@ typedef enum IcebergCatalogOptionType
 	CATALOG_OPT_STRING,
 	CATALOG_OPT_BOOL,
 	CATALOG_OPT_AUTH_TYPE,
-	CATALOG_OPT_LOCATION_PREFIX
+	CATALOG_OPT_LOCATION_PREFIX,
+	CATALOG_OPT_COMMIT_MODE
 }			IcebergCatalogOptionType;
 
 /* Validation flags checked at CREATE/ALTER time. */
@@ -104,6 +105,9 @@ static const IcebergCatalogOptionDesc iceberg_catalog_option_descs[] = {
 		CATALOG_OPT_NONEMPTY,
 	CATALOG_OPT_CTX_SERVER | CATALOG_OPT_CTX_USER_MAPPING},
 	{"enable_vended_credentials", CATALOG_OPT_BOOL, offsetof(RestCatalogOptions, enableVendedCredentials),
+		0,
+	CATALOG_OPT_CTX_SERVER},
+	{REST_CATALOG_COMMIT_MODE_OPTION, CATALOG_OPT_COMMIT_MODE, offsetof(RestCatalogOptions, commitMode),
 		0,
 	CATALOG_OPT_CTX_SERVER},
 	{"location_prefix", CATALOG_OPT_LOCATION_PREFIX, offsetof(RestCatalogOptions, locationPrefix),
@@ -202,6 +206,9 @@ ValidateCatalogOptionValue(const IcebergCatalogOptionDesc * desc, DefElem *def)
 		case CATALOG_OPT_BOOL:
 			(void) defGetBoolean(def);
 			return;
+		case CATALOG_OPT_COMMIT_MODE:
+			(void) ParseRestCatalogCommitMode(defGetString(def));
+			return;
 		default:
 			break;
 	}
@@ -257,6 +264,10 @@ ApplyCatalogOptionValue(RestCatalogOptions * opts,
 				*(int *) ((char *) opts + desc->offset) = resolvedAuthType;
 				break;
 			}
+		case CATALOG_OPT_COMMIT_MODE:
+			*(int *) ((char *) opts + desc->offset) =
+				ParseRestCatalogCommitMode(defGetString(def));
+			break;
 		case CATALOG_OPT_LOCATION_PREFIX:
 			{
 				bool		inPlace = false;
@@ -276,7 +287,8 @@ ApplyCatalogOptionValue(RestCatalogOptions * opts,
  *
  *   - ForeignServerRelationId:  CREATE SERVER / ALTER SERVER OPTIONS.
  *     Anything non-credential: rest_endpoint, rest_auth_type,
- *     oauth_endpoint, scope, enable_vended_credentials, location_prefix,
+ *     oauth_endpoint, scope, enable_vended_credentials, commit_mode,
+ *     location_prefix,
  *     catalog_name, warehouse.
  *
  *   - UserMappingRelationId:    CREATE USER MAPPING / ALTER USER MAPPING

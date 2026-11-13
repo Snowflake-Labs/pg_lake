@@ -65,6 +65,11 @@ extern PGDLLEXPORT bool EnableAppendOnlyCommitFastPath;
 
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);
+extern PGDLLEXPORT void CommitRestCatalogRequestsBeforeCommit(void);
+extern PGDLLEXPORT bool XactCommitsInRestCatalog(void);
+extern PGDLLEXPORT bool IsPostgresTableWrite(Oid relationId);
+extern PGDLLEXPORT void RecordTableWriteInTx(Oid relationId);
+extern PGDLLEXPORT void ResetPostgresTableWrites(void);
 extern PGDLLEXPORT void TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes);
 extern PGDLLEXPORT void RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
 													 const char *body);
