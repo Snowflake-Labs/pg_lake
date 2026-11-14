@@ -370,11 +370,13 @@ AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t s
 		appendJsonInt64(command, "snapshot-id", snapshots[i].snapshot_id);
 
 		/*
-		 * Only write a parent that is among the snapshots, since readers may
-		 * look it up. Expiry can remove the parent of a kept snapshot, and a
-		 * table's first snapshot has -1 as its parent.
+		 * Leave out a parent that is not among the snapshots, since readers
+		 * may look it up and expiry can remove the parent of a kept snapshot.
+		 * The first snapshot keeps -1, the current snapshot id of an empty
+		 * table, so that a changelog can start from the empty table.
 		 */
-		if (hash_search(snapshotIds, &snapshots[i].parent_snapshot_id, HASH_FIND, NULL) != NULL)
+		if (snapshots[i].parent_snapshot_id == -1 ||
+			hash_search(snapshotIds, &snapshots[i].parent_snapshot_id, HASH_FIND, NULL) != NULL)
 		{
 			appendStringInfoString(command, ", ");
 			appendJsonInt64(command, "parent-snapshot-id", snapshots[i].parent_snapshot_id);
@@ -410,6 +412,8 @@ AppendIcebergSnapshots(StringInfo command, IcebergSnapshot * snapshots, size_t s
 	}
 
 	appendStringInfoString(command, "]");
+
+	hash_destroy(snapshotIds);
 }
 
 static void

@@ -35,7 +35,8 @@ def test_snapshots_point_to_previous_snapshot(
 
     snapshots = metadata_snapshots("parent_ids", pg_conn, s3)
     assert len(snapshots) == 3
-    assert "parent-snapshot-id" not in snapshots[0]
+    # -1 is the current snapshot id of the empty table
+    assert snapshots[0]["parent-snapshot-id"] == -1
     assert snapshots[1]["parent-snapshot-id"] == snapshots[0]["snapshot-id"]
     assert snapshots[2]["parent-snapshot-id"] == snapshots[1]["snapshot-id"]
 
