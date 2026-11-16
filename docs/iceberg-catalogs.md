@@ -291,10 +291,47 @@ WITH (catalog = 'sales_catalog', read_only = true);
 For equality-delete support and its limitations, see
 [Reading external equality deletes](#reading-external-equality-deletes).
 
-Attached tables cannot be written to. Writing would mean taking over the table's metadata,
-field IDs and file inventory from whatever produced them, which pg_lake does not do: it writes
-only to tables it created. To move existing data under pg_lake, create a new table and copy
-into it.
+A `read_only` table cannot be written to. To write to a table that other engines also write,
+attach it with `external` instead.
+
+### Write tables shared with other engines
+
+{: .note }
+Writing to tables shared with other engines is experimental.
+
+A table attached with `external = true` reads like a `read_only` one: the catalog is the only
+place its state lives, and PostgreSQL keeps just the pointer to it. pg_lake can also write it.
+Each statement that modifies the table commits a new snapshot to the catalog, as a child of the
+snapshot the statement read, on condition that nobody committed in between:
+
+```sql
+CREATE TABLE events () USING iceberg
+WITH (catalog = 'polaris', external = true,
+      catalog_name = 'sales', catalog_namespace = 'analytics',
+      catalog_table_name = 'events');
+
+INSERT INTO events SELECT * FROM staging_events;
+DELETE FROM events WHERE ts < now() - interval '90 days';
+```
+
+Commits from other engines are visible to the next statement, and the next write builds on top
+of them. If another engine commits after a statement read the table and before it commits, the
+catalog rejects the commit and the statement fails with a serialization failure
+(`SQLSTATE 40001`). Run it again to apply it to the new snapshot.
+
+Since the catalog commits each change on its own, a change cannot be part of a larger
+transaction:
+
+- `INSERT`, `UPDATE`, `DELETE` and `COPY FROM` must run outside a transaction block, and a
+  statement can modify a table only once. Several external tables of the same catalog can be
+  modified by one statement, and commit together.
+- A statement that modifies an external table cannot also modify other Iceberg tables.
+- Tables whose default partition spec is partitioned cannot be written yet, and neither
+  `row_ids` nor schema and partitioning changes are supported. If another engine changes the
+  schema, queries and writes fail until the table is attached again.
+- Deletes and updates add position delete files rather than rewrite data files.
+
+Dropping the table only removes it from PostgreSQL.
 
 #### Lowercase column names from external engines
 
