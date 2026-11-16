@@ -678,10 +678,10 @@ CheckIfExternalObjectStoreCatalogExists(const char *catalogName)
  */
 static char *
 ObjectStoreCatalogFilePath(const char *defaultPrefix, const char *catalogPrefix,
-               const char *catalogName, const char *suffix)
+						   const char *catalogName, const char *suffix)
 {
-  if (suffix != NULL && suffix[0] != '\0')
-  {
+	if (suffix != NULL && suffix[0] != '\0')
+	{
 		return psprintf("%s/%s/catalog/%s/%s/catalog.json", defaultPrefix,
 						catalogPrefix, URLEncodePath(catalogName),
 						URLEncodePath(suffix));
@@ -718,7 +718,7 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 
 	return ObjectStoreCatalogFilePath(defaultPrefix, ExternalObjectStorePrefix,
 									  catalogName,
-                    ExternalObjectStoreCatalogDatabaseSuffix);
+									  ExternalObjectStoreCatalogDatabaseSuffix);
 }
 
 static char *
