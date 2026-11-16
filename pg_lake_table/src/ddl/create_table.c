@@ -815,6 +815,24 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 	bool		hasObjectStoreCatalogOption = HasObjectStoreCatalogTableOption(createStmt->options);
 
 	/*
+	 * Seed commit_mode of a writable REST catalog table from its server, then
+	 * from pg_lake_iceberg.default_rest_catalog_commit_mode. As for
+	 * compatibility_mode, only the non-default value is persisted. The mode
+	 * decides whether pg_lake keeps the table's data files in PostgreSQL at
+	 * all, so it is fixed at creation.
+	 */
+	if (hasRestCatalogOption && !HasReadOnlyOption(createStmt->options) &&
+		GetOption(createStmt->options, REST_CATALOG_COMMIT_MODE_OPTION) == NULL &&
+		GetDefaultRestCatalogCommitMode(GetStringOption(createStmt->options, "catalog", false)) ==
+		REST_CATALOG_COMMIT_MODE_CATALOG)
+	{
+		createStmt->options =
+			lappend(createStmt->options,
+					makeDefElem(REST_CATALOG_COMMIT_MODE_OPTION,
+								(Node *) makeString(pstrdup("catalog")), -1));
+	}
+
+	/*
 	 * For user-created iceberg_catalog servers, verify that the current user
 	 * has USAGE privilege on the server.  Built-in catalog names ('rest',
 	 * 'postgres', 'object_store') have no backing server object and skip this

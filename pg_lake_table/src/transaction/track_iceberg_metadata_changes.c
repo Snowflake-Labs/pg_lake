@@ -126,6 +126,8 @@ static void AssertAddedOnlyOperationsMatchDiff(const TableMetadataOperationTrack
 static TableMetadataOperation * CopyAddDataFileOperation(const TableDataFile * dataFile);
 static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
 static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
+static void DeleteInProgressPendingFiles(List *pendingOperations);
+static TableMetadataOperation * CopyPendingDataFileOperation(const TableMetadataOperation * operation);
 static bool AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema * newSchema);
 static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
@@ -214,6 +216,13 @@ CopyMetadataHash(HTAB *source, Size entrySize, bool restRequests)
 			RestCatalogRequestPerTable *request = copiedEntry;
 
 			request->tableModifyRequests = list_copy(request->tableModifyRequests);
+		}
+		else
+		{
+			TableMetadataOperationTracker *tracker = copiedEntry;
+
+			tracker->pendingDataFileOperations =
+				list_copy(tracker->pendingDataFileOperations);
 		}
 	}
 	return copy;
@@ -406,6 +415,114 @@ RecordRestCatalogStagedTable(Oid relationId, const char *uuid)
 	if (tracker == NULL || !tracker->relationCreated)
 		elog(ERROR, "no tracked CREATE TABLE for relation %u", relationId);
 	tracker->stagedTableUuid = MemoryContextStrdup(TopTransactionContext, uuid);
+}
+
+
+/*
+ * RecordPendingDataFileOperations keeps the data file operations of a
+ * statement on a table in catalog commit mode until the commit sends them to
+ * the catalog. Only adding files and removing all files are supported, since
+ * anything else needs to know the table's files.
+ */
+void
+RecordPendingDataFileOperations(Oid relationId, List *metadataOperations)
+{
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, metadataOperations)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		/* nothing to forget for a dropped table, the catalog drops it */
+		if (operation->type == DATA_FILE_DROP_TABLE)
+			continue;
+
+		if (operation->type != DATA_FILE_ADD && operation->type != DATA_FILE_REMOVE_ALL)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("this change to table \"%s\" is not supported with "
+							"commit_mode 'catalog'", get_rel_name(relationId)),
+					 errdetail("Tables with commit_mode 'catalog' support inserts, "
+							   "COPY and TRUNCATE.")));
+	}
+
+	List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
+
+	if (ShouldSkipMetadataChangeToIceberg(operationTypes))
+		return;
+
+	/* TrackIcebergMetadataChangesInTx already took the savepoint copy */
+	TableMetadataOperationTracker *opTracker =
+		hash_search(TrackedIcebergMetadataOperationsHash, &relationId, HASH_FIND, NULL);
+
+	if (opTracker == NULL)
+		elog(ERROR, "no tracked data file changes for relation %u", relationId);
+
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+	foreach(operationCell, metadataOperations)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		/*
+		 * Files added before a TRUNCATE in the same transaction never reach
+		 * the catalog. Their in-progress records stay, so they are deleted
+		 * like the files of an aborted write.
+		 */
+		if (operation->type == DATA_FILE_DROP_TABLE)
+			continue;
+
+		if (operation->type == DATA_FILE_REMOVE_ALL)
+			opTracker->pendingDataFileOperations = NIL;
+
+		opTracker->pendingDataFileOperations =
+			lappend(opTracker->pendingDataFileOperations,
+					CopyPendingDataFileOperation(operation));
+	}
+
+	MemoryContextSwitchTo(oldContext);
+}
+
+
+/*
+ * GetPendingDataFileOperations returns the data file operations a table in
+ * catalog commit mode has in the current transaction.
+ */
+List *
+GetPendingDataFileOperations(Oid relationId)
+{
+	if (TrackedIcebergMetadataOperationsHash == NULL)
+		return NIL;
+
+	TableMetadataOperationTracker *opTracker =
+		hash_search(TrackedIcebergMetadataOperationsHash, &relationId, HASH_FIND, NULL);
+
+	return opTracker != NULL ? opTracker->pendingDataFileOperations : NIL;
+}
+
+
+/*
+ * CopyPendingDataFileOperation copies a data file operation into the current
+ * memory context.
+ */
+static TableMetadataOperation *
+CopyPendingDataFileOperation(const TableMetadataOperation * operation)
+{
+	if (operation->type == DATA_FILE_REMOVE_ALL)
+	{
+		TableMetadataOperation *removeAllOp = palloc0(sizeof(TableMetadataOperation));
+
+		removeAllOp->type = DATA_FILE_REMOVE_ALL;
+		return removeAllOp;
+	}
+
+	DataFileStats *copiedStats = DeepCopyDataFileStats(&operation->dataFileStats);
+	Partition  *copiedPartition =
+		operation->partition != NULL ? CopyPartition(operation->partition) : NULL;
+
+	return AddDataFileOperation(pstrdup(operation->path), operation->content,
+								copiedStats, copiedPartition,
+								operation->partitionSpecId);
 }
 
 
@@ -1382,6 +1499,31 @@ ConsumeTrackedIcebergMetadataChanges(bool isVerbose)
 
 
 /*
+ * DeleteInProgressPendingFiles removes the in-progress records of the files
+ * the commit adds to the catalog.
+ */
+static void
+DeleteInProgressPendingFiles(List *pendingOperations)
+{
+	List	   *addedFilePaths = NIL;
+	ListCell   *operationCell = NULL;
+
+	foreach(operationCell, pendingOperations)
+	{
+		TableMetadataOperation *operation = lfirst(operationCell);
+
+		if (operation->type == DATA_FILE_ADD)
+			addedFilePaths = lappend(addedFilePaths, (char *) operation->path);
+	}
+
+	if (addedFilePaths != NIL)
+		DeleteInProgressFileRecords(addedFilePaths);
+
+	list_free(addedFilePaths);
+}
+
+
+/*
  * GetEffectiveMaxSnapshotAgeInSecs returns the effective max snapshot age
  * in seconds for the given relation. If the table has a per-table
  * max_snapshot_age option set, that value is used. Otherwise, the global
@@ -1507,7 +1649,18 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 		}
 
 		/* apply all data file operations at once */
-		if (opTracker->relationDataFileChanged)
+		if (opTracker->relationDataFileChanged && IsCatalogCommitRestTable(relationId))
+		{
+			/*
+			 * There is no data files catalog to diff against: the operations
+			 * the statements recorded are the change to the catalog's
+			 * snapshot.
+			 */
+			metadataOperations = list_concat(metadataOperations,
+											 opTracker->pendingDataFileOperations);
+			DeleteInProgressPendingFiles(opTracker->pendingDataFileOperations);
+		}
+		else if (opTracker->relationDataFileChanged)
 		{
 			List	   *dataFileOps = GetDataFileMetadataOperations(opTracker, allTransforms);
 

@@ -40,9 +40,10 @@
  * rejected change aborts the transaction, and the transaction cannot also
  * write to PostgreSQL tables.
  *
- * A table takes its mode from its commit_mode option, then from the
+ * A new table takes its mode from its commit_mode option, then from the
  * commit_mode option of its catalog server, then from
- * pg_lake_iceberg.default_rest_catalog_commit_mode.
+ * pg_lake_iceberg.default_rest_catalog_commit_mode, and keeps it. A table in
+ * catalog mode keeps no data file metadata in PostgreSQL.
  */
 #define REST_CATALOG_COMMIT_MODE_POST_COMMIT (0)
 #define REST_CATALOG_COMMIT_MODE_CATALOG (1)
@@ -467,7 +468,9 @@ extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalogForIceberg
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool RestCatalogVendingEnabledForRelation(Oid relationId);
 extern PGDLLEXPORT int ParseRestCatalogCommitMode(const char *value);
+extern PGDLLEXPORT int GetDefaultRestCatalogCommitMode(const char *catalog);
 extern PGDLLEXPORT int GetRestCatalogCommitModeForRelation(Oid relationId);
+extern PGDLLEXPORT bool IsCatalogCommitRestTable(Oid relationId);
 
 /*
  * Resolves a relation's REST-catalog vended credentials, returning a

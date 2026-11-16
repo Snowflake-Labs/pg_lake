@@ -1670,6 +1670,20 @@ HandleIcebergOptionsChanges(Oid relationId, AlterTableStmt *alterStmt)
 								   "was created; altering it would not match the "
 								   "existing data files.")));
 
+			/*
+			 * A table in catalog commit mode keeps no data files in
+			 * PostgreSQL, and one in post_commit mode relies on them, so the
+			 * mode cannot change after creation.
+			 */
+			if (strcmp(newOption->defname, REST_CATALOG_COMMIT_MODE_OPTION) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("Changing option \"%s\" is not supported",
+								newOption->defname),
+						 errdetail("The commit mode decides where the table's data "
+								   "files are tracked, and was fixed when the "
+								   "table was created.")));
+
 			/* we currently only care about row_ids */
 			if (strcmp(newOption->defname, "row_ids") != 0)
 				continue;

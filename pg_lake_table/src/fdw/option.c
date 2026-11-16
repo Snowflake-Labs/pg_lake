@@ -699,6 +699,8 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	IcebergCatalogType icebergCatalogType = POSTGRES_CATALOG;
 	bool		readOnlyExternalCatalogTable = false;
 	bool		commitModeProvided = false;
+	int			commitMode = REST_CATALOG_COMMIT_MODE_POST_COMMIT;
+	bool		rowIds = false;
 	bool		lowercaseColumnNames = false;
 	char	   *catalogName = NULL;
 	char	   *catalogTableName = NULL;
@@ -860,7 +862,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "row_ids") == 0)
 		{
 			/* only accept boolean */
-			(void) defGetBoolean(def);
+			rowIds = defGetBoolean(def);
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "partition_by") == 0)
 		{
@@ -943,7 +945,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		else if (catalog == ForeignTableRelationId &&
 				 strcmp(def->defname, REST_CATALOG_COMMIT_MODE_OPTION) == 0)
 		{
-			(void) ParseRestCatalogCommitMode(defGetString(def));
+			commitMode = ParseRestCatalogCommitMode(defGetString(def));
 			commitModeProvided = true;
 		}
 	}
@@ -970,6 +972,14 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("\"%s\" option is only valid for writable rest catalog tables",
 						REST_CATALOG_COMMIT_MODE_OPTION)));
+
+	/* row IDs are mapped to data files in PostgreSQL */
+	if (catalog == ForeignTableRelationId && rowIds &&
+		commitMode == REST_CATALOG_COMMIT_MODE_CATALOG)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("\"row_ids\" option is not supported for tables with "
+						"commit_mode 'catalog'")));
 
 	if (catalog == ForeignTableRelationId && readOnlyExternalCatalogTable &&
 		!(icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY))

@@ -537,23 +537,16 @@ ParseRestCatalogCommitMode(const char *value)
 
 
 /*
- * GetRestCatalogCommitModeForRelation returns the commit mode of a writable
- * REST catalog table: its own commit_mode option, else its server's, else
+ * GetDefaultRestCatalogCommitMode returns the commit mode a new writable
+ * table in the given catalog gets: the commit_mode option of its server, else
  * pg_lake_iceberg.default_rest_catalog_commit_mode. Like
  * RestCatalogVendingEnabledForRelation, it reads the options directly
  * instead of resolving credentials.
  */
 int
-GetRestCatalogCommitModeForRelation(Oid relationId)
+GetDefaultRestCatalogCommitMode(const char *catalog)
 {
-	ForeignTable *foreignTable = GetForeignTable(relationId);
-	char	   *tableCommitMode = GetStringOption(foreignTable->options,
-												  REST_CATALOG_COMMIT_MODE_OPTION, false);
-
-	if (tableCommitMode != NULL)
-		return ParseRestCatalogCommitMode(tableCommitMode);
-
-	Oid			serverOid = GetRestCatalogServerIdForRelation(relationId);
+	Oid			serverOid = ResolveRestCatalogServerId(catalog);
 	ForeignServer *server = GetForeignServerExtended(serverOid, FSV_MISSING_OK);
 
 	if (server != NULL)
@@ -566,6 +559,42 @@ GetRestCatalogCommitModeForRelation(Oid relationId)
 	}
 
 	return DefaultRestCatalogCommitMode;
+}
+
+
+/*
+ * GetRestCatalogCommitModeForRelation returns the commit mode of a writable
+ * REST catalog table. CREATE TABLE records 'catalog' in the commit_mode
+ * option and the option cannot change, so a table without it, including
+ * every table created before the option existed, commits through
+ * PostgreSQL.
+ */
+int
+GetRestCatalogCommitModeForRelation(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *tableCommitMode = GetStringOption(foreignTable->options,
+												  REST_CATALOG_COMMIT_MODE_OPTION, false);
+
+	if (tableCommitMode != NULL)
+		return ParseRestCatalogCommitMode(tableCommitMode);
+
+	return REST_CATALOG_COMMIT_MODE_POST_COMMIT;
+}
+
+
+/*
+ * IsCatalogCommitRestTable returns whether the relation is a writable REST
+ * catalog table whose catalog holds its whole state. pg_lake keeps none of
+ * its data files in PostgreSQL: scans read the catalog's current snapshot,
+ * and writes go to the catalog at commit.
+ */
+bool
+IsCatalogCommitRestTable(Oid relationId)
+{
+	return IsPgLakeIcebergForeignTableById(relationId) &&
+		GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE &&
+		GetRestCatalogCommitModeForRelation(relationId) == REST_CATALOG_COMMIT_MODE_CATALOG;
 }
 
 

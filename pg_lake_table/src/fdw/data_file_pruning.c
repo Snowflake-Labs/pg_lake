@@ -134,7 +134,7 @@ static OpExpr *MakeOpExpression(Var *variable, int16 strategyNumber);
 static NullTest *MakeIsNullExpression(Var *variable);
 static Oid	GetOperatorByType(Oid typeId, Oid accessMethodId, int16 strategyNumber);
 static HTAB *TryCreateBatchFilterHash(List *baseRestrictInfoList, Var *filenameCol);
-static List *GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
+static List *GetDataFileStatsAndPartition(bool isTableDataFile, void *dataFile,
 										  List *externalLeafFields, Partition * *partition);
 
 /* partition pruning functions */
@@ -192,6 +192,23 @@ static Const *TransformConstToTargetType(Const *constantClause, Oid targetTypeId
 List *
 PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, PruneType pruneType)
 {
+	bool		filesFromMetadata = !IsInternalIcebergTable(relationId);
+
+	return PruneDataFilesExtended(relationId, dataFiles, baseRestrictInfoList, pruneType,
+								  filesFromMetadata);
+}
+
+
+/*
+ * PruneDataFilesExtended is PruneDataFiles for a list whose element type the
+ * caller names: DataFile entries read from Iceberg metadata when
+ * filesFromMetadata is true, TableDataFile entries otherwise. A table in
+ * catalog commit mode has both kinds, in separate lists.
+ */
+List *
+PruneDataFilesExtended(Oid relationId, List *dataFiles, List *baseRestrictInfoList,
+					   PruneType pruneType, bool filesFromMetadata)
+{
 	List	   *retainedDataFiles = NIL;
 	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
 	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
@@ -248,23 +265,14 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	int			dataFileCount = list_length(dataFiles);
 
 	/*
-	 * Resolve the table type once: IsInternalIcebergTable parses the foreign
-	 * table options on every call. For external tables, also fetch the leaf
-	 * fields once; they come from the metadata file, so looking them up per
-	 * data file would re-read and re-parse the metadata every iteration.
+	 * For files read from metadata, fetch the leaf fields once; for external
+	 * tables they come from the metadata file, so looking them up per data
+	 * file would re-read and re-parse the metadata every iteration.
 	 */
-	bool		isInternalIcebergTable = IsInternalIcebergTable(relationId);
+	bool		isTableDataFile = !filesFromMetadata;
 	List	   *externalLeafFields = NIL;
 
-	/*
-	 * Non-Iceberg tables returned early above, so anything that is not an
-	 * internal Iceberg table is an external one. Assert instead of erroring:
-	 * the case is unreachable, and this keeps the second option lookup out of
-	 * non-assert builds.
-	 */
-	Assert(isInternalIcebergTable || IsExternalIcebergTable(relationId));
-
-	if (!isInternalIcebergTable && dataFileCount > 0)
+	if (filesFromMetadata && dataFileCount > 0)
 		externalLeafFields = GetLeafFieldsForTable(relationId);
 
 	for (int dataFileIndex = 0; dataFileIndex < dataFileCount; ++dataFileIndex)
@@ -272,7 +280,7 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 		List	   *columnBoundConstraints = NIL;
 		Partition  *partition = NULL;
 		List	   *columnStats =
-			GetDataFileStatsAndPartition(isInternalIcebergTable,
+			GetDataFileStatsAndPartition(isTableDataFile,
 										 list_nth(dataFiles, dataFileIndex),
 										 externalLeafFields, &partition);
 
@@ -311,16 +319,17 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
  * GetDataFileStatsAndPartition returns the column stats of a single data file
  * and sets *partition to that file's partition.
  *
- * The list elements have a different type per table type, so dataFile is
- * untyped: it points to a TableDataFile for internal Iceberg tables and to a
- * DataFile for external ones. externalLeafFields is only used for the latter,
- * whose stats come from the bounds in their manifest entry.
+ * The list elements have a different type depending on where the files come
+ * from, so dataFile is untyped: it points to a TableDataFile for files from
+ * the data files catalog and to a DataFile for files read from Iceberg
+ * metadata. externalLeafFields is only used for the latter, whose stats come
+ * from the bounds in their manifest entry.
  */
 static List *
-GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
+GetDataFileStatsAndPartition(bool isTableDataFile, void *dataFile,
 							 List *externalLeafFields, Partition * *partition)
 {
-	if (isInternalIcebergTable)
+	if (isTableDataFile)
 	{
 		TableDataFile *tableDataFile = (TableDataFile *) dataFile;
 
