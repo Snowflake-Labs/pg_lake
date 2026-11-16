@@ -67,7 +67,6 @@ static List *GetBaseRestrictInfoForRelation(List *relationRestrictionsList,
 static void ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 											  List **fileScans,
 											  List **positionDeleteFileScans);
-static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
 static int	NullSafeStrcmp(const char *a, const char *b);
 static bool TypesAreCompatible(PGType pgType, PGType icebergType);
 
@@ -420,7 +419,7 @@ NullSafeStrcmp(const char *a, const char *b)
 * ErrorIfSchemasDoNotMatch is a helper function that checks if the Iceberg
 * table schema matches the Postgres table schema.
 */
-static void
+void
 ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 {
 	IcebergTableSchema *icebergTableSchema = GetCurrentIcebergTableSchema(metadata);

@@ -93,3 +93,4 @@ extern PGDLLEXPORT void CreateTableScanForIcebergMetadata(Oid relationId,
 														  List **positionDeleteScans,
 														  List **equalityDeleteScans,
 														  List **equalityDeleteReadGroups);
+extern void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
