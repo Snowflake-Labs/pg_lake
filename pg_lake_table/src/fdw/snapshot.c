@@ -49,6 +49,8 @@
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/iceberg/iceberg_field.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
+#include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/util/rel_utils.h"
@@ -80,6 +82,10 @@ static List *IdentityPartitionFieldsForFileConstants(IcebergTableMetadata * meta
 static List *FileConstantsForDataFile(DataFile * dataFile, List *identityPartitionFields);
 static char *FileConstantText(Datum value, PGType pgType);
 static void AppendEscapedFileConstant(StringInfo buffer, const char *text);
+static void CreateTableScanForCatalogCommitTable(Oid relationId, List *baseRestrictInfoList,
+												 List **fileScans, List **positionDeleteScans,
+												 List **equalityDeleteScans,
+												 List **equalityDeleteReadGroups);
 static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
 static int	NullSafeStrcmp(const char *a, const char *b);
 static bool TypesAreCompatible(PGType pgType, PGType icebergType);
@@ -207,7 +213,14 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 	List	   *equalityDeleteScans = NIL;
 	List	   *equalityDeleteReadGroups = NIL;
 
-	if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
+	if (IsCatalogCommitRestTable(relationId))
+	{
+		CreateTableScanForCatalogCommitTable(relationId, baseRestrictInfoList,
+											 &fileScans, &positionDeleteScans,
+											 &equalityDeleteScans,
+											 &equalityDeleteReadGroups);
+	}
+	else if (IsWritablePgLakeTable(relationId) || IsInternalIcebergTable(relationId))
 	{
 		/*
 		 * Read only the data files, do not yet include the deletion files.
@@ -717,6 +730,85 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 									  fileScans, positionDeleteScans);
 	*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles, deleteFiles,
 														   *fileScans, equalityDeleteScans);
+}
+
+
+/*
+ * CreateTableScanForCatalogCommitTable creates a table scan for a table in
+ * catalog commit mode, which pg_lake keeps no data files for: the files of
+ * the catalog's current snapshot, unless the transaction created or
+ * truncated the table, and the files the transaction added so far.
+ *
+ * Like a read-only REST catalog table, the scan sees the catalog's latest
+ * commit rather than the transaction's PostgreSQL snapshot.
+ */
+static void
+CreateTableScanForCatalogCommitTable(Oid relationId, List *baseRestrictInfoList,
+									 List **fileScans, List **positionDeleteScans,
+									 List **equalityDeleteScans,
+									 List **equalityDeleteReadGroups)
+{
+	List	   *pendingOperations = GetPendingDataFileOperations(relationId);
+	List	   *pendingFiles = NIL;
+	bool		removedAllFiles = false;
+
+	foreach_ptr(TableMetadataOperation, operation, pendingOperations)
+	{
+		if (operation->type == DATA_FILE_REMOVE_ALL)
+		{
+			removedAllFiles = true;
+			continue;
+		}
+
+		Assert(operation->type == DATA_FILE_ADD && operation->content == CONTENT_DATA);
+
+		TableDataFile *pendingFile = palloc0(sizeof(TableDataFile));
+
+		pendingFile->path = (char *) operation->path;
+		pendingFile->content = operation->content;
+		pendingFile->stats = operation->dataFileStats;
+		pendingFile->partition = operation->partition;
+		pendingFile->partitionSpecId = operation->partitionSpecId;
+
+		pendingFiles = lappend(pendingFiles, pendingFile);
+	}
+
+	/* a table created in this transaction is only staged in the catalog */
+	if (!removedAllFiles && !IsIcebergTableCreatedInCurrentTransaction(relationId))
+	{
+		IcebergTableMetadata *metadata = GetWritableRestCatalogTableMetadata(relationId, NULL);
+		List	   *dataFiles = NIL;
+		List	   *deleteFiles = NIL;
+
+		FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
+
+		bool		filesFromMetadata = true;
+		List	   *retainedFiles = PruneDataFilesExtended(relationId, dataFiles,
+														   baseRestrictInfoList,
+														   PARTIAL_MATCH, filesFromMetadata);
+		List	   *fileConstants = FileConstantsForDataFiles(metadata, retainedFiles);
+
+		ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, fileConstants,
+										  fileScans, positionDeleteScans);
+		*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles,
+															   deleteFiles, *fileScans,
+															   equalityDeleteScans);
+	}
+
+	bool		filesFromMetadata = false;
+	List	   *retainedPendingFiles = PruneDataFilesExtended(relationId, pendingFiles,
+															  baseRestrictInfoList,
+															  PARTIAL_MATCH, filesFromMetadata);
+
+	foreach_ptr(TableDataFile, pendingFile, retainedPendingFiles)
+	{
+		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
+
+		fileScan->path = pendingFile->path;
+		fileScan->rowCount = pendingFile->stats.rowCount;
+
+		*fileScans = lappend(*fileScans, fileScan);
+	}
 }
 
 

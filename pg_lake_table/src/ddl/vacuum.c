@@ -831,8 +831,13 @@ static void
 VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
 						   bool isAutoVacuum)
 {
+	/*
+	 * Compaction picks its files from the data files catalog, which a table
+	 * in catalog commit mode does not use.
+	 */
 	bool		compactDataFiles =
-		!isAutoVacuum || IsAutoVacuumCompactDataFilesEnabled(relationId);
+		(!isAutoVacuum || IsAutoVacuumCompactDataFilesEnabled(relationId)) &&
+		!IsCatalogCommitRestTable(relationId);
 
 	if (compactDataFiles)
 		VacuumCompactDataFiles(relationId, isFull, isVerbose);

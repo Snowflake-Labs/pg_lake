@@ -60,6 +60,7 @@
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -1416,10 +1417,12 @@ ApplyDataFileModifications(Relation rel, List *modifications)
 	 * Seed the counter with rows already deleted across the whole table so
 	 * that copy_on_write_max_delete_rows limits the table-wide total, not
 	 * just the rows deleted in this single operation.  Skip the catalog query
-	 * when the limit is disabled (< 0) to avoid unnecessary overhead.
+	 * when the limit is disabled (< 0) to avoid unnecessary overhead, and for
+	 * a table in catalog commit mode, which only inserts and keeps no files
+	 * in the catalog.
 	 */
 	int64		totalPositionDeletedRows =
-		(CopyOnWriteMaxDeleteRows >= 0)
+		(CopyOnWriteMaxDeleteRows >= 0 && !IsCatalogCommitRestTable(relationId))
 		? GetTotalDeletedRowCountFromCatalog(relationId)
 		: 0;
 
@@ -1494,11 +1497,21 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
 
 		case PG_LAKE_ICEBERG_TABLE_TYPE:
 			{
-				ApplyDataFileCatalogChanges(relationId, metadataOperations);
+				bool		catalogCommit = IsCatalogCommitRestTable(relationId);
+
+				/*
+				 * The catalog keeps the data files of a table in catalog
+				 * commit mode, so they stay out of the data files catalog.
+				 */
+				if (!catalogCommit)
+					ApplyDataFileCatalogChanges(relationId, metadataOperations);
 
 				List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
 
 				TrackIcebergMetadataChangesInTx(relationId, operationTypes);
+
+				if (catalogCommit)
+					RecordPendingDataFileOperations(relationId, metadataOperations);
 				break;
 			}
 
