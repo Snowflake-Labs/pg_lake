@@ -20,6 +20,7 @@
 #include "utils/rel.h"
 #include "utils/snapmgr.h"
 
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 
@@ -54,6 +55,12 @@ IcebergXactCallback(XactEvent event, void *arg)
 				Assert(!ActiveSnapshotSet());
 				PushActiveSnapshot(GetTransactionSnapshot());
 
+				/*
+				 * before the tracked changes are consumed, which it checks
+				 * for
+				 */
+				CommitExternalRestCatalogTableChanges();
+
 				ConsumeTrackedIcebergMetadataChanges(false);
 
 				PopActiveSnapshot();
@@ -66,6 +73,7 @@ IcebergXactCallback(XactEvent event, void *arg)
 			{
 				ResetTrackedIcebergMetadataOperation();
 				ResetRestCatalogRequests();
+				ResetExternalRestCatalogTableChanges();
 				break;
 			}
 		case XACT_EVENT_PRE_PREPARE:

@@ -104,6 +104,7 @@
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/storage/local_storage.h"
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/item_pointer_utils.h"
 #include "pg_lake/util/rel_utils.h"
@@ -2616,7 +2617,8 @@ postgresIsForeignRelUpdatable(Relation rel)
 	 * By default, all pg_lake foreign tables are assumed not writable. This
 	 * can be overridden by a per-table setting.
 	 */
-	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId) &&
+		!IsWritableExternalRestCatalogTable(relationId))
 		return 0;
 
 	int			writeFlags = (1 << CMD_INSERT);
@@ -3614,6 +3616,9 @@ create_foreign_modify(Relation rel,
 	/* extra checks */
 	if (PgLakeModifyValidityCheckHook)
 		PgLakeModifyValidityCheckHook(relationId);
+
+	if (IsWritableExternalRestCatalogTable(relationId))
+		PrepareExternalRestCatalogTableWrite(relationId);
 
 	PgLakeModifyState *fmstate;
 
