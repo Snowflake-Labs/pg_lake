@@ -1645,10 +1645,12 @@ HandleIcebergOptionsChanges(Oid relationId, AlterTableStmt *alterStmt)
 			/*
 			 * catalog picks the server and catalog_name the REST prefix a
 			 * writable table was created under; changing either would point
-			 * the table at a catalog that does not hold it.
+			 * the table at a catalog that does not hold it. external decides
+			 * whether the table's state is in our catalogs or in that one.
 			 */
 			if (strcmp(newOption->defname, "catalog") == 0 ||
-				strcmp(newOption->defname, "catalog_name") == 0)
+				strcmp(newOption->defname, "catalog_name") == 0 ||
+				strcmp(newOption->defname, EXTERNAL_CATALOG_TABLE_OPTION) == 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						 errmsg("Changing option \"%s\" is not supported",
