@@ -25,6 +25,7 @@
 #include "utils/acl.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/lsyscache.h"
 
 PG_FUNCTION_INFO_V1(test_run_commands_in_parallel);
 
