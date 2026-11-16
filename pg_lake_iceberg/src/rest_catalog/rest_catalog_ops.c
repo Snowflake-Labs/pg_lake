@@ -2267,7 +2267,7 @@ IcebergProvideStorageCredentials(Oid relationId)
 	ListCell   *credsCell = NULL;
 	StorageCredential *sc;
 
-	if (catalogType != REST_CATALOG_READ_ONLY)
+	if (!IsExternalRestCatalogType(catalogType))
 		return NIL;
 
 	/*
@@ -2393,7 +2393,7 @@ IcebergProvideStorageCredentials(Oid relationId)
 void
 ErrorIfVendedCredentialsWithheld(Oid relationId)
 {
-	if (GetIcebergCatalogType(relationId) != REST_CATALOG_READ_ONLY ||
+	if (!IsExternalRestCatalogType(GetIcebergCatalogType(relationId)) ||
 		!RestCatalogVendingEnabledForRelation(relationId))
 		return;
 
@@ -2471,10 +2471,10 @@ GetRestCatalogTableName(Oid relationId)
 {
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+	Assert(IsExternalRestCatalogType(catalogType) ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
-	if (catalogType == REST_CATALOG_READ_ONLY)
+	if (IsExternalRestCatalogType(catalogType))
 	{
 		ForeignTable *foreignTable = GetForeignTable(relationId);
 		List	   *options = foreignTable->options;
@@ -2507,10 +2507,10 @@ GetRestCatalogNamespace(Oid relationId)
 {
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+	Assert(IsExternalRestCatalogType(catalogType) ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
-	if (catalogType == REST_CATALOG_READ_ONLY)
+	if (IsExternalRestCatalogType(catalogType))
 	{
 
 		ForeignTable *foreignTable = GetForeignTable(relationId);
@@ -2554,7 +2554,7 @@ GetRestCatalogName(Oid relationId)
 {
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+	Assert(IsExternalRestCatalogType(catalogType) ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
 	ForeignTable *foreignTable = GetForeignTable(relationId);
