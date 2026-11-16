@@ -23,6 +23,7 @@
 
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_extension_base/extension_ids.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/fdw/data_files_catalog.h"
 #include "pg_lake/iceberg/api/datafile.h"
 #include "pg_lake/iceberg/metadata_operations.h"
