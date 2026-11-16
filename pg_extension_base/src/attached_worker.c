@@ -519,6 +519,10 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	 * finishing the command.
 	 */
 	pid_t		pid = 0;
+
+	/* lets a test fail a launch the way a cancel during the wait does */
+	INJECTION_POINT_COMPAT("attached-worker-before-startup-wait");
+
 	BgwHandleStatus status = WaitForBackgroundWorkerStartup(workerHandle, &pid);
 
 	if (status != BGWH_STARTED && status != BGWH_STOPPED)
