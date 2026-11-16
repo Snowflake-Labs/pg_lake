@@ -33,6 +33,7 @@
 #include "access/genam.h"
 #include "catalog/namespace.h"
 #include "commands/sequence.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/cleanup/deletion_queue.h"
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/extensions/pg_lake_table.h"
@@ -76,6 +77,14 @@ static int64 TransactionOperationId = 0;
 static bool TransactionCallbackRegistered = false;
 
 /*
+ * Whether this transaction holds back deletes of in-progress records, and the
+ * paths whose records it held back, in TopTransactionContext.  See
+ * DeferInProgressFileRecordDeletes.
+ */
+static bool DeferringRecordDeletes = false;
+static List *DeferredRecordDeletes = NIL;
+
+/*
  * Cached result of InProgressTableVisibleToExternalTx().
  *
  * We only cache the "visible" (true) result, which is the common case
@@ -110,6 +119,7 @@ static bool TryLockTransactionOperationId(int64 operationId);
 static void LockTransactionOperationId(int64 operationId);
 static bool InProgressTableVisibleToExternalTx(void);
 static bool FileInProgressRecordExists(char *path);
+static char *TextArrayLiteral(List *strings);
 
 
 PG_FUNCTION_INFO_V1(flush_in_progress_queue);
@@ -417,6 +427,17 @@ DeleteInProgressFileRecords(List *paths)
 	if (paths == NIL)
 		return;
 
+	if (DeferringRecordDeletes)
+	{
+		MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+		foreach_ptr(char, path, paths)
+			DeferredRecordDeletes = lappend(DeferredRecordDeletes, pstrdup(path));
+
+		MemoryContextSwitchTo(oldContext);
+		return;
+	}
+
 	char	   *query =
 		"DELETE FROM " PG_LAKE_ENGINE_NSP "." IN_PROGRESS_FILES_TABLE " "
 		"WHERE path OPERATOR(pg_catalog.=) ANY($1)";
@@ -449,6 +470,134 @@ DeleteInProgressFileRecords(List *paths)
 	SPI_END();
 
 	CommandCounterIncrement();
+}
+
+
+/*
+ * DeferInProgressFileRecordDeletes holds back the deletes of in-progress
+ * records for the rest of the transaction, until
+ * FlushDeferredInProgressFileRecordDeletes.
+ *
+ * A record is normally deleted by the transaction that writes the file, so
+ * the file stays queued for cleanup unless that transaction commits. That is
+ * wrong for a table whose commit is decided elsewhere: once a REST catalog
+ * accepts a snapshot, its files are live whatever happens to the PostgreSQL
+ * transaction afterwards. Such a transaction collects the deletes instead and
+ * makes them in a transaction of their own before it asks the catalog to
+ * commit, so a crash in between leaks files rather than removing live ones.
+ *
+ * It must be called before the transaction deletes a record, since a record
+ * deleted here cannot be deleted from another transaction until this one ends.
+ */
+void
+DeferInProgressFileRecordDeletes(void)
+{
+	/* registers the callback that ends the deferral with the transaction */
+	(void) GetTransactionOperationId();
+
+	DeferringRecordDeletes = true;
+}
+
+
+/*
+ * FlushDeferredInProgressFileRecordDeletes deletes the records whose deletes
+ * the transaction held back, in a transaction of its own, and returns their
+ * paths, in TopTransactionContext.  Later deletes are made in the current
+ * transaction again.
+ */
+List *
+FlushDeferredInProgressFileRecordDeletes(void)
+{
+	/* lives until the end of the transaction, which is long enough */
+	List	   *paths = DeferredRecordDeletes;
+
+	DeferringRecordDeletes = false;
+	DeferredRecordDeletes = NIL;
+
+	if (paths == NIL || !InProgressTableVisibleToExternalTx())
+		return paths;
+
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfo(query,
+					 "delete from " PG_LAKE_ENGINE_NSP "." IN_PROGRESS_FILES_TABLE " "
+					 "where path operator(pg_catalog.=) any(%s)",
+					 TextArrayLiteral(paths));
+
+	SPI_START_EXTENSION_OWNER(PgLakeEngine);
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, TEXTOID, query->data, false);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE("select * from extension_base.run_attached($1)", readOnly);
+
+	SPI_END();
+
+	return paths;
+}
+
+
+/*
+ * RestoreInProgressFileRecords records the given paths as in progress again,
+ * in a transaction of its own, after FlushDeferredInProgressFileRecordDeletes
+ * removed them and the commit they were for did not happen.  They are owned
+ * by this transaction's operation, so cleanup leaves them alone until it ends.
+ */
+void
+RestoreInProgressFileRecords(List *paths)
+{
+	if (paths == NIL || !InProgressTableVisibleToExternalTx())
+		return;
+
+	int64		operationId = GetTransactionOperationId();
+
+	LockTransactionOperationId(operationId);
+
+	StringInfo	query = makeStringInfo();
+
+	appendStringInfo(query,
+					 "insert into " PG_LAKE_ENGINE_NSP "." IN_PROGRESS_FILES_TABLE " "
+					 "(path, operation_id, is_prefix) "
+					 "select p, " INT64_FORMAT ", false from unnest(%s) p",
+					 operationId, TextArrayLiteral(paths));
+
+	SPI_START_EXTENSION_OWNER(PgLakeEngine);
+
+	DECLARE_SPI_ARGS(1);
+	SPI_ARG_VALUE(1, TEXTOID, query->data, false);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE("select * from extension_base.run_attached($1)", readOnly);
+
+	SPI_END();
+}
+
+
+/*
+ * TextArrayLiteral returns a text[] literal of the given strings, for a query
+ * that runs in another session and cannot take parameters.
+ */
+static char *
+TextArrayLiteral(List *strings)
+{
+	StringInfo	literal = makeStringInfo();
+
+	appendStringInfoString(literal, "array[");
+
+	foreach_ptr(char, string, strings)
+	{
+		if (literal->data[literal->len - 1] != '[')
+			appendStringInfoChar(literal, ',');
+
+		appendStringInfoString(literal, quote_literal_cstr(string));
+	}
+
+	appendStringInfoString(literal, "]::text[]");
+
+	return literal->data;
 }
 
 
@@ -788,6 +937,10 @@ InProgressFileTransactionCallback(XactEvent event, void *arg)
 		 * from OPERATION_ID_SEQUENCE when needed.
 		 */
 		TransactionOperationId = 0;
+
+		/* the list was in TopTransactionContext */
+		DeferringRecordDeletes = false;
+		DeferredRecordDeletes = NIL;
 	}
 }
 

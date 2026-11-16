@@ -32,3 +32,6 @@ extern PGDLLEXPORT void DeleteInProgressFileRecords(List *paths);
 extern PGDLLEXPORT void ReplaceInProgressPrefixPathWithFullPaths(char *prefixPath, List *fullPaths);
 extern PGDLLEXPORT void InvalidateInProgressTableVisibilityCache(void);
 extern PGDLLEXPORT void ClearInProgressFiles(void);
+extern PGDLLEXPORT void DeferInProgressFileRecordDeletes(void);
+extern PGDLLEXPORT List *FlushDeferredInProgressFileRecordDeletes(void);
+extern PGDLLEXPORT void RestoreInProgressFileRecords(List *paths);
