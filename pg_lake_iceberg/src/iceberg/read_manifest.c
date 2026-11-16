@@ -197,6 +197,8 @@ ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, v
 {
 	memset(manifest, '\0', sizeof(IcebergManifest));
 	AvroGetStringField(record, "manifest_path", AVRO_FIELD_REQUIRED, &manifest->manifest_path, &manifest->manifest_path_length);
+	manifest->manifest_path = S3URLFromHadoopScheme(manifest->manifest_path);
+	manifest->manifest_path_length = strlen(manifest->manifest_path);
 	AvroGetInt64Field(record, "manifest_length", AVRO_FIELD_REQUIRED, &manifest->manifest_length);
 	AvroGetInt32Field(record, "partition_spec_id", AVRO_FIELD_REQUIRED, &manifest->partition_spec_id);
 	/* v1 manifest lists have neither content nor sequence numbers. */
@@ -309,6 +311,8 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 		ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
 						errmsg("invalid Iceberg data file content %d", dataFile->content)));
 	AvroGetStringField(record, "file_path", AVRO_FIELD_REQUIRED, &dataFile->file_path, &dataFile->file_path_length);
+	dataFile->file_path = S3URLFromHadoopScheme(dataFile->file_path);
+	dataFile->file_path_length = strlen(dataFile->file_path);
 
 	ValidateStorageURL(dataFile->file_path);
 
@@ -335,6 +339,28 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 						   dataFile->file_path),
 				 errhint("Deletion vectors are an Iceberg v3 feature; rewrite "
 						 "the table with positional delete files to read it.")));
+	}
+
+	/*
+	 * Other engines can also write data and position delete files in ORC or
+	 * Avro.  DuckDB would fail on those as malformed Parquet, so name the
+	 * format.  An equality delete file is checked where it is applied.
+	 */
+	if (dataFile->content != ICEBERG_DATA_FILE_CONTENT_EQUALITY_DELETES &&
+		dataFile->file_format != NULL &&
+		pg_strcasecmp(dataFile->file_format, "PARQUET") != 0)
+	{
+		LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_FILE_FORMAT);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pg_lake_iceberg: %s files are not supported",
+						dataFile->file_format),
+				 errdetail("Table references the %s file \"%s\".",
+						   dataFile->file_format, dataFile->file_path),
+				 errhint("pg_lake reads Iceberg data and delete files in "
+						 "Parquet only; rewrite the table's files as Parquet "
+						 "to read it.")));
 	}
 
 	AvroGetRecordField(record, "partition", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadPartitionFromAvro, &dataFile->partition, context);

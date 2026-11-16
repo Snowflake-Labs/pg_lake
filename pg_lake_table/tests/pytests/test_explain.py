@@ -291,7 +291,10 @@ def test_explain_explicit_cardinality(pg_conn, s3, with_default_location):
 
     position_delete_projection_plan = hash_join_plan["Plans"][1]
     assert position_delete_projection_plan["Node Type"] == "PROJECTION"
-    assert position_delete_projection_plan["Projections"] == '"row"(file_path, pos)'
+    assert (
+        position_delete_projection_plan["Projections"]
+        == "\"row\"(regexp_replace(file_path, '^s3[an]://', 's3://'), pos)"
+    )
     assert position_delete_projection_plan["Estimated Cardinality"] == "1"
 
     position_delete_read_parquet_plan = position_delete_projection_plan["Plans"][0]

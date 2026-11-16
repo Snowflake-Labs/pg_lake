@@ -230,11 +230,16 @@ ReadDataSourceQuery(List *sourcePaths,
 		/*
 		 * Add an anti-join with the position delete files to filter out
 		 * deleted rows. The anti-join is reasonably efficient in DuckDB.
+		 *
+		 * Engines built on Hadoop name the data files in their position
+		 * deletes by s3a:// or s3n:// URLs, which reach this scan as s3://
+		 * (see S3URLFromHadoopScheme), so the names are compared that way.
 		 */
 
 		appendStringInfo(&command,
 						 " WHERE (" INTERNAL_FILENAME_COLUMN_NAME ", file_row_number)"
-						 " NOT IN (SELECT (file_path, pos) FROM read_parquet(%s",
+						 " NOT IN (SELECT (regexp_replace(file_path, '^s3[an]://', 's3://'), pos)"
+						 " FROM read_parquet(%s",
 						 PathListToString(positionDeletePaths));
 
 		if (stats != NO_STATISTICS && stats->positionDeleteRowCount > 0)
