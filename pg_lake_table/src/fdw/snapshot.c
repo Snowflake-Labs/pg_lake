@@ -68,7 +68,6 @@ static void ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles
 											  List **fileScans,
 											  List **positionDeleteFileScans);
 static int	NullSafeStrcmp(const char *a, const char *b);
-static bool TypesAreCompatible(PGType pgType, PGType icebergType);
 
 /*
  * CreatePgLakeScanSnapshot generates a current snapshot for a list
@@ -500,7 +499,7 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 * means the element types are compatible. For maps, compatibility means the
 * key and value types are compatible.
 */
-static bool
+bool
 TypesAreCompatible(PGType pgType, PGType icebergType)
 {
 	/* if both are the same base type, they are compatible */

@@ -19,6 +19,7 @@
 
 #include "nodes/pg_list.h"
 #include "pg_lake/iceberg/metadata_spec.h"
+#include "pg_lake/pgduck/type.h"
 
 /*
  * PgLakeFileScan represents a single file to scan.
@@ -94,3 +95,4 @@ extern PGDLLEXPORT void CreateTableScanForIcebergMetadata(Oid relationId,
 														  List **equalityDeleteScans,
 														  List **equalityDeleteReadGroups);
 extern void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
+extern bool TypesAreCompatible(PGType pgType, PGType icebergType);

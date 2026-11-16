@@ -21,6 +21,7 @@
 
 extern PGDLLEXPORT bool IsWritableExternalRestCatalogTable(Oid relationId);
 extern void PrepareExternalRestCatalogTableWrite(Oid relationId);
+extern void CreateExternalRestCatalogTableInCatalog(Oid relationId, List *tableElements);
 extern void RecordExternalRestCatalogTableChanges(Oid relationId, List *metadataOperations);
 extern void CommitExternalRestCatalogTableChanges(void);
 extern void ResetExternalRestCatalogTableChanges(void);

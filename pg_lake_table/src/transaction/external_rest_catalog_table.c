@@ -45,8 +45,10 @@
  * - Snapshot expiration and compaction, which VACUUM skips for these tables.
  * - Partitioned tables. New files go into spec 0, and the partition values
  *   of an existing file come from our catalogs, which hold nothing here.
- * - Schema changes, row_ids, TRUNCATE, and creating a new table in the
- *   catalog from pg_lake: attach an existing table instead.
+ * - Schema changes, row_ids and TRUNCATE.
+ * - Partitioning or a location for a table created from pg_lake, and making
+ *   that create atomic: the catalog has the table as soon as CREATE asks for
+ *   it, so a later error in the same statement leaves it there.
  * - Copy-on-write deletes, since the rewrite would have to apply position
  *   deletes other engines added. Deletes are merge-on-read.
  * - INSERT .. SELECT and COPY pushdown. Both take the regular FDW path.
@@ -61,6 +63,8 @@
 
 #include "access/xact.h"
 #include "foreign/foreign.h"
+#include "nodes/parsenodes.h"
+#include "utils/builtins.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 
@@ -68,7 +72,9 @@
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/snapshot.h"
+#include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/metadata_operations.h"
@@ -118,6 +124,80 @@ IsWritableExternalRestCatalogTable(Oid relationId)
 {
 	return IsPgLakeIcebergForeignTableById(relationId) &&
 		GetIcebergCatalogType(relationId) == REST_CATALOG_EXTERNAL_READ_WRITE;
+}
+
+
+/*
+ * CreateExternalRestCatalogTableInCatalog creates the catalog table of a new
+ * external table whose columns the user gave, when the catalog does not have
+ * it yet. Field ids are assigned for the request only; the catalog may assign
+ * its own, and we read them back from it like for any attached table.
+ */
+void
+CreateExternalRestCatalogTableInCatalog(Oid relationId, List *tableElements)
+{
+	if (IsTransactionBlock())
+		ereport(ERROR,
+				(errcode(ERRCODE_ACTIVE_SQL_TRANSACTION),
+				 errmsg("cannot create external REST catalog table \"%s\" in a transaction block",
+						get_rel_name(relationId)),
+				 errdetail("The REST catalog creates the table on its own, "
+						   "so it cannot be part of a larger transaction.")));
+
+	List	   *columnDefs = NIL;
+
+	/* table constraints are PostgreSQL's alone */
+	ListCell   *elementCell = NULL;
+
+	foreach(elementCell, tableElements)
+	{
+		if (IsA(lfirst(elementCell), ColumnDef))
+			columnDefs = lappend(columnDefs, lfirst(elementCell));
+	}
+
+	bool		forAddColumn = false;
+	List	   *columnMappings =
+		CreatePostgresColumnMappingsForColumnDefs(relationId, columnDefs, forAddColumn);
+
+	DataFileSchema *schema = palloc0(sizeof(DataFileSchema));
+
+	schema->fields = palloc0(sizeof(DataFileSchemaField) * list_length(columnMappings));
+
+	foreach_ptr(PostgresColumnMapping, columnMapping, columnMappings)
+	{
+		/*
+		 * Every read compares the columns to the catalog's schema, so a type
+		 * that comes back from Iceberg as another one would make the new
+		 * table unreadable.
+		 */
+		PGType		icebergType = IcebergFieldToPostgresType(columnMapping->field->type);
+
+		if (!TypesAreCompatible(columnMapping->pgType, icebergType))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("column \"%s\" of type %s is stored in Iceberg as %s",
+							columnMapping->attname,
+							format_type_with_typemod(columnMapping->pgType.postgresTypeOid,
+													 columnMapping->pgType.postgresTypeMod),
+							format_type_with_typemod(icebergType.postgresTypeOid,
+													 icebergType.postgresTypeMod)),
+					 errhint("Use type %s for an external REST catalog table.",
+							 format_type_with_typemod(icebergType.postgresTypeOid,
+													  icebergType.postgresTypeMod))));
+
+		schema->fields[schema->nfields++] = *columnMapping->field;
+	}
+
+	RestCatalogOptions *opts = GetRestCatalogOptionsForRelation(relationId);
+
+	(void) RegisterNamespaceToRestCatalog(opts, GetRestCatalogName(relationId),
+										  GetRestCatalogNamespace(relationId));
+
+	const char *requestedLocation = NULL;
+	bool		stageCreate = false;
+
+	(void) CreateRestCatalogIcebergTable(relationId, schema, requestedLocation,
+										 stageCreate);
 }
 
 

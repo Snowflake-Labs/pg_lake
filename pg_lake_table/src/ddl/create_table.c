@@ -80,6 +80,7 @@
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/query/execute.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/storage/storage_credentials.h"
@@ -884,6 +885,9 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		char	   *metadataLocation = NULL;
 		Jsonb	   *catalogTableMetadata = NULL;
+
+		/* an external table with columns that the catalog does not have yet */
+		bool		createInCatalog = false;
 		char	   *catalogNamespace = NULL;
 		char	   *catalogTableName = NULL;
 		char	   *catalogName = NULL;
@@ -952,7 +956,20 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			catalogName = catalogNameProvided;
 		}
 
-		if (hasRestCatalogOption && attachesToCatalogTable)
+		if (hasRestCatalogOption && attachesToCatalogTable &&
+			!HasReadOnlyOption(createStmt->options) &&
+			createStmt->base.tableElts != NIL)
+		{
+			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+			RestCatalogOptions *opts =
+				ResolveRestCatalogOptions(catalogOptionValue);
+
+			createInCatalog = !RestCatalogTableExists(opts, catalogName,
+													  catalogNamespace,
+													  catalogTableName);
+		}
+
+		if (hasRestCatalogOption && attachesToCatalogTable && !createInCatalog)
 		{
 			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
 			RestCatalogOptions *opts =
@@ -1070,6 +1087,10 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 			/* Keep in sync with the writable-table call below. */
 			RecordIcebergCatalogServerDependency(readOnlyRelId, createStmt->options);
+
+			if (createInCatalog)
+				CreateExternalRestCatalogTableInCatalog(readOnlyRelId,
+														createStmt->base.tableElts);
 
 			return true;
 		}

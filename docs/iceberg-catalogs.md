@@ -314,6 +314,17 @@ INSERT INTO events SELECT * FROM staging_events;
 DELETE FROM events WHERE ts < now() - interval '90 days';
 ```
 
+When columns are given and the catalog has no such table, pg_lake creates it in the catalog
+first, outside any transaction block. The catalog creates it right away, so an error later in
+the same statement leaves it there. A column type that Iceberg would hand back as another type,
+such as `varchar(10)`, is rejected. Partitioning and a location cannot be set yet.
+
+```sql
+-- creates analytics.events in the catalog, then attaches it
+CREATE TABLE analytics.events (id bigint NOT NULL, payload text) USING iceberg
+WITH (catalog = 'polaris', external = true);
+```
+
 Commits from other engines are visible to the next statement, and the next write builds on top
 of them. If another engine commits after a statement read the table and before it commits, the
 catalog rejects the commit and the statement fails with a serialization failure

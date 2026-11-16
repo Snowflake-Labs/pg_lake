@@ -494,3 +494,76 @@ def test_external_option_cannot_change(pg_conn, shared_table, with_default_locat
 
     run_command(f'DROP TABLE "{NAMESPACE}".owned', pg_conn)
     pg_conn.commit()
+
+
+def test_create_table_in_catalog(pg_conn, rest_catalog, set_polaris_gucs, installcheck):
+    """
+    CREATE TABLE with columns creates the table in the catalog when it does
+    not exist, and then it is like any attached table: other engines see it
+    and write it, and dropping it leaves it in the catalog.
+    """
+    if installcheck:
+        pytest.skip("needs the test Polaris server")
+
+    pg_name = f'"{NAMESPACE}".created_by_pg'
+    conn = autocommit_conn()
+    run_command(
+        f"""CREATE TABLE {pg_name} (id bigint NOT NULL, val text)
+            USING iceberg WITH (catalog='rest', external='true')""",
+        conn,
+    )
+    run_command(f"INSERT INTO {pg_name} VALUES (1, 'pg-1')", conn)
+
+    table = rest_catalog.load_table(f"{NAMESPACE}.created_by_pg")
+    assert [field.name for field in table.schema().fields] == ["id", "val"]
+    assert table.schema().find_field("id").required
+
+    external_append(table, [(2, "spark-2")])
+    res = run_query(f"SELECT id, val FROM {pg_name} ORDER BY id", conn)
+    assert res == [[1, "pg-1"], [2, "spark-2"]]
+
+    # columns given for a table the catalog already has attach to it
+    run_command(f"DROP TABLE {pg_name}", conn)
+    run_command(
+        f"""CREATE TABLE {pg_name} (id bigint NOT NULL, val text)
+            USING iceberg WITH (catalog='rest', external='true')""",
+        conn,
+    )
+    res = run_query(f"SELECT count(*) FROM {pg_name}", conn)
+    assert res == [[2]]
+
+    run_command(f"DROP TABLE {pg_name}", conn)
+    conn.close()
+    assert catalog_rows(table) == [(1, "pg-1"), (2, "spark-2")]
+    rest_catalog.drop_table(f"{NAMESPACE}.created_by_pg")
+
+
+def test_create_table_in_catalog_rejected(
+    pg_conn, rest_catalog, set_polaris_gucs, installcheck
+):
+    if installcheck:
+        pytest.skip("needs the test Polaris server")
+
+    # a type Iceberg would hand back as another one
+    conn = autocommit_conn()
+    error = run_command(
+        f"""CREATE TABLE "{NAMESPACE}".bad_type (id bigint, val varchar(10))
+            USING iceberg WITH (catalog='rest', external='true')""",
+        conn,
+        raise_error=False,
+    )
+    conn.close()
+    assert "is stored in Iceberg as" in str(error)
+
+    # the catalog would create it outside the transaction
+    error = run_command(
+        f"""CREATE TABLE "{NAMESPACE}".in_block (id bigint)
+            USING iceberg WITH (catalog='rest', external='true')""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "in a transaction block" in str(error)
+    pg_conn.rollback()
+
+    tables = [name for _, name in rest_catalog.list_tables(NAMESPACE)]
+    assert "bad_type" not in tables and "in_block" not in tables
