@@ -52,8 +52,9 @@ static bool JobIsComplete(AttachedWorker * worker);
  *
  * Each command commits in its own worker.  When one fails, or the caller is
  * interrupted, the workers still running are stopped before the error is
- * raised, so none of them commits after it; those that had finished stay
- * committed.
+ * raised.  Jobs that had finished stay committed, and some of the unfinished
+ * ones may have committed too, since a worker that is already committing
+ * when it is stopped still commits.
  */
 void
 RunCommandsInParallel(List *commands,
@@ -222,8 +223,9 @@ static void
 EndRunningJobs(AttachedWorker * *workers, int workerCount)
 {
 	/*
-	 * Signal every worker before waiting for any: a cancel that interrupts
-	 * one of the waits then leaves none of them running on.
+	 * Signal every worker before waiting for any, and hold interrupts during
+	 * the waits, so that a second cancel cannot raise the error while a
+	 * signalled worker is still running.
 	 */
 	for (int workerIndex = 0; workerIndex < workerCount; workerIndex++)
 	{
@@ -233,11 +235,15 @@ EndRunningJobs(AttachedWorker * *workers, int workerCount)
 			TerminateBackgroundWorker(worker->workerHandle);
 	}
 
+	HOLD_INTERRUPTS();
+
 	for (int workerIndex = 0; workerIndex < workerCount; workerIndex++)
 	{
 		if (workers[workerIndex] != NULL)
 			EndAttachedWorker(workers[workerIndex]);
 	}
+
+	RESUME_INTERRUPTS();
 }
 
 

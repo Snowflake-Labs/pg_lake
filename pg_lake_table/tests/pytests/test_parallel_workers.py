@@ -174,3 +174,27 @@ def test_launch_error_raised(superuser_conn, parallel_jobs, create_injection_ext
 
     assert error is not None
     assert "attached-worker-before-startup-wait" in error
+
+
+def test_failed_job_stops_the_others(superuser_conn, parallel_jobs):
+    # When one job fails, the jobs still running are stopped before the error
+    # is raised, so they do not commit after the caller saw it fail.
+    sleeping_jobs = ",".join(
+        f"$$SELECT pg_sleep(2); INSERT INTO public.parallel_jobs VALUES ({job})$$"
+        for job in range(2)
+    )
+
+    error = run_command(
+        f"SELECT public.test_run_commands_in_parallel("
+        f"ARRAY[{sleeping_jobs}, $$SELECT 1/0$$], 3)",
+        superuser_conn,
+        raise_error=False,
+    )
+    superuser_conn.rollback()
+
+    assert error is not None
+    assert "division by zero" in error
+
+    # long enough for a job left running to finish its insert
+    time.sleep(4)
+    assert committed_jobs(superuser_conn) == 0

@@ -519,11 +519,36 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	 * finishing the command.
 	 */
 	pid_t		pid = 0;
+	BgwHandleStatus status;
 
-	/* lets a test fail a launch the way a cancel during the wait does */
-	INJECTION_POINT_COMPAT("attached-worker-before-startup-wait");
+	PG_TRY();
+	{
+		/* lets a test fail a launch the way a cancel during the wait does */
+		INJECTION_POINT_COMPAT("attached-worker-before-startup-wait");
 
-	BgwHandleStatus status = WaitForBackgroundWorkerStartup(workerHandle, &pid);
+		status = WaitForBackgroundWorkerStartup(workerHandle, &pid);
+	}
+	PG_CATCH();
+	{
+		/*
+		 * The caller never gets this worker back, so it would run its command
+		 * to the end, and commit, while the caller reports the error.  Held
+		 * interrupts keep a second cancel from cutting the wait short.
+		 */
+		HOLD_INTERRUPTS();
+		TerminateBackgroundWorker(workerHandle);
+		BgwHandleStatus shutdownStatus = WaitForBackgroundWorkerShutdown(workerHandle);
+
+		RESUME_INTERRUPTS();
+
+		dsm_detach(seg);
+
+		if (shutdownStatus == BGWH_STOPPED)
+			RemoveAttachedWorkerHandle(workerHandle);
+
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	if (status != BGWH_STARTED && status != BGWH_STOPPED)
 	{
