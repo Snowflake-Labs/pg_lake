@@ -5,7 +5,7 @@
     "azure-storage-files-datalake-cpp",
     {
       "name": "aws-sdk-cpp",
-      "features": [ "sso", "sts" , "identity-management", "rds", "redshift", "cloudformation"]
+      "features": [ "sso", "sts" , "identity-management", "rds", "redshift", "redshift-serverless", "cloudformation"]
     },
     "zlib",
     "openssl",

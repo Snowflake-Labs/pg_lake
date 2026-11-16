@@ -18,7 +18,7 @@ surface types) keep scanning instead of failing to parse.
 Note: ST_AsBinary drops the SRID. If SRID preservation is needed, a separate
 column or in-reader EWKB stripping would be required.
 diff --git a/src/include/postgres_utils.hpp b/src/include/postgres_utils.hpp
-index d95262f..6255463 100644
+index 8a5d135..ee1d83a 100644
 --- a/src/include/postgres_utils.hpp
 +++ b/src/include/postgres_utils.hpp
 @@ -53,7 +53,8 @@ enum class PostgresTypeAnnotation {
@@ -32,28 +32,29 @@ index d95262f..6255463 100644
  
  struct PostgresType {
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index 2ea4442..019f15d 100644
+index aa3e102..e314e0d 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
-@@ -213,7 +213,15 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
- 				col_names += "ctid";
+@@ -210,7 +210,16 @@ static string WriteColumnNames(const PostgresBindData &bind_data, const Postgres
  			}
+ 			col_names_required = true;
  		} else {
--			col_names += PostgresUtils::WriteIdentifier(bind_data->names[column_id]);
-+			auto quoted_name = PostgresUtils::WriteIdentifier(bind_data->names[column_id]);
-+			if (bind_data->postgres_types[column_id].info == PostgresTypeAnnotation::POSTGIS_GEOMETRY) {
+-			col_names += PostgresUtils::WriteIdentifier(bind_data.names[column_id]);
++			auto quoted_name = PostgresUtils::WriteIdentifier(bind_data.names[column_id]);
++			if (bind_data.postgres_types[column_id].info == PostgresTypeAnnotation::POSTGIS_GEOMETRY) {
 +				// PostGIS emits EWKB by default (with SRID prefix when set), but DuckDB
 +				// spatial expects standard WKB. Use ST_AsBinary() server-side to get
 +				// canonical WKB and avoid "invalid WKB format" downstream.
 +				col_names += "ST_AsBinary(" + quoted_name + ")";
++				col_names_required = true;
 +				continue;
 +			}
 +			col_names += quoted_name;
- 			if (bind_data->postgres_types[column_id].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
+ 			if (bind_data.postgres_types[column_id].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
  				col_names += "::VARCHAR";
- 			} else if (bind_data->types[column_id].id() == LogicalTypeId::LIST) {
+ 				col_names_required = true;
 diff --git a/src/postgres_utils.cpp b/src/postgres_utils.cpp
-index adf6059..d98e4b4 100644
+index 19b3914..acac6ca 100644
 --- a/src/postgres_utils.cpp
 +++ b/src/postgres_utils.cpp
 @@ -117,6 +117,10 @@ string PostgresUtils::TypeToString(const LogicalType &input) {

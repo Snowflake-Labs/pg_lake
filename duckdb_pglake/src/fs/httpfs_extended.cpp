@@ -48,13 +48,14 @@ initialize_http_headers(HTTPHeaders &header_map)
  * an HTTP 401 or 403 into "HTTP 0 Internal Server Error".
  */
 HTTPException
-PgLakeHTTPFileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &response, const string &url)
+PgLakeHTTPFileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &response, RequestType request_type,
+                                   const string &url)
 {
 	if (response.status == HTTPStatusCode::INVALID && response.HasRequestError()) {
 		return HTTPException(response, "%s", response.GetRequestError());
 	}
 
-	return HTTPFileSystem::GetHTTPError(handle, response, url);
+	return HTTPFileSystem::GetHTTPError(handle, response, request_type, url);
 }
 
 /*
@@ -80,7 +81,7 @@ PgLakeHTTPFileSystem::Download(ClientContext &context, FileHandle &inputHandle, 
 							   inputUrl, headerMap, hfh.http_params,
 							   [&](const HTTPResponse &response) {
 								   if (static_cast<int>(response.status) >= 400) {
-									   throw GetHTTPError(inputHandle, response, inputUrl);
+									   throw GetHTTPError(inputHandle, response, RequestType::GET_REQUEST, inputUrl);
 								   }
 								   return true;
 							   },

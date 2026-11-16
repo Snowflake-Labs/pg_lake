@@ -62,7 +62,7 @@ index 0bd6bf4..526c54c 100644
 +		auto secret_match = LookupSecret(opener, path);
 +		if (secret_match.HasMatch()) {
 +			secret_storage = secret_match.secret_entry->storage_mode;
-+			secret_name = secret_match.GetSecret().GetName();
++			secret_name = secret_match.GetSecret().GetName().GetIdentifierName();
 +		}
 +
 +		BatchKey key {secret_storage, secret_name, parsed.storage_account_name, parsed.endpoint, parsed.container};

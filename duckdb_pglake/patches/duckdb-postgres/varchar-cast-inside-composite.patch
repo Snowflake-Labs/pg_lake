@@ -25,7 +25,7 @@ applied per element -- and that case now throws.  It used to fall through and
 scan the column untouched, which handed the binary form of the leaf to the
 varchar reader and returned junk, so an error is what it should have been.
 diff --git a/src/postgres_scanner.cpp b/src/postgres_scanner.cpp
-index 24428a2..2b0d6e2 100644
+index d7a1b66..469e728 100644
 --- a/src/postgres_scanner.cpp
 +++ b/src/postgres_scanner.cpp
 @@ -193,6 +193,43 @@ static bool ContainsCastToVarchar(const PostgresType &type) {
@@ -69,34 +69,35 @@ index 24428a2..2b0d6e2 100644
 +	return "CASE WHEN (" + expr + ")::TEXT IS NULL THEN NULL ELSE ROW(" + row_args + ") END";
 +}
 +
- static void PostgresInitInternal(ClientContext &context, const PostgresBindData *bind_data_p,
-                                  PostgresLocalState &lstate, idx_t task_min, idx_t task_max) {
- 	D_ASSERT(bind_data_p);
-@@ -230,13 +267,23 @@ static void PostgresInitInternal(ClientContext &context, const PostgresBindData
- 				}
- 				if (bind_data->postgres_types[column_id].children[0].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
+ static string WriteColumnNames(const PostgresBindData &bind_data, const PostgresLocalState &lstate,
+                                bool &col_names_required) {
+ 	string col_names;
+@@ -230,13 +267,24 @@ static string WriteColumnNames(const PostgresBindData &bind_data, const Postgres
+ 				if (bind_data.postgres_types[column_id].children[0].info == PostgresTypeAnnotation::CAST_TO_VARCHAR) {
  					col_names += "::VARCHAR[]";
-+				} else if (ContainsCastToVarchar(bind_data->postgres_types[column_id])) {
+ 					col_names_required = true;
++				} else if (ContainsCastToVarchar(bind_data.postgres_types[column_id])) {
 +					// A varchar-read leaf below the element type would need the cast
 +					// applied per element; reading the column as-is would hand the
 +					// binary value of the leaf to the varchar reader.
 +					throw NotImplementedException("Error reading table \"%s\" - cast to varchar not implemented below "
 +					                              "column \"%s\" (type %s)",
-+					                              bind_data->table_name, bind_data->names[column_id],
-+					                              bind_data->types[column_id].ToString());
++					                              bind_data.table_name, bind_data.names[column_id],
++					                              bind_data.types[column_id].ToString());
  				}
  			} else {
- 				if (ContainsCastToVarchar(bind_data->postgres_types[column_id])) {
+ 				if (ContainsCastToVarchar(bind_data.postgres_types[column_id])) {
 -					throw NotImplementedException("Error reading table \"%s\" - cast to varchar not implemented for "
 -					                              "composite column \"%s\" (type %s)",
--					                              bind_data->table_name, bind_data->names[column_id],
--					                              bind_data->types[column_id].ToString());
-+					auto projection = BuildVarcharCastProjection(quoted_name, bind_data->types[column_id],
-+					                                             bind_data->postgres_types[column_id],
-+					                                             bind_data->table_name, bind_data->names[column_id]);
+-					                              bind_data.table_name, bind_data.names[column_id],
+-					                              bind_data.types[column_id].ToString());
++					auto projection = BuildVarcharCastProjection(quoted_name, bind_data.types[column_id],
++					                                             bind_data.postgres_types[column_id], bind_data.table_name,
++					                                             bind_data.names[column_id]);
 +					// replace the plain column name appended above
 +					col_names.resize(col_names.size() - quoted_name.size());
 +					col_names += projection;
++					col_names_required = true;
  				}
  			}
  		}

@@ -185,12 +185,11 @@ inline void UuidExtractVersionPG(DataChunk &args, ExpressionState &state, Vector
 {
 	auto &input_vector = args.data[0];
 
-	UnaryExecutor::ExecuteWithNulls<hugeint_t, int16_t>(
+	UnaryExecutor::Execute<hugeint_t, int16_t>(
 		input_vector, result, args.size(),
-		[&](hugeint_t value, ValidityMask &mask, idx_t idx) -> int16_t {
+		[&](hugeint_t value) -> optional<int16_t> {
 			if (!IsRfc9562Variant(value)) {
-				mask.SetInvalid(idx);
-				return 0;
+				return nullopt;
 			}
 
 			return static_cast<int16_t>((GetRawUuidUpper(value) >> 12) & 0x0F);
@@ -219,12 +218,11 @@ inline void UuidExtractTimestampPG(DataChunk &args, ExpressionState &state, Vect
 	/* microseconds between the Gregorian epoch (1582-10-15) and 1970-01-01 */
 	constexpr int64_t GREGORIAN_TO_UNIX_EPOCH_US = 12219292800000000LL;
 
-	BinaryExecutor::ExecuteWithNulls<hugeint_t, int32_t, timestamp_tz_t>(
+	BinaryExecutor::Execute<hugeint_t, int32_t, timestamp_tz_t>(
 		input_vector, pg_version_vector, result, args.size(),
-		[&](hugeint_t value, int32_t pg_version, ValidityMask &mask, idx_t idx) -> timestamp_tz_t {
+		[&](hugeint_t value, int32_t pg_version) -> optional<timestamp_tz_t> {
 			if (!IsRfc9562Variant(value)) {
-				mask.SetInvalid(idx);
-				return timestamp_tz_t(0);
+				return nullopt;
 			}
 
 			uint64_t upper = GetRawUuidUpper(value);
@@ -248,8 +246,7 @@ inline void UuidExtractTimestampPG(DataChunk &args, ExpressionState &state, Vect
 				return timestamp_tz_t(static_cast<int64_t>(tms) * 1000);
 			}
 
-			mask.SetInvalid(idx);
-			return timestamp_tz_t(0);
+			return nullopt;
 		});
 }
 
