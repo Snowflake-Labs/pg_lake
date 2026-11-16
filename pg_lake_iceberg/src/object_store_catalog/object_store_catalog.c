@@ -32,7 +32,7 @@
 char	   *ObjectStoreCatalogLocationPrefix = NULL;
 char	   *ExternalObjectStorePrefix = "fromsf";
 char	   *InternalObjectStorePrefix = "frompg";
-char	   *ObjectStoreCatalogDatabaseSuffix = NULL;
+char	   *ExternalObjectStoreCatalogDatabaseSuffix = NULL;
 
 PG_FUNCTION_INFO_V1(list_object_store_tables);
 PG_FUNCTION_INFO_V1(trigger_object_store_catalog_generation);
@@ -673,20 +673,19 @@ CheckIfExternalObjectStoreCatalogExists(const char *catalogName)
 
 /*
  * ObjectStoreCatalogFilePath builds the catalog.json path for the given
- * catalog prefix. When pg_lake_iceberg.catalog_database_suffix is set, the
- * file lives under <database>/<suffix>/catalog.json, otherwise under
- * <database>/catalog.json.
+ * catalog prefix. When a suffix is given, the file lives under
+ * <database>/<suffix>/catalog.json, otherwise under <database>/catalog.json.
  */
 static char *
 ObjectStoreCatalogFilePath(const char *defaultPrefix, const char *catalogPrefix,
 						   const char *catalogName)
 {
-	if (ObjectStoreCatalogDatabaseSuffix != NULL &&
-		ObjectStoreCatalogDatabaseSuffix[0] != '\0')
+	if (ExternalObjectStoreCatalogDatabaseSuffix != NULL &&
+		ExternalObjectStoreCatalogDatabaseSuffix[0] != '\0')
 	{
 		return psprintf("%s/%s/catalog/%s/%s/catalog.json", defaultPrefix,
 						catalogPrefix, URLEncodePath(catalogName),
-						URLEncodePath(ObjectStoreCatalogDatabaseSuffix));
+						URLEncodePath(suffix));
 	}
 
 	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,

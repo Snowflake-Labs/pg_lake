@@ -179,10 +179,10 @@ _PG_init(void)
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,
 							   NULL, NULL, NULL);
 
-	DefineCustomStringVariable("pg_lake_iceberg.catalog_database_suffix",
-							   gettext_noop("Specifies an optional path component appended to the database name in the object store catalog file path."),
-							   gettext_noop("When set, catalog.json is read and written at <database>/<suffix>/catalog.json instead of <database>/catalog.json."),
-							   &ObjectStoreCatalogDatabaseSuffix,
+	DefineCustomStringVariable("pg_lake_iceberg.external_object_store_catalog_database_suffix",
+							   gettext_noop("Specifies an optional path component appended to the database name in the external object store catalog file path."),
+							   gettext_noop("When set, the external catalog.json is read from <database>/<suffix>/catalog.json instead of <database>/catalog.json. The internal catalog is not affected."),
+							   &ExternalObjectStoreCatalogDatabaseSuffix,
 							   NULL,
 							   PGC_SUSET,
 							   GUC_NO_SHOW_ALL | GUC_SUPERUSER_ONLY | GUC_NOT_IN_SAMPLE,

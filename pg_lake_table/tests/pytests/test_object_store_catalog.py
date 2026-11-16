@@ -1667,20 +1667,20 @@ def test_object_store_catalog_periodic_rewrite(
         superuser_conn.autocommit = False
 
 
-# catalog.json moves under <database>/<suffix>/ when
-# pg_lake_iceberg.catalog_database_suffix is set, and stays at
-# <database>/catalog.json when it is not
-def test_catalog_database_suffix(
+# the external catalog.json is read from <database>/<suffix>/ when
+# pg_lake_iceberg.external_object_store_catalog_database_suffix is set, and from
+# <database>/catalog.json when it is not. The internal (written) catalog does
+# not move.
+def test_external_catalog_database_suffix(
     superuser_conn,
     s3,
     extension,
     with_default_location,
     adjust_object_store_settings,
 ):
-    # The GUC is session scoped, so everything runs on one superuser session:
-    # the background export worker never sees it, a forced push does.
     suffix = "suffix_abc"
     schema = "test_db_suffix"
+    guc = "pg_lake_iceberg.external_object_store_catalog_database_suffix"
     conn = superuser_conn
 
     run_command(f"CREATE SCHEMA {schema}", conn)
@@ -1692,23 +1692,28 @@ def test_catalog_database_suffix(
     conn.commit()
 
     try:
-        run_command(f"SET pg_lake_iceberg.catalog_database_suffix TO '{suffix}'", conn)
         run_command("SELECT lake_iceberg.force_push_object_store_catalog()", conn)
         conn.commit()
 
         dbname = run_query("SELECT current_database()", conn)[0][0]
-        prefix = run_query(
+        internal_prefix = run_query(
             "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix", conn
         )[0][0]
+        external_prefix = run_query(
+            "SHOW pg_lake_iceberg.external_object_store_catalog_prefix", conn
+        )[0][0]
 
-        # write: the catalog lands under <database>/<suffix>/
-        suffixed_key = f"{prefix}/catalog/{dbname}/{suffix}/catalog.json"
-        body = json.loads(
-            s3.get_object(Bucket=TEST_BUCKET, Key=suffixed_key)["Body"].read()
-        )
-        assert "catalog-snapshot-time" in body
+        # the written catalog stays at <database>/catalog.json even with the suffix set
+        run_command(f"SET {guc} TO '{suffix}'", conn)
+        run_command("SELECT lake_iceberg.force_push_object_store_catalog()", conn)
+        conn.commit()
+        internal_key = f"{internal_prefix}/catalog/{dbname}/catalog.json"
+        body = s3.get_object(Bucket=TEST_BUCKET, Key=internal_key)["Body"].read()
+        assert "catalog-snapshot-time" in json.loads(body)
 
-        # read: a reader resolves the table through the suffixed file
+        # the external catalog is read from <database>/<suffix>/
+        suffixed_key = f"{external_prefix}/catalog/{dbname}/{suffix}/catalog.json"
+        s3.put_object(Bucket=TEST_BUCKET, Key=suffixed_key, Body=body)
         run_command(
             f"CREATE TABLE {schema}.read_tbl(a int) USING iceberg "
             "WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl')",
@@ -1718,20 +1723,23 @@ def test_catalog_database_suffix(
         assert run_query(f"SELECT sum(a) FROM {schema}.read_tbl", conn)[0][0] == 6
 
         # a different suffix points at a file that does not exist
-        run_command("SET pg_lake_iceberg.catalog_database_suffix TO 'other_sfx'", conn)
+        run_command(f"SET {guc} TO 'other_sfx'", conn)
         with pytest.raises(Exception):
             run_query(f"SELECT count(*) FROM {schema}.read_tbl", conn)
         conn.rollback()
     finally:
         conn.rollback()
-        run_command("RESET pg_lake_iceberg.catalog_database_suffix", conn)
+        run_command(f"RESET {guc}", conn)
         run_command(f"DROP SCHEMA {schema} CASCADE", conn)
         conn.commit()
 
 
-def test_catalog_database_suffix_is_superuser_only(extension, user_conn):
+def test_external_catalog_database_suffix_is_superuser_only(extension, user_conn):
     with pytest.raises(Exception, match="permission denied"):
-        run_command("SET pg_lake_iceberg.catalog_database_suffix TO 'x'", user_conn)
+        run_command(
+            "SET pg_lake_iceberg.external_object_store_catalog_database_suffix TO 'x'",
+            user_conn,
+        )
     user_conn.rollback()
 
 
