@@ -265,7 +265,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	{
 		IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY)
+		if (IsExternalRestCatalogType(icebergCatalogType))
 		{
 			/*
 			 * We currently only allow changing catalog_table_name option for
