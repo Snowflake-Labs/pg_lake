@@ -773,6 +773,85 @@ def test_returning_more_columns_expected(superuser_conn, pg_extension_base):
     assert result[0]["alive"] == 1
 
 
+def test_error_from_commit(superuser_conn, pg_extension_base):
+    # A worker sends CommandComplete before it commits, so a deferred
+    # constraint that fails at commit time has to reach the caller too.
+    run_command(
+        """
+        CREATE TABLE fails_at_commit (x int);
+        CREATE FUNCTION fail_at_commit() RETURNS trigger LANGUAGE plpgsql
+            AS $$ BEGIN RAISE EXCEPTION 'failed at commit'; END $$;
+        CREATE CONSTRAINT TRIGGER fail_at_commit AFTER INSERT ON fails_at_commit
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION fail_at_commit();
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        for command in [
+            "SELECT * FROM extension_base.run_attached($$INSERT INTO fails_at_commit VALUES (1)$$)",
+            "SELECT * FROM extension_base.run_attached_returning("
+            "$$INSERT INTO fails_at_commit VALUES (1) RETURNING x$$) AS t(x int)",
+        ]:
+            error = run_command(command, superuser_conn, raise_error=False)
+            superuser_conn.rollback()
+
+            assert error is not None, command
+            assert "failed at commit" in error, command
+
+        result = run_query("SELECT count(*) FROM fails_at_commit", superuser_conn)
+        assert result[0]["count"] == 0
+    finally:
+        superuser_conn.rollback()
+        run_command(
+            "DROP TABLE fails_at_commit; DROP FUNCTION fail_at_commit()",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
+def test_slow_commit(superuser_conn, pg_extension_base):
+    # A commit that succeeds slowly is done by the time the call returns,
+    # instead of being cut short when the caller ends the worker.
+    run_command(
+        """
+        CREATE TABLE slow_commit (x int);
+        CREATE FUNCTION sleep_at_commit() RETURNS trigger LANGUAGE plpgsql
+            AS $$ BEGIN PERFORM pg_sleep(1); RETURN NULL; END $$;
+        CREATE CONSTRAINT TRIGGER sleep_at_commit AFTER INSERT ON slow_commit
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION sleep_at_commit();
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        for command in [
+            "SELECT * FROM extension_base.run_attached($$INSERT INTO slow_commit VALUES (1)$$)",
+            "SELECT * FROM extension_base.run_attached_returning("
+            "$$INSERT INTO slow_commit VALUES (1) RETURNING x$$) AS t(x int)",
+        ]:
+            run_command("TRUNCATE slow_commit", superuser_conn)
+            superuser_conn.commit()
+
+            run_command(command, superuser_conn)
+            superuser_conn.commit()
+
+            result = run_query("SELECT count(*) FROM slow_commit", superuser_conn)
+            superuser_conn.commit()
+            assert result[0]["count"] == 1, command
+    finally:
+        superuser_conn.rollback()
+        run_command(
+            "DROP TABLE slow_commit; DROP FUNCTION sleep_at_commit()",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
 def test_worker_dies_before_attaching(
     superuser_conn, pg_extension_base, create_injection_extension
 ):

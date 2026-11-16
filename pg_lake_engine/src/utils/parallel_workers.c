@@ -185,14 +185,20 @@ RunCommandsInParallel(List *commands,
 
 /*
  * JobIsComplete() - check for completion
+ *
+ * A worker sends CommandComplete before it commits, so an error from the
+ * commit follows it on the queue: read everything queued, not just up to the
+ * first command tag.  Ask whether the worker runs before reading, since one
+ * that has stopped has queued all it ever will.
  */
 static bool
 JobIsComplete(AttachedWorker * worker)
 {
 	bool		wait = false;
+	bool		running = IsAttachedWorkerRunning(worker);
 
-	/* consume any messages for now */
-	ReadFromAttachedWorker(worker, wait);
+	while (ReadFromAttachedWorker(worker, wait) != NULL)
+		;
 
-	return !IsAttachedWorkerRunning(worker);
+	return !running;
 }
