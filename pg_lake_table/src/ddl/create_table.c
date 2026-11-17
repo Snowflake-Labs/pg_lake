@@ -968,13 +968,10 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		}
 		else if (hasObjectStoreCatalogOption && hasExternalCatalogReadOnlyOption)
 		{
-			char	   *catalogSubdir = GetStringOption(createStmt->options, "catalog_subdir", false);
-
-			ErrorIfExternalObjectStoreCatalogDoesNotExist(catalogName, catalogSubdir);
+			ErrorIfExternalObjectStoreCatalogDoesNotExist(catalogName);
 
 			metadataLocation =
 				GetTableMetadataLocationFromExternalObjectStoreCatalog(catalogName,
-																	   catalogSubdir,
 																	   catalogNamespace,
 																	   catalogTableName);
 		}

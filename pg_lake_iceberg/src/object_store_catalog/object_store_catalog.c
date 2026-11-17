@@ -72,10 +72,10 @@ static bool CatalogNeedsExport(void);
 static void PushMetadataLocationToObjectStoreCatalog(void);
 static void BuildAndUploadObjectStoreCatalogFile(void);
 static void TrackInvalidateCatalogExport(Datum argument, Oid relationId);
-static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName, const char *catalogSubdir);
+static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName);
 static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
-static bool CheckIfExternalObjectStoreCatalogExists(const char *catalogName, const char *catalogSubdir);
-static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogSubdir, char **catalogNamespace, char **catalogTableName);
+static bool CheckIfExternalObjectStoreCatalogExists(const char *catalogName);
+static void GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogNamespace, char **catalogTableName);
 static char *GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent, const char *catalogNamespace, const char *catalogTableName);
 static void FormatCurrentTimestampUTC(char *buf, size_t bufsize);
 static bool IsBlankCatalogField(const char *value);
@@ -90,21 +90,12 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 {
 	char	   *catalogName = text_to_cstring(PG_GETARG_TEXT_P(0));
 	bool		internalTables = PG_GETARG_BOOL(1);
-	char	   *catalogSubdir = NULL;
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (!PG_ARGISNULL(2))
-		catalogSubdir = text_to_cstring(PG_GETARG_TEXT_P(2));
-
-	if (internalTables && catalogSubdir != NULL)
-		ereport(ERROR,
-				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-				 errmsg("catalog_subdir cannot be used with the internal object store catalog")));
-
-	if (!CheckIfExternalObjectStoreCatalogExists(catalogName, catalogSubdir))
+	if (!CheckIfExternalObjectStoreCatalogExists(catalogName))
 	{
 		ereport(NOTICE,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
@@ -116,7 +107,7 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 	const char *catalogPath =
 		internalTables ?
 		GetInternalObjectStoreCatalogFilePath(catalogName) :
-		GetExternalObjectStoreCatalogFilePath(catalogName, catalogSubdir);
+		GetExternalObjectStoreCatalogFilePath(catalogName);
 
 	/* catalog.json is a fixed path that may change out of band; read fresh. */
 	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
@@ -326,7 +317,7 @@ CatalogNeedsExport(void)
 * from the foreign table options for the given relationId.
 */
 static void
-GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogSubdir, char **catalogNamespace, char **catalogTableName)
+GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **catalogNamespace, char **catalogTableName)
 {
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;
@@ -340,9 +331,6 @@ GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **
 				 errmsg("catalog_name option is missing for " OBJECT_STORE_CATALOG_NAME " catalog iceberg table %s",
 						get_rel_name(relationId))));
 	}
-
-	/* optional: NULL means the catalog.json shared by the whole database */
-	*catalogSubdir = GetStringOption(options, "catalog_subdir", false);
 
 	*catalogNamespace = GetStringOption(options, "catalog_namespace", true);
 	if (!*catalogNamespace)
@@ -373,13 +361,12 @@ char *
 GetExternalObjectStoreCatalogFilePathForTable(Oid relationId)
 {
 	char	   *catalogName = NULL;
-	char	   *catalogSubdir = NULL;
 	char	   *catalogNamespace = NULL;
 	char	   *catalogTableName = NULL;
 
-	GetObjectStoreCatalogInfoFromCatalog(relationId, &catalogName, &catalogSubdir, &catalogNamespace, &catalogTableName);
+	GetObjectStoreCatalogInfoFromCatalog(relationId, &catalogName, &catalogNamespace, &catalogTableName);
 
-	return GetExternalObjectStoreCatalogFilePath(catalogName, catalogSubdir);
+	return GetExternalObjectStoreCatalogFilePath(catalogName);
 }
 
 
@@ -392,11 +379,10 @@ char *
 GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId, const char *catalogContent)
 {
 	char	   *catalogName = NULL;
-	char	   *catalogSubdir = NULL;
 	char	   *catalogNamespace = NULL;
 	char	   *catalogTableName = NULL;
 
-	GetObjectStoreCatalogInfoFromCatalog(relationId, &catalogName, &catalogSubdir, &catalogNamespace, &catalogTableName);
+	GetObjectStoreCatalogInfoFromCatalog(relationId, &catalogName, &catalogNamespace, &catalogTableName);
 
 	/* otherwise we should have thrown an error */
 	Assert(catalogName != NULL && catalogNamespace != NULL && catalogTableName != NULL);
@@ -576,10 +562,10 @@ BuildAndUploadObjectStoreCatalogFile(void)
 * for read-only object store catalog iceberg tables.
 */
 char *
-GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, const char *catalogSubdir, const char *catalogNamespace, const char *catalogTableName)
+GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, const char *catalogNamespace, const char *catalogTableName)
 {
 	const char *catalogPath =
-		GetExternalObjectStoreCatalogFilePath(catalogName, catalogSubdir);
+		GetExternalObjectStoreCatalogFilePath(catalogName);
 
 	/* catalog.json is a fixed path that may change out of band; read fresh. */
 	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
@@ -661,9 +647,9 @@ GetTableMetadataLocationFromObjectStoreCatalogContent(const char *catalogContent
 * exists in S3, and raises an error if it does not.
 */
 void
-ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName, const char *catalogSubdir)
+ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName)
 {
-	if (!CheckIfExternalObjectStoreCatalogExists(catalogName, catalogSubdir))
+	if (!CheckIfExternalObjectStoreCatalogExists(catalogName))
 	{
 		ereport(ERROR,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
@@ -677,31 +663,11 @@ ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName, const cha
 * exists in S3.
 */
 static bool
-CheckIfExternalObjectStoreCatalogExists(const char *catalogName, const char *catalogSubdir)
+CheckIfExternalObjectStoreCatalogExists(const char *catalogName)
 {
-	char	   *filePath = GetExternalObjectStoreCatalogFilePath(catalogName, catalogSubdir);
+	char	   *filePath = GetExternalObjectStoreCatalogFilePath(catalogName);
 
 	return RemoteFileExists(filePath);
-}
-
-/*
- * ObjectStoreCatalogFilePath builds the catalog.json path for the given
- * catalog prefix. When a subdirectory is given, the file lives under
- * <database>/<subdir>/catalog.json, otherwise under <database>/catalog.json.
- */
-static char *
-ObjectStoreCatalogFilePath(const char *defaultPrefix, const char *catalogPrefix,
-						   const char *catalogName, const char *suffix)
-{
-	if (suffix != NULL && suffix[0] != '\0')
-	{
-		return psprintf("%s/%s/catalog/%s/%s/catalog.json", defaultPrefix,
-						catalogPrefix, URLEncodePath(catalogName),
-						URLEncodePath(suffix));
-	}
-
-	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
-					catalogPrefix, URLEncodePath(catalogName));
 }
 
 /*
@@ -709,7 +675,7 @@ ObjectStoreCatalogFilePath(const char *defaultPrefix, const char *catalogPrefix,
  * of the current database.
  */
 static char *
-GetExternalObjectStoreCatalogFilePath(const char *catalogName, const char *catalogSubdir)
+GetExternalObjectStoreCatalogFilePath(const char *catalogName)
 {
 	const char *defaultPrefix = GetObjectStoreDefaultLocationPrefix();
 
@@ -729,8 +695,8 @@ GetExternalObjectStoreCatalogFilePath(const char *catalogName, const char *catal
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
-	return ObjectStoreCatalogFilePath(defaultPrefix, ExternalObjectStorePrefix,
-									  catalogName, catalogSubdir);
+	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
+					ExternalObjectStorePrefix, URLEncodePath(catalogName));
 }
 
 static char *
@@ -754,8 +720,8 @@ GetInternalObjectStoreCatalogFilePath(const char *catalogName)
 				 errdetail("Set the GUC to use catalog=" OBJECT_STORE_CATALOG_NAME)));
 	}
 
-	return ObjectStoreCatalogFilePath(defaultPrefix, InternalObjectStorePrefix,
-									  catalogName, NULL);
+	return psprintf("%s/%s/catalog/%s/catalog.json", defaultPrefix,
+					InternalObjectStorePrefix, URLEncodePath(catalogName));
 }
 
 /*

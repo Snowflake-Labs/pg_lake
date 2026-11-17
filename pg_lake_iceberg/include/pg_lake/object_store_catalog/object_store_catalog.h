@@ -20,6 +20,6 @@ extern PGDLLEXPORT void ExportIcebergCatalogIfNeeded(void);
 extern PGDLLEXPORT const char *GetObjectStoreDefaultLocationPrefix(void);
 extern PGDLLEXPORT char *GetExternalObjectStoreCatalogFilePathForTable(Oid relationId);
 extern PGDLLEXPORT char *GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId, const char *catalogContent);
-extern PGDLLEXPORT void ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName, const char *catalogSubdir);
-extern PGDLLEXPORT char *GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, const char *catalogSubdir, const char *catalogNamespace, const char *catalogTableName);
+extern PGDLLEXPORT void ErrorIfExternalObjectStoreCatalogDoesNotExist(const char *catalogName);
+extern PGDLLEXPORT char *GetTableMetadataLocationFromExternalObjectStoreCatalog(const char *catalogName, const char *catalogNamespace, const char *catalogTableName);
 extern PGDLLEXPORT void TriggerCatalogExportIfObjectStoreTable(Oid relationId);

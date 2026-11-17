@@ -285,7 +285,7 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 			 * catalog_table_name) can be changed to re-point the table at a
 			 * different source.
 			 */
-			List	   *allowedOptions = list_make4("catalog_table_name", "catalog_namespace", "catalog_name", "catalog_subdir");
+			List	   *allowedOptions = list_make3("catalog_table_name", "catalog_namespace", "catalog_name");
 
 			ErrorIfUnsupportedTableOptionChange(alterStmt, allowedOptions);
 

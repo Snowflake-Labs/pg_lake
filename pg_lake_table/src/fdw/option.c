@@ -592,7 +592,6 @@ InitPgLakeIcebergOptions(void)
 		{"catalog_name", ForeignTableRelationId},
 		{"catalog_table_name", ForeignTableRelationId},
 		{"catalog_namespace", ForeignTableRelationId},
-		{"catalog_subdir", ForeignTableRelationId},
 		{LOWERCASE_COLUMN_NAMES_OPTION, ForeignTableRelationId},
 
 		/*
@@ -696,7 +695,6 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	char	   *catalogName = NULL;
 	char	   *catalogTableName = NULL;
 	char	   *catalogNamespace = NULL;
-	char	   *catalogSubdir = NULL;
 
 	/* Build our options lists if we didn't yet. */
 	InitPgLakeIcebergOptions();
@@ -847,10 +845,6 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		{
 			catalogNamespace = defGetString(def);
 		}
-		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "catalog_subdir") == 0)
-		{
-			catalogSubdir = defGetString(def);
-		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "catalog_name") == 0)
 		{
 			catalogName = defGetString(def);
@@ -999,11 +993,6 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("\"catalog_table_name\" option is required for read-only rest and object_store catalog tables")));
-
-			if (catalogSubdir && icebergCatalogType != OBJECT_STORE_READ_ONLY)
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_subdir\" option is only valid for read-only object_store catalog tables")));
 		}
 		else
 		{
@@ -1018,11 +1007,6 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				ereport(ERROR,
 						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 						 errmsg("\"catalog_name\" option is only valid for read-only rest and object_store catalog tables")));
-
-			if (catalogSubdir)
-				ereport(ERROR,
-						(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-						 errmsg("\"catalog_subdir\" option is only valid for read-only object_store catalog tables")));
 
 			if (catalogNamespace)
 				ereport(ERROR,
