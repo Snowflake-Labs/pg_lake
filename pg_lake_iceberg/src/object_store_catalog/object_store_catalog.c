@@ -4,8 +4,12 @@
 #include "miscadmin.h"
 #include "pgtime.h"
 
+#include "access/xlog.h"
 #include "commands/dbcommands.h"
 #include "foreign/foreign.h"
+#include "replication/slot.h"
+#include "storage/latch.h"
+#include "utils/wait_event.h"
 #include "utils/inval.h"
 #include "utils/snapmgr.h"
 #include "utils/lsyscache.h"
@@ -69,9 +73,23 @@ static List *InvalidatedRelationIds = NULL;
  */
 static TimestampTz LastCatalogPushTime = 0;
 
+/*
+ * Set when the export worker built a catalog but held it back because the
+ * standbys in synchronized_standby_slots had not confirmed it yet, so the next
+ * tick tries again even if nothing else changed.
+ */
+static bool CatalogExportPending = false;
+
+/* How long one export attempt waits for synchronized_standby_slots */
+#define STANDBY_CONFIRMATION_WAIT_MS 1000
+
+/* How often a held-back export is reported, in milliseconds */
+#define STANDBY_CONFIRMATION_WARNING_INTERVAL_MS 60000
+
 static bool CatalogNeedsExport(void);
-static void PushMetadataLocationToObjectStoreCatalog(void);
-static void BuildAndUploadObjectStoreCatalogFile(void);
+static bool PushMetadataLocationToObjectStoreCatalog(bool waitForStandbys);
+static bool BuildAndUploadObjectStoreCatalogFile(bool waitForStandbys);
+static bool StandbysHaveConfirmed(XLogRecPtr lsn);
 static void TrackInvalidateCatalogExport(Datum argument, Oid relationId);
 static char *GetExternalObjectStoreCatalogFilePath(const char *catalogName);
 static char *GetInternalObjectStoreCatalogFilePath(const char *catalogName);
@@ -185,7 +203,7 @@ trigger_object_store_catalog_generation(PG_FUNCTION_ARGS)
 Datum
 force_push_object_store_catalog(PG_FUNCTION_ARGS)
 {
-	PushMetadataLocationToObjectStoreCatalog();
+	PushMetadataLocationToObjectStoreCatalog(false);
 
 	PG_RETURN_VOID();
 }
@@ -262,7 +280,7 @@ ExportIcebergCatalogIfNeeded(void)
 
 	/* can see everything for which we received invalidations */
 	PushActiveSnapshot(GetLatestSnapshot());
-	PushMetadataLocationToObjectStoreCatalog();
+	CatalogExportPending = !PushMetadataLocationToObjectStoreCatalog(true);
 	PopActiveSnapshot();
 }
 
@@ -279,7 +297,7 @@ ExportIcebergCatalogIfNeeded(void)
 static bool
 CatalogNeedsExport(void)
 {
-	bool		catalogNeedsExport = false;
+	bool		catalogNeedsExport = CatalogExportPending;
 	ListCell   *cell;
 
 	foreach(cell, InvalidatedRelationIds)
@@ -398,15 +416,19 @@ GetMetadataLocationFromExternalObjectStoreCatalogForTable(Oid relationId, const 
 *
 * Any failure is re-raised with CATALOG_EXPORT_ERROR_PREFIX in front of the
 * original message, keeping the error code, detail and hint intact.
+*
+* Returns false when waitForStandbys held the upload back, see
+* BuildAndUploadObjectStoreCatalogFile.
 */
-static void
-PushMetadataLocationToObjectStoreCatalog(void)
+static bool
+PushMetadataLocationToObjectStoreCatalog(bool waitForStandbys)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
+	bool		uploaded = false;
 
 	PG_TRY();
 	{
-		BuildAndUploadObjectStoreCatalogFile();
+		uploaded = BuildAndUploadObjectStoreCatalogFile(waitForStandbys);
 	}
 	PG_CATCH();
 	{
@@ -423,15 +445,28 @@ PushMetadataLocationToObjectStoreCatalog(void)
 		ThrowErrorData(edata);
 	}
 	PG_END_TRY();
+
+	return uploaded;
 }
 
 
 /*
 * BuildAndUploadObjectStoreCatalogFile builds the catalog file from
 * tables_internal and uploads it to the catalog's fixed path in object storage.
+*
+* With waitForStandbys, the file is uploaded only once the physical slots in
+* synchronized_standby_slots have confirmed the WAL of every commit the file
+* reflects, and false is returned without uploading when they do not confirm it
+* within STANDBY_CONFIRMATION_WAIT_MS.  A reader of the catalog acts on the
+* table versions it names: without the wait, an HA failover can promote a
+* standby that lacks a version a reader has already consumed, the new primary
+* then writes a different history under the same table, and the reader has
+* consumed changes that the new primary will produce again.  That is the same
+* guarantee synchronized_standby_slots gives a failover logical slot's
+* consumer, and it holds the export back in the same situations.
 */
-static void
-BuildAndUploadObjectStoreCatalogFile(void)
+static bool
+BuildAndUploadObjectStoreCatalogFile(bool waitForStandbys)
 {
 	/*
 	 * allocate before SPI so that future expansions use the current memory
@@ -482,6 +517,16 @@ BuildAndUploadObjectStoreCatalogFile(void)
 	 * snapshot of its own.
 	 */
 	PushActiveSnapshot(GetLatestSnapshot());
+
+	/*
+	 * Every commit the snapshot sees was inserted into WAL before this point,
+	 * so the standbys having this location covers all of them.
+	 */
+	if (waitForStandbys && !StandbysHaveConfirmed(GetXLogInsertRecPtr()))
+	{
+		PopActiveSnapshot();
+		return false;
+	}
 
 	SPI_START_EXTENSION_OWNER(PgLakeIceberg);
 
@@ -552,6 +597,59 @@ BuildAndUploadObjectStoreCatalogFile(void)
 							 GetInternalObjectStoreCatalogFilePath(get_database_name(MyDatabaseId)));
 
 	LastCatalogPushTime = GetCurrentTimestamp();
+
+	return true;
+}
+
+
+/*
+ * StandbysHaveConfirmed waits up to STANDBY_CONFIRMATION_WAIT_MS for the
+ * physical slots in synchronized_standby_slots to confirm lsn, and returns
+ * whether they did.  Always true when the setting is empty, on a standby, and
+ * before PostgreSQL 17, which has no such setting.
+ */
+static bool
+StandbysHaveConfirmed(XLogRecPtr lsn)
+{
+#if PG_VERSION_NUM >= 170000
+	static TimestampTz lastWarningTime = 0;
+	TimestampTz start = GetCurrentTimestamp();
+
+	/* the standbys can only confirm WAL that has been flushed */
+	XLogFlush(lsn);
+
+	for (;;)
+	{
+		if (StandbySlotsHaveCaughtup(lsn, DEBUG1))
+			return true;
+
+		if (TimestampDifferenceExceeds(start, GetCurrentTimestamp(),
+									   STANDBY_CONFIRMATION_WAIT_MS))
+			break;
+
+		(void) WaitLatch(MyLatch, WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+						 10, PG_WAIT_EXTENSION);
+		ResetLatch(MyLatch);
+		CHECK_FOR_INTERRUPTS();
+	}
+
+	if (TimestampDifferenceExceeds(lastWarningTime, GetCurrentTimestamp(),
+								   STANDBY_CONFIRMATION_WARNING_INTERVAL_MS))
+	{
+		ereport(WARNING,
+				(errmsg("pg_lake_iceberg: object store catalog export waits for "
+						"the standbys in \"synchronized_standby_slots\" to confirm "
+						"WAL location %X/%X",
+						LSN_FORMAT_ARGS(lsn)),
+				 errhint("Start the standby associated with the replication slots "
+						 "in \"synchronized_standby_slots\", or amend the parameter.")));
+		lastWarningTime = GetCurrentTimestamp();
+	}
+
+	return false;
+#else
+	return true;
+#endif
 }
 
 
