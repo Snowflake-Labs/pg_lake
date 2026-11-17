@@ -1753,10 +1753,144 @@ def test_external_catalog_subdir(
         with pytest.raises(Exception):
             run_query(f"SELECT count(*) FROM {schema}.read_tbl", conn)
         conn.rollback()
+
+        # re-point it at a subdirectory that exists
+        s3.put_object(
+            Bucket=TEST_BUCKET,
+            Key=f"{external_prefix}/catalog/{dbname}/other_sfx/catalog.json",
+            Body=body,
+        )
+        run_command(
+            f"ALTER FOREIGN TABLE {schema}.read_tbl OPTIONS (SET catalog_subdir 'other_sfx')",
+            conn,
+        )
+        conn.commit()
+        assert run_query(f"SELECT sum(a) FROM {schema}.read_tbl", conn)[0][0] == 6
+
+        # dropping the option goes back to the shared <database>/catalog.json
+        run_command(
+            f"ALTER FOREIGN TABLE {schema}.read_tbl OPTIONS (DROP catalog_subdir)",
+            conn,
+        )
+        conn.commit()
+        with pytest.raises(Exception, match="catalog does not exist"):
+            run_query(f"SELECT count(*) FROM {schema}.read_tbl", conn)
+        conn.rollback()
+        s3.put_object(
+            Bucket=TEST_BUCKET,
+            Key=f"{external_prefix}/catalog/{dbname}/catalog.json",
+            Body=body,
+        )
+        assert run_query(f"SELECT sum(a) FROM {schema}.read_tbl", conn)[0][0] == 6
     finally:
         conn.rollback()
         run_command(f"DROP SCHEMA {schema} CASCADE", conn)
         conn.commit()
+
+
+# three read-only tables of one database read three different catalog.json files
+# (shared, subdir_a, subdir_b), the way several mirrors share a database. Each
+# file lists the same table at a different state, so a mixed-up path shows up
+# as a wrong row count, and the three can be joined in one query. A new
+# metadata location written to one file is seen by another session.
+def test_external_catalog_subdir_multiple_in_one_query(
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    schema = "test_catalog_subdir_multi"
+    conn = superuser_conn
+
+    run_command(f"CREATE SCHEMA {schema}", conn)
+    run_command(
+        f"CREATE TABLE {schema}.src(a int) USING iceberg WITH (catalog='object_store')",
+        conn,
+    )
+    conn.commit()
+
+    try:
+        dbname = run_query("SELECT current_database()", conn)[0][0]
+        internal_prefix = run_query(
+            "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix", conn
+        )[0][0]
+        external_prefix = run_query(
+            "SHOW pg_lake_iceberg.external_object_store_catalog_prefix", conn
+        )[0][0]
+        internal_key = f"{internal_prefix}/catalog/{dbname}/catalog.json"
+
+        def snapshot(rows, external_key):
+            run_command(
+                f"INSERT INTO {schema}.src SELECT generate_series(1, {rows})", conn
+            )
+            conn.commit()
+            run_command("SELECT lake_iceberg.force_push_object_store_catalog()", conn)
+            conn.commit()
+            body = s3.get_object(Bucket=TEST_BUCKET, Key=internal_key)["Body"].read()
+            s3.put_object(Bucket=TEST_BUCKET, Key=external_key, Body=body)
+            return body
+
+        base = f"{external_prefix}/catalog/{dbname}"
+        # 1 row, then 1 + 2 rows, then 1 + 2 + 4 rows
+        snapshot(1, f"{base}/catalog.json")
+        snapshot(2, f"{base}/subdir_a/catalog.json")
+        body_c = snapshot(4, f"{base}/subdir_b/catalog.json")
+
+        for name, subdir in (
+            ("t_shared", None),
+            ("t_a", "subdir_a"),
+            ("t_b", "subdir_b"),
+        ):
+            opt = f", catalog_subdir='{subdir}'" if subdir else ""
+            run_command(
+                f"CREATE TABLE {schema}.{name}(a int) USING iceberg "
+                "WITH (catalog='object_store', read_only=True, "
+                f"catalog_table_name='src'{opt})",
+                conn,
+            )
+        conn.commit()
+
+        query = (
+            f"SELECT (SELECT count(*) FROM {schema}.t_shared), "
+            f"(SELECT count(*) FROM {schema}.t_a), "
+            f"(SELECT count(*) FROM {schema}.t_b)"
+        )
+        assert tuple(run_query(query, conn)[0]) == (1, 3, 7)
+
+        joined = run_query(
+            f"SELECT count(*) FROM {schema}.t_shared s "
+            f"JOIN {schema}.t_a a USING (a) JOIN {schema}.t_b b USING (a)",
+            conn,
+        )
+        # value 1 occurs 1, 2 and 3 times in the three sources
+        assert joined[0][0] == 6
+
+        # a new metadata location in subdir_a is seen by another session
+        s3.put_object(
+            Bucket=TEST_BUCKET, Key=f"{base}/subdir_a/catalog.json", Body=body_c
+        )
+        other = open_pg_conn()
+        try:
+            assert tuple(run_query(query, other)[0]) == (1, 7, 7)
+        finally:
+            other.close()
+    finally:
+        conn.rollback()
+        run_command(f"DROP SCHEMA {schema} CASCADE", conn)
+        conn.commit()
+
+
+def test_list_object_store_tables_subdir_needs_external_catalog(
+    superuser_conn, extension, with_default_location
+):
+    with pytest.raises(Exception, match="catalog_subdir"):
+        run_query(
+            "SELECT * FROM lake_iceberg.list_object_store_tables("
+            "current_database(), true, 'x')",
+            superuser_conn,
+        )
+    superuser_conn.rollback()
 
 
 def test_catalog_subdir_is_only_for_read_only_object_store_tables(

@@ -99,6 +99,11 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 	if (!PG_ARGISNULL(2))
 		catalogSubdir = text_to_cstring(PG_GETARG_TEXT_P(2));
 
+	if (internalTables && catalogSubdir != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("catalog_subdir cannot be used with the internal object store catalog")));
+
 	if (!CheckIfExternalObjectStoreCatalogExists(catalogName, catalogSubdir))
 	{
 		ereport(NOTICE,
@@ -337,7 +342,7 @@ GetObjectStoreCatalogInfoFromCatalog(Oid relationId, char **catalogName, char **
 	}
 
 	/* optional: NULL means the catalog.json shared by the whole database */
-	*catalogSubdir = GetStringOption(options, "catalog_subdir", true);
+	*catalogSubdir = GetStringOption(options, "catalog_subdir", false);
 
 	*catalogNamespace = GetStringOption(options, "catalog_namespace", true);
 	if (!*catalogNamespace)
