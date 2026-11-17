@@ -88,16 +88,13 @@ static bool IsBlankCatalogField(const char *value);
 Datum
 list_object_store_tables(PG_FUNCTION_ARGS)
 {
-	char	   *catalogName = NULL;
-	bool		internalTables = false;
+	char	   *catalogName = text_to_cstring(PG_GETARG_TEXT_P(0));
+	bool		internalTables = PG_GETARG_BOOL(1);
 	char	   *catalogSubdir = NULL;
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	InitMaterializedSRF(fcinfo, 0);
-
-	catalogName = text_to_cstring(PG_GETARG_TEXT_P(0));
-	internalTables = PG_GETARG_BOOL(1);
 
 	if (!PG_ARGISNULL(2))
 		catalogSubdir = text_to_cstring(PG_GETARG_TEXT_P(2));
