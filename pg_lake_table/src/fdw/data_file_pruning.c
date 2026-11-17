@@ -21,6 +21,7 @@
 *   execution and statistics of the data files.
 */
 #include "postgres.h"
+#include "miscadmin.h"
 #include "utils/hsearch.h"
 #include "access/htup_details.h"
 #include "catalog/pg_type_d.h"
@@ -29,6 +30,7 @@
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_collation_d.h"
+#include "catalog/pg_database.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
@@ -118,6 +120,8 @@ static List *GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
 									   HTAB *fieldIdCache, List *columnStats,
 									   List *partitionTransformsUsedInQuery, Partition * partition);
 static bool ColumnIsNotNull(Oid relationId, AttrNumber attrNo);
+static bool CollationOrdersByBytes(Oid collation);
+static bool DefaultCollationOrdersByBytes(void);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 													  ColumnToFieldIdMapping * entry);
 static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
@@ -498,14 +502,7 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 		entry->fieldId = field->id;
 		entry->column = column;
 
-		Oid			collation = column->varcollid;
-
-		/*
-		 * We currently do not support data file pruning for columns with
-		 * collations.
-		 */
-		if (collation == InvalidOid || collation == DEFAULT_COLLATION_OID ||
-			collation == C_COLLATION_OID)
+		if (CollationOrdersByBytes(column->varcollid))
 		{
 			entry->columnBoundInclusiveUpper =
 				BuildConstraintsWithNullConst(column, BTLessEqualStrategyNumber, BTGreaterEqualStrategyNumber);
@@ -627,6 +624,70 @@ ColumnIsNotNull(Oid relationId, AttrNumber attrNo)
 	}
 
 	return notNull;
+}
+
+
+/*
+ * CollationOrdersByBytes returns whether a column compares the way file
+ * bounds are ordered. Iceberg orders string bounds by their UTF-8 bytes,
+ * and so does DuckDB's min/max for pg_lake's own files; compared in another
+ * order, a file's bounds can refute a clause the file has rows for.
+ */
+static bool
+CollationOrdersByBytes(Oid collation)
+{
+	if (collation == InvalidOid || collation == C_COLLATION_OID)
+		return true;
+
+	if (collation == DEFAULT_COLLATION_OID)
+		return DefaultCollationOrdersByBytes();
+
+	return false;
+}
+
+
+/*
+ * DefaultCollationOrdersByBytes returns whether the database's default
+ * collation orders strings by their bytes: the libc C, POSIX and C.UTF-8
+ * locales, and every locale of the builtin provider, sort by code point,
+ * which is UTF-8 byte order.
+ */
+static bool
+DefaultCollationOrdersByBytes(void)
+{
+	static int	ordersByBytes = -1;
+
+	if (ordersByBytes >= 0)
+		return ordersByBytes == 1;
+
+	HeapTuple	tuple = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
+
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for database %u", MyDatabaseId);
+
+	char		provider = ((Form_pg_database) GETSTRUCT(tuple))->datlocprovider;
+
+	ordersByBytes = 0;
+
+	if (provider == COLLPROVIDER_LIBC)
+	{
+		Datum		collateDatum = SysCacheGetAttrNotNull(DATABASEOID, tuple,
+														  Anum_pg_database_datcollate);
+		char	   *collate = TextDatumGetCString(collateDatum);
+
+		if (strcmp(collate, "C") == 0 || strcmp(collate, "POSIX") == 0 ||
+			pg_strcasecmp(collate, "C.UTF-8") == 0 ||
+			pg_strcasecmp(collate, "C.utf8") == 0)
+			ordersByBytes = 1;
+	}
+#ifdef COLLPROVIDER_BUILTIN
+	else if (provider == COLLPROVIDER_BUILTIN)
+		ordersByBytes = 1;
+#endif
+
+	ReleaseSysCache(tuple);
+
+	return ordersByBytes == 1;
 }
 
 /*
