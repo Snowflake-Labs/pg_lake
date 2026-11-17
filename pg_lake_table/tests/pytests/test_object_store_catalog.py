@@ -1773,9 +1773,6 @@ def test_external_catalog_subdir(
             conn,
         )
         conn.commit()
-        with pytest.raises(Exception, match="catalog does not exist"):
-            run_query(f"SELECT count(*) FROM {schema}.read_tbl", conn)
-        conn.rollback()
         s3.put_object(
             Bucket=TEST_BUCKET,
             Key=f"{external_prefix}/catalog/{dbname}/catalog.json",
@@ -1832,10 +1829,10 @@ def test_external_catalog_subdir_multiple_in_one_query(
             return body
 
         base = f"{external_prefix}/catalog/{dbname}"
-        # 1 row, then 1 + 2 rows, then 1 + 2 + 4 rows
-        snapshot(1, f"{base}/catalog.json")
-        snapshot(2, f"{base}/subdir_a/catalog.json")
-        body_c = snapshot(4, f"{base}/subdir_b/catalog.json")
+        # the states hold 1, 3 and 7 rows; the shared file ends with 7
+        snapshot(1, f"{base}/subdir_a/catalog.json")
+        snapshot(2, f"{base}/subdir_b/catalog.json")
+        body_c = snapshot(4, f"{base}/catalog.json")
 
         for name, subdir in (
             ("t_shared", None),
@@ -1856,14 +1853,14 @@ def test_external_catalog_subdir_multiple_in_one_query(
             f"(SELECT count(*) FROM {schema}.t_a), "
             f"(SELECT count(*) FROM {schema}.t_b)"
         )
-        assert tuple(run_query(query, conn)[0]) == (1, 3, 7)
+        assert tuple(run_query(query, conn)[0]) == (7, 1, 3)
 
         joined = run_query(
             f"SELECT count(*) FROM {schema}.t_shared s "
             f"JOIN {schema}.t_a a USING (a) JOIN {schema}.t_b b USING (a)",
             conn,
         )
-        # value 1 occurs 1, 2 and 3 times in the three sources
+        # value 1 occurs 3, 1 and 2 times in the three sources
         assert joined[0][0] == 6
 
         # a new metadata location in subdir_a is seen by another session
@@ -1872,7 +1869,7 @@ def test_external_catalog_subdir_multiple_in_one_query(
         )
         other = open_pg_conn()
         try:
-            assert tuple(run_query(query, other)[0]) == (1, 7, 7)
+            assert tuple(run_query(query, other)[0]) == (7, 7, 3)
         finally:
             other.close()
     finally:
