@@ -865,6 +865,9 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 
 	if (pgType.postgresTypeOid == INT4OID || pgType.postgresTypeOid == INT2OID)
 	{
+		if (partitionField->value_length != sizeof(int32))
+			return NULL;
+
 		int32		partitionValue = *(int32_t *) partitionField->value;
 		int			truncateLen = partitionTransform->truncateLen;
 
@@ -895,8 +898,16 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 	}
 	else if (pgType.postgresTypeOid == INT8OID)
 	{
-		int64		partitionValue = *(int64_t *) partitionField->value;
+		int64		partitionValue;
 		int			truncateLen = partitionTransform->truncateLen;
+
+		/* manifests written before an int column became long store an int */
+		if (partitionField->value_length == sizeof(int32))
+			partitionValue = *(int32_t *) partitionField->value;
+		else if (partitionField->value_length == sizeof(int64))
+			partitionValue = *(int64_t *) partitionField->value;
+		else
+			return NULL;
 
 		int64		upperBound;
 

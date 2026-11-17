@@ -2439,6 +2439,62 @@ def test_pruning_external_table_with_dropped_partition_field(
     pg_conn.rollback()
 
 
+def test_pruning_truncate_partition_after_int_promoted_to_long(
+    installcheck,
+    s3,
+    pg_conn,
+    extension,
+    spark_session,
+    disable_data_file_pruning,
+):
+    """Manifests written before the promotion store the partition values as
+    ints."""
+    if installcheck:
+        return
+
+    table_name = "public.test_truncate_partition_int_to_long"
+    spark_session.sql(
+        f"CREATE TABLE {table_name} (id bigint, x int) USING iceberg "
+        "PARTITIONED BY (truncate(10, x))"
+    )
+    spark_session.sql(f"INSERT INTO {table_name} VALUES (1, 5), (2, 15), (3, 25)")
+    spark_session.sql(f"ALTER TABLE {table_name} ALTER COLUMN x TYPE bigint")
+    spark_session.sql(f"INSERT INTO {table_name} VALUES (4, 35)")
+    metadata_location = (
+        spark_session.sql(
+            f"SELECT file FROM {table_name}.metadata_log_entries ORDER BY timestamp DESC"
+        )
+        .collect()[0]
+        .file
+    )
+
+    try:
+        run_command(
+            f"""
+            CREATE FOREIGN TABLE test_truncate_partition_int_to_long ()
+            SERVER pg_lake
+            OPTIONS (path '{metadata_location}', format 'iceberg')
+            """,
+            pg_conn,
+        )
+
+        for id, x in [(1, 5), (2, 15), (3, 25), (4, 35)]:
+            assert run_query(
+                f"SELECT id FROM test_truncate_partition_int_to_long WHERE x = {x}",
+                pg_conn,
+            ) == [[id]]
+
+        results = run_query(
+            "EXPLAIN (verbose, format json) "
+            "SELECT * FROM test_truncate_partition_int_to_long WHERE x = 15",
+            pg_conn,
+        )
+        assert int(fetch_data_files_used(results)) == 1
+    finally:
+        pg_conn.rollback()
+        spark_session.sql(f"DROP TABLE IF EXISTS {table_name}")
+
+
 @pytest.fixture(scope="module")
 def spark_table_metadata_location(installcheck, spark_session):
     if installcheck:
