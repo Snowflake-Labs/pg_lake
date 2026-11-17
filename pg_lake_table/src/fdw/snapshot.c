@@ -52,6 +52,7 @@
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/typcache.h"
 
 static PgLakeTableScan * CreateTableScanForRelation(Oid relationId,
@@ -461,6 +462,44 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 						   unmatched->data) : 0,
 				 errhint("Please drop and recreate the table \"%s\"", get_rel_name(relationId))));
 	}
+
+	/*
+	 * Each field found a column above, but a column that no field names (one
+	 * dropped or renamed in the catalog) leaves the counts equal.
+	 */
+	Bitmapset  *mappedAttnums = NULL;
+
+	foreach_ptr(PostgresColumnMapping, columnMapping, postgresColumnMappings)
+	{
+		if (columnMapping->attrNum > InvalidAttrNumber)
+			mappedAttnums = bms_add_member(mappedAttnums, columnMapping->attrNum);
+	}
+
+	Relation	rel = RelationIdGetRelation(relationId);
+	TupleDesc	tupleDesc = RelationGetDescr(rel);
+	char	   *unmatchedColumn = NULL;
+
+	for (int attIdx = 0; attIdx < tupleDesc->natts; attIdx++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, attIdx);
+
+		if (!attr->attisdropped && !bms_is_member(attr->attnum, mappedAttnums))
+		{
+			unmatchedColumn = pstrdup(NameStr(attr->attname));
+			break;
+		}
+	}
+
+	RelationClose(rel);
+
+	if (unmatchedColumn != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Schema mismatch between Iceberg and Postgres for relation \"%s\"",
+						get_rel_name(relationId)),
+				 errdetail("Postgres column \"%s\" has no matching Iceberg field.",
+						   unmatchedColumn),
+				 errhint("Please drop and recreate the table \"%s\"", get_rel_name(relationId))));
 
 	/*
 	 * now iterate on the fields, and throw error in case anything doesn't
