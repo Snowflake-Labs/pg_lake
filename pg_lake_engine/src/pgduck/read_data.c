@@ -238,7 +238,9 @@ ReadDataSourceQuery(List *sourcePaths,
 
 		appendStringInfo(&command,
 						 " WHERE (" INTERNAL_FILENAME_COLUMN_NAME ", file_row_number)"
-						 " NOT IN (SELECT (regexp_replace(file_path, '^s3[an]://', 's3://'), pos)"
+						 " NOT IN (SELECT (CASE WHEN starts_with(file_path, 's3a://')"
+						 " OR starts_with(file_path, 's3n://')"
+						 " THEN 's3://' || file_path[7:] ELSE file_path END, pos)"
 						 " FROM read_parquet(%s",
 						 PathListToString(positionDeletePaths));
 

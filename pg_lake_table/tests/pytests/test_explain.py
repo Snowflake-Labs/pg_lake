@@ -293,7 +293,9 @@ def test_explain_explicit_cardinality(pg_conn, s3, with_default_location):
     assert position_delete_projection_plan["Node Type"] == "PROJECTION"
     assert (
         position_delete_projection_plan["Projections"]
-        == "\"row\"(regexp_replace(file_path, '^s3[an]://', 's3://'), pos)"
+        == "\"row\"(CASE  WHEN ((starts_with(file_path, 's3a://') OR "
+        "starts_with(file_path, 's3n://'))) THEN (('s3://' || "
+        "array_slice(file_path, 7, []))) ELSE file_path END, pos)"
     )
     assert position_delete_projection_plan["Estimated Cardinality"] == "1"
 

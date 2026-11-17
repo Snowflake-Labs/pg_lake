@@ -10,6 +10,7 @@ import uuid
 from collections import Counter
 
 import pytest
+from helpers import server_params
 from helpers.spark import create_spark_catalog_database, spark_session
 from utils_pytest import (
     TEST_BUCKET,
@@ -57,7 +58,8 @@ def test_s3a_paths_and_position_deletes(
             Counter(tuple(row) for row in spark.sql(f"SELECT * FROM {name}").collect())
             == expected
         )
-        assert_pg_lake_rows(pg_conn, metadata.replace("s3a://", "s3://", 1), expected)
+        # the s3a:// metadata location Spark reports is accepted as it is
+        assert_pg_lake_rows(pg_conn, metadata, expected)
     finally:
         spark.sql(f"DROP TABLE IF EXISTS {name}")
         spark.sql(f"DROP NAMESPACE {namespace}")
@@ -100,6 +102,78 @@ def test_non_parquet_data_files_are_refused(
     finally:
         spark.sql(f"DROP TABLE IF EXISTS {name}")
         spark.sql(f"DROP NAMESPACE {namespace}")
+
+
+def test_non_parquet_files_only_refused_when_read(
+    installcheck, spark_session, s3, pg_conn, extension
+):
+    """A rewrite from ORC to Parquet leaves the ORC files in the current
+    snapshot as deleted entries, and pruning can skip the ORC files of a
+    mixed-format table; neither is a file the read opens."""
+    if installcheck:
+        pytest.skip("requires the Spark integration fixture")
+
+    namespace = f"hadoop_files_{uuid.uuid4().hex}"
+    name = f"{namespace}.rows"
+    spark = spark_session
+    spark.sql(f"CREATE NAMESPACE {namespace}")
+    try:
+        spark.sql(
+            f"CREATE TABLE {name} (id INT, part STRING) USING iceberg "
+            "PARTITIONED BY (part) "
+            "TBLPROPERTIES ('format-version'='2', 'write.format.default'='orc')"
+        )
+        spark.sql(f"INSERT INTO {name} VALUES (1, 'orc')")
+        spark.sql(
+            f"ALTER TABLE {name} SET TBLPROPERTIES ('write.format.default'='parquet')"
+        )
+        spark.sql(f"INSERT INTO {name} VALUES (2, 'parquet')")
+
+        run_command(
+            "CREATE FOREIGN TABLE mixed_formats () SERVER pg_lake "
+            f"OPTIONS (path '{metadata_location(spark, name)}', format 'iceberg')",
+            pg_conn,
+        )
+        assert run_query(
+            "SELECT id FROM mixed_formats WHERE part = 'parquet'", pg_conn
+        ) == [[2]]
+        error = run_query("SELECT id FROM mixed_formats", pg_conn, raise_error=False)
+        assert "ORC files are not supported" in str(error)
+        pg_conn.rollback()
+
+        spark.sql(
+            f"CALL {server_params.SPARK_CATALOG}.system.rewrite_data_files("
+            f"table => '{name}', options => map('rewrite-all', 'true'))"
+        )
+        files = spark.sql(
+            f"SELECT data_file.file_format, status FROM {name}.entries"
+        ).collect()
+        assert {(row.file_format, row.status) for row in files} >= {("ORC", 2)}
+
+        run_command(
+            "CREATE FOREIGN TABLE rewritten () SERVER pg_lake "
+            f"OPTIONS (path '{metadata_location(spark, name)}', format 'iceberg')",
+            pg_conn,
+        )
+        assert run_query("SELECT id FROM rewritten ORDER BY id", pg_conn) == [
+            [1],
+            [2],
+        ]
+        pg_conn.rollback()
+    finally:
+        spark.sql(f"DROP TABLE IF EXISTS {name}")
+        spark.sql(f"DROP NAMESPACE {namespace}")
+
+
+def test_hadoop_scheme_path_only_for_iceberg(pg_conn, extension):
+    error = run_command(
+        "CREATE FOREIGN TABLE not_iceberg () SERVER pg_lake "
+        f"OPTIONS (path 's3a://{TEST_BUCKET}/hadoop_files/data.parquet')",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "unsupported URL" in str(error)
+    pg_conn.rollback()
 
 
 def metadata_location(spark, name):
