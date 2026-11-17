@@ -279,3 +279,51 @@ def test_v3_column_default_is_rejected(
     assert catalog_log_lines(offset) == [
         "a table uses Iceberg column default values, which pg_lake does not support"
     ]
+
+
+def test_v3_nested_column_default_is_rejected(
+    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck
+):
+    """A default on a field inside a struct is refused like a top-level one."""
+    if installcheck:
+        return
+
+    table = _make_table(iceberg_catalog, "v3_nested_column_default")
+
+    metadata = json.loads(_get(s3, table.metadata_location))
+    metadata["format-version"] = 3
+    for schema in metadata["schemas"]:
+        if schema["schema-id"] == metadata["current-schema-id"]:
+            schema["fields"].append(
+                {
+                    "id": 3,
+                    "name": "place",
+                    "required": False,
+                    "type": {
+                        "type": "struct",
+                        "fields": [
+                            {
+                                "id": 4,
+                                "name": "country",
+                                "required": False,
+                                "type": "string",
+                                "initial-default": "unknown",
+                            }
+                        ],
+                    },
+                }
+            )
+    metadata["last-column-id"] = 4
+
+    default_location = table.metadata_location.replace(
+        ".metadata.json", ".v3-nested-default.metadata.json"
+    )
+    _put(s3, default_location, json.dumps(metadata).encode())
+
+    offset = server_log_offset()
+    err = _data_files(superuser_conn, default_location, raise_error=False)
+    assert "column default values are not supported" in str(err)
+    assert "country" in str(err)
+    assert catalog_log_lines(offset) == [
+        "a table uses Iceberg column default values, which pg_lake does not support"
+    ]

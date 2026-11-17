@@ -604,6 +604,16 @@ ReadIcebergTypeFieldElement(JsonbContainer *json, DataFileSchemaField * fieldEle
 
 	JsonExtractStringField(json, "doc", FIELD_OPTIONAL, &fieldElement->doc, &docLength);
 
+	size_t		initialDefaultLength = 0;
+
+	JsonExtractFieldAsJsonString(json, "initial-default", FIELD_OPTIONAL,
+								 &fieldElement->initialDefault, &initialDefaultLength);
+
+	size_t		writeDefaultLength = 0;
+
+	JsonExtractFieldAsJsonString(json, "write-default", FIELD_OPTIONAL,
+								 &fieldElement->writeDefault, &writeDefaultLength);
+
 	/* recurse into "type" field */
 	JsonExtractField(json, "type", FIELD_REQUIRED, &fieldElement->type);
 	EnsureIcebergField(fieldElement->type);
