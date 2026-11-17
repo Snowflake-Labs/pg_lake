@@ -67,3 +67,20 @@ $function$;
 COMMENT ON FUNCTION lake_snowflake.test_connection(text) IS 'check that a Snowflake foreign server, its credentials and its warehouse work';
 REVOKE ALL ON FUNCTION lake_snowflake.test_connection(text) FROM public;
 GRANT EXECUTE ON FUNCTION lake_snowflake.test_connection(text) TO lake_read;
+
+/*
+ * lake_snowflake.cortex_request posts a JSON body to a Cortex REST API endpoint
+ * (a path below /api/v2/cortex/) of the account behind server_name and returns
+ * the JSON answer. It needs no warehouse. Like lake_snowflake.execute, the
+ * caller needs USAGE on the foreign server, and the request is made with the
+ * credentials of the user mapping that applies to the caller.
+ */
+CREATE FUNCTION lake_snowflake.cortex_request(server_name text, path text, body jsonb)
+ RETURNS jsonb
+ LANGUAGE C
+ VOLATILE STRICT
+AS 'MODULE_PATHNAME', $function$pg_lake_snowflake_cortex_request$function$;
+
+COMMENT ON FUNCTION lake_snowflake.cortex_request(text,text,jsonb) IS 'post a request to the Cortex REST API of a Snowflake account and return the JSON answer';
+REVOKE ALL ON FUNCTION lake_snowflake.cortex_request(text,text,jsonb) FROM public;
+GRANT EXECUTE ON FUNCTION lake_snowflake.cortex_request(text,text,jsonb) TO lake_read;

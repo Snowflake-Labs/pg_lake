@@ -341,6 +341,18 @@ mapping that applies to the caller and returns the first column of the first row
 which is what `SHOW`, `DESCRIBE` and DDL answer with. It needs `USAGE` on the
 foreign server.
 
+```sql
+SELECT lake_snowflake.cortex_request('sf', '/api/v2/cortex/inference:embed',
+  '{"model": "snowflake-arctic-embed-m-v1.5", "text": ["hello"]}');
+```
+
+`lake_snowflake.cortex_request` posts a JSON body to an endpoint of the [Cortex
+REST API](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api)
+of the account and returns the JSON answer. It needs no warehouse, the same
+privileges as `lake_snowflake.execute`, and only accepts paths below
+`/api/v2/cortex/`. [`pg_lake_cortex`](./cortex-functions.md) builds its functions
+on it.
+
 ## Limitations
 
 - A write is not part of your transaction, an `UPDATE` or a `DELETE` has to be one

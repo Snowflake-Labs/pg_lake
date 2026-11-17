@@ -55,6 +55,8 @@ class MockSnowflake:
         self.requests_without_authorization = 0
         self.compressed_responses = 0
         self.routes = []
+        self.cortex_requests = []
+        self.cortex_routes = {}
         self.default_route = Route([column("STATUS", "text")], [[["ok"]]])
         self._handles = {}
         self._next_handle = 1
@@ -74,6 +76,14 @@ class MockSnowflake:
         route = Route(columns, partitions, status, error, asynchronous)
         self.routes.insert(0, (substring, route))
         return route
+
+    def cortex_route(self, path, answer, status=200):
+        """Answer Cortex REST requests to path with answer, a function of the body.
+
+        answer may also be a fixed JSON value. A status other than 200 makes the
+        answer an error body.
+        """
+        self.cortex_routes[path] = (answer, status)
 
     def start(self):
         with socket.socket() as probe:
@@ -116,6 +126,16 @@ class MockSnowflake:
             def do_POST(self):
                 self._check_authorization()
                 path = urlparse(self.path).path
+
+                if path.startswith("/api/v2/cortex/"):
+                    body = self._read_body()
+                    mock.cortex_requests.append((path, body))
+                    if path not in mock.cortex_routes:
+                        self._respond(404, {"code": "000404", "message": "no route"})
+                        return
+                    answer, status = mock.cortex_routes[path]
+                    self._respond(status, answer(body) if callable(answer) else answer)
+                    return
 
                 if path.endswith("/cancel"):
                     handle = path.split("/")[-2]
