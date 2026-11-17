@@ -1736,6 +1736,14 @@ def test_external_catalog_subdir(
         finally:
             other.close()
 
+        # the lister reads the subdirectory when asked to
+        listed = run_query(
+            "SELECT catalog_table_name FROM lake_iceberg.list_object_store_tables("
+            f"current_database(), false, '{subdir}')",
+            conn,
+        )
+        assert ("wrt_tbl",) in [tuple(r) for r in listed]
+
         # re-point the table at a subdirectory that does not exist
         run_command(
             f"ALTER FOREIGN TABLE {schema}.read_tbl OPTIONS (SET catalog_subdir 'other_sfx')",

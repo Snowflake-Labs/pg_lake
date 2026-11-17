@@ -88,14 +88,25 @@ static bool IsBlankCatalogField(const char *value);
 Datum
 list_object_store_tables(PG_FUNCTION_ARGS)
 {
-	char	   *catalogName = text_to_cstring(PG_GETARG_TEXT_P(0));
-	bool		internalTables = PG_GETARG_BOOL(1);
+	char	   *catalogName = NULL;
+	bool		internalTables = false;
+	char	   *catalogSubdir = NULL;
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 
 	InitMaterializedSRF(fcinfo, 0);
 
-	if (!CheckIfExternalObjectStoreCatalogExists(catalogName, NULL))
+	/* the function is not STRICT, only catalog_subdir may be NULL */
+	if (PG_ARGISNULL(0) || PG_ARGISNULL(1))
+		PG_RETURN_VOID();
+
+	catalogName = text_to_cstring(PG_GETARG_TEXT_P(0));
+	internalTables = PG_GETARG_BOOL(1);
+
+	if (!PG_ARGISNULL(2))
+		catalogSubdir = text_to_cstring(PG_GETARG_TEXT_P(2));
+
+	if (!CheckIfExternalObjectStoreCatalogExists(catalogName, catalogSubdir))
 	{
 		ereport(NOTICE,
 				(errcode(ERRCODE_UNDEFINED_OBJECT),
@@ -107,7 +118,7 @@ list_object_store_tables(PG_FUNCTION_ARGS)
 	const char *catalogPath =
 		internalTables ?
 		GetInternalObjectStoreCatalogFilePath(catalogName) :
-		GetExternalObjectStoreCatalogFilePath(catalogName, NULL);
+		GetExternalObjectStoreCatalogFilePath(catalogName, catalogSubdir);
 
 	/* catalog.json is a fixed path that may change out of band; read fresh. */
 	char	   *catalogContent = GetJsonFromURINoCache(catalogPath);
