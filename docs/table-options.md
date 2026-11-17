@@ -40,6 +40,7 @@ accepts the same options.
 | `catalog_name`<span class="pglake-meta">Default the catalog server's `catalog_name`, or the database name; can be changed for read-only tables</span> | Catalog name of a read-only table. |
 | `catalog_namespace`<span class="pglake-meta">Default schema name; can be changed for read-only tables</span> | Namespace of a read-only table. |
 | `catalog_table_name`<span class="pglake-meta">Default table name; can be changed for read-only tables</span> | Table name of a read-only table. |
+| `catalog_subdir`<span class="pglake-meta">Default none; can be changed for read-only `object_store` tables</span> | Subdirectory under the database name that holds the catalog file of a read-only `object_store` table. Without it the file is `<database>/catalog.json`, with it `<database>/<catalog_subdir>/catalog.json`. |
 | `lowercase_column_names`<span class="pglake-meta">Default `false` for attached tables, `true` for read-only `catalog = 'snowflake'` tables; fixed at creation</span> | Fold column and nested struct field names. Also accepted when importing Iceberg metadata files. Names that differ only by case in the same table or struct, and column names that fold to a system column, are rejected. |
 | `autovacuum_enabled`<span class="pglake-meta">Default `true`; can be changed</span> | Whether the autovacuum worker processes the table. |
 | `autovacuum_compact_data_files`<span class="pglake-meta">Default `true`; can be changed</span> | Whether autovacuum compacts the table's data files. |

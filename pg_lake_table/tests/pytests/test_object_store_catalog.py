@@ -1667,20 +1667,20 @@ def test_object_store_catalog_periodic_rewrite(
         superuser_conn.autocommit = False
 
 
-# the external catalog.json is read from <database>/<suffix>/ when
-# pg_lake_iceberg.external_object_store_catalog_database_suffix is set, and from
-# <database>/catalog.json when it is not. The internal (written) catalog does
-# not move.
-def test_external_catalog_database_suffix(
+# a read-only object_store table reads its catalog.json from
+# <database>/<catalog_subdir>/ when it has the catalog_subdir option, and from
+# <database>/catalog.json when it does not. The option is stored with the table,
+# so every session sees the same file. The internal (written) catalog does not
+# move.
+def test_external_catalog_subdir(
     superuser_conn,
     s3,
     extension,
     with_default_location,
     adjust_object_store_settings,
 ):
-    suffix = "suffix_abc"
-    schema = "test_db_suffix"
-    guc = "pg_lake_iceberg.external_object_store_catalog_database_suffix"
+    subdir = "subdir_abc"
+    schema = "test_catalog_subdir"
     conn = superuser_conn
 
     run_command(f"CREATE SCHEMA {schema}", conn)
@@ -1703,44 +1703,80 @@ def test_external_catalog_database_suffix(
             "SHOW pg_lake_iceberg.external_object_store_catalog_prefix", conn
         )[0][0]
 
-        # the written catalog stays at <database>/catalog.json even with the suffix set
-        run_command(f"SET {guc} TO '{suffix}'", conn)
-        run_command("SELECT lake_iceberg.force_push_object_store_catalog()", conn)
-        conn.commit()
         internal_key = f"{internal_prefix}/catalog/{dbname}/catalog.json"
         body = s3.get_object(Bucket=TEST_BUCKET, Key=internal_key)["Body"].read()
         assert "catalog-snapshot-time" in json.loads(body)
 
-        # the external catalog is read from <database>/<suffix>/
-        suffixed_key = f"{external_prefix}/catalog/{dbname}/{suffix}/catalog.json"
-        s3.put_object(Bucket=TEST_BUCKET, Key=suffixed_key, Body=body)
+        # the subdirectory has no catalog.json yet
+        with pytest.raises(Exception, match="catalog does not exist"):
+            run_command(
+                f"CREATE TABLE {schema}.read_tbl(a int) USING iceberg "
+                "WITH (catalog='object_store', read_only=True, "
+                f"catalog_table_name='wrt_tbl', catalog_subdir='{subdir}')",
+                conn,
+            )
+        conn.rollback()
+
+        # the external catalog is read from <database>/<subdir>/
+        subdir_key = f"{external_prefix}/catalog/{dbname}/{subdir}/catalog.json"
+        s3.put_object(Bucket=TEST_BUCKET, Key=subdir_key, Body=body)
         run_command(
             f"CREATE TABLE {schema}.read_tbl(a int) USING iceberg "
-            "WITH (catalog='object_store', read_only=True, catalog_table_name='wrt_tbl')",
+            "WITH (catalog='object_store', read_only=True, "
+            f"catalog_table_name='wrt_tbl', catalog_subdir='{subdir}')",
             conn,
         )
         conn.commit()
         assert run_query(f"SELECT sum(a) FROM {schema}.read_tbl", conn)[0][0] == 6
 
-        # a different suffix points at a file that does not exist
-        run_command(f"SET {guc} TO 'other_sfx'", conn)
+        # another session reads the same file, nothing is taken from the session
+        other = open_pg_conn()
+        try:
+            assert run_query(f"SELECT sum(a) FROM {schema}.read_tbl", other)[0][0] == 6
+        finally:
+            other.close()
+
+        # re-point the table at a subdirectory that does not exist
+        run_command(
+            f"ALTER FOREIGN TABLE {schema}.read_tbl OPTIONS (SET catalog_subdir 'other_sfx')",
+            conn,
+        )
+        conn.commit()
         with pytest.raises(Exception):
             run_query(f"SELECT count(*) FROM {schema}.read_tbl", conn)
         conn.rollback()
     finally:
         conn.rollback()
-        run_command(f"RESET {guc}", conn)
         run_command(f"DROP SCHEMA {schema} CASCADE", conn)
         conn.commit()
 
 
-def test_external_catalog_database_suffix_is_superuser_only(extension, user_conn):
-    with pytest.raises(Exception, match="permission denied"):
-        run_command(
-            "SET pg_lake_iceberg.external_object_store_catalog_database_suffix TO 'x'",
-            user_conn,
-        )
-    user_conn.rollback()
+def test_catalog_subdir_is_only_for_read_only_object_store_tables(
+    superuser_conn, extension, with_default_location, adjust_object_store_settings
+):
+    conn = superuser_conn
+    run_command("CREATE SCHEMA test_catalog_subdir_opt", conn)
+    conn.commit()
+    try:
+        with pytest.raises(Exception, match="catalog_subdir"):
+            run_command(
+                "CREATE TABLE test_catalog_subdir_opt.t(a int) USING iceberg "
+                "WITH (catalog='object_store', catalog_subdir='x')",
+                conn,
+            )
+        conn.rollback()
+
+        with pytest.raises(Exception, match="catalog_subdir"):
+            run_command(
+                "CREATE TABLE test_catalog_subdir_opt.t(a int) USING iceberg "
+                "WITH (catalog_subdir='x')",
+                conn,
+            )
+        conn.rollback()
+    finally:
+        conn.rollback()
+        run_command("DROP SCHEMA test_catalog_subdir_opt CASCADE", conn)
+        conn.commit()
 
 
 # A failed catalog export must name itself. The periodic export runs in the
