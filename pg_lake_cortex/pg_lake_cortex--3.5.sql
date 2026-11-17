@@ -4,281 +4,205 @@
 \echo Use "CREATE EXTENSION pg_lake_cortex" to load this file. \quit
 
 /*
- * pg_lake_cortex exposes the Snowflake Cortex AI functions as Postgres
- * functions. Every call becomes one statement on the account behind a
- * pg_lake_snowflake foreign server, run with the credentials of the user
- * mapping that applies to the caller, and on that account's warehouse.
+ * pg_lake_cortex exposes the Snowflake Cortex REST API as Postgres functions.
+ * Every call becomes one request to the account behind a pg_lake_snowflake
+ * foreign server, made with the credentials of the user mapping that applies
+ * to the caller. A request runs no SQL and needs no warehouse; the account
+ * bills the tokens the model processes.
  *
  * The server is the server_name argument when given, and otherwise the
- * lake_cortex.default_server setting.
+ * pg_lake_cortex.default_server setting.
  */
-CREATE SCHEMA lake_cortex;
-GRANT USAGE ON SCHEMA lake_cortex TO lake_read;
+CREATE SCHEMA cortex;
+GRANT USAGE ON SCHEMA cortex TO lake_read;
 
-/*
- * lake_cortex.sql_literal turns a value into a Snowflake string literal.
- *
- * Unlike a standard-conforming Postgres string, a Snowflake string treats a
- * backslash as an escape character, so backslashes are doubled along with
- * quotes. Cortex functions require some arguments (the model above all) to be
- * literals rather than expressions, which is why arguments are inlined rather
- * than passed as one parsed JSON document.
- */
-CREATE FUNCTION lake_cortex.sql_literal(value text)
+/* the server a call goes to */
+CREATE FUNCTION cortex.resolve_server(server_name text)
  RETURNS text
- LANGUAGE SQL
- IMMUTABLE PARALLEL SAFE
-AS $function$
-  SELECT CASE WHEN value IS NULL THEN 'NULL'
-         ELSE '''' || replace(replace(value, '\', '\\'), '''', '''''') || ''''
-         END
-$function$;
-
-/* a JSON value as a Snowflake VARIANT expression */
-CREATE FUNCTION lake_cortex.sql_json(value jsonb)
- RETURNS text
- LANGUAGE SQL
- IMMUTABLE PARALLEL SAFE
-AS $function$
-  SELECT CASE WHEN value IS NULL THEN 'NULL'
-         ELSE 'PARSE_JSON(' || lake_cortex.sql_literal(value::text) || ')'
-         END
-$function$;
-
-/*
- * lake_cortex.invoke evaluates a Snowflake expression on the account and
- * returns its value as JSON. Going through TO_JSON keeps every result type,
- * including OBJECT, ARRAY and VECTOR, in one wire form that jsonb can parse.
- */
-CREATE FUNCTION lake_cortex.invoke(expression text, server_name text DEFAULT NULL)
- RETURNS jsonb
  LANGUAGE plpgsql
- VOLATILE
+ STABLE
 AS $function$
 DECLARE
   server text := coalesce(server_name,
-                          nullif(current_setting('lake_cortex.default_server', true), ''));
-  result text;
+                          nullif(current_setting('pg_lake_cortex.default_server', true), ''));
 BEGIN
   IF server IS NULL THEN
     RAISE EXCEPTION 'no Snowflake server to run Cortex functions on'
-      USING HINT = 'Pass server_name, or set lake_cortex.default_server to the name of a pg_lake_snowflake foreign server.';
+      USING HINT = 'Pass server_name, or set pg_lake_cortex.default_server to the name of a pg_lake_snowflake foreign server.';
   END IF;
 
-  result := lake_snowflake.execute(server,
-                                   'SELECT TO_JSON(TO_VARIANT(' || expression || '))');
-
-  RETURN result::jsonb;
+  RETURN server;
 END;
 $function$;
 
-COMMENT ON FUNCTION lake_cortex.invoke(text,text) IS 'evaluate a Snowflake expression on a Snowflake account and return its value as jsonb';
-REVOKE ALL ON FUNCTION lake_cortex.invoke(text,text) FROM public;
-GRANT EXECUTE ON FUNCTION lake_cortex.invoke(text,text) TO lake_read;
+/*
+ * cortex.request posts a body to any Cortex REST endpoint and returns the
+ * answer, for what the functions below do not cover.
+ */
+CREATE FUNCTION cortex.request(path text, body jsonb, server_name text DEFAULT NULL)
+ RETURNS jsonb
+ LANGUAGE SQL
+ VOLATILE
+AS $function$
+  SELECT lake_snowflake.cortex_request(cortex.resolve_server(server_name), path, body)
+$function$;
+
+COMMENT ON FUNCTION cortex.request(text,jsonb,text) IS 'post a request to a Cortex REST API endpoint (a path below /api/v2/cortex/) and return the JSON answer';
 
 /*
- * The Cortex functions. They are STRICT where Cortex would answer NULL for a
- * NULL input anyway, which saves the round trip, and VOLATILE because each one
- * is a remote call whose answer can change.
+ * cortex.chat_request builds a chat completions request for one user message.
+ *
+ * model_parameters takes the options of AI_COMPLETE. The REST API calls the
+ * output limit max_completion_tokens and refuses max_tokens, so that one is
+ * renamed; the others (temperature, top_p) are passed on as they are.
+ */
+CREATE FUNCTION cortex.chat_request(model text, prompt text, model_parameters jsonb,
+                                    response_format jsonb DEFAULT NULL)
+ RETURNS jsonb
+ LANGUAGE SQL
+ IMMUTABLE PARALLEL SAFE
+AS $function$
+  SELECT jsonb_strip_nulls(jsonb_build_object(
+           'model', model,
+           'messages', jsonb_build_array(jsonb_build_object('role', 'user', 'content', prompt)),
+           'response_format', response_format))
+         || coalesce(model_parameters - 'max_tokens', '{}')
+         || CASE WHEN model_parameters ? 'max_tokens'
+                 THEN jsonb_build_object('max_completion_tokens', model_parameters -> 'max_tokens')
+                 ELSE '{}' END
+$function$;
+
+/*
+ * cortex.chat_response_format turns the response_format of AI_COMPLETE,
+ * {"type": "json", "schema": ...}, into the json_schema form of the chat
+ * completions API. A response_format already in that form is left alone.
+ */
+CREATE FUNCTION cortex.chat_response_format(response_format jsonb)
+ RETURNS jsonb
+ LANGUAGE SQL
+ IMMUTABLE PARALLEL SAFE
+AS $function$
+  SELECT CASE WHEN response_format ->> 'type' = 'json' AND response_format ? 'schema'
+              THEN jsonb_build_object('type', 'json_schema',
+                                      'json_schema', jsonb_build_object('name', 'response',
+                                                                        'schema', response_format -> 'schema'))
+              ELSE response_format END
+$function$;
+
+/*
+ * The Cortex functions. A NULL input returns NULL without a request, and they
+ * are VOLATILE because each one is a remote call whose answer can change.
  */
 
-CREATE FUNCTION lake_cortex.complete(model text, prompt text,
-                                     model_parameters jsonb DEFAULT NULL,
-                                     server_name text DEFAULT NULL)
+CREATE FUNCTION cortex.complete(model text, prompt text,
+                                model_parameters jsonb DEFAULT NULL,
+                                server_name text DEFAULT NULL)
  RETURNS text
  LANGUAGE SQL
  VOLATILE
 AS $function$
   SELECT CASE WHEN model IS NULL OR prompt IS NULL THEN NULL ELSE
-    lake_cortex.invoke(
-      'AI_COMPLETE(model => ' || lake_cortex.sql_literal(model) ||
-      ', prompt => ' || lake_cortex.sql_literal(prompt) ||
-      CASE WHEN model_parameters IS NULL THEN ''
-           ELSE ', model_parameters => ' || lake_cortex.sql_json(model_parameters) END ||
-      ')', server_name) #>> '{}'
+    cortex.request('/api/v2/cortex/v1/chat/completions',
+                   cortex.chat_request(model, prompt, model_parameters),
+                   server_name) #>> '{choices,0,message,content}'
   END
 $function$;
 
-COMMENT ON FUNCTION lake_cortex.complete(text,text,jsonb,text) IS 'generate a completion for a prompt with a Cortex model (AI_COMPLETE)';
+COMMENT ON FUNCTION cortex.complete(text,text,jsonb,text) IS 'generate a completion for a prompt with a Cortex model (chat completions API)';
 
-CREATE FUNCTION lake_cortex.complete_json(model text, prompt text,
-                                          response_format jsonb,
-                                          model_parameters jsonb DEFAULT NULL,
-                                          server_name text DEFAULT NULL)
- RETURNS jsonb
- LANGUAGE SQL
- VOLATILE
-AS $function$
-  SELECT CASE WHEN model IS NULL OR prompt IS NULL OR response_format IS NULL THEN NULL ELSE
-    lake_cortex.invoke(
-      'AI_COMPLETE(model => ' || lake_cortex.sql_literal(model) ||
-      ', prompt => ' || lake_cortex.sql_literal(prompt) ||
-      ', model_parameters => ' || coalesce(lake_cortex.sql_json(model_parameters), 'NULL') ||
-      ', response_format => ' || lake_cortex.sql_json(response_format) ||
-      ')', server_name)
-  END
-$function$;
-
-COMMENT ON FUNCTION lake_cortex.complete_json(text,text,jsonb,jsonb,text) IS 'generate a completion that follows a JSON schema (AI_COMPLETE with response_format)';
-
-CREATE FUNCTION lake_cortex.classify(input text, categories text[],
+CREATE FUNCTION cortex.complete_json(model text, prompt text,
+                                     response_format jsonb,
+                                     model_parameters jsonb DEFAULT NULL,
                                      server_name text DEFAULT NULL)
- RETURNS text[]
- LANGUAGE SQL
- VOLATILE
-AS $function$
-  SELECT CASE WHEN input IS NULL OR categories IS NULL THEN NULL ELSE
-    ARRAY(SELECT jsonb_array_elements_text(
-      lake_cortex.invoke(
-        'AI_CLASSIFY(' || lake_cortex.sql_literal(input) || ', ' ||
-        lake_cortex.sql_json(to_jsonb(categories)) || ')', server_name) -> 'labels'))
-  END
-$function$;
-
-COMMENT ON FUNCTION lake_cortex.classify(text,text[],text) IS 'pick the categories that apply to a text (AI_CLASSIFY)';
-
-CREATE FUNCTION lake_cortex.filter(predicate text, input text,
-                                   server_name text DEFAULT NULL)
- RETURNS boolean
- LANGUAGE SQL
- VOLATILE
-AS $function$
-  SELECT CASE WHEN predicate IS NULL OR input IS NULL THEN NULL ELSE
-    (lake_cortex.invoke(
-      'AI_FILTER(' || lake_cortex.sql_literal(predicate || ' ' || input) || ')',
-      server_name) #>> '{}')::boolean
-  END
-$function$;
-
-COMMENT ON FUNCTION lake_cortex.filter(text,text,text) IS 'answer a yes/no question about a text (AI_FILTER)';
-
-CREATE FUNCTION lake_cortex.sentiment(input text, server_name text DEFAULT NULL)
- RETURNS text
- LANGUAGE SQL
- VOLATILE
-AS $function$
-  SELECT CASE WHEN input IS NULL THEN NULL ELSE
-    (SELECT category ->> 'sentiment'
-     FROM jsonb_array_elements(
-       lake_cortex.invoke('AI_SENTIMENT(' || lake_cortex.sql_literal(input) || ')',
-                          server_name) -> 'categories') AS category
-     WHERE category ->> 'name' = 'overall')
-  END
-$function$;
-
-COMMENT ON FUNCTION lake_cortex.sentiment(text,text) IS 'overall sentiment of a text: positive, negative, neutral or mixed (AI_SENTIMENT)';
-
-CREATE FUNCTION lake_cortex.translate(input text, source_language text,
-                                      target_language text,
-                                      server_name text DEFAULT NULL)
- RETURNS text
- LANGUAGE SQL
- VOLATILE
-AS $function$
-  SELECT CASE WHEN input IS NULL OR target_language IS NULL THEN NULL ELSE
-    lake_cortex.invoke(
-      'AI_TRANSLATE(' || lake_cortex.sql_literal(input) || ', ' ||
-      lake_cortex.sql_literal(coalesce(source_language, '')) || ', ' ||
-      lake_cortex.sql_literal(target_language) || ')', server_name) #>> '{}'
-  END
-$function$;
-
-COMMENT ON FUNCTION lake_cortex.translate(text,text,text,text) IS 'translate a text; a NULL or empty source language is detected (AI_TRANSLATE)';
-
-CREATE FUNCTION lake_cortex.summarize(input text, server_name text DEFAULT NULL)
- RETURNS text
- LANGUAGE SQL
- VOLATILE
-AS $function$
-  SELECT CASE WHEN input IS NULL THEN NULL ELSE
-    lake_cortex.invoke(
-      'SNOWFLAKE.CORTEX.SUMMARIZE(' || lake_cortex.sql_literal(input) || ')',
-      server_name) #>> '{}'
-  END
-$function$;
-
-COMMENT ON FUNCTION lake_cortex.summarize(text,text) IS 'summarize a text (SNOWFLAKE.CORTEX.SUMMARIZE)';
-
-CREATE FUNCTION lake_cortex.extract(input text, response_format jsonb,
-                                    server_name text DEFAULT NULL)
  RETURNS jsonb
+ LANGUAGE plpgsql
+ VOLATILE
+AS $function$
+DECLARE
+  content text;
+BEGIN
+  IF model IS NULL OR prompt IS NULL OR response_format IS NULL THEN
+    RETURN NULL;
+  END IF;
+
+  content := cortex.request('/api/v2/cortex/v1/chat/completions',
+                            cortex.chat_request(model, prompt, model_parameters,
+                                                cortex.chat_response_format(response_format)),
+                            server_name) #>> '{choices,0,message,content}';
+
+  BEGIN
+    RETURN content::jsonb;
+  EXCEPTION WHEN invalid_text_representation THEN
+    RAISE EXCEPTION 'Cortex model % answered with something other than JSON', model
+      USING DETAIL = 'The answer starts with: ' || left(content, 200);
+  END;
+END;
+$function$;
+
+COMMENT ON FUNCTION cortex.complete_json(text,text,jsonb,jsonb,text) IS 'generate a completion that follows a JSON schema (chat completions API with response_format)';
+
+/*
+ * cortex.embed_batch embeds many texts in one request, which is what makes
+ * filling an embedding column affordable: the answer for inputs[i] comes back
+ * with index i.
+ */
+CREATE FUNCTION cortex.embed_batch(model text, inputs text[], server_name text DEFAULT NULL)
+ RETURNS TABLE (index int, embedding float8[])
  LANGUAGE SQL
  VOLATILE
 AS $function$
-  SELECT CASE WHEN input IS NULL OR response_format IS NULL THEN NULL ELSE
-    lake_cortex.invoke(
-      'AI_EXTRACT(text => ' || lake_cortex.sql_literal(input) ||
-      ', responseFormat => ' || lake_cortex.sql_json(response_format) || ')',
-      server_name) -> 'response'
-  END
+  SELECT (entry ->> 'index')::int + 1,
+         ARRAY(SELECT element::float8
+               FROM jsonb_array_elements_text(entry #> '{embedding,0}') AS element)
+  FROM jsonb_array_elements(
+         cortex.request('/api/v2/cortex/inference:embed',
+                        jsonb_build_object('model', model, 'text', to_jsonb(inputs)),
+                        server_name) -> 'data') AS entry
+  WHERE model IS NOT NULL AND inputs IS NOT NULL AND cardinality(inputs) > 0
 $function$;
 
-COMMENT ON FUNCTION lake_cortex.extract(text,jsonb,text) IS 'extract the answers to questions about a text (AI_EXTRACT)';
+COMMENT ON FUNCTION cortex.embed_batch(text,text[],text) IS 'embed many texts as vectors in one request; index is the position in inputs';
 
-CREATE FUNCTION lake_cortex.redact(input text, server_name text DEFAULT NULL)
- RETURNS text
- LANGUAGE SQL
- VOLATILE
-AS $function$
-  SELECT CASE WHEN input IS NULL THEN NULL ELSE
-    lake_cortex.invoke('AI_REDACT(' || lake_cortex.sql_literal(input) || ')',
-                       server_name) #>> '{}'
-  END
-$function$;
-
-COMMENT ON FUNCTION lake_cortex.redact(text,text) IS 'replace personal information in a text with placeholders (AI_REDACT)';
-
-CREATE FUNCTION lake_cortex.embed(model text, input text, server_name text DEFAULT NULL)
+CREATE FUNCTION cortex.embed(model text, input text, server_name text DEFAULT NULL)
  RETURNS float8[]
  LANGUAGE SQL
  VOLATILE
 AS $function$
   SELECT CASE WHEN model IS NULL OR input IS NULL THEN NULL ELSE
-    ARRAY(SELECT element::float8
-          FROM jsonb_array_elements_text(
-            lake_cortex.invoke(
-              'AI_EMBED(' || lake_cortex.sql_literal(model) || ', ' ||
-              lake_cortex.sql_literal(input) || ')::ARRAY', server_name)) AS element)
+    (SELECT embedding FROM cortex.embed_batch(model, ARRAY[input], server_name))
   END
 $function$;
 
-COMMENT ON FUNCTION lake_cortex.embed(text,text,text) IS 'embed a text as a vector with a Cortex embedding model (AI_EMBED)';
+COMMENT ON FUNCTION cortex.embed(text,text,text) IS 'embed a text as a vector with a Cortex embedding model';
 
-CREATE FUNCTION lake_cortex.similarity(input1 text, input2 text,
-                                       server_name text DEFAULT NULL)
+/*
+ * cortex.similarity embeds both texts in one request and returns the cosine
+ * similarity of the two vectors, from -1 to 1.
+ */
+CREATE FUNCTION cortex.similarity(input1 text, input2 text,
+                                  model text DEFAULT 'snowflake-arctic-embed-m-v1.5',
+                                  server_name text DEFAULT NULL)
  RETURNS float8
  LANGUAGE SQL
  VOLATILE
 AS $function$
-  SELECT CASE WHEN input1 IS NULL OR input2 IS NULL THEN NULL ELSE
-    (lake_cortex.invoke(
-      'AI_SIMILARITY(' || lake_cortex.sql_literal(input1) || ', ' ||
-      lake_cortex.sql_literal(input2) || ')', server_name) #>> '{}')::float8
+  SELECT CASE WHEN input1 IS NULL OR input2 IS NULL OR model IS NULL THEN NULL ELSE
+    (SELECT sum(a.value * b.value) /
+            nullif(sqrt(sum(a.value * a.value)) * sqrt(sum(b.value * b.value)), 0)
+     FROM (SELECT array_agg(embedding ORDER BY index) AS vectors
+           FROM cortex.embed_batch(model, ARRAY[input1, input2], server_name)) e,
+          unnest(e.vectors[1:1]) WITH ORDINALITY AS a(value, position)
+          JOIN unnest(e.vectors[2:2]) WITH ORDINALITY AS b(value, position)
+          USING (position))
   END
 $function$;
 
-COMMENT ON FUNCTION lake_cortex.similarity(text,text,text) IS 'semantic similarity of two texts, from -1 to 1 (AI_SIMILARITY)';
-
-CREATE FUNCTION lake_cortex.count_tokens(function_name text, model text, input text,
-                                         server_name text DEFAULT NULL)
- RETURNS bigint
- LANGUAGE SQL
- VOLATILE
-AS $function$
-  SELECT CASE WHEN function_name IS NULL OR input IS NULL THEN NULL ELSE
-    (lake_cortex.invoke(
-      'AI_COUNT_TOKENS(' || lake_cortex.sql_literal(function_name) || ', ' ||
-      CASE WHEN model IS NULL THEN '' ELSE lake_cortex.sql_literal(model) || ', ' END ||
-      lake_cortex.sql_literal(input) || ')', server_name) #>> '{}')::bigint
-  END
-$function$;
-
-COMMENT ON FUNCTION lake_cortex.count_tokens(text,text,text,text) IS 'number of tokens a Cortex function would bill for an input (AI_COUNT_TOKENS)';
+COMMENT ON FUNCTION cortex.similarity(text,text,text,text) IS 'cosine similarity of the embeddings of two texts, from -1 to 1';
 
 /*
  * The functions can only reach an account through a server the caller has
  * USAGE on and a user mapping for, so they are granted like
- * lake_snowflake.execute is.
+ * lake_snowflake.cortex_request is.
  */
 DO $do$
 DECLARE
@@ -286,8 +210,7 @@ DECLARE
 BEGIN
   FOR f IN
     SELECT p.oid::regprocedure FROM pg_proc p
-    WHERE p.pronamespace = 'lake_cortex'::regnamespace
-      AND p.proname NOT IN ('sql_literal', 'sql_json', 'invoke')
+    WHERE p.pronamespace = 'cortex'::regnamespace
   LOOP
     EXECUTE format('REVOKE ALL ON FUNCTION %s FROM public', f);
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO lake_read', f);

@@ -1,55 +1,74 @@
 # Snowflake Cortex AI functions
 
-`pg_lake_cortex` makes the [Snowflake Cortex AI functions](https://docs.snowflake.com/en/user-guide/snowflake-cortex/aisql) callable from Postgres. Each call runs on a Snowflake account through a [`pg_lake_snowflake`](./snowflake-tables.md) foreign server, so the models, the billing and the governance are the account's: the call runs with the credentials of the caller's user mapping and on the server's warehouse.
+`pg_lake_cortex` makes [Snowflake Cortex](https://docs.snowflake.com/en/user-guide/snowflake-cortex/cortex-rest-api) models callable from Postgres. Each call is a request to the Cortex REST API of a Snowflake account, reached through a [`pg_lake_snowflake`](./snowflake-tables.md) foreign server, so the models, the billing and the governance are the account's. A request runs no SQL and needs no warehouse: the account bills the tokens the model processes.
 
 ## Setup
 
 ```sql
 CREATE EXTENSION pg_lake_cortex CASCADE;
 
+-- no warehouse needed
 CREATE SERVER my_account FOREIGN DATA WRAPPER snowflake
-  OPTIONS (account 'myorg-myaccount', warehouse 'AI_WH');
+  OPTIONS (account 'myorg-myaccount');
 CREATE USER MAPPING FOR CURRENT_USER SERVER my_account
   OPTIONS (token '<programmatic access token>');
 
 -- the server the functions use when no server_name is passed
-SET lake_cortex.default_server TO my_account;
+SET pg_lake_cortex.default_server TO my_account;
 ```
 
-The Snowflake role needs the `SNOWFLAKE.CORTEX_USER` database role, and the account needs access to the models you call.
+Any credential of a `pg_lake_snowflake` user mapping works: a programmatic access token, an OAuth token or key-pair authentication. The Cortex REST API takes no role, so the request is authorized by the **default role** of the Snowflake user, and that role needs the `SNOWFLAKE.CORTEX_USER` (or `SNOWFLAKE.CORTEX_REST_API_USER`) database role. The `role` option of the server does not apply. The account also needs access to the models you call.
 
 ## Functions
 
-Every function also takes an optional `server_name` argument that overrides `lake_cortex.default_server`.
+Every function also takes an optional `server_name` argument that overrides `pg_lake_cortex.default_server`.
 
-| Function | Cortex function | Returns |
+| Function | Cortex REST endpoint | Returns |
 |---|---|---|
-| `lake_cortex.complete(model, prompt [, model_parameters jsonb])` | `AI_COMPLETE` | `text` |
-| `lake_cortex.complete_json(model, prompt, response_format jsonb [, model_parameters jsonb])` | `AI_COMPLETE` with structured output | `jsonb` |
-| `lake_cortex.classify(input, categories text[])` | `AI_CLASSIFY` | `text[]` labels |
-| `lake_cortex.filter(predicate, input)` | `AI_FILTER` | `boolean` |
-| `lake_cortex.sentiment(input)` | `AI_SENTIMENT` | `positive`, `negative`, `neutral` or `mixed` |
-| `lake_cortex.translate(input, source_language, target_language)` | `AI_TRANSLATE` | `text` (NULL source language is detected) |
-| `lake_cortex.summarize(input)` | `SNOWFLAKE.CORTEX.SUMMARIZE` | `text` |
-| `lake_cortex.extract(input, response_format jsonb)` | `AI_EXTRACT` | `jsonb` answers |
-| `lake_cortex.redact(input)` | `AI_REDACT` | `text` |
-| `lake_cortex.embed(model, input)` | `AI_EMBED` | `float8[]` |
-| `lake_cortex.similarity(input1, input2)` | `AI_SIMILARITY` | `float8` |
-| `lake_cortex.count_tokens(function_name, model, input)` | `AI_COUNT_TOKENS` | `bigint` |
-| `lake_cortex.invoke(expression [, server_name])` | any Snowflake expression | `jsonb` |
+| `cortex.complete(model, prompt [, model_parameters jsonb])` | chat completions | `text` |
+| `cortex.complete_json(model, prompt, response_format jsonb [, model_parameters jsonb])` | chat completions with structured output | `jsonb` |
+| `cortex.embed(model, input)` | embed | `float8[]` |
+| `cortex.embed_batch(model, inputs text[])` | embed, one request for all inputs | `TABLE (index int, embedding float8[])` |
+| `cortex.similarity(input1, input2 [, model])` | embed, one request for both | `float8`, cosine similarity |
+| `cortex.request(path, body jsonb)` | any endpoint below `/api/v2/cortex/` | `jsonb` |
 
 ```sql
-SELECT id, lake_cortex.sentiment(body) FROM reviews WHERE created_at > now() - interval '1 day';
+SELECT cortex.complete('claude-sonnet-4-5', 'Write a haiku about Postgres');
 
-SELECT lake_cortex.complete_json('llama3.1-70b', 'Extract the city from: ' || address,
+SELECT cortex.complete_json('llama3.1-70b', 'Extract the city from: ' || address,
   '{"type":"json","schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}}');
 ```
 
-A NULL input returns NULL without a round trip.
+- `model_parameters` takes `temperature`, `top_p` and `max_tokens`, as `AI_COMPLETE` does. Other fields are passed to the chat completions API as they are.
+- `response_format` takes the `AI_COMPLETE` form, `{"type": "json", "schema": ...}`, or the `json_schema` form of the chat completions API.
+- `cortex.request` is for what the functions do not cover, such as conversations with several messages or the Anthropic-compatible messages endpoint.
+
+A NULL input returns NULL without a request.
+
+### Embeddings with pgvector
+
+An embedding converts to a pgvector `vector` with a cast. `cortex.embed_batch` embeds many texts in one request, which makes filling a column much cheaper than one request per row:
+
+```sql
+CREATE EXTENSION vector;
+ALTER TABLE reviews ADD COLUMN embedding vector(768);
+
+UPDATE reviews r SET embedding = e.embedding::vector
+FROM (SELECT array_agg(id ORDER BY id) AS ids, array_agg(body ORDER BY id) AS bodies FROM reviews) b,
+     cortex.embed_batch('snowflake-arctic-embed-m-v1.5', b.bodies) e
+WHERE r.id = b.ids[e.index];
+
+-- embed the question once, in a subquery, and let the index do the rest
+SELECT id, body FROM reviews
+ORDER BY embedding <=> (SELECT cortex.embed('snowflake-arctic-embed-m-v1.5', 'broken on arrival')::vector)
+LIMIT 5;
+```
+
+Compare vectors from the same model only.
 
 ## Things to know
 
-- **One statement per call.** Each function call is a round trip to the account (a few hundred milliseconds at least), so calling one over a large table is slow. For bulk work over Snowflake tables, run the Cortex function in Snowflake, for example via `lake_snowflake.execute` or a foreign table on a view.
-- **Arguments are sent as literals.** Cortex needs the model, and some other arguments, to be literals, so values are inlined as escaped Snowflake string literals. Snowflake strings treat a backslash as an escape, and backslashes are doubled as well as quotes.
-- **The functions are `VOLATILE`.** Postgres does not cache their results, and every call is billed by the account.
+- **One request per call.** `cortex.complete` sends one request for every row it is called on. `cortex.embed_batch` is the way to embed many rows at once.
+- **The functions are `VOLATILE`.** Postgres does not cache their results, and evaluates a call once per row even when its arguments are constant. Put a constant call in a scalar subquery, as above, to make it run once.
+- **Rate limits.** The account has a per-model limit on tokens and requests per minute. A request over the limit is retried a few times with a backoff and then fails.
 - Access needs `USAGE` on the foreign server and a user mapping. The functions are granted to `lake_read`.
