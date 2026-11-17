@@ -1,5 +1,6 @@
 import pytest
 import psycopg2
+import threading
 import time
 from utils_pytest import *
 
@@ -156,6 +157,47 @@ def test_worker_uses_search_path_from_set_local_and_function(
     finally:
         superuser_conn.rollback()
         run_command("DROP SCHEMA attached_sp_local CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "timeout_guc", ["statement_timeout", "lock_timeout", "transaction_timeout"]
+)
+def test_worker_uses_caller_timeouts(superuser_conn, pg_extension_base, timeout_guc):
+    """The worker runs under the caller's timeouts, not the database's, so a
+    database-level timeout the caller is not subject to does not cancel the
+    caller's command."""
+    if timeout_guc == "transaction_timeout" and (
+        get_pg_version_num(superuser_conn) < 170000
+    ):
+        pytest.skip("transaction_timeout requires PostgreSQL 17+")
+
+    db = server_params.PG_DATABASE
+    run_command("CREATE TABLE attached_timeouts (x int)", superuser_conn)
+    superuser_conn.commit()
+
+    # both sessions predate the ALTER, so have no timeout of their own
+    locker = open_pg_conn()
+    run_command("LOCK attached_timeouts", locker)
+    unlock = threading.Timer(0.5, locker.rollback)
+    run_command(f"ALTER DATABASE \"{db}\" SET {timeout_guc} = '50ms'", superuser_conn)
+    superuser_conn.commit()
+
+    # waits on the lock past the database's bound, so lock_timeout applies too
+    command = "LOCK attached_timeouts; SELECT pg_sleep(0.5)"
+    try:
+        unlock.start()
+        result = run_query(
+            f"SELECT * FROM extension_base.run_attached($${command}$$)",
+            superuser_conn,
+        )
+        assert [row["command_tag"] for row in result] == ["LOCK TABLE", "SELECT 1"]
+    finally:
+        unlock.join()
+        superuser_conn.rollback()
+        locker.close()
+        run_command(f'ALTER DATABASE "{db}" RESET {timeout_guc}', superuser_conn)
+        run_command("DROP TABLE attached_timeouts", superuser_conn)
         superuser_conn.commit()
 
 
