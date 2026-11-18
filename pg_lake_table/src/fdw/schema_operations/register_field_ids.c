@@ -344,7 +344,8 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 		columnMapping->field = field;
 
 		columnMapping->attrNum = get_attnum(relationId, field->name);
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY && columnMapping->attrNum <= InvalidAttrNumber)
+		if (IsExternalRestCatalogType(icebergCatalogType) &&
+			columnMapping->attrNum <= InvalidAttrNumber)
 		{
 			/*
 			 * If no such user column exists, skip. System columns have

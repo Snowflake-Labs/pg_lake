@@ -242,7 +242,7 @@ ServerHasDependentRestIcebergTable(Oid serverOid)
 
 		IcebergCatalogType type = GetIcebergCatalogType(depForm->objid);
 
-		if (type == REST_CATALOG_READ_WRITE || type == REST_CATALOG_READ_ONLY)
+		if (type == REST_CATALOG_READ_WRITE || IsExternalRestCatalogType(type))
 		{
 			found = true;
 			break;

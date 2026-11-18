@@ -104,7 +104,7 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 {
 	IcebergCatalogType icebergCatalogType = GetIcebergCatalogType(relationId);
 
-	if (icebergCatalogType == REST_CATALOG_READ_ONLY)
+	if (IsExternalRestCatalogType(icebergCatalogType))
 		return ResolveRestCatalogTable(relationId);
 
 	if (icebergCatalogType == OBJECT_STORE_READ_ONLY)

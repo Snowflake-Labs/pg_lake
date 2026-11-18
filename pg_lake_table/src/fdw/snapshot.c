@@ -67,9 +67,7 @@ static List *GetBaseRestrictInfoForRelation(List *relationRestrictionsList,
 static void ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 											  List **fileScans,
 											  List **positionDeleteFileScans);
-static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
 static int	NullSafeStrcmp(const char *a, const char *b);
-static bool TypesAreCompatible(PGType pgType, PGType icebergType);
 
 /*
  * CreatePgLakeScanSnapshot generates a current snapshot for a list
@@ -304,7 +302,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 */
 		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-		if (catalogType == REST_CATALOG_READ_ONLY ||
+		if (IsExternalRestCatalogType(catalogType) ||
 			catalogType == OBJECT_STORE_READ_ONLY ||
 			catalogType == NONE_CATALOG)
 			ErrorIfSchemasDoNotMatch(relationId, metadata);
@@ -420,7 +418,7 @@ NullSafeStrcmp(const char *a, const char *b)
 * ErrorIfSchemasDoNotMatch is a helper function that checks if the Iceberg
 * table schema matches the Postgres table schema.
 */
-static void
+void
 ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 {
 	IcebergTableSchema *icebergTableSchema = GetCurrentIcebergTableSchema(metadata);
@@ -501,7 +499,7 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 * means the element types are compatible. For maps, compatibility means the
 * key and value types are compatible.
 */
-static bool
+bool
 TypesAreCompatible(PGType pgType, PGType icebergType)
 {
 	/* if both are the same base type, they are compatible */

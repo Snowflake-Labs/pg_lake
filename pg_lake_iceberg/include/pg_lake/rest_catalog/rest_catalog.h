@@ -433,6 +433,8 @@ typedef struct RestCatalogStagedTable
 }			RestCatalogStagedTable;
 
 extern PGDLLEXPORT RestCatalogStagedTable StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema, const char *requestedLocation);
+extern PGDLLEXPORT RestCatalogStagedTable CreateRestCatalogIcebergTable(Oid relationId, DataFileSchema * dataFileSchema,
+																		const char *requestedLocation, bool stageCreate);
 extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs, const char *stagedUuid);
 extern PGDLLEXPORT RestCatalogLoadTableResult ResolveReadOnlyRestCatalogTable(RestCatalogOptions * opts, char **catalogName,
 																			  char **namespaceName, char **tableName);
@@ -445,6 +447,8 @@ extern PGDLLEXPORT char *LoadRestCatalogMetadataLocation(RestCatalogOptions * op
 extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogName,
 																	   const char *namespaceName, const char *relationName);
 extern PGDLLEXPORT RestCatalogLoadTableResult LoadTableFromRestCatalogForIcebergTable(Oid relationId);
+extern PGDLLEXPORT bool RestCatalogTableExists(RestCatalogOptions * opts, const char *catalogName,
+											   const char *namespaceName, const char *tableName);
 extern PGDLLEXPORT char *GetMetadataLocationForRestCatalogForIcebergTable(Oid relationId);
 extern PGDLLEXPORT bool RestCatalogVendingEnabledForRelation(Oid relationId);
 
