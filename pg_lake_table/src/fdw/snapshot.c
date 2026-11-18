@@ -475,6 +475,8 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 			mappedAttnums = bms_add_member(mappedAttnums, columnMapping->attrNum);
 	}
 
+	bool		emitsFilename =
+		GetBoolOption(GetForeignTable(relationId)->options, "filename", false);
 	Relation	rel = RelationIdGetRelation(relationId);
 	TupleDesc	tupleDesc = RelationGetDescr(rel);
 	char	   *unmatchedColumn = NULL;
@@ -483,11 +485,15 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 	{
 		Form_pg_attribute attr = TupleDescAttr(tupleDesc, attIdx);
 
-		if (!attr->attisdropped && !bms_is_member(attr->attnum, mappedAttnums))
-		{
-			unmatchedColumn = pstrdup(NameStr(attr->attname));
-			break;
-		}
+		if (attr->attisdropped || bms_is_member(attr->attnum, mappedAttnums))
+			continue;
+
+		/* the scan fills the filename column, not a field */
+		if (emitsFilename && strcmp(NameStr(attr->attname), "_filename") == 0)
+			continue;
+
+		unmatchedColumn = pstrdup(NameStr(attr->attname));
+		break;
 	}
 
 	RelationClose(rel);

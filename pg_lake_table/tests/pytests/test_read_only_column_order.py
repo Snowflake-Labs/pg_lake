@@ -59,6 +59,30 @@ def test_column_dropped_in_catalog(pg_conn, iceberg_table):
     pg_conn.rollback()
 
 
+def test_filename_column(pg_conn, s3, extension, with_default_location):
+    """The filename column is filled by the scan, not by an Iceberg field."""
+    run_command("CREATE TABLE filename_source (a int, b text) USING iceberg", pg_conn)
+    run_command("INSERT INTO filename_source VALUES (1, 'x')", pg_conn)
+    pg_conn.commit()
+    metadata = run_query(
+        "SELECT metadata_location FROM iceberg_tables "
+        "WHERE table_name = 'filename_source'",
+        pg_conn,
+    )[0][0]
+
+    run_command(
+        "CREATE FOREIGN TABLE filename_read () SERVER pg_lake "
+        f"OPTIONS (path '{metadata}', format 'iceberg', filename 'true')",
+        pg_conn,
+    )
+    rows = run_query("SELECT a, b, _filename LIKE 's3://%' FROM filename_read", pg_conn)
+    assert rows == [[1, "x", True]]
+
+    pg_conn.rollback()
+    run_command("DROP TABLE filename_source", pg_conn)
+    pg_conn.commit()
+
+
 @pytest.fixture
 def iceberg_table(
     installcheck, pg_conn, s3, polaris_session, set_polaris_gucs, with_default_location
