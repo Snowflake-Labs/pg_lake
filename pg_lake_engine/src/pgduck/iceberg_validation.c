@@ -20,7 +20,8 @@
  * datum-level validation: out-of-range policy resolution, temporal type
  * classification, and TypeNeedsIcebergValidation which determines
  * whether a type requires any validation (temporal boundaries,
- * multidimensional array rejection, or bounded numeric NaN).
+ * multidimensional array rejection, bounded numeric NaN, or +-infinity
+ * intervals).
  */
 #include "postgres.h"
 
@@ -94,11 +95,11 @@ IsTemporalType(Oid typeOid)
  * arrays, composites, maps, and domains.
  *
  * Validation covers: temporal boundaries (date/timestamp/timestamptz),
- * multidimensional array rejection (any array type), and bounded
- * numeric NaN.  The latter is non-pushdown only: pushdown refuses a
- * query that can produce a NaN numeric, and a value DuckDB reads into a
- * DECIMAL column never is one, so there is nothing left to validate on
- * that path.
+ * multidimensional array rejection (any array type), bounded numeric
+ * NaN, and +-infinity intervals.  The last two are non-pushdown only:
+ * pushdown refuses a query that can produce a NaN numeric, a value DuckDB
+ * reads into a DECIMAL column never is one, and DuckDB intervals have no
+ * infinity, so there is nothing left to validate on that path.
  * Unbounded and large-precision numerics are mapped to float8 on
  * Iceberg tables, so NaN is valid for those and no validation is needed.
  */
@@ -111,6 +112,11 @@ TypeNeedsIcebergValidation(Oid typeOid, int32 typmod, bool isPushdown)
 	if (!isPushdown && typeOid == NUMERICOID &&
 		!IsUnsupportedNumericForIceberg(typeOid, typmod))
 		return true;
+
+#if PG_VERSION_NUM >= 170000
+	if (!isPushdown && typeOid == INTERVALOID)
+		return true;
+#endif
 
 	Oid			elemType = get_element_type(typeOid);
 

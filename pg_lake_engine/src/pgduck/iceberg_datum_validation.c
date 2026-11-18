@@ -70,6 +70,11 @@ static Datum IcebergErrorOrClampTemporalDatum(Datum value, Oid typeOid,
 static Datum IcebergErrorOrClampNumericDatum(Datum value, int32 typmod,
 											 IcebergOutOfRangePolicy policy,
 											 bool *isNull);
+#if PG_VERSION_NUM >= 170000
+static Datum IcebergErrorOrClampIntervalDatum(Datum value,
+											  IcebergOutOfRangePolicy policy,
+											  bool *isNull);
+#endif
 static Datum IcebergErrorOrClampMultiDimArrayDatum(ArrayType *array,
 												   IcebergOutOfRangePolicy policy,
 												   bool *isNull);
@@ -542,6 +547,36 @@ IcebergErrorOrClampNumericDatum(Datum value, int32 typmod,
 }
 
 
+#if PG_VERSION_NUM >= 170000
+/*
+ * IcebergErrorOrClampIntervalDatum handles a +-infinity interval (PG 17+),
+ * which the Iceberg struct<months, days, microseconds> cannot represent:
+ * raises an error, or nullifies it via *isNull.  Finite intervals are
+ * returned unchanged.
+ */
+static Datum
+IcebergErrorOrClampIntervalDatum(Datum value, IcebergOutOfRangePolicy policy,
+								 bool *isNull)
+{
+	if (!INTERVAL_NOT_FINITE(DatumGetIntervalP(value)))
+		return value;
+
+	if (policy == ICEBERG_OOR_ERROR)
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_DATETIME_VALUE_OUT_OF_RANGE),
+				 errmsg("+-Infinity intervals are not allowed in iceberg tables"),
+				 errhint("Use out_of_range_values = 'clamp' to "
+						 "automatically replace +-Infinity intervals "
+						 "with NULL.")));
+	}
+
+	*isNull = true;
+	return (Datum) 0;
+}
+#endif
+
+
 /*
  * IcebergErrorOrClampMultiDimArrayDatum handles a multidimensional
  * PostgreSQL array: raises an error, or nullifies it via *isNull.
@@ -582,9 +617,9 @@ IcebergErrorOrClampMultiDimArrayDatum(ArrayType *array,
  * Iceberg write constraints, deconstructing and reconstructing arrays,
  * composites, maps (domain over array of composites), and domains.
  *
- * *isNull is set to true only when a scalar numeric NaN is clamped at
- * this recursion level.  For containers, NaN-clamped elements are
- * absorbed as NULL within the reconstructed container.
+ * *isNull is set to true only when a scalar numeric NaN or infinite
+ * interval is clamped at this recursion level.  For containers, clamped
+ * elements are absorbed as NULL within the reconstructed container.
  *
  * *modified is set to true when the returned Datum differs from the
  * input, allowing callers to skip reconstruction when nothing changed.
@@ -613,6 +648,17 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 		*modified = *isNull;
 		return result;
 	}
+
+#if PG_VERSION_NUM >= 170000
+	if (typeOid == INTERVALOID)
+	{
+		Datum		result = IcebergErrorOrClampIntervalDatum(value, policy,
+															  isNull);
+
+		*modified = *isNull;
+		return result;
+	}
+#endif
 
 	/*
 	 * array types: nullify multidim (→ NULL), validate elements,
@@ -782,8 +828,8 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
 /*
  * IcebergErrorOrClampDatum validates a Datum for Iceberg write constraints.
  *
- * Recursively handles scalar types (date/timestamp/timestamptz/numeric)
- * as well as nested containers (arrays, composites, maps, domains).
+ * Recursively handles scalar types (date/timestamp/timestamptz/numeric/
+ * interval) as well as nested containers (arrays, composites, maps, domains).
  * For types that need no validation the value is returned unchanged.
  *
  * typmod is used to distinguish bounded numerics (Iceberg decimal) from
@@ -791,9 +837,10 @@ IcebergErrorOrClampNestedDatum(Datum value, Oid typeOid, int32 typmod,
  * clamped; unbounded numerics pass through unchanged.
  *
  * *isNull is set to true when a top-level unsupported value is clamped:
- * numeric NaN or a multidimensional array.  The caller should write NULL
- * instead of the original value.  Unsupported values nested inside
- * containers are absorbed as NULL within the reconstructed container.
+ * numeric NaN, a +-infinity interval, or a multidimensional array.  The
+ * caller should write NULL instead of the original value.  Unsupported
+ * values nested inside containers are absorbed as NULL within the
+ * reconstructed container.
  */
 Datum
 IcebergErrorOrClampDatum(Datum value, Oid typeOid, int32 typmod,

@@ -22,7 +22,8 @@
 /*
  * IcebergErrorOrClampDatum validates a Datum for Iceberg write constraints.
  *
- * Recursively handles scalar types (date/timestamp/timestamptz/numeric),
+ * Recursively handles scalar types (date/timestamp/timestamptz/numeric/
+ * interval),
  * multidimensional arrays (clamped to NULL), and nested containers
  * (composites, maps, domains).  For types that need no validation the
  * value is returned unchanged.
@@ -32,8 +33,8 @@
  * clamped; unbounded numerics pass through unchanged.
  *
  * *isNull is set to true when a top-level unsupported value is clamped:
- * numeric NaN or a multidimensional array.  The caller should write NULL
- * instead of the original value.  NaN values and multidimensional arrays
+ * numeric NaN, a +-infinity interval, or a multidimensional array.  The
+ * caller should write NULL instead of the original value.  Such values
  * nested inside containers are absorbed as NULL within the reconstructed
  * container.
  */
