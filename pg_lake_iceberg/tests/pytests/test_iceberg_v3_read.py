@@ -246,6 +246,37 @@ def test_deletion_vector_is_rejected(
     ]
 
 
+@pytest.mark.parametrize("type_name", ["timestamp_ns", "timestamptz_ns"])
+def test_v3_nanosecond_timestamp_is_rejected(
+    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck, type_name
+):
+    """A nanosecond timestamp is refused by name, not read as a microsecond
+    one: its bounds would decode to dates tens of millennia away, and the
+    pruning built on them would skip files with matching rows."""
+    if installcheck:
+        return
+
+    table = _make_table(iceberg_catalog, f"v3_{type_name}")
+
+    metadata = json.loads(_get(s3, table.metadata_location))
+    metadata["format-version"] = 3
+    for schema in metadata["schemas"]:
+        if schema["schema-id"] == metadata["current-schema-id"]:
+            schema["fields"][1]["type"] = type_name
+
+    ns_location = table.metadata_location.replace(
+        ".metadata.json", f".v3-{type_name}.metadata.json"
+    )
+    _put(s3, ns_location, json.dumps(metadata).encode())
+
+    offset = server_log_offset()
+    err = _data_files(superuser_conn, ns_location, raise_error=False)
+    assert f"iceberg type {type_name} is not supported" in str(err)
+    assert catalog_log_lines(offset) == [
+        f"a table uses the Iceberg type {type_name}, which pg_lake does not support"
+    ]
+
+
 def test_v3_column_default_is_rejected(
     superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck
 ):
@@ -279,35 +310,4 @@ def test_v3_column_default_is_rejected(
     assert "city" in str(err)
     assert catalog_log_lines(offset) == [
         "a table uses Iceberg column default values, which pg_lake does not support"
-    ]
-
-
-@pytest.mark.parametrize("type_name", ["timestamp_ns", "timestamptz_ns"])
-def test_v3_nanosecond_timestamp_is_rejected(
-    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck, type_name
-):
-    """A nanosecond timestamp is refused by name, not read as a microsecond
-    one: its bounds would decode to dates tens of millennia away, and the
-    pruning built on them would skip files with matching rows."""
-    if installcheck:
-        return
-
-    table = _make_table(iceberg_catalog, f"v3_{type_name}")
-
-    metadata = json.loads(_get(s3, table.metadata_location))
-    metadata["format-version"] = 3
-    for schema in metadata["schemas"]:
-        if schema["schema-id"] == metadata["current-schema-id"]:
-            schema["fields"][1]["type"] = type_name
-
-    ns_location = table.metadata_location.replace(
-        ".metadata.json", f".v3-{type_name}.metadata.json"
-    )
-    _put(s3, ns_location, json.dumps(metadata).encode())
-
-    offset = server_log_offset()
-    err = _data_files(superuser_conn, ns_location, raise_error=False)
-    assert f"iceberg type {type_name} is not supported" in str(err)
-    assert catalog_log_lines(offset) == [
-        f"a table uses the Iceberg type {type_name}, which pg_lake does not support"
     ]
