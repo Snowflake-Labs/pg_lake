@@ -115,6 +115,8 @@ static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
 								   PgLakeTableProperties tableProperties,
 								   List *columnsUsedInFilters);
 static List *GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds);
+static bool PartitionFieldIdIsAmbiguous(List *partitionFields,
+										IcebergPartitionSpecField * specField);
 static List *GetExternalIcebergFieldsForAttributes(Oid relationId, List *attrNos);
 static List *GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
 									   HTAB *fieldIdCache, List *columnStats,
@@ -344,7 +346,7 @@ GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
 
 /*
  * GetPartitionSpecFieldsUsedInQuery gets the partition spec fields that are
- * used in the query filters.
+ * used in the query filters and can prune data files.
  */
 static List *
 GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds)
@@ -362,13 +364,40 @@ GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds)
 
 		hash_search(fieldIdsToUseInBounds, &specField->source_id, HASH_FIND, &found);
 
-		if (found)
+		if (found && PartitionTransformCanPrune(specField->transform) &&
+			!PartitionFieldIdIsAmbiguous(partitionFields, specField))
 		{
 			filteredPartitionFields = lappend(filteredPartitionFields, specField);
 		}
 	}
 
 	return filteredPartitionFields;
+}
+
+
+/*
+ * PartitionFieldIdIsAmbiguous returns whether another partition spec gives
+ * specField's partition field id a different source or transform. A v1
+ * table reuses ids: a dropped partition field keeps its id with a void
+ * transform. Pruning finds a data file's partition values by id across all
+ * specs, so it cannot tell which transform produced such a value.
+ */
+static bool
+PartitionFieldIdIsAmbiguous(List *partitionFields, IcebergPartitionSpecField * specField)
+{
+	ListCell   *otherCell = NULL;
+
+	foreach(otherCell, partitionFields)
+	{
+		IcebergPartitionSpecField *other = lfirst(otherCell);
+
+		if (other->field_id == specField->field_id &&
+			(other->source_id != specField->source_id ||
+			 strcmp(other->transform, specField->transform) != 0))
+			return true;
+	}
+
+	return false;
 }
 
 

@@ -31,6 +31,7 @@ extern PGDLLEXPORT List *CurrentPartitionTransformList(Oid relationId);
 extern IcebergPartitionSpec * GetPartitionSpecIfAlreadyExist(Oid relationId, List *partitionTransforms);
 extern List *AllPartitionTransformList(Oid relationId);
 extern List *GetPartitionTransformsFromSpecFields(Oid relationId, List *specFields);
+extern bool PartitionTransformCanPrune(const char *transformName);
 extern void *DeserializePartitionValueFromPGText(IcebergPartitionTransform * transform,
 												 const char *valueText, size_t *valueLength);
 extern const char *SerializePartitionValueToPGText(void *value, size_t valueLength, IcebergPartitionTransform * transform);
