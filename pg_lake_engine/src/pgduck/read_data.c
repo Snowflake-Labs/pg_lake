@@ -59,6 +59,7 @@ static char *ReadDataSourceFunction(List *sourcePaths,
 									ReadRowLocationMode emitRowLocation,
 									bool emitRowId);
 static char *BuildParquetSchema(DataFileSchema * schema, bool emitRowId);
+static char *MappedNamesToDuckDBList(List *names);
 static char *GetSchemaType(Field * mapping);
 static const char *IcebergScalarTypeNameToDuckDBTypeName(const char *icebergTypeName);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
@@ -703,6 +704,13 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 
 	bool		addComma = false;
 	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
+	bool		hasMappedNames = false;
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
+	{
+		if (schema->fields[fieldIdx].mappedNames != NIL)
+			hasMappedNames = true;
+	}
 
 	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
 	{
@@ -722,24 +730,63 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 		 * add this to the schema 0: {name: 'renamed_i', type: 'BIGINT',
 		 * default_value: '<default>'}
 		 */
-		appendStringInfo(&schemaString, "%d: {name: %s, type: %s, default_value: %s}",
+		appendStringInfo(&schemaString, "%d: {name: %s, type: %s, default_value: %s",
 						 field->id,
 						 quote_literal_cstr(DuckDBNameForFieldId(field->name, field->id,
 																 hasCollision)),
 						 quote_literal_cstr(GetSchemaType(field->type)),
 						 defaultValue);
 
+		/* every map value needs the same struct type */
+		if (hasMappedNames)
+			appendStringInfo(&schemaString, ", names: %s",
+							 MappedNamesToDuckDBList(field->mappedNames));
+
+		appendStringInfoString(&schemaString, "}");
+
 		addComma = true;
 	}
 
 	if (emitRowId)
-		appendStringInfo(&schemaString, "%s %d: {name: '_row_id', type: 'BIGINT', default_value: NULL}",
+		appendStringInfo(&schemaString, "%s %d: {name: '_row_id', type: 'BIGINT', default_value: NULL%s}",
 						 addComma ? ", " : "",
-						 ICEBERG_ROWID_FIELD_ID);
+						 ICEBERG_ROWID_FIELD_ID,
+						 hasMappedNames ? ", names: NULL::VARCHAR[]" : "");
 
 	appendStringInfoString(&schemaString, "}");
 
 	return schemaString.data;
+}
+
+
+/*
+ * MappedNamesToDuckDBList returns a DuckDB VARCHAR[] literal of the given
+ * names, or a NULL one.
+ */
+static char *
+MappedNamesToDuckDBList(List *names)
+{
+	if (names == NIL)
+		return "NULL::VARCHAR[]";
+
+	StringInfoData list;
+
+	initStringInfo(&list);
+	appendStringInfoChar(&list, '[');
+
+	ListCell   *nameCell = NULL;
+
+	foreach(nameCell, names)
+	{
+		if (foreach_current_index(nameCell) > 0)
+			appendStringInfoString(&list, ", ");
+
+		appendStringInfoString(&list, quote_literal_cstr(lfirst(nameCell)));
+	}
+
+	appendStringInfoString(&list, "]::VARCHAR[]");
+
+	return list.data;
 }
 
 
