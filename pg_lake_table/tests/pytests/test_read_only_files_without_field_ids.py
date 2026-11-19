@@ -66,3 +66,24 @@ def test_file_without_field_ids(
         pg_conn.commit()
         catalog.drop_table(f"{namespace}.t")
         catalog.drop_namespace(namespace)
+
+
+def test_file_without_field_ids_fails_with_row_numbers(pgduck_conn, s3):
+    """A scan of a table with position deletes reads row numbers, whose column
+    has a field id even in a file written without any."""
+    path = f"s3://{TEST_BUCKET}/no_field_ids_{uuid.uuid4().hex[:8]}/f.parquet"
+    run_command(
+        f"COPY (SELECT 1::BIGINT AS id, 'a' AS v) TO '{path}' (FORMAT PARQUET)",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
+    read = f"""read_parquet('{path}', schema=map {{
+                   1: {{name: 'id', type: 'BIGINT', default_value: NULL}},
+                   2: {{name: 'v', type: 'VARCHAR', default_value: NULL}}}},
+                   filename=true, file_row_number=true)"""
+
+    error = run_query(f"SELECT id, v FROM {read}", pgduck_conn, False)
+    assert "the file has no field ids to match its columns by" in str(error)
+    pgduck_conn.rollback()
+
+    assert run_query(f"SELECT file_row_number FROM {read}", pgduck_conn) == [[0]]

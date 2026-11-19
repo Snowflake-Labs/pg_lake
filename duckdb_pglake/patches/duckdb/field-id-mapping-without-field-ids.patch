@@ -1,15 +1,49 @@
 diff --git a/src/common/multi_file/multi_file_column_mapper.cpp b/src/common/multi_file/multi_file_column_mapper.cpp
-index db8ba4ee7c1..919048475e2 100644
+index db8ba4e..a6eaa6e 100644
 --- a/src/common/multi_file/multi_file_column_mapper.cpp
 +++ b/src/common/multi_file/multi_file_column_mapper.cpp
-@@ -789,6 +789,16 @@ ResultColumnMapping MultiFileColumnMapper::CreateColumnMapping(MultiFileColumnMa
+@@ -88,8 +88,8 @@ struct FieldIdMapper : public ColumnMapper {
+ 		for (idx_t col_idx = 0; col_idx < columns.size(); col_idx++) {
+ 			auto &column = columns[col_idx];
+ 			if (column.identifier.IsNull()) {
+-				// Extra columns at the end will not have a field_id
+-				break;
++				// a column without a field id can come before ones with one, such as file_row_number
++				continue;
+ 			}
+ 			auto field_id = column.GetIdentifierFieldId();
+ 			field_id_map.emplace(field_id, MultiFileLocalColumnId(col_idx));
+@@ -769,6 +769,21 @@ ResultColumnMapping MultiFileColumnMapper::CreateColumnMappingByMapper(const Col
+ 	return result;
+ }
+ 
++//! Whether a column is the file_row_number column, which has a field id in files written without any
++static bool IsFileRowNumberColumn(const MultiFileColumnDefinition &column) {
++	return !column.identifier.IsNull() && column.identifier.type().id() == LogicalTypeId::INTEGER &&
++	       column.GetIdentifierFieldId() == MultiFileReader::ORDINAL_FIELD_ID;
++}
++
++static bool HasFieldIds(const vector<MultiFileColumnDefinition> &columns) {
++	for (auto &column : columns) {
++		if (!column.identifier.IsNull() && !IsFileRowNumberColumn(column)) {
++			return true;
++		}
++	}
++	return false;
++}
++
+ ResultColumnMapping MultiFileColumnMapper::CreateColumnMapping(MultiFileColumnMappingMode mapping_mode) {
+ 	auto &reader = *reader_data.reader;
+ 	auto &local_columns = reader.GetColumns();
+@@ -789,6 +804,17 @@ ResultColumnMapping MultiFileColumnMapper::CreateColumnMapping(MultiFileColumnMa
  
  		// we have expected types: create a map of field_id -> column index
  		FieldIdMapper field_id_map(local_columns);
-+		if (field_id_map.MapCount() == 0 && !local_columns.empty()) {
++		if (!local_columns.empty() && !HasFieldIds(local_columns)) {
 +			// every column of a file written without field ids would read as its default
 +			for (auto &global_id : global_column_ids) {
-+				if (!IsVirtualColumn(global_id.GetPrimaryIndex())) {
++				auto global_column_id = global_id.GetPrimaryIndex();
++				if (!IsVirtualColumn(global_column_id) && !IsFileRowNumberColumn(global_columns[global_column_id])) {
 +					throw InvalidInputException(
 +					    "Failed to read file \"%s\": the file has no field ids to match its columns by",
 +					    reader.GetFileName());
