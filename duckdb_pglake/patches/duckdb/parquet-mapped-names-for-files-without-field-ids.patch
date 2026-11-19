@@ -1,0 +1,88 @@
+--- a/extension/parquet/include/parquet_reader.hpp
++++ b/extension/parquet/include/parquet_reader.hpp
+@@ -99,6 +99,8 @@
+ 	LogicalType type;
+ 	Value default_value;
+ 	Value identifier;
++	//! Names the column has in files written without field ids (an Iceberg name mapping)
++	vector<string> mapped_names;
+ 
+ public:
+ 	void Serialize(Serializer &serializer) const;
+--- a/extension/parquet/parquet_multi_file_info.cpp
++++ b/extension/parquet/parquet_multi_file_info.cpp
+@@ -226,6 +226,11 @@
+ 		throw InvalidInputException("'schema' expects the third field of the struct to be called 'default_value'");
+ 	}
+ 	//! NOTE: default_value can be any type
++	if (children.size() > 3 && (!StringUtil::CIEquals(children[3].first, "names") ||
++	                            children[3].second != LogicalType::LIST(LogicalType::VARCHAR))) {
++		throw InvalidInputException("'schema' expects the optional fourth field of the struct to be 'names' of type "
++		                            "VARCHAR[]");
++	}
+ 
+ 	if (key_type.id() != LogicalTypeId::INTEGER && key_type.id() != LogicalTypeId::VARCHAR) {
+ 		throw InvalidInputException(
+--- a/extension/parquet/parquet_reader.cpp
++++ b/extension/parquet/parquet_reader.cpp
+@@ -809,6 +809,38 @@
+ 	return result;
+ }
+ 
++//! Gives the top-level columns of a file written without field ids the field ids their names map to, as Iceberg
++//! readers do with a table's name mapping. A file with field ids keeps them, mapped names or not.
++static void AssignFieldIdsFromMappedNames(vector<MultiFileColumnDefinition> &columns,
++                                          const vector<ParquetColumnDefinition> &schema) {
++	unordered_map<string, Value> field_ids;
++	for (auto &column : schema) {
++		if (column.identifier.type().id() != LogicalTypeId::INTEGER) {
++			continue;
++		}
++		for (auto &name : column.mapped_names) {
++			field_ids.emplace(name, column.identifier);
++		}
++	}
++	if (field_ids.empty()) {
++		return;
++	}
++	for (auto &column : columns) {
++		if (!column.identifier.IsNull() && column.GetIdentifierFieldId() != MultiFileReader::ORDINAL_FIELD_ID) {
++			return;
++		}
++	}
++	for (auto &column : columns) {
++		if (!column.identifier.IsNull()) {
++			continue;
++		}
++		auto entry = field_ids.find(column.name);
++		if (entry != field_ids.end()) {
++			column.identifier = entry->second;
++		}
++	}
++}
++
+ void ParquetReader::InitializeSchema(ClientContext &context) {
+ 	auto file_meta_data = GetFileMetadata();
+ 
+@@ -828,6 +860,7 @@
+ 		auto &element = root_schema->children[i];
+ 		columns.push_back(ParseColumnDefinition(*file_meta_data, element));
+ 	}
++	AssignFieldIdsFromMappedNames(columns, parquet_options.schema);
+ }
+ 
+ void ParquetReader::AddVirtualColumn(column_t virtual_column_id) {
+@@ -864,6 +897,13 @@
+ 		throw BinderException("Unable to cast Parquet schema default_value \"%s\" to %s", children[2].ToString(),
+ 		                      result.type.ToString());
+ 	}
++	if (children.size() > 3 && !children[3].IsNull()) {
++		for (auto &name : ListValue::GetChildren(children[3])) {
++			if (!name.IsNull()) {
++				result.mapped_names.push_back(StringValue::Get(name));
++			}
++		}
++	}
+ 
+ 	return result;
+ }

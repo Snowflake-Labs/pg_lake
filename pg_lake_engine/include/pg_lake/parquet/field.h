@@ -96,6 +96,12 @@ typedef struct FieldStructElement
 	const char *initialDefault;
 	const char *duckSerializedInitialDefault;
 	struct Field *type;
+
+	/*
+	 * Names of a table column in data files written without field ids, from
+	 * the Iceberg table's name mapping (char * list, top-level fields only).
+	 */
+	List	   *mappedNames;
 }			FieldStructElement;
 
 /*
