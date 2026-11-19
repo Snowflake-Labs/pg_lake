@@ -55,6 +55,12 @@ precision, is created as `double precision` instead. Set
 `pg_lake_iceberg.unsupported_numeric_as_double = off` to reject those columns at
 `CREATE TABLE` time instead, so that you can choose a precision yourself.
 
+Only the column type is rewritten, and only for a `numeric` or `numeric[]` column. A `numeric`
+nested in a composite type or a map keeps the type you declared, since rewriting it would mean
+giving the column a composite type you never wrote, but it is still stored as an Iceberg
+`double`. `\d` therefore shows `numeric` while values beyond the precision of
+`double precision` lose digits; `CREATE TABLE` reports this with a notice.
+
 `NaN` and infinity are valid in `double precision` columns, and are not subject to
 `out_of_range_values`.
 

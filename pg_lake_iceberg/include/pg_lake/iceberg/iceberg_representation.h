@@ -51,10 +51,11 @@
  * `type` unchanged when nothing is rewritten (including when the GUC is off, in
  * which case CREATE rejects such a column outright rather than storing it).
  *
- * Rewriting a nested leaf means rebuilding the enclosing composite or map, which
- * materializes a type in lake_struct / the map schema -- the create path's own
- * behaviour.  A caller that must not create catalog types should first reject
- * the input with TypeHasUnrepresentableLeaf(type, true).
+ * Only a numeric column and an array of numeric are rewritten.  A leaf below a
+ * composite type or a map is left as it is, exactly as the create path leaves
+ * it, because rewriting it would mean declaring a composite or map type the
+ * user never wrote.  Such a leaf is stored as an Iceberg double instead, which
+ * TypeHasUnrepresentableLeaf(type, true) reports on.
  */
 extern PGDLLEXPORT PGType IcebergStoredPostgresType(PGType type);
 
@@ -91,11 +92,13 @@ extern PGDLLEXPORT bool IcebergFieldsEquivalent(Field * a, Field * b);
  * TypeHasUnrepresentableLeaf - true when the type tree has a leaf Iceberg
  * cannot hold natively (currently: a numeric that is unbounded or whose
  * precision/scale exceeds DUCKDB_MAX_NUMERIC_PRECISION).  `nestedOnly`
- * restricts the answer to leaves below the top level, i.e. those whose rewrite
- * would require materializing a new composite or map type.
+ * restricts the answer to leaves below the top level, array elements included.
+ * Of those, an array element is rewritten to float8, while a leaf below a
+ * composite type or a map keeps its declared type and is stored as an Iceberg
+ * double.
  *
  * Shares ConvertTypeTree's traversal, so it cannot drift out of coverage from
- * the rewrite it predicts, and creates no catalog types (see the leaf rule).
+ * the rewrite it predicts.
  */
 extern PGDLLEXPORT bool TypeHasUnrepresentableLeaf(PGType type,
 												   bool nestedOnly);
