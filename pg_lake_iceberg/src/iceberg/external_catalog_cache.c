@@ -59,6 +59,7 @@
 
 /* foreach_ptr() on the versions of Postgres that do not have it yet */
 #include "pg_extension_base/pg_compat.h"
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/iceberg/external_catalog_cache.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -117,7 +118,7 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 		tableProperties.format == DATA_FORMAT_ICEBERG)
 	{
 		/* the location is a table option, which the relation lock keeps still */
-		return GetForeignTablePath(relationId);
+		return S3URLFromHadoopScheme(GetForeignTablePath(relationId));
 	}
 
 	ereport(ERROR,

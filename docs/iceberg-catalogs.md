@@ -291,10 +291,21 @@ WITH (catalog = 'sales_catalog', read_only = true);
 For equality-delete support and its limitations, see
 [Reading external equality deletes](#reading-external-equality-deletes).
 
+pg_lake reads columns by their Iceberg field IDs. Data files written without field IDs, as
+added by `add_files` or left by `migrate` and `snapshot`, can only be read through the table's
+name mapping (`schema.name-mapping.default`), which pg_lake does not support: a query that
+reads a column from such a file fails with `the file has no field ids to match its columns
+by`.
+
 Attached tables cannot be written to. Writing would mean taking over the table's metadata,
 field IDs and file inventory from whatever produced them, which pg_lake does not do: it writes
 only to tables it created. To move existing data under pg_lake, create a new table and copy
 into it.
+
+pg_lake reads manifests and manifest lists that are uncompressed or compressed with deflate
+(Iceberg's default, `gzip`) or snappy. A table whose manifests are compressed with zstd or
+bzip2, as PyIceberg writes them when `write.avro.compression-codec` is set to one of those,
+cannot be read: queries fail with `File header contains an unknown codec`.
 
 #### Lowercase column names from external engines
 
@@ -576,6 +587,7 @@ resolving the credentials a query needs fails.
 ```
 a table uses Iceberg deletion vectors, which pg_lake does not support
 a table uses Iceberg column default values, which pg_lake does not support
+a table uses Iceberg files in a format other than Parquet, which pg_lake does not support
 a table uses Iceberg format version <version>, which pg_lake cannot read
 a table uses Iceberg format version <version>, which pg_lake cannot write
 a table uses the Iceberg type <type>, which pg_lake does not support

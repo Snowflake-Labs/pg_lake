@@ -444,6 +444,30 @@ IsSupportedURL(const char *path)
 
 
 /*
+ * S3URLFromHadoopScheme returns url with the s3a:// or s3n:// scheme of
+ * Hadoop's S3 file systems replaced by s3://, and any other url as is.
+ * Engines built on Hadoop write those schemes into the Iceberg metadata,
+ * manifests and position delete files of the tables they write, for the
+ * same objects pg_lake reads through s3://. The position delete anti-join in
+ * ReadDataSourceQuery does the same in SQL; a new scheme goes there too.
+ */
+char *
+S3URLFromHadoopScheme(const char *url)
+{
+	if (url == NULL)
+		return NULL;
+
+	if (strncmp(url, S3A_URL_PREFIX, strlen(S3A_URL_PREFIX)) == 0)
+		return psprintf(S3_URL_PREFIX "%s", url + strlen(S3A_URL_PREFIX));
+
+	if (strncmp(url, S3N_URL_PREFIX, strlen(S3N_URL_PREFIX)) == 0)
+		return psprintf(S3_URL_PREFIX "%s", url + strlen(S3N_URL_PREFIX));
+
+	return unconstify(char *, url);
+}
+
+
+/*
  * GetPgLakeStageLocation returns the base URL configured for @STAGE/ resolution,
  * with trailing slash removed if present.
  */

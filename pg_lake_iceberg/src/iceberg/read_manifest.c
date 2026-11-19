@@ -69,6 +69,9 @@ typedef struct ManifestReaderContext
 	/* partition field name => field id mapping */
 	HTAB	   *partitionFieldMap;
 	bool		isV1Manifest;
+
+	/* whether to read s3a:// and s3n:// URLs as s3:// */
+	bool		rewriteHadoopSchemes;
 }			ManifestReaderContext;
 
 
@@ -91,10 +94,18 @@ static PartitionFieldIdMapEntry * ReferencedPartitionField(avro_schema_t partiti
 
 /*
  * ReadIcebergManifests reads manifests from manifest list path.
+ *
+ * A read takes s3a:// and s3n:// URLs as the s3:// URLs of the same objects
+ * (see S3URLFromHadoopScheme).  A write (forWrite) keeps refusing them: it
+ * would write the s3:// form back, which the engine that wrote the table no
+ * longer matches against its own position deletes.
  */
 List *
-ReadIcebergManifests(const char *manifestListPath)
+ReadIcebergManifests(const char *manifestListPath, bool forWrite)
 {
+	if (!forWrite)
+		manifestListPath = S3URLFromHadoopScheme(manifestListPath);
+
 	ValidateStorageURL(manifestListPath);
 
 	size_t		contentLength = 0;
@@ -122,11 +133,11 @@ ReadIcebergManifests(const char *manifestListPath)
 	IcebergManifest *manifest = palloc0(sizeof(IcebergManifest));
 	AvroReader *manifestListReader = AvroReaderCreate(manifestListLocalPath);
 
-	void	   *context = NULL;
+	ManifestReaderContext context = {.rewriteHadoopSchemes = !forWrite};
 
 	while (AvroReaderReadRecord(manifestListReader,
 								(AvroParseFunction) ReadIcebergManifestFromAvro,
-								manifest, context))
+								manifest, &context))
 	{
 		ErrorIfURLLeavesObjectStorage(manifest->manifest_path, manifestListPath);
 		manifests = lappend(manifests, manifest);
@@ -141,11 +152,15 @@ ReadIcebergManifests(const char *manifestListPath)
 
 /*
  * ReadManifestEntries reads an Iceberg manifest file and
- * returns a list of manifest entries.
+ * returns a list of manifest entries.  forWrite is as for
+ * ReadIcebergManifests.
  */
 List *
-ReadManifestEntries(const char *manifestPath)
+ReadManifestEntries(const char *manifestPath, bool forWrite)
 {
+	if (!forWrite)
+		manifestPath = S3URLFromHadoopScheme(manifestPath);
+
 	ValidateStorageURL(manifestPath);
 
 	size_t		contentLength = 0;
@@ -176,6 +191,7 @@ ReadManifestEntries(const char *manifestPath)
 	ManifestReaderContext *context = palloc0(sizeof(ManifestReaderContext));
 
 	context->partitionFieldMap = CreateManifestPartitionFieldMap(manifestReader);
+	context->rewriteHadoopSchemes = !forWrite;
 
 	while (AvroReaderReadRecord(manifestReader,
 								(AvroParseFunction) ReadIcebergManifestEntryFromAvro,
@@ -197,6 +213,11 @@ ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, v
 {
 	memset(manifest, '\0', sizeof(IcebergManifest));
 	AvroGetStringField(record, "manifest_path", AVRO_FIELD_REQUIRED, &manifest->manifest_path, &manifest->manifest_path_length);
+	if (((ManifestReaderContext *) context)->rewriteHadoopSchemes)
+	{
+		manifest->manifest_path = S3URLFromHadoopScheme(manifest->manifest_path);
+		manifest->manifest_path_length = strlen(manifest->manifest_path);
+	}
 	AvroGetInt64Field(record, "manifest_length", AVRO_FIELD_REQUIRED, &manifest->manifest_length);
 	AvroGetInt32Field(record, "partition_spec_id", AVRO_FIELD_REQUIRED, &manifest->partition_spec_id);
 	/* v1 manifest lists have neither content nor sequence numbers. */
@@ -309,6 +330,11 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 		ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
 						errmsg("invalid Iceberg data file content %d", dataFile->content)));
 	AvroGetStringField(record, "file_path", AVRO_FIELD_REQUIRED, &dataFile->file_path, &dataFile->file_path_length);
+	if (context->rewriteHadoopSchemes)
+	{
+		dataFile->file_path = S3URLFromHadoopScheme(dataFile->file_path);
+		dataFile->file_path_length = strlen(dataFile->file_path);
+	}
 
 	ValidateStorageURL(dataFile->file_path);
 

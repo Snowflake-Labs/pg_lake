@@ -194,9 +194,7 @@ def test_pg_lake_serde_int(
 ):
     # test with random integers
     for _ in range(1_000):
-        iceberg_type, pg_type = random.choice(
-            [("integer", "integer"), ("long", "bigint")]
-        )
+        iceberg_type, pg_type = random.choice([("int", "integer"), ("long", "bigint")])
 
         if pg_type == "integer":
             random_value = random.randint(pow(-2, 31), pow(2, 31) - 1)

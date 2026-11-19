@@ -580,10 +580,14 @@ GetIcebergTypeInfoFromTypeName(const char *typeName)
 		 * (decimal(10,2))
 		 *
 		 * We need to find the longest prefix match since we have types like
-		 * timestamp and timestamptz.
+		 * timestamp and timestamptz. The match must end the name or start its
+		 * arguments: timestamp_ns is not a timestamp.
 		 */
 		if (currentTypeNameLen > longestPrefixLen &&
-			strncasecmp(currentTypeName, typeName, currentTypeNameLen) == 0)
+			strncasecmp(currentTypeName, typeName, currentTypeNameLen) == 0 &&
+			(typeName[currentTypeNameLen] == '\0' ||
+			 typeName[currentTypeNameLen] == '(' ||
+			 typeName[currentTypeNameLen] == '['))
 		{
 			icebergTypeInfo->type = IcebergToDuckDBTypes[typeIndex].icebergType;
 			longestPrefixLen = currentTypeNameLen;
