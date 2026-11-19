@@ -894,6 +894,87 @@ def test_slow_commit(superuser_conn, pg_extension_base):
         superuser_conn.commit()
 
 
+def test_cancelled_launch_stops_worker(
+    superuser_conn, pg_extension_base, create_injection_extension
+):
+    # A cancel that lands after the worker is registered, but before the
+    # caller gets it back, stops the worker instead of leaving it to run the
+    # command, and commit, while the session lives on.
+    if get_pg_version_num(superuser_conn) < 170000:
+        pytest.skip("Injection points not available (requires PostgreSQL 17+)")
+
+    run_command("CREATE TABLE cancelled_launch (x int)", superuser_conn)
+    run_command(
+        "SELECT injection_points_attach('attached-worker-before-startup-wait', 'wait')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # the caller stays connected to the end: its exit would stop the worker
+    caller_conn = open_pg_conn()
+    caller_pid = run_query("SELECT pg_backend_pid() AS pid", caller_conn)[0]["pid"]
+    caller_conn.commit()
+
+    errors = []
+
+    def run_caller():
+        errors.append(
+            run_command(
+                "SELECT * FROM extension_base.run_attached("
+                "$$SELECT pg_sleep(2); INSERT INTO cancelled_launch VALUES (1)$$)",
+                caller_conn,
+                raise_error=False,
+            )
+        )
+        caller_conn.rollback()
+
+    caller = threading.Thread(target=run_caller)
+
+    try:
+        caller.start()
+
+        # cancel the caller at the injection point once its worker is running
+        for _ in range(100):
+            result = run_query(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE backend_type = 'pg_extension_base attached worker' "
+                "AND query LIKE '%cancelled_launch%'",
+                superuser_conn,
+            )
+            superuser_conn.commit()
+            if result[0]["count"] > 0:
+                break
+            time.sleep(0.1)
+
+        assert result[0]["count"] == 1
+
+        run_query(f"SELECT pg_cancel_backend({caller_pid})", superuser_conn)
+        superuser_conn.commit()
+        caller.join(30)
+
+        assert not caller.is_alive()
+        assert errors[0] is not None
+        assert "canceling statement due to user request" in errors[0]
+
+        # long enough for a worker left running to finish its insert
+        time.sleep(4)
+
+        result = run_query("SELECT count(*) FROM cancelled_launch", superuser_conn)
+        superuser_conn.commit()
+        assert result[0]["count"] == 0
+    finally:
+        run_command(
+            "SELECT injection_points_detach('attached-worker-before-startup-wait')",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.commit()
+        caller.join(30)
+        caller_conn.close()
+        run_command("DROP TABLE cancelled_launch", superuser_conn)
+        superuser_conn.commit()
+
+
 def test_out_of_worker_slots(
     superuser_conn, pg_extension_base, create_injection_extension
 ):

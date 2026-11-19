@@ -273,6 +273,11 @@ LogCatalogUnsupportedFeature(CatalogLogFeature feature)
 			LogCatalogLine("a table uses Iceberg column default values, "
 						   "which pg_lake does not support");
 			break;
+
+		case CATALOG_LOG_FEATURE_FILE_FORMAT:
+			LogCatalogLine("a table uses Iceberg files in a format other than "
+						   "Parquet, which pg_lake does not support");
+			break;
 	}
 }
 

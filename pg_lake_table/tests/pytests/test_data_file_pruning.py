@@ -1571,12 +1571,8 @@ def test_pruning_for_collations(
             pg_conn,
         )
 
-        # with non-default collation, do not apply pruning on internal iceberg tables
-        # external iceberg tables are unaware of the collations
-        if tbl_name == "test_table":
-            assert int(fetch_data_files_used(results)) == 2
-        else:
-            assert int(fetch_data_files_used(results)) == 1
+        # an equality compares exact values, so it prunes under any collation
+        assert int(fetch_data_files_used(results)) == 1
 
     run_command("DROP SCHEMA test_pruning_for_collations CASCADE", pg_conn)
     pg_conn.commit()

@@ -477,8 +477,8 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 		/*
 		 * Compare the id fields. We deliberately don't compare defaults:
 		 * read-only external Iceberg tables don't carry iceberg
-		 * writeDefault/initialDefault onto pg_attribute, and defaults don't
-		 * affect read behavior anyway.
+		 * writeDefault/initialDefault onto pg_attribute, and the scan takes
+		 * initialDefault from the metadata.
 		 */
 		if (icebergField->id != postgresField->id ||
 			NullSafeStrcmp(icebergField->name, postgresField->name) != 0 ||
@@ -674,6 +674,8 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 	{
 		DataFile   *dataFile = lfirst(dataFileCell);
 
+		ErrorIfDataFileNotParquet(dataFile);
+
 		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
 
 		fileScan->path = (char *) dataFile->file_path;
@@ -690,6 +692,8 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 
 		if (dataFile->content != ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES)
 			continue;
+
+		ErrorIfDataFileNotParquet(dataFile);
 
 		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
 

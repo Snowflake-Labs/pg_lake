@@ -987,7 +987,8 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 	List	   *existingDataManifests = NIL;
 	List	   *existingDeleteManifests = NIL;
 
-	List	   *existingManifests = FetchManifestsFromSnapshot(currentSnapshot, NULL);
+	List	   *existingManifests = currentSnapshot != NULL ?
+		ReadIcebergManifests(currentSnapshot->manifest_list, true) : NIL;
 	ListCell   *existingManifestCell = NULL;
 
 	foreach(existingManifestCell, existingManifests)
@@ -1282,7 +1283,7 @@ RewriteManifestForRemoval(IcebergManifest * manifest,
 	/* read the manifest's entries into per-manifest memory */
 	MemoryContext callerCtx = MemoryContextSwitchTo(perManifestCtx);
 
-	List	   *manifestEntries = ReadManifestEntries(manifest->manifest_path);
+	List	   *manifestEntries = ReadManifestEntries(manifest->manifest_path, true);
 
 	List	   *deletedManifestEntries =
 		FindAndAdjustDeletedManifestEntries(manifest, manifestEntries, removedEntries,
