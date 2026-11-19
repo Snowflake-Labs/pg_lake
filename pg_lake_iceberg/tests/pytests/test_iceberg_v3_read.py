@@ -327,3 +327,27 @@ def test_v3_nested_column_default_is_rejected(
     assert catalog_log_lines(offset) == [
         "a table uses Iceberg column default values, which pg_lake does not support"
     ]
+
+
+def test_v3_null_column_default_is_no_default(
+    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck
+):
+    """A null initial-default is the same as having none, so it is not
+    refused."""
+    if installcheck:
+        return
+
+    table = _make_table(iceberg_catalog, "v3_null_column_default")
+
+    metadata = json.loads(_get(s3, table.metadata_location))
+    metadata["format-version"] = 3
+    for schema in metadata["schemas"]:
+        if schema["schema-id"] == metadata["current-schema-id"]:
+            schema["fields"][0]["initial-default"] = None
+
+    default_location = table.metadata_location.replace(
+        ".metadata.json", ".v3-null-default.metadata.json"
+    )
+    _put(s3, default_location, json.dumps(metadata).encode())
+
+    assert len(_data_files(superuser_conn, default_location)) == 1
