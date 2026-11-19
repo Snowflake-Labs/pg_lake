@@ -1038,7 +1038,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 			if (HasLowercaseColumnNamesOption(createStmt->options))
 				LowercaseIcebergTableMetadataNames(metadata);
-			TruncateIcebergTableMetadataNames(metadata, true);
+			TruncateIcebergTableMetadataNames(metadata, true, true);
 
 			List	   *dataFileColumns =
 				DescribeColumnsFromIcebergMetadata(metadata, false);
@@ -1687,7 +1687,7 @@ AddLakeTableColumnDefinitions(CreateForeignTableStmt *createStmt)
 
 	List	   *dataFileColumns = DescribeColumnsForURL(path,
 														format, compression,
-														createStmt->options);
+														createStmt->options, true);
 
 	createStmt->base.tableElts = dataFileColumns;
 

@@ -6,7 +6,7 @@ import uuid
 import pyarrow
 import pytest
 from pyiceberg.schema import Schema
-from pyiceberg.types import LongType, NestedField, StringType
+from pyiceberg.types import LongType, NestedField, StringType, StructType
 
 from helpers.polaris import *
 from utils_pytest import *
@@ -51,8 +51,28 @@ def test_multibyte_name_truncated_at_a_character(pg_conn, rest_table):
     pg_conn.rollback()
 
 
+def test_multibyte_nested_field_name(pg_conn, rest_table):
+    namespace, _ = rest_table(nested="é" * 40)
+    create_read_only_table(pg_conn, namespace)
+
+    struct_type = run_query(
+        "SELECT atttypid FROM pg_attribute "
+        f"WHERE attrelid = '\"{namespace}\".t'::regclass AND attname = 's'",
+        pg_conn,
+    )[0][0]
+    assert run_query(
+        "SELECT attname FROM pg_attribute "
+        f"WHERE attrelid = (SELECT typrelid FROM pg_type WHERE oid = {struct_type}) "
+        "AND attnum > 0",
+        pg_conn,
+    ) == [["é" * 31]]
+    assert run_query(f'SELECT id, s FROM "{namespace}".t', pg_conn) == [[1, "(v)"]]
+    pg_conn.rollback()
+
+
 def test_names_that_truncate_to_the_same_name(pg_conn, rest_table):
-    namespace, _ = rest_table("x" * 63 + "a", "x" * 63 + "b")
+    long_names = ["x" * 63 + "a", "x" * 63 + "b"]
+    namespace, table = rest_table(*long_names)
 
     run_command(f'CREATE SCHEMA "{namespace}"', pg_conn)
     error = run_command(
@@ -61,7 +81,20 @@ def test_names_that_truncate_to_the_same_name(pg_conn, rest_table):
         pg_conn,
         raise_error=False,
     )
-    assert "have the same name when truncated to 63 bytes" in str(error)
+    assert "have the same name when truncated to a Postgres identifier" in str(error)
+    pg_conn.rollback()
+
+    # neither names a column, so both keep their names
+    assert run_query(
+        f"SELECT column_name FROM lake_file.preview('{table.metadata_location}')",
+        pg_conn,
+    ) == [["id"]] + [[name] for name in long_names]
+    run_command("CREATE TEMP TABLE copied (id bigint, a text, b text)", pg_conn)
+    run_command(
+        f"COPY copied FROM '{table.metadata_location}' WITH (format 'iceberg')",
+        pg_conn,
+    )
+    assert run_query("SELECT * FROM copied", pg_conn) == [[1, "v", "v"]]
     pg_conn.rollback()
 
 
@@ -75,12 +108,16 @@ def rest_table(
     namespace = f"long_names_{uuid.uuid4().hex[:8]}"
     catalog = create_iceberg_rest_catalog(namespace)
 
-    def create(*names):
+    def create(*names, nested=None):
         fields = [NestedField(1, "id", LongType())] + [
             NestedField(i + 2, name, StringType()) for i, name in enumerate(names)
         ]
-        table = catalog.create_table(f"{namespace}.t", schema=Schema(*fields))
         row = {"id": 1} | {name: "v" for name in names}
+        if nested is not None:
+            struct = StructType(NestedField(len(fields) + 2, nested, StringType()))
+            fields.append(NestedField(len(fields) + 1, "s", struct, required=False))
+            row["s"] = {nested: "v"}
+        table = catalog.create_table(f"{namespace}.t", schema=Schema(*fields))
         table.append(pyarrow.Table.from_pylist([row], table.schema().as_arrow()))
         return namespace, table
 

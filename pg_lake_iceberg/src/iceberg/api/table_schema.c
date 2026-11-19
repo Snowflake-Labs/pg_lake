@@ -38,6 +38,9 @@ static IcebergTableSchema * GetIcebergTableSchemaById(IcebergTableMetadata * met
 static List *GetLeafFieldsForField(Field * field, int fieldId, int *level);
 static void LowercaseStructElementNames(FieldStructElement * elements, size_t elementCount);
 static void LowercaseFieldNames(Field * field);
+static void TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
+									   bool nested, bool warn);
+static void TruncateFieldNames(Field * field, bool warn);
 
 /*
  * GetIcebergTableSchemaByIdFromTableMetadata gets the schema by id from given table metadata.
@@ -236,50 +239,99 @@ LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata)
 /*
  * TruncateIcebergTableMetadataNames truncates the column names of the current
  * schema to the longest identifier Postgres keeps, in place, as the parser
- * truncates a column name it is given. With warn, it says so for each name.
- * Two columns whose names become the same cannot both be columns of a table.
+ * truncates a name it is given. With nested, it also truncates the names of
+ * the fields in structs, which become attributes of the columns' types; a
+ * scan has to keep those, as DuckDB matches a struct's fields to the ones in
+ * the files by name. With warn, it says so for each name.
  */
 void
-TruncateIcebergTableMetadataNames(IcebergTableMetadata * metadata, bool warn)
+TruncateIcebergTableMetadataNames(IcebergTableMetadata * metadata, bool nested, bool warn)
 {
 	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
-	const char **originalNames = palloc0(sizeof(char *) * (schema->fields_length + 1));
 
-	for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+	TruncateStructElementNames(schema->fields, schema->fields_length, nested, warn);
+}
+
+
+/*
+ * TruncateStructElementNames truncates the names of the given sibling fields,
+ * and with nested of everything below them. Two siblings whose names become
+ * the same cannot both be columns of a table or attributes of a type.
+ */
+static void
+TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
+						   bool nested, bool warn)
+{
+	const char **originalNames = palloc0(sizeof(char *) * (elementCount + 1));
+
+	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
 	{
-		FieldStructElement *field = &schema->fields[fieldIdx];
+		FieldStructElement *element = &elements[elementIdx];
 
-		originalNames[fieldIdx] = field->name;
+		originalNames[elementIdx] = element->name;
 
-		if (field->name == NULL || strlen(field->name) < NAMEDATALEN)
-			continue;
+		if (element->name != NULL && strlen(element->name) >= NAMEDATALEN)
+		{
+			char	   *truncatedName = pstrdup(element->name);
 
-		char	   *truncatedName = pstrdup(field->name);
+			truncate_identifier(truncatedName, strlen(truncatedName), warn);
+			element->name = truncatedName;
+		}
 
-		truncate_identifier(truncatedName, strlen(truncatedName), warn);
-		field->name = truncatedName;
+		if (nested)
+			TruncateFieldNames(element->type, warn);
 	}
 
-	for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
 	{
-		const char *name = schema->fields[fieldIdx].name;
+		const char *name = elements[elementIdx].name;
 
 		/* Iceberg names are unique, so a collision involves a truncated one */
-		if (name == NULL || name == originalNames[fieldIdx])
+		if (name == NULL || name == originalNames[elementIdx])
 			continue;
 
-		for (size_t otherIdx = 0; otherIdx < schema->fields_length; otherIdx++)
+		for (size_t otherIdx = 0; otherIdx < elementCount; otherIdx++)
 		{
-			const char *otherName = schema->fields[otherIdx].name;
+			const char *otherName = elements[otherIdx].name;
 
-			if (otherIdx != fieldIdx && otherName != NULL && strcmp(name, otherName) == 0)
+			if (otherIdx != elementIdx && otherName != NULL && strcmp(name, otherName) == 0)
 				ereport(ERROR,
 						(errcode(ERRCODE_DUPLICATE_COLUMN),
-						 errmsg("Iceberg columns \"%s\" and \"%s\" have the same name "
-								"when truncated to %d bytes",
-								originalNames[fieldIdx], originalNames[otherIdx],
-								NAMEDATALEN - 1)));
+						 errmsg("Iceberg fields \"%s\" and \"%s\" have the same name "
+								"when truncated to a Postgres identifier",
+								originalNames[elementIdx], originalNames[otherIdx]),
+						 errdetail("Postgres keeps at most the first %d bytes of a name.",
+								   NAMEDATALEN - 1)));
 		}
+	}
+}
+
+
+/*
+ * TruncateFieldNames truncates the struct field names nested in the given
+ * type.
+ */
+static void
+TruncateFieldNames(Field * field, bool warn)
+{
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			break;
+
+		case FIELD_TYPE_LIST:
+			TruncateFieldNames(field->field.list.element, warn);
+			break;
+
+		case FIELD_TYPE_MAP:
+			TruncateFieldNames(field->field.map.key, warn);
+			TruncateFieldNames(field->field.map.value, warn);
+			break;
+
+		case FIELD_TYPE_STRUCT:
+			TruncateStructElementNames(field->field.structType.fields,
+									   field->field.structType.nfields, true, warn);
+			break;
 	}
 }
 

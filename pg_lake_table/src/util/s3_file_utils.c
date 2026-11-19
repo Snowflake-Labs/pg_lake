@@ -234,7 +234,7 @@ pg_lake_file_preview(PG_FUNCTION_ARGS)
 								 &dataFormat, &dataCompression);
 
 	List	   *columns = DescribeColumnsForURL(url, dataFormat, dataCompression,
-												previewOptionsList);
+												previewOptionsList, false);
 	ListCell   *columnCell = NULL;
 
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
