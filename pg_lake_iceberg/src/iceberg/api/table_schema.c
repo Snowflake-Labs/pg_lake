@@ -40,6 +40,9 @@ static IcebergTableSchema * GetIcebergTableSchemaById(IcebergTableMetadata * met
 static List *GetLeafFieldsForField(Field * field, int fieldId, int *level);
 static void LowercaseStructElementNames(FieldStructElement * elements, size_t elementCount);
 static void LowercaseFieldNames(Field * field);
+static void TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
+									   bool nested, bool warn);
+static void TruncateFieldNames(Field * field, bool warn);
 static void ApplyNameMappingEntries(JsonbContainer *entries, IcebergTableSchema * schema);
 static FieldStructElement * FindStructElementById(FieldStructElement * elements, size_t elementCount,
 												  int fieldId);
@@ -235,6 +238,106 @@ LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata)
 							"name when lowercased", columnName),
 					 errhint("Create the table without the %s option.",
 							 LOWERCASE_COLUMN_NAMES_OPTION)));
+	}
+}
+
+
+/*
+ * TruncateIcebergTableMetadataNames truncates the column names of the current
+ * schema to the longest identifier Postgres keeps, in place, as the parser
+ * truncates a name it is given. With nested, it also truncates the names of
+ * the fields in structs, which become attributes of the columns' types; a
+ * scan has to keep those, as DuckDB matches a struct's fields to the ones in
+ * the files by name. With warn, it says so for each name.
+ */
+void
+TruncateIcebergTableMetadataNames(IcebergTableMetadata * metadata, bool nested, bool warn)
+{
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+
+	TruncateStructElementNames(schema->fields, schema->fields_length, nested, warn);
+}
+
+
+/*
+ * TruncateStructElementNames truncates the names of the given sibling fields,
+ * and with nested of everything below them. Two siblings whose names become
+ * the same cannot both be columns of a table or attributes of a type.
+ */
+static void
+TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
+						   bool nested, bool warn)
+{
+	const char **originalNames = palloc0(sizeof(char *) * elementCount);
+
+	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
+	{
+		FieldStructElement *element = &elements[elementIdx];
+
+		originalNames[elementIdx] = element->name;
+
+		if (element->name != NULL && strlen(element->name) >= NAMEDATALEN)
+		{
+			char	   *truncatedName = pstrdup(element->name);
+
+			truncate_identifier(truncatedName, strlen(truncatedName), warn);
+			element->name = truncatedName;
+		}
+
+		if (nested)
+			TruncateFieldNames(element->type, warn);
+	}
+
+	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
+	{
+		const char *name = elements[elementIdx].name;
+
+		/* Iceberg names are unique, so a collision involves a truncated one */
+		if (name == NULL || name == originalNames[elementIdx])
+			continue;
+
+		for (size_t otherIdx = 0; otherIdx < elementCount; otherIdx++)
+		{
+			const char *otherName = elements[otherIdx].name;
+
+			if (otherIdx != elementIdx && otherName != NULL && strcmp(name, otherName) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_COLUMN),
+						 errmsg("Iceberg fields \"%s\" and \"%s\" have the same name "
+								"when truncated to a Postgres identifier",
+								originalNames[elementIdx], originalNames[otherIdx]),
+						 errdetail("Postgres keeps at most the first %d bytes of a name.",
+								   NAMEDATALEN - 1)));
+		}
+	}
+}
+
+
+/*
+ * TruncateFieldNames truncates the struct field names nested in the given
+ * type.
+ */
+static void
+TruncateFieldNames(Field * field, bool warn)
+{
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			break;
+
+		case FIELD_TYPE_LIST:
+			TruncateFieldNames(field->field.list.element, warn);
+			break;
+
+		case FIELD_TYPE_MAP:
+			TruncateFieldNames(field->field.map.key, warn);
+			TruncateFieldNames(field->field.map.value, warn);
+			break;
+
+		case FIELD_TYPE_STRUCT:
+			TruncateStructElementNames(field->field.structType.fields,
+									   field->field.structType.nfields, true, warn);
+			break;
 	}
 }
 
