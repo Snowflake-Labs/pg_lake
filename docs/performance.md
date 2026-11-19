@@ -145,6 +145,12 @@ naturally the case for time-ordered data. For string columns, pg_lake keeps the 
 of the bounds by default; the `column_stats_mode` [table option](table-options.md) changes this.
 Pruning does not apply to arrays, composite types, maps or geometry.
 
+String bounds are ordered by their bytes, so string columns are pruned only when they compare
+the same way: with the `C` collation, or with a database default collation that sorts by code
+point (the libc `C`, `POSIX` and `C.UTF-8` locales, or the builtin provider). In a database
+whose default collation is linguistic, such as `en_US.UTF-8` or an ICU locale, string columns
+are not pruned.
+
 For files in object storage outside Iceberg, DuckDB uses the row group statistics in Parquet
 files in the same way, and hive-style directory names such as `year=2026/` can be used as
 columns in filters.
