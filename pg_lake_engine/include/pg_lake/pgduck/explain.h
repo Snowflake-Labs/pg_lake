@@ -22,7 +22,8 @@
 #include "commands/explain_state.h"
 #endif
 
-extern PGDLLEXPORT void ExplainPGDuckQuery(char *query,
+extern PGDLLEXPORT void ExplainPGDuckQuery(Oid queryEngine,
+										   char *query,
 										   int numParams,
 										   const char **paramValues,
 										   ExplainState *es);
