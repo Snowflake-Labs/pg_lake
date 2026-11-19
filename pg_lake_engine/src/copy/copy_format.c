@@ -448,7 +448,8 @@ IsSupportedURL(const char *path)
  * Hadoop's S3 file systems replaced by s3://, and any other url as is.
  * Engines built on Hadoop write those schemes into the Iceberg metadata,
  * manifests and position delete files of the tables they write, for the
- * same objects pg_lake reads through s3://.
+ * same objects pg_lake reads through s3://. The position delete anti-join in
+ * ReadDataSourceQuery does the same in SQL; a new scheme goes there too.
  */
 char *
 S3URLFromHadoopScheme(const char *url)

@@ -234,6 +234,8 @@ ReadDataSourceQuery(List *sourcePaths,
 		 * Engines built on Hadoop name the data files in their position
 		 * deletes by s3a:// or s3n:// URLs, which reach this scan as s3://
 		 * (see S3URLFromHadoopScheme), so the names are compared that way.
+		 * The CASE repeats S3URLFromHadoopScheme in SQL, and [7:] relies on
+		 * both schemes being 6 characters: keep the two in sync.
 		 */
 
 		appendStringInfo(&command,
