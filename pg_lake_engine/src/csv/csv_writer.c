@@ -129,6 +129,14 @@ typedef struct CopyToStateData
 	 * re-check whether it is a map type, for every value.
 	 */
 	PGDuckSerializeKind *duckSerializeKind;
+
+	/*
+	 * Per-column flag: the column's type reaches an array (directly, or
+	 * nested inside a composite/map/domain).  Precomputed once so the per-row
+	 * multidimensional-array validation only walks columns that can carry
+	 * one.
+	 */
+	bool	   *needsMultidimArrayCheck;
 	MemoryContext rowcontext;	/* per-row evaluation context */
 	uint64		bytes_processed;	/* number of bytes processed so far */
 
@@ -138,9 +146,6 @@ typedef struct CopyToStateData
 
 	/* whether the CSV writer should survive multiple transactions */
 	bool		sessionLifetime;
-
-	/* whether EndCopy already released the per-copy resources */
-	bool		ended;
 } CopyToStateData;
 
 /* DestReceiver for COPY (query) TO */
@@ -177,6 +182,9 @@ static void ErrorIfCopyToExceedsUnboundedNumericMaxAllowedDigits(Numeric num);
 static bool TypeContainsNumeric(Oid typeOid);
 static void ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid,
 													 int32 typmod);
+static bool TypeContainsArray(Oid typeOid);
+static void ErrorIfCopyToContainsMultidimArray(Datum value, Oid typeOid,
+											   const char *colname);
 
 
 /*----------
@@ -244,20 +252,6 @@ CopySendEndOfRow(CopyToState cstate)
 					   cstate->copy_file) != 1 ||
 				ferror(cstate->copy_file))
 			{
-				int			save_errno = errno;
-
-				/*
-				 * Drop the row we failed to write before reporting the error.
-				 * The cstate can outlive the failure: the caller may catch
-				 * the error and keep using the same DestReceiver, which for a
-				 * session-lifetime receiver survives the transaction. Leaving
-				 * the row in fe_msgbuf would prepend it to the next row
-				 * written, producing a line with more fields than the tuple
-				 * descriptor has columns.
-				 */
-				resetStringInfo(fe_msgbuf);
-				errno = save_errno;
-
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not write to COPY file: %m")));
@@ -310,23 +304,7 @@ CopySendInt16(CopyToState cstate, int16 val)
 static void
 EndCopy(CopyToState cstate)
 {
-	/*
-	 * EndCopy can be reached more than once for the same cstate, because the
-	 * DestReceiver calls it from both rShutdown and rDestroy, and a receiver
-	 * may be destroyed without being shut down at all.  Closing the file and
-	 * deleting the memory contexts twice would release resources we no longer
-	 * own, so do the work only once.
-	 */
-	if (cstate->ended)
-		return;
-
-	cstate->ended = true;
-
-	/*
-	 * copy_file and rowcontext are only set up by StartCopyTo, so they are
-	 * NULL when the copy is ended without ever having been started.
-	 */
-	if (CopyOptsIsBinary(cstate->opts) && cstate->copy_file != NULL)
+	if (CopyOptsIsBinary(cstate->opts))
 	{
 		/* Generate trailer for a binary copy */
 		CopySendInt16(cstate, -1);
@@ -334,19 +312,15 @@ EndCopy(CopyToState cstate)
 		CopySendEndOfRow(cstate);
 	}
 
-	if (cstate->copy_file != NULL)
+	if (cstate->filename != NULL)
 	{
-		FILE	   *copyFile = cstate->copy_file;
-
-		cstate->copy_file = NULL;
-
 		if (cstate->sessionLifetime)
 		{
-			fclose(copyFile);
+			fclose(cstate->copy_file);
 		}
 		else
 		{
-			if (FreeFile(copyFile))
+			if (FreeFile(cstate->copy_file))
 				ereport(ERROR,
 						(errcode_for_file_access(),
 						 errmsg("could not close file \"%s\": %m",
@@ -354,8 +328,7 @@ EndCopy(CopyToState cstate)
 		}
 	}
 
-	if (cstate->rowcontext != NULL)
-		MemoryContextDelete(cstate->rowcontext);
+	MemoryContextDelete(cstate->rowcontext);
 	MemoryContextDelete(cstate->copycontext);
 }
 
@@ -525,6 +498,7 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 	cstate->useDuckSerialization = (bool *) palloc0(num_phys_attrs * sizeof(bool));
 	cstate->duckSerializeKind = (PGDuckSerializeKind *)
 		palloc0(num_phys_attrs * sizeof(PGDuckSerializeKind));
+	cstate->needsMultidimArrayCheck = (bool *) palloc0(num_phys_attrs * sizeof(bool));
 	foreach(cur, cstate->attnumlist)
 	{
 		int			attnum = lfirst_int(cur);
@@ -555,6 +529,8 @@ StartCopyTo(CopyToState cstate, TupleDesc tupDesc)
 				GetPGDuckSerializeKind(&cstate->out_functions[attnum - 1],
 									   attr->atttypid,
 									   cstate->targetFormat);
+		cstate->needsMultidimArrayCheck[attnum - 1] =
+			TypeContainsArray(attr->atttypid);
 	}
 
 	/*
@@ -816,6 +792,55 @@ TypeContainsNumeric(Oid typeOid)
 
 
 /*
+ * TypeContainsArray returns true if `typeOid` reaches an array at any nesting
+ * depth: as the type itself, a composite field, or through a domain over
+ * either.  Mirror of TypeContainsNumeric; called once per column at COPY
+ * setup (see needsMultidimArrayCheck) so the per-row multidimensional-array
+ * walk only visits columns that can actually carry an array.
+ */
+static bool
+TypeContainsArray(Oid typeOid)
+{
+	if (OidIsValid(get_element_type(typeOid)))
+		return true;
+
+	char		typtype = get_typtype(typeOid);
+
+	/*
+	 * Domains (including pg_map) unwrap to their base type, which feeds back
+	 * into the array and composite checks above.
+	 */
+	if (typtype == TYPTYPE_DOMAIN)
+		return TypeContainsArray(getBaseType(typeOid));
+
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
+		bool		found = false;
+
+		for (int i = 0; i < tupdesc->natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped)
+				continue;
+
+			if (TypeContainsArray(attr->atttypid))
+			{
+				found = true;
+				break;
+			}
+		}
+
+		ReleaseTupleDesc(tupdesc);
+		return found;
+	}
+
+	return false;
+}
+
+
+/*
  * ErrorIfCopyToExceedsNumericLimitsInDatum applies the COPY TO numeric limits
  * to every numeric leaf reachable from `value`, recursing through arrays,
  * composites, maps, and domains.  Each numeric leaf is subject to the same
@@ -945,6 +970,127 @@ ErrorIfCopyToExceedsNumericLimitsInDatum(Datum value, Oid typeOid, int32 typmod)
 
 
 /*
+ * ErrorIfCopyToContainsMultidimArray raises if any array reachable from
+ * `value` -- the value itself, an array element, a composite field, or one
+ * reached through a domain -- has more than one dimension.
+ *
+ * PostgreSQL does not encode dimensionality in the type system (int[] and
+ * int[][] share one OID), so a multidimensional value would be serialised as
+ * "{{1,2},{3,4}}" and DuckDB cannot cast that back to a flat LIST(T) (see the
+ * top-level rationale in CopyOneRowTo).  The reviewer on #430 asked that the
+ * top-level column check also reach arrays nested inside composites, maps, and
+ * domains; this recurses like ErrorIfCopyToExceedsNumericLimitsInDatum does
+ * for numeric leaves.
+ *
+ * Callers gate on the column type actually containing an array (see
+ * needsMultidimArrayCheck), and the inner TypeContainsArray guard prunes
+ * subtrees with no array so we never deconstruct or deform needlessly.
+ * `colname` is the top-level column name, carried through the recursion only
+ * so the error can point back at it.
+ */
+static void
+ErrorIfCopyToContainsMultidimArray(Datum value, Oid typeOid, const char *colname)
+{
+	Oid			elemType = get_element_type(typeOid);
+
+	if (OidIsValid(elemType))
+	{
+		ArrayType  *array = DatumGetArrayTypeP(value);
+
+		if (ARR_NDIM(array) > 1)
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("multidimensional arrays are not supported"
+							" in COPY TO"),
+					 errdetail("Column \"%s\" contains a"
+							   " %d-dimensional array value.",
+							   colname,
+							   ARR_NDIM(array)),
+					 errhint("Flatten the array to one dimension before"
+							 " exporting, write to CSV format, or write"
+							 " to an Iceberg table with"
+							 " out_of_range_values = 'clamp'.")));
+
+		/*
+		 * A 1-D array can still carry arrays deeper down (e.g. an array of a
+		 * composite that has an array field), so recurse into the elements
+		 * when the element type can reach one.
+		 */
+		if (!TypeContainsArray(elemType))
+			return;
+
+		int16		elmlen;
+		bool		elmbyval;
+		char		elmalign;
+		Datum	   *elems;
+		bool	   *nulls;
+		int			nelems;
+
+		get_typlenbyvalalign(elemType, &elmlen, &elmbyval, &elmalign);
+		deconstruct_array(array, elemType, elmlen, elmbyval, elmalign,
+						  &elems, &nulls, &nelems);
+
+		for (int i = 0; i < nelems; i++)
+		{
+			if (nulls[i])
+				continue;
+
+			ErrorIfCopyToContainsMultidimArray(elems[i], elemType, colname);
+		}
+
+		return;
+	}
+
+	char		typtype = get_typtype(typeOid);
+
+	/* domains (including maps): unwrap to the base type and recurse */
+	if (typtype == TYPTYPE_DOMAIN)
+	{
+		ErrorIfCopyToContainsMultidimArray(value, getBaseType(typeOid), colname);
+		return;
+	}
+
+	/* composite: deform the tuple and recurse into each field */
+	if (typtype == TYPTYPE_COMPOSITE)
+	{
+		HeapTupleHeader tup = DatumGetHeapTupleHeader(value);
+		Oid			tupType = HeapTupleHeaderGetTypeId(tup);
+		int32		tupTypmod = HeapTupleHeaderGetTypMod(tup);
+		TupleDesc	tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod);
+		int			natts = tupdesc->natts;
+		HeapTupleData tmptup;
+		Datum	   *values = (Datum *) palloc(natts * sizeof(Datum));
+		bool	   *attrNulls = (bool *) palloc(natts * sizeof(bool));
+
+		tmptup.t_len = HeapTupleHeaderGetDatumLength(tup);
+		ItemPointerSetInvalid(&(tmptup.t_self));
+		tmptup.t_tableOid = InvalidOid;
+		tmptup.t_data = tup;
+
+		heap_deform_tuple(&tmptup, tupdesc, values, attrNulls);
+
+		for (int i = 0; i < natts; i++)
+		{
+			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+
+			if (attr->attisdropped || attrNulls[i])
+				continue;
+
+			if (!TypeContainsArray(attr->atttypid))
+				continue;
+
+			ErrorIfCopyToContainsMultidimArray(values[i], attr->atttypid, colname);
+		}
+
+		pfree(values);
+		pfree(attrNulls);
+		ReleaseTupleDesc(tupdesc);
+		return;
+	}
+}
+
+
+/*
  * Emit one row
  */
 static void
@@ -992,6 +1138,43 @@ CopyOneRowTo(CopyToState cstate, TupleTableSlot *slot)
 		{
 			if (!CopyOptsIsBinary(cstate->opts))
 			{
+				/*
+				 * Lookup the underlying tuple's attribute so we can pass in
+				 * the typid
+				 */
+				Form_pg_attribute attr = TupleDescAttr(slot->tts_tupleDescriptor, attnum - 1);
+
+				/*
+				 * Reject multidimensional arrays before DuckDB serialization.
+				 * PostgreSQL cannot distinguish int[] from int[][] at the
+				 * type level, so a value with ndim > 1 would be serialised as
+				 * "{{1,2},{3,4}}" and DuckDB cannot cast that string back to
+				 * a flat LIST(T).  Check before serialisation so we do not
+				 * pay the cost of PGDuckSerialize on a value we will reject.
+				 * The walk reaches arrays nested inside composites, maps, and
+				 * domains, not just a top-level array column.
+				 *
+				 * This only fires for formats that hand the value to DuckDB
+				 * as a typed LIST(T) (Parquet/Iceberg/JSON), i.e. exactly the
+				 * formats for which ShouldUseDuckSerialization returns true
+				 * for an array.  CSV is deliberately exempt: it preserves the
+				 * PostgreSQL text representation ("{{1,2},{3,4}}") and reads
+				 * every column back as VARCHAR, so a multidimensional value
+				 * round-trips faithfully and must not be rejected (#407).
+				 *
+				 * For the Iceberg write path (INSERT into an Iceberg table) a
+				 * multidimensional value is already rejected (error policy)
+				 * or set to NULL (clamp policy) upstream by
+				 * IcebergErrorOrClampDatum, so it never reaches here with
+				 * ndim > 1.  COPY TO in Iceberg format is rejected earlier in
+				 * EnsureFormatSupported.  In practice this only fires on
+				 * plain COPY TO to a Parquet or JSON file.
+				 */
+				if (cstate->useDuckSerialization[attnum - 1] &&
+					cstate->needsMultidimArrayCheck[attnum - 1])
+					ErrorIfCopyToContainsMultidimArray(value, attr->atttypid,
+													   NameStr(attr->attname));
+
 				if (cstate->useDuckSerialization[attnum - 1])
 				{
 					/*
@@ -1348,17 +1531,6 @@ static void
 copy_dest_destroy(DestReceiver *self)
 {
 	DR_copy    *myState = (DR_copy *) self;
-
-	/*
-	 * Usually rShutdown already ended the copy, and EndCopy is idempotent. A
-	 * receiver can also be destroyed without being shut down, though (for
-	 * instance when the caller abandons a partially initialized receiver
-	 * after an error), and then this is the only chance to close the file and
-	 * free the per-copy memory contexts.  Without it the FILE * and its stdio
-	 * buffer leak for the rest of the session and the buffered tail of the
-	 * file is never written.
-	 */
-	EndCopy(myState->cstate);
 
 	pfree(myState->cstate);
 	pfree(self);
