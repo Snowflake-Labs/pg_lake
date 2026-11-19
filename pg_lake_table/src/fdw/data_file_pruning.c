@@ -502,43 +502,44 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 		entry->fieldId = field->id;
 		entry->column = column;
 
+		/*
+		 * A range over the bounds holds only under a collation that orders
+		 * strings by their bytes, as the bounds are. Equality and null
+		 * constraints compare exact values, so they hold under any collation.
+		 */
 		if (CollationOrdersByBytes(column->varcollid))
 		{
 			entry->columnBoundInclusiveUpper =
 				BuildConstraintsWithNullConst(column, BTLessEqualStrategyNumber, BTGreaterEqualStrategyNumber);
-			entry->equalityOperatorExpression = MakeOpExpression(column, BTEqualStrategyNumber);
-			entry->isNullExpression = MakeIsNullExpression(column);
 			entry->columnBoundExclusiveUpper =
 				BuildConstraintsWithNullConst(column, BTLessStrategyNumber, BTGreaterEqualStrategyNumber);
-
-			int			syntheticColId = MaxAttrNumber - pgAttNum;
-
-			/*
-			 * For bucket partitioning, we create a synthetic column that
-			 * represents the bucket partition bound.
-			 *
-			 * Our convention is to use the maximum attribute number
-			 * (MaxAttrNumber) minus the attribute number of the column. This
-			 * way, we can ensure that each column/partition field has a
-			 * unique synthetic column id, and we can use it to create the
-			 * synthetic filters for the bucket partitioning.
-			 */
-			entry->syntheticColEqualityOperator = syntheticColId > 0 ?
-				MakeOpExpression(MakeSyntheticInt4Column(syntheticColId), BTEqualStrategyNumber) :
-				NULL;
-
-			get_typlenbyval(column->vartype, &entry->typLen, &entry->constByVal);
 		}
 		else
 		{
 			entry->columnBoundInclusiveUpper = NULL;
-			entry->equalityOperatorExpression = NULL;
-			entry->isNullExpression = NULL;
 			entry->columnBoundExclusiveUpper = NULL;
-			entry->syntheticColEqualityOperator = NULL;
-			entry->constByVal = false;
-			entry->typLen = -1;
 		}
+
+		entry->equalityOperatorExpression = MakeOpExpression(column, BTEqualStrategyNumber);
+		entry->isNullExpression = MakeIsNullExpression(column);
+
+		int			syntheticColId = MaxAttrNumber - pgAttNum;
+
+		/*
+		 * For bucket partitioning, we create a synthetic column that
+		 * represents the bucket partition bound.
+		 *
+		 * Our convention is to use the maximum attribute number
+		 * (MaxAttrNumber) minus the attribute number of the column. This way,
+		 * we can ensure that each column/partition field has a unique
+		 * synthetic column id, and we can use it to create the synthetic
+		 * filters for the bucket partitioning.
+		 */
+		entry->syntheticColEqualityOperator = syntheticColId > 0 ?
+			MakeOpExpression(MakeSyntheticInt4Column(syntheticColId), BTEqualStrategyNumber) :
+			NULL;
+
+		get_typlenbyval(column->vartype, &entry->typLen, &entry->constByVal);
 	}
 }
 
@@ -2146,6 +2147,13 @@ ConstantEqualityOperatorExpressionOnColumn(Expr *clause, AttrNumber attrNo)
 	}
 
 	if (!EqualityOperator(opExpr->opno))
+	{
+		return NULL;
+	}
+
+	/* a bucket holds a hash of the bytes, which only bytewise equality keeps */
+	if (OidIsValid(opExpr->inputcollid) &&
+		!get_collation_isdeterministic(opExpr->inputcollid))
 	{
 		return NULL;
 	}
