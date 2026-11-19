@@ -23,6 +23,14 @@ def test_linguistic_default_collation(icu_database):
 
     assert run_query("SELECT v FROM t WHERE v = 'a'", conn) == [["a"]]
     assert run_query("SELECT v FROM t WHERE v = 'B'", conn) == [["B"]]
+
+    # 'B' > 'a' in the collation, but the file's byte-order upper bound 'a'
+    # would refute it; its rows are left out, since the pushed-down
+    # comparison is in byte order (#84)
+    explain = run_query(
+        "EXPLAIN (verbose, format json) SELECT v FROM t WHERE v > 'a'", conn
+    )
+    assert int(fetch_data_files_used(explain)) == 1
     conn.rollback()
 
 
@@ -71,11 +79,15 @@ def test_bucket_under_nondeterministic_collation(
     )
     run_command("INSERT INTO string_pruning_bucket VALUES (1, 'a'), (2, 'A')", pg_conn)
 
-    assert run_query(
+    query = (
         "SELECT id FROM string_pruning_bucket "
-        "WHERE v COLLATE string_pruning_ci = 'a' ORDER BY id",
-        pg_conn,
-    ) == [[1], [2]]
+        "WHERE v COLLATE string_pruning_ci = 'a' ORDER BY id"
+    )
+    assert run_query(query, pg_conn) == [[1], [2]]
+    explain = run_query(f"EXPLAIN (verbose, format json) {query}", pg_conn)
+    assert int(fetch_data_files_used(explain)) == data_file_count(
+        pg_conn, "string_pruning_bucket"
+    )
     pg_conn.rollback()
 
 
