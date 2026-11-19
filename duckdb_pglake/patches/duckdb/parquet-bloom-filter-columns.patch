@@ -1,0 +1,160 @@
+diff --git a/extension/parquet/include/parquet_writer.hpp b/extension/parquet/include/parquet_writer.hpp
+index c8ea43f571..6e0c2742b9 100644
+--- a/extension/parquet/include/parquet_writer.hpp
++++ b/extension/parquet/include/parquet_writer.hpp
+@@ -11,6 +11,8 @@
+ #include "duckdb.hpp"
+ #include "duckdb/common/common.hpp"
+ #include "duckdb/common/optional_idx.hpp"
++#include "duckdb/common/string_util.hpp"
++#include "duckdb/common/unordered_set.hpp"
+ #include "duckdb/common/encryption_state.hpp"
+ #include "duckdb/common/exception.hpp"
+ #include "duckdb/common/mutex.hpp"
+@@ -161,6 +163,13 @@ public:
+ 	double BloomFilterFalsePositiveRatio() const {
+ 		return bloom_filter_false_positive_ratio;
+ 	}
++	void SetBloomFilterColumns(const vector<string> &columns) {
++		bloom_filter_columns.insert(columns.begin(), columns.end());
++	}
++	//! Whether the column at schema_path always gets a bloom filter, whatever its encoding
++	bool ForceBloomFilter(const vector<string> &schema_path) const {
++		return !bloom_filter_columns.empty() && bloom_filter_columns.count(StringUtil::Join(schema_path, ".")) > 0;
++	}
+ 	int64_t CompressionLevel() const {
+ 		return compression_level;
+ 	}
+@@ -209,6 +218,8 @@ private:
+ 	idx_t string_dictionary_page_size_limit;
+ 	bool enable_bloom_filters;
+ 	double bloom_filter_false_positive_ratio;
++	//! Dot-separated paths of the columns set by the bloom_filter_columns option
++	unordered_set<string> bloom_filter_columns;
+ 	int64_t compression_level;
+ 	shared_ptr<EncryptionUtil> encryption_util;
+ 	ParquetVersion parquet_version;
+diff --git a/extension/parquet/include/writer/templated_column_writer.hpp b/extension/parquet/include/writer/templated_column_writer.hpp
+index ea3f516efb..6f5f1bec38 100644
+--- a/extension/parquet/include/writer/templated_column_writer.hpp
++++ b/extension/parquet/include/writer/templated_column_writer.hpp
+@@ -98,6 +98,9 @@ public:
+ 	}
+ 	duckdb_parquet::Encoding::type encoding;
+ 
++	//! Bloom filter to add every written value to, set when the column chunk is not dictionary-encoded
++	optional_ptr<ParquetBloomFilter> bloom_filter;
++
+ 	bool dbp_initialized;
+ 	DbpEncoder dbp_encoder;
+ 
+@@ -137,6 +140,9 @@ public:
+ 		auto result = make_uniq<StandardWriterPageState<SRC, TGT, OP>>(
+ 		    page_info.row_count - (page_info.empty_count + page_info.null_count), state.total_string_size,
+ 		    state.encoding, state.dictionary);
++		if (!HasDictionary(state)) {
++			result->bloom_filter = state.bloom_filter.get();
++		}
+ 		return std::move(result);
+ 	}
+ 
+@@ -256,6 +262,11 @@ public:
+ 					state.encoding = duckdb_parquet::Encoding::PLAIN;
+ 				}
+ 			}
++			if (writer.ForceBloomFilter(schema_path)) {
++				// total_value_count bounds the number of distinct values
++				state.bloom_filter =
++				    make_uniq<ParquetBloomFilter>(state.total_value_count, writer.BloomFilterFalsePositiveRatio());
++			}
+ 		} else {
+ 			state.key_bit_width = RleBpDecoder::ComputeBitWidth(state.dictionary.GetSize());
+ 		}
+@@ -291,7 +302,7 @@ public:
+ 		D_ASSERT(state.encoding == duckdb_parquet::Encoding::RLE_DICTIONARY ||
+ 		         state.encoding == duckdb_parquet::Encoding::PLAIN_DICTIONARY);
+ 
+-		if (writer.EnableBloomFilters()) {
++		if (writer.EnableBloomFilters() || writer.ForceBloomFilter(schema_path)) {
+ 			state.bloom_filter =
+ 			    make_uniq<ParquetBloomFilter>(state.dictionary.GetSize(), writer.BloomFilterFalsePositiveRatio());
+ 		}
+@@ -332,6 +343,16 @@ private:
+ 		const auto &mask = FlatVector::Validity(input_column);
+ 		const auto *data_ptr = FlatVector::GetData<SRC>(input_column);
+ 
++		if (page_state.bloom_filter) {
++			for (idx_t r = chunk_start; r < chunk_end; r++) {
++				if (!ALL_VALID && !mask.RowIsValid(r)) {
++					continue;
++				}
++				const TGT target_value = OP::template Operation<SRC, TGT>(data_ptr[r]);
++				page_state.bloom_filter->FilterInsert(OP::template XXHash64<SRC, TGT>(target_value));
++			}
++		}
++
+ 		switch (page_state.encoding) {
+ 		case duckdb_parquet::Encoding::PLAIN_DICTIONARY:
+ 			// PLAIN_DICTIONARY can be treated the same as RLE_DICTIONARY
+diff --git a/extension/parquet/parquet_extension.cpp b/extension/parquet/parquet_extension.cpp
+index caad5e2dee..d5f95540e3 100644
+--- a/extension/parquet/parquet_extension.cpp
++++ b/extension/parquet/parquet_extension.cpp
+@@ -84,6 +84,8 @@ struct ParquetWriteBindData : public TableFunctionData {
+ 	bool enable_bloom_filters = true;
+ 	//! What false positive rate are we willing to accept for bloom filters
+ 	double bloom_filter_false_positive_ratio = 0.01;
++	//! Columns that always get a bloom filter, whatever their encoding
++	vector<string> bloom_filter_columns;
+ 
+ 	//! After how many row groups to rotate to a new file
+ 	optional_idx row_groups_per_file;
+@@ -134,6 +136,7 @@ static void ParquetListCopyOptions(ClientContext &context, CopyOptionsInput &inp
+ 	copy_options["bloom_filter_false_positive_ratio"] = CopyOption(LogicalType::DOUBLE, CopyOptionMode::WRITE_ONLY);
+ 	copy_options["debug_use_openssl"] = CopyOption(LogicalType::BOOLEAN, CopyOptionMode::READ_WRITE);
+ 	copy_options["write_bloom_filter"] = CopyOption(LogicalType::BOOLEAN, CopyOptionMode::WRITE_ONLY);
++	copy_options["bloom_filter_columns"] = CopyOption(LogicalType::ANY, CopyOptionMode::WRITE_ONLY);
+ 	copy_options["compression_level"] = CopyOption(LogicalType::BIGINT, CopyOptionMode::WRITE_ONLY);
+ 	copy_options["parquet_version"] = CopyOption(LogicalType::VARCHAR, CopyOptionMode::WRITE_ONLY);
+ 	copy_options["binary_as_string"] = CopyOption(LogicalType::BOOLEAN, CopyOptionMode::READ_ONLY);
+@@ -297,6 +300,16 @@ static unique_ptr<FunctionData> ParquetWriteBind(ClientContext &context, CopyFun
+ 				throw BinderException("bloom_filter_false_positive_ratio must be greater than 0");
+ 			}
+ 			bind_data->bloom_filter_false_positive_ratio = val;
++		} else if (loption == "bloom_filter_columns") {
++			for (auto &value : option.second) {
++				if (value.type().id() == LogicalTypeId::LIST) {
++					for (auto &child : ListValue::GetChildren(value)) {
++						bind_data->bloom_filter_columns.push_back(child.ToString());
++					}
++				} else {
++					bind_data->bloom_filter_columns.push_back(value.ToString());
++				}
++			}
+ 		} else if (loption == "compression_level") {
+ 			const auto val = option.second[0].GetValue<int64_t>();
+ 			if (val < ZStdFileSystem::MinimumCompressionLevel() || val > ZStdFileSystem::MaximumCompressionLevel()) {
+@@ -361,6 +374,7 @@ static unique_ptr<GlobalFunctionData> ParquetWriteInitializeGlobal(ClientContext
+ 	    parquet_bind.string_dictionary_page_size_limit, parquet_bind.enable_bloom_filters,
+ 	    parquet_bind.bloom_filter_false_positive_ratio, parquet_bind.compression_level, parquet_bind.parquet_version,
+ 	    parquet_bind.geoparquet_version);
++	global_state->writer->SetBloomFilterColumns(parquet_bind.bloom_filter_columns);
+ 	return std::move(global_state);
+ }
+ 
+@@ -617,6 +631,7 @@ static void ParquetCopySerialize(Serializer &serializer, const FunctionData &bin
+ 	                                    default_value.geoparquet_version);
+ 	serializer.WritePropertyWithDefault<ShreddingType>(117, "shredding_types", bind_data.shredding_types,
+ 	                                                   default_value.shredding_types);
++	serializer.WritePropertyWithDefault(118, "bloom_filter_columns", bind_data.bloom_filter_columns);
+ }
+ 
+ static unique_ptr<FunctionData> ParquetCopyDeserialize(Deserializer &deserializer, CopyFunction &function) {
+@@ -652,6 +667,7 @@ static unique_ptr<FunctionData> ParquetCopyDeserialize(Deserializer &deserialize
+ 	    deserializer.ReadPropertyWithExplicitDefault(116, "geoparquet_version", default_value.geoparquet_version);
+ 	data->shredding_types =
+ 	    deserializer.ReadPropertyWithExplicitDefault<ShreddingType>(117, "shredding_types", ShreddingType());
++	deserializer.ReadPropertyWithDefault<vector<string>>(118, "bloom_filter_columns", data->bloom_filter_columns);
+ 
+ 	return std::move(data);
+ }

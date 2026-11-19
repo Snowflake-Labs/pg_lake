@@ -245,10 +245,15 @@ WriteQueryResultTo(char *query,
 				}
 
 				ListCell   *optionCell = NULL;
+				StringInfoData bloomFilterColumns;
+				bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
+
+				initStringInfo(&bloomFilterColumns);
 
 				foreach(optionCell, formatOptions)
 				{
 					DefElem    *option = lfirst(optionCell);
+					const char *bloomFilterColumn = GetBloomFilterOptionColumnName(option->defname);
 
 					if (strcmp(option->defname, "file_size_bytes") == 0)
 					{
@@ -257,7 +262,19 @@ WriteQueryResultTo(char *query,
 						appendStringInfo(&command, ", file_size_bytes %s",
 										 quote_literal_cstr(fileSizeStr));
 					}
+					else if (bloomFilterColumn != NULL && defGetBoolean(option))
+					{
+						appendStringInfo(&bloomFilterColumns, "%s%s",
+										 bloomFilterColumns.len > 0 ? ", " : "",
+										 quote_literal_cstr(DuckDBNameForColumn(schema,
+																				bloomFilterColumn,
+																				hasCollision)));
+					}
 				}
+
+				if (bloomFilterColumns.len > 0)
+					appendStringInfo(&command, ", bloom_filter_columns [%s]",
+									 bloomFilterColumns.data);
 
 				if (schema != NULL)
 				{
@@ -592,6 +609,23 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
 	appendStringInfoString(&map, "}");
 
 	return map.data;
+}
+
+
+/*
+ * GetBloomFilterOptionColumnName returns the column name in a
+ * write.parquet.bloom-filter-enabled.column.<column> option name, or NULL if
+ * optionName is not such an option.
+ */
+const char *
+GetBloomFilterOptionColumnName(const char *optionName)
+{
+	size_t		prefixLength = strlen(PARQUET_BLOOM_FILTER_ENABLED_COLUMN_PREFIX);
+
+	if (strncmp(optionName, PARQUET_BLOOM_FILTER_ENABLED_COLUMN_PREFIX, prefixLength) != 0)
+		return NULL;
+
+	return optionName + prefixLength;
 }
 
 

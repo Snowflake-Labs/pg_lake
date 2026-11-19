@@ -47,9 +47,30 @@ accepts the same options.
 | `column_stats_mode`<span class="pglake-meta">Default `truncate(16)`; can be changed</span> | Which column statistics to keep for file pruning: `full`, `none`, or `truncate(N)` to keep the first `N` bytes of string bounds. |
 | `out_of_range_values`<span class="pglake-meta">Default `error`; can be changed</span> | `error` or `clamp`. See [out-of-range values](data-types.md#out-of-range-values). |
 | `compatibility_mode`<span class="pglake-meta">Default `pg_lake_iceberg.default_compatibility_mode`; fixed at creation</span> | `auto` or `snowflake`. With `snowflake`, `uuid` values nested in arrays or composites are stored as strings. |
+| `write.parquet.bloom-filter-enabled.column.<column>`<span class="pglake-meta">Default `false`; can be changed; changes apply to new data files</span> | `true` writes a Parquet bloom filter for `<column>` in every new data file. See [bloom filters](#bloom-filters). |
 
 `CREATE TABLE ... USING iceberg` also accepts the options for
 [creating a table from a file](#creating-a-table-from-a-file).
+
+### Bloom filters
+
+A Parquet bloom filter lets a reader skip row groups that cannot contain the value of an
+equality filter. It helps on high-cardinality columns such as identifiers, where min/max
+statistics rarely exclude anything. Quote the option name:
+
+```sql
+CREATE TABLE events (something_id bigint, payload jsonb)
+USING iceberg
+WITH ("write.parquet.bloom-filter-enabled.column.something_id" = 'true');
+```
+
+- Supported for top-level columns of primitive types other than `boolean` and `interval`, and
+  for `numeric` with a precision of at most 18.
+- pg_lake's own queries use the filters on integer, floating-point, text and `bytea` columns.
+  On other types they only help other engines.
+- Only new data files get a bloom filter; existing files get one when compaction rewrites them.
+- PostgreSQL truncates option names to 63 bytes, which leaves 21 bytes for the column name.
+- The option is not added to the `properties` of the Iceberg table metadata.
 
 ## Data lake files
 
