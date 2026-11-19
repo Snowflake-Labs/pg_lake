@@ -472,7 +472,7 @@ MergeManifestGroup(ManifestGroup * mergeableManifestGroup, IcebergSnapshot * cur
 	{
 		IcebergManifest *newManifest = lfirst(mergeableManifestCell);
 
-		List	   *manifestEntries = FetchManifestEntriesFromManifest(newManifest, NULL);
+		List	   *manifestEntries = ReadManifestEntries(newManifest->manifest_path, true);
 
 		/*
 		 * set the status of entries to EXISTING if they are from the old
@@ -546,7 +546,7 @@ RemoveDeletedManifestEntriesInternal(IcebergManifest * *manifest, IcebergSnapsho
 	/* tests attach here to check that a manifest is not read needlessly */
 	INJECTION_POINT_COMPAT("manifest-merge-read-manifest-entries");
 
-	List	   *manifestEntries = FetchManifestEntriesFromManifest(*manifest, NULL);
+	List	   *manifestEntries = ReadManifestEntries((*manifest)->manifest_path, true);
 
 	List	   *newManifestEntries = NIL;
 

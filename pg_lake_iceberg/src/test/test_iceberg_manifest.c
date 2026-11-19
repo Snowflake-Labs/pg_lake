@@ -55,7 +55,7 @@ reserialize_iceberg_manifest_list(PG_FUNCTION_ARGS)
 	char	   *manifestListReadPath = text_to_cstring(PG_GETARG_TEXT_P(0));
 	char	   *manifestListWritePath = text_to_cstring(PG_GETARG_TEXT_P(1));
 
-	List	   *manifests = ReadIcebergManifests(manifestListReadPath);
+	List	   *manifests = ReadIcebergManifests(manifestListReadPath, true);
 
 	WriteIcebergManifestList(manifestListWritePath, manifests);
 
@@ -72,7 +72,7 @@ reserialize_iceberg_manifest(PG_FUNCTION_ARGS)
 	char	   *manifestReadPath = text_to_cstring(PG_GETARG_TEXT_P(0));
 	char	   *manifestWritePath = text_to_cstring(PG_GETARG_TEXT_P(1));
 
-	List	   *manifestEntries = ReadManifestEntries(manifestReadPath);
+	List	   *manifestEntries = ReadManifestEntries(manifestReadPath, true);
 
 	/* only the entries are compared, so no table key-value metadata */
 	WriteIcebergManifest(manifestWritePath, manifestEntries, NIL);
@@ -447,7 +447,7 @@ FetchManifestPathsFromManifestListUri(const char *manifestListPath)
 {
 	List	   *manifestPaths = NIL;
 
-	List	   *manifests = ReadIcebergManifests(manifestListPath);
+	List	   *manifests = ReadIcebergManifests(manifestListPath, false);
 
 	ListCell   *manifestCell = NULL;
 

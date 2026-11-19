@@ -674,6 +674,8 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 	{
 		DataFile   *dataFile = lfirst(dataFileCell);
 
+		ErrorIfDataFileNotParquet(dataFile);
+
 		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
 
 		fileScan->path = (char *) dataFile->file_path;
@@ -690,6 +692,8 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 
 		if (dataFile->content != ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES)
 			continue;
+
+		ErrorIfDataFileNotParquet(dataFile);
 
 		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
 
