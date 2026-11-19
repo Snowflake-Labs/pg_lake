@@ -67,6 +67,8 @@ static IcebergPartitionTransform * GetPartitionTransformFromSpecField(Oid relati
 																	  IcebergPartitionSpecField * specField);
 static void ParseTransformName(const char *name, IcebergPartitionTransformType * type,
 							   size_t *bucketCount, size_t *truncateLen);
+static bool TryParseTransformName(const char *name, IcebergPartitionTransformType * type,
+								  size_t *bucketCount, size_t *truncateLen);
 static bool ParseBracketUintSize(const char *name, const char *prefix, size_t *outVal);
 static void *DatumToPartitionValue(IcebergPartitionTransform * transform, Datum columnValue, bool isNull,
 								   size_t *valuelength);
@@ -305,12 +307,6 @@ ParseTransformName(const char *name,
 				   size_t *bucketCount,
 				   size_t *truncateLen)
 {
-	/* Defensive – clear outputs first */
-	if (bucketCount)
-		*bucketCount = 0;
-	if (truncateLen)
-		*truncateLen = 0;
-
 	/* Check for empty name */
 	if (name == NULL || *name == '\0')
 	{
@@ -318,52 +314,91 @@ ParseTransformName(const char *name,
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("empty partition transform name")));
 	}
+
+	if (!TryParseTransformName(name, type, bucketCount, truncateLen))
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("unknown partition transform \"%s\"", name)));
+}
+
+
+/*
+ * TryParseTransformName is ParseTransformName() that returns false for a
+ * name it does not know instead of raising an error.
+ */
+static bool
+TryParseTransformName(const char *name,
+					  IcebergPartitionTransformType * type,
+					  size_t *bucketCount,
+					  size_t *truncateLen)
+{
+	/* Defensive – clear outputs first */
+	if (bucketCount)
+		*bucketCount = 0;
+	if (truncateLen)
+		*truncateLen = 0;
+
+	if (name == NULL || *name == '\0')
+		return false;
 	else if (pg_strncasecmp(name, "identity", strlen("identity")) == 0)
 	{
 		*type = PARTITION_TRANSFORM_IDENTITY;
-		return;
+		return true;
 	}
 	else if (pg_strncasecmp(name, "year", strlen("year")) == 0)
 	{
 		*type = PARTITION_TRANSFORM_YEAR;
-		return;
+		return true;
 	}
 	else if (pg_strncasecmp(name, "month", strlen("month")) == 0)
 	{
 		*type = PARTITION_TRANSFORM_MONTH;
-		return;
+		return true;
 	}
 	else if (pg_strncasecmp(name, "day", strlen("day")) == 0)
 	{
 		*type = PARTITION_TRANSFORM_DAY;
-		return;
+		return true;
 	}
 	else if (pg_strncasecmp(name, "hour", strlen("hour")) == 0)
 	{
 		*type = PARTITION_TRANSFORM_HOUR;
-		return;
+		return true;
 	}
 	else if (pg_strncasecmp(name, "void", strlen("void")) == 0)
 	{
 		*type = PARTITION_TRANSFORM_VOID;
-		return;
+		return true;
 	}
 	else if (pg_strncasecmp(name, "bucket[", strlen("bucket[")) == 0 &&
 			 ParseBracketUintSize(name, "bucket[", bucketCount))
 	{
 		*type = PARTITION_TRANSFORM_BUCKET;
-		return;
+		return true;
 	}
 	else if (pg_strncasecmp(name, "truncate[", strlen("truncate[")) == 0 &&
 			 ParseBracketUintSize(name, "truncate[", truncateLen))
 	{
 		*type = PARTITION_TRANSFORM_TRUNCATE;
-		return;
+		return true;
 	}
 
-	ereport(ERROR,
-			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-			 errmsg("unknown partition transform \"%s\"", name)));
+	return false;
+}
+
+
+/*
+ * PartitionTransformCanPrune returns whether a partition field with the
+ * given transform can prune data files. A void field is always null, and a
+ * transform pg_lake does not know cannot be evaluated against a filter.
+ */
+bool
+PartitionTransformCanPrune(const char *transformName)
+{
+	IcebergPartitionTransformType type;
+
+	return TryParseTransformName(transformName, &type, NULL, NULL) &&
+		type != PARTITION_TRANSFORM_VOID;
 }
 
 
