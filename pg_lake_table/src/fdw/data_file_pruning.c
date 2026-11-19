@@ -353,6 +353,15 @@ GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds)
 {
 	List	   *partitionFields = GetAllPartitionSpecFields(relationId);
 
+	/* the hash is keyed by attribute number, which need not be the field id */
+	List	   *fieldIdsUsedInQuery = NIL;
+	HASH_SEQ_STATUS status;
+	ColumnToFieldIdMapping *mapping = NULL;
+
+	hash_seq_init(&status, fieldIdsToUseInBounds);
+	while ((mapping = hash_seq_search(&status)) != NULL)
+		fieldIdsUsedInQuery = lappend_int(fieldIdsUsedInQuery, mapping->fieldId);
+
 	List	   *filteredPartitionFields = NIL;
 	ListCell   *filteredPartitionFieldCell = NULL;
 
@@ -360,11 +369,8 @@ GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds)
 	{
 		IcebergPartitionSpecField *specField = lfirst(filteredPartitionFieldCell);
 
-		bool		found = false;
-
-		hash_search(fieldIdsToUseInBounds, &specField->source_id, HASH_FIND, &found);
-
-		if (found && PartitionTransformCanPrune(specField->transform) &&
+		if (list_member_int(fieldIdsUsedInQuery, specField->source_id) &&
+			PartitionTransformCanPrune(specField->transform) &&
 			!PartitionFieldIdIsAmbiguous(partitionFields, specField))
 		{
 			filteredPartitionFields = lappend(filteredPartitionFields, specField);
