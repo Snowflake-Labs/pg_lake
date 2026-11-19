@@ -2372,7 +2372,6 @@ def test_partition_pruning_after_type_promotion(
     pg_conn.commit()
 
 
-# this test file aims to ensure partition pruning works
 @pytest.mark.parametrize("composite_column_first", [False, True])
 def test_partition_pruning_when_field_ids_differ_from_attnums(
     s3,
@@ -2415,6 +2414,7 @@ def test_partition_pruning_when_field_ids_differ_from_attnums(
         pg_conn.commit()
 
 
+# this test file aims to ensure partition pruning works
 @pytest.fixture(scope="module")
 def disable_data_file_pruning(superuser_conn):
 
