@@ -26,12 +26,14 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
+#include "pg_lake/json/json_reader.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/catalog_type.h"
 #include "catalog/heap.h"
 #include "parser/scansup.h"
 #include "utils/builtins.h"
+#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 
 static IcebergTableSchema * GetIcebergTableSchemaById(IcebergTableMetadata * metadata, int schemaId);
@@ -332,6 +334,75 @@ TruncateFieldNames(Field * field, bool warn)
 			TruncateStructElementNames(field->field.structType.fields,
 									   field->field.structType.nfields, true, warn);
 			break;
+	}
+}
+
+
+/*
+ * ApplyIcebergNameMapping records on each top-level column of the current
+ * schema the names the table's name mapping (schema.name-mapping.default)
+ * gives it, which is how the columns of a data file written without field ids
+ * are matched. Nested fields are matched by name in any case.
+ */
+void
+ApplyIcebergNameMapping(IcebergTableMetadata * metadata)
+{
+	const char *mappingString = NULL;
+
+	for (size_t propertyIdx = 0; propertyIdx < metadata->properties_length; propertyIdx++)
+	{
+		if (strcmp(metadata->properties[propertyIdx].key, "schema.name-mapping.default") == 0)
+			mappingString = metadata->properties[propertyIdx].value;
+	}
+
+	if (mappingString == NULL)
+		return;
+
+	Jsonb	   *mapping = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
+															 CStringGetDatum(mappingString)));
+
+	if (!JB_ROOT_IS_ARRAY(mapping) || JB_ROOT_IS_SCALAR(mapping))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Iceberg table property schema.name-mapping.default is not a JSON array")));
+
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+	uint32		entryCount = JB_ROOT_COUNT(mapping);
+
+	for (uint32 entryIdx = 0; entryIdx < entryCount; entryIdx++)
+	{
+		JsonbValue *entry = getIthJsonbValueFromContainer(&mapping->root, entryIdx);
+		int32		fieldId = 0;
+
+		/* an entry without a field id lists names that map to no field */
+		if (entry == NULL || entry->type != jbvBinary ||
+			!JsonExtractInt32Field(entry->val.binary.data, "field-id", FIELD_OPTIONAL, &fieldId))
+			continue;
+
+		FieldStructElement *field = NULL;
+
+		for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+		{
+			if (schema->fields[fieldIdx].id == fieldId)
+				field = &schema->fields[fieldIdx];
+		}
+
+		JsonbValue *names = getKeyJsonValueFromContainer(entry->val.binary.data,
+														 "names", strlen("names"), NULL);
+
+		if (field == NULL || names == NULL || names->type != jbvBinary)
+			continue;
+
+		uint32		nameCount = JsonContainerSize(names->val.binary.data);
+
+		for (uint32 nameIdx = 0; nameIdx < nameCount; nameIdx++)
+		{
+			JsonbValue *name = getIthJsonbValueFromContainer(names->val.binary.data, nameIdx);
+
+			if (name != NULL && name->type == jbvString)
+				field->mappedNames = lappend(field->mappedNames,
+											 pnstrdup(name->val.string.val, name->val.string.len));
+		}
 	}
 }
 

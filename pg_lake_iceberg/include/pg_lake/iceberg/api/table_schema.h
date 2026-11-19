@@ -31,6 +31,7 @@ extern PGDLLEXPORT DataFileSchemaField * GetDataFileSchemaFieldById(DataFileSche
 extern PGDLLEXPORT void LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata);
 extern PGDLLEXPORT void TruncateIcebergTableMetadataNames(IcebergTableMetadata * metadata,
 														  bool nested, bool warn);
+extern PGDLLEXPORT void ApplyIcebergNameMapping(IcebergTableMetadata * metadata);
 
 /* write api */
 extern PGDLLEXPORT IcebergTableSchema * RebuildIcebergSchemaFromDataFileSchema(Oid foreignTableOid,

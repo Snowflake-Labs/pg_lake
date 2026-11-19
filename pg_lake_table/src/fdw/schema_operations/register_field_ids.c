@@ -501,6 +501,8 @@ GetDataFileSchemaForExternalIcebergTable(Oid relationId, char *metadataPath,
 	if (OidIsValid(relationId))
 		TruncateIcebergTableMetadataNames(metadata, false, false);
 
+	ApplyIcebergNameMapping(metadata);
+
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
 
 	DataFileSchema *schema = palloc0(sizeof(DataFileSchema));

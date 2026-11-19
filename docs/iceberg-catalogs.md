@@ -292,10 +292,16 @@ For equality-delete support and its limitations, see
 [Reading external equality deletes](#reading-external-equality-deletes).
 
 pg_lake reads columns by their Iceberg field IDs. Data files written without field IDs, as
-added by `add_files` or left by `migrate` and `snapshot`, can only be read through the table's
-name mapping (`schema.name-mapping.default`), which pg_lake does not support: a query that
-reads a column from such a file fails with `the file has no field ids to match its columns
-by`.
+added by `add_files` or left by `migrate` and `snapshot`, are read through the table's name
+mapping (`schema.name-mapping.default`): each column is read from the file column that has one
+of the names the mapping lists for its field ID, and a column the mapping does not cover reads
+as NULL. If the table has no name mapping, a query that reads a column from such a file fails
+with `the file has no field ids to match its columns by`.
+
+Fields nested in a struct are read by their current names instead, in files with or without
+field IDs. A nested field renamed in the source catalog therefore reads as NULL from the files
+written before the rename, and a query fails with `STRUCT to STRUCT cast must have at least one
+matching member` if no field of the struct kept its name.
 
 Attached tables cannot be written to. Writing would mean taking over the table's metadata,
 field IDs and file inventory from whatever produced them, which pg_lake does not do: it writes
