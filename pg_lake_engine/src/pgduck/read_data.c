@@ -47,6 +47,10 @@
 #include "utils/typcache.h"
 
 
+/* the type of the nested fields of a column in read_parquet's schema */
+#define NESTED_FIELDS_TYPE \
+	"STRUCT(parent_id INTEGER, field_id INTEGER, name VARCHAR, names VARCHAR[])[]"
+
 static char *ReadDataSourceFunction(List *sourcePaths,
 									uint64 sourceRowCount,
 									CopyDataFormat sourceFormat,
@@ -60,6 +64,10 @@ static char *ReadDataSourceFunction(List *sourcePaths,
 									bool emitRowId);
 static char *BuildParquetSchema(DataFileSchema * schema, bool emitRowId);
 static char *MappedNamesToDuckDBList(List *names);
+static char *NestedFieldsToDuckDBList(Field * field, int fieldId);
+static void AppendNestedFields(StringInfo list, Field * field, int parentId);
+static void AppendNestedField(StringInfo list, int parentId, int fieldId, const char *name,
+							  List *names);
 static char *GetSchemaType(Field * mapping);
 static const char *IcebergScalarTypeNameToDuckDBTypeName(const char *icebergTypeName);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
@@ -705,11 +713,14 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 	bool		addComma = false;
 	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
 	bool		hasMappedNames = false;
+	bool		hasNestedFields = false;
 
 	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
 	{
 		if (schema->fields[fieldIdx].mappedNames != NIL)
 			hasMappedNames = true;
+		if (schema->fields[fieldIdx].type->type != FIELD_TYPE_SCALAR)
+			hasNestedFields = true;
 	}
 
 	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
@@ -741,6 +752,9 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 		if (hasMappedNames)
 			appendStringInfo(&schemaString, ", names: %s",
 							 MappedNamesToDuckDBList(field->mappedNames));
+		if (hasNestedFields)
+			appendStringInfo(&schemaString, ", nested: %s",
+							 NestedFieldsToDuckDBList(field->type, field->id));
 
 		appendStringInfoString(&schemaString, "}");
 
@@ -748,14 +762,89 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 	}
 
 	if (emitRowId)
-		appendStringInfo(&schemaString, "%s %d: {name: '_row_id', type: 'BIGINT', default_value: NULL%s}",
+		appendStringInfo(&schemaString, "%s %d: {name: '_row_id', type: 'BIGINT', default_value: NULL%s%s}",
 						 addComma ? ", " : "",
 						 ICEBERG_ROWID_FIELD_ID,
-						 hasMappedNames ? ", names: NULL::VARCHAR[]" : "");
+						 hasMappedNames ? ", names: NULL::VARCHAR[]" : "",
+						 hasNestedFields ? ", nested: NULL::" NESTED_FIELDS_TYPE : "");
 
 	appendStringInfoString(&schemaString, "}");
 
 	return schemaString.data;
+}
+
+
+/*
+ * NestedFieldsToDuckDBList returns a DuckDB literal of the fields nested in a
+ * column of the given type and field id, by which read_parquet matches the
+ * nested fields of each file by field id, or a NULL one for a scalar column.
+ */
+static char *
+NestedFieldsToDuckDBList(Field * field, int fieldId)
+{
+	if (field->type == FIELD_TYPE_SCALAR)
+		return "NULL::" NESTED_FIELDS_TYPE;
+
+	StringInfoData list;
+
+	initStringInfo(&list);
+	appendStringInfoChar(&list, '[');
+	AppendNestedFields(&list, field, fieldId);
+	appendStringInfoString(&list, "]::" NESTED_FIELDS_TYPE);
+
+	return list.data;
+}
+
+
+/*
+ * AppendNestedFields appends the fields nested in a field of the given type and
+ * field id: a struct field under its name, which is also the name it has in a
+ * file without field ids along with the names the name mapping gives it, a
+ * list element as "element", and a map key and value as "key" and "value".
+ */
+static void
+AppendNestedFields(StringInfo list, Field * field, int parentId)
+{
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			break;
+
+		case FIELD_TYPE_LIST:
+			AppendNestedField(list, parentId, field->field.list.elementId, "element", NIL);
+			AppendNestedFields(list, field->field.list.element, field->field.list.elementId);
+			break;
+
+		case FIELD_TYPE_MAP:
+			AppendNestedField(list, parentId, field->field.map.keyId, "key", NIL);
+			AppendNestedFields(list, field->field.map.key, field->field.map.keyId);
+			AppendNestedField(list, parentId, field->field.map.valueId, "value", NIL);
+			AppendNestedFields(list, field->field.map.value, field->field.map.valueId);
+			break;
+
+		case FIELD_TYPE_STRUCT:
+			for (size_t fieldIdx = 0; fieldIdx < field->field.structType.nfields; fieldIdx++)
+			{
+				FieldStructElement *element = &field->field.structType.fields[fieldIdx];
+				List	   *names = lcons(unconstify(char *, element->name),
+										  list_copy(element->mappedNames));
+
+				AppendNestedField(list, parentId, element->id, element->name, names);
+				AppendNestedFields(list, element->type, element->id);
+			}
+			break;
+	}
+}
+
+
+static void
+AppendNestedField(StringInfo list, int parentId, int fieldId, const char *name, List *names)
+{
+	if (list->data[list->len - 1] != '[')
+		appendStringInfoString(list, ", ");
+
+	appendStringInfo(list, "{parent_id: %d, field_id: %d, name: %s, names: %s}",
+					 parentId, fieldId, quote_literal_cstr(name), MappedNamesToDuckDBList(names));
 }
 
 
