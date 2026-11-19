@@ -297,8 +297,9 @@ only to tables it created. To move existing data under pg_lake, create a new tab
 into it.
 
 pg_lake reads manifests and manifest lists that are uncompressed or compressed with deflate
-(Iceberg's default, `gzip`) or snappy. A table whose `write.avro.compression-codec` is `zstd` or `bzip2` cannot be
-read: queries fail with `File header contains an unknown codec`.
+(Iceberg's default, `gzip`) or snappy. A table whose manifests are compressed with zstd or
+bzip2, as PyIceberg writes them when `write.avro.compression-codec` is set to one of those,
+cannot be read: queries fail with `File header contains an unknown codec`.
 
 #### Lowercase column names from external engines
 
