@@ -20,6 +20,7 @@
 
 #include <inttypes.h>
 
+#include "access/relation.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
@@ -52,6 +53,7 @@
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/typcache.h"
 
 static PgLakeTableScan * CreateTableScanForRelation(Oid relationId,
@@ -297,6 +299,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		/* fold names before the schema check, which looks them up as attnames */
 		if (LowercasesColumnNames(relationId))
 			LowercaseIcebergTableMetadataNames(metadata);
+		TruncateIcebergTableMetadataNames(metadata, false, false);
 
 		/*
 		 * We cannot afford to have a different schema between the Postgres
@@ -461,6 +464,50 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 						   unmatched->data) : 0,
 				 errhint("Please drop and recreate the table \"%s\"", get_rel_name(relationId))));
 	}
+
+	/*
+	 * Each field found a column above, but a column that no field names (one
+	 * dropped or renamed in the catalog) leaves the counts equal.
+	 */
+	Bitmapset  *mappedAttnums = NULL;
+
+	foreach_ptr(PostgresColumnMapping, columnMapping, postgresColumnMappings)
+	{
+		if (columnMapping->attrNum > InvalidAttrNumber)
+			mappedAttnums = bms_add_member(mappedAttnums, columnMapping->attrNum);
+	}
+
+	bool		emitsFilename =
+		GetBoolOption(GetForeignTable(relationId)->options, "filename", false);
+	Relation	rel = relation_open(relationId, NoLock);
+	TupleDesc	tupleDesc = RelationGetDescr(rel);
+	char	   *unmatchedColumn = NULL;
+
+	for (int attIdx = 0; attIdx < tupleDesc->natts; attIdx++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, attIdx);
+
+		if (attr->attisdropped || bms_is_member(attr->attnum, mappedAttnums))
+			continue;
+
+		/* the scan fills the filename column, not a field */
+		if (emitsFilename && strcmp(NameStr(attr->attname), "_filename") == 0)
+			continue;
+
+		unmatchedColumn = pstrdup(NameStr(attr->attname));
+		break;
+	}
+
+	relation_close(rel, NoLock);
+
+	if (unmatchedColumn != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Schema mismatch between Iceberg and Postgres for relation \"%s\"",
+						get_rel_name(relationId)),
+				 errdetail("Postgres column \"%s\" has no matching Iceberg field.",
+						   unmatchedColumn),
+				 errhint("Please drop and recreate the table \"%s\"", get_rel_name(relationId))));
 
 	/*
 	 * now iterate on the fields, and throw error in case anything doesn't
