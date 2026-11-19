@@ -187,6 +187,7 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	bool		createNewTable = HasCreateTableOperation(metadataOperations);
 
 	IcebergTableMetadata *metadata = NULL;
+	RestCatalogRequest *assertTableStateRequest = NULL;
 
 	if (createNewTable)
 	{
@@ -222,6 +223,13 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 			 * held until end of transaction.
 			 */
 			metadata = GetWritableRestCatalogTableMetadata(relationId, &metadataPath);
+
+			/*
+			 * The changes below build on this version of the table, so a
+			 * commit that the catalog decides on asserts it is still current.
+			 */
+			assertTableStateRequest =
+				GetAssertTableStateCatalogRequest(relationId, metadata);
 		}
 		else
 		{
@@ -406,6 +414,9 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	{
 		if (metadataPath)
 			InsertDeletionQueueRecord(metadataPath, relationId, GetCurrentTransactionStartTimestamp());
+
+		if (assertTableStateRequest != NULL && restCatalogRequests != NIL)
+			restCatalogRequests = lcons(assertTableStateRequest, restCatalogRequests);
 
 		/*
 		 * We are done, writable rest catalog iceberg tables have their
@@ -1024,6 +1035,39 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 	}
 
 	/*
+	 * If we have any files to be marked as removed, we need to update the
+	 * manifest entries to mark them as deleted. We do no create anything new
+	 * here, we just update the existing manifest entries. If any entry
+	 * changes in a manifest, we write a new manifest file.
+	 *
+	 * This runs before the manifests for new files are added, so removing all
+	 * files only removes the ones that existed before this snapshot.
+	 */
+	if (removedEntries != NIL || removeAllEntries)
+	{
+		/* do not modify input lists */
+		List	   *manifestList = list_concat_copy(finalDataManifestList,
+													finalDeleteManifestList);
+
+		ListCell   *manifestCell = NULL;
+
+		foreach(manifestCell, manifestList)
+		{
+			IcebergManifest *manifest = lfirst(manifestCell);
+
+			if (RewriteManifestForRemoval(manifest, removedEntries, removeAllEntries,
+										  snapshotId, newSnapshot,
+										  metadataLocation, snapshotUUID,
+										  &manifestIndex, allTransforms, writeContext,
+										  &finalDataManifestList,
+										  &finalDeleteManifestList))
+			{
+				createNewSnapshot = true;
+			}
+		}
+	}
+
+	/*
 	 * Iterate on the newDataManifestEntries HTAB, which is already grouped by
 	 * partitionSpecId. For each partitionSpecId, create a new manifest.
 	 */
@@ -1093,36 +1137,6 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 			finalDeleteManifestList = lappend(finalDeleteManifestList, newDeleteManifest);
 
 			createNewSnapshot = true;
-		}
-	}
-
-	/*
-	 * If we have any files to be marked as removed, we need to update the
-	 * manifest entries to mark them as deleted. We do no create anything new
-	 * here, we just update the existing manifest entries. If any entry
-	 * changes in a manifest, we write a new manifest file.
-	 */
-	if (removedEntries != NIL || removeAllEntries)
-	{
-		/* do not modify input lists */
-		List	   *manifestList = list_concat_copy(finalDataManifestList,
-													finalDeleteManifestList);
-
-		ListCell   *manifestCell = NULL;
-
-		foreach(manifestCell, manifestList)
-		{
-			IcebergManifest *manifest = lfirst(manifestCell);
-
-			if (RewriteManifestForRemoval(manifest, removedEntries, removeAllEntries,
-										  snapshotId, newSnapshot,
-										  metadataLocation, snapshotUUID,
-										  &manifestIndex, allTransforms, writeContext,
-										  &finalDataManifestList,
-										  &finalDeleteManifestList))
-			{
-				createNewSnapshot = true;
-			}
 		}
 	}
 

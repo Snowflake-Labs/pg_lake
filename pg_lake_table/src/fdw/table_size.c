@@ -23,7 +23,12 @@
 
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_extension_base/extension_ids.h"
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/fdw/data_files_catalog.h"
+#include "pg_lake/iceberg/api/datafile.h"
+#include "pg_lake/iceberg/metadata_operations.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/rel_utils.h"
 #include "utils/builtins.h"
 
@@ -40,7 +45,23 @@ pg_lake_table_size(PG_FUNCTION_ARGS)
 {
 	Oid			relationId = PG_GETARG_OID(0);
 
-	if (IsPgLakeIcebergForeignTableById(relationId))
+	if (IsCatalogCommitRestTable(relationId) &&
+		!IsIcebergTableCreatedInCurrentTransaction(relationId))
+	{
+		/* the catalog keeps the files, so count its current snapshot */
+		IcebergTableMetadata *metadata = GetWritableRestCatalogTableMetadata(relationId, NULL);
+		List	   *dataFiles = NIL;
+		List	   *deleteFiles = NIL;
+		int64		tableSize = 0;
+
+		FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
+
+		foreach_ptr(DataFile, dataFile, list_concat(dataFiles, deleteFiles))
+			tableSize += dataFile->file_size_in_bytes;
+
+		PG_RETURN_INT64(tableSize);
+	}
+	else if (IsPgLakeIcebergForeignTableById(relationId))
 	{
 		int64		tableSize = GetTableSizeFromCatalog(relationId);
 

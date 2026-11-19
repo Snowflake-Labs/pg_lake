@@ -36,6 +36,14 @@ typedef struct TableMetadataOperationTracker
 	bool		relationDataFilesRemoveAllSeen;
 
 	/*
+	 * For a table in catalog commit mode (IsCatalogCommitRestTable), the data
+	 * file operations of the transaction, which are never written to the data
+	 * files catalog. The commit applies them to the catalog's metadata, and
+	 * scans in the transaction add them to the catalog's snapshot.
+	 */
+	List	   *pendingDataFileOperations;
+
+	/*
 	 * Set when a single data file was removed from the relation, by a DELETE,
 	 * an UPDATE or a rewrite. The commit-time diff needs the last pushed
 	 * metadata only to find such files, so a transaction that never set this
@@ -65,6 +73,11 @@ extern PGDLLEXPORT bool EnableAppendOnlyCommitFastPath;
 
 extern PGDLLEXPORT void ConsumeTrackedIcebergMetadataChanges(bool isVerbose);
 extern PGDLLEXPORT void PostAllRestCatalogRequests(void);
+extern PGDLLEXPORT void CommitRestCatalogRequestsBeforeCommit(void);
+extern PGDLLEXPORT bool XactCommitsInRestCatalog(void);
+extern PGDLLEXPORT bool IsPostgresTableWrite(Oid relationId);
+extern PGDLLEXPORT void RecordTableWriteInTx(Oid relationId);
+extern PGDLLEXPORT void ResetPostgresTableWrites(void);
 extern PGDLLEXPORT void TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes);
 extern PGDLLEXPORT void RecordRestCatalogRequestInTx(Oid relationId, RestCatalogOperationType operationType,
 													 const char *body);
@@ -79,3 +92,5 @@ extern PGDLLEXPORT void IcebergMetadataSubXactCallback(SubXactEvent event,
 													   SubTransactionId mySubid,
 													   SubTransactionId parentSubid, void *arg);
 extern PGDLLEXPORT void RecordRestCatalogStagedTable(Oid relationId, const char *uuid);
+extern PGDLLEXPORT void RecordPendingDataFileOperations(Oid relationId, List *metadataOperations);
+extern PGDLLEXPORT List *GetPendingDataFileOperations(Oid relationId);

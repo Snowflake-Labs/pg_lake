@@ -79,6 +79,13 @@ static const struct config_enum_entry RestCatalogAuthTypeOptions[] = {
 	{NULL, 0, false},
 };
 
+/* pg_lake_iceberg.default_rest_catalog_commit_mode */
+static const struct config_enum_entry RestCatalogCommitModeOptions[] = {
+	{"post_commit", REST_CATALOG_COMMIT_MODE_POST_COMMIT, false},
+	{"catalog", REST_CATALOG_COMMIT_MODE_CATALOG, false},
+	{NULL, 0, false},
+};
+
 /* pg_lake_iceberg.default_compatibility_mode */
 static const struct config_enum_entry CompatibilityModeOptions[] = {
 	{"auto", ICEBERG_COMPAT_AUTO, false},
@@ -374,6 +381,23 @@ _PG_init(void)
 							 PGC_SUSET,
 							 GUC_SUPERUSER_ONLY | GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, AssignRestCatalogAuthType, NULL);
+
+	DefineCustomEnumVariable("pg_lake_iceberg.default_rest_catalog_commit_mode",
+							 gettext_noop("Determines when changes to writable REST catalog "
+										  "tables are committed to the catalog, for tables and "
+										  "catalog servers without a commit_mode option."),
+							 gettext_noop("'post_commit' (the default) sends the changes after the "
+										  "PostgreSQL commit and only warns if the catalog rejects "
+										  "them. 'catalog' commits them in the catalog before the "
+										  "PostgreSQL commit, aborts the transaction if the catalog "
+										  "rejects them, and does not allow writes to PostgreSQL "
+										  "tables in the same transaction."),
+							 &DefaultRestCatalogCommitMode,
+							 REST_CATALOG_COMMIT_MODE_POST_COMMIT,
+							 RestCatalogCommitModeOptions,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
 
 	DefineCustomEnumVariable("pg_lake_iceberg.default_compatibility_mode",
 							 gettext_noop("Downstream-engine storage compatibility mode that new "

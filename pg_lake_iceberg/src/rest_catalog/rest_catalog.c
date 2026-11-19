@@ -49,6 +49,7 @@ char	   *RestCatalogClientSecret = NULL;
 char	   *RestCatalogScope = "PRINCIPAL_ROLE:ALL";
 int			RestCatalogAuthType = REST_CATALOG_AUTH_TYPE_OAUTH2;
 bool		RestCatalogEnableVendedCredentials = false;
+int			DefaultRestCatalogCommitMode = REST_CATALOG_COMMIT_MODE_POST_COMMIT;
 
 
 /*
@@ -175,6 +176,7 @@ ApplyGUCDefaults(RestCatalogOptions * opts, bool isBuiltin)
 	 */
 	opts->authType = isBuiltin ? RestCatalogAuthType : REST_CATALOG_AUTH_TYPE_OAUTH2;
 	opts->enableVendedCredentials = RestCatalogEnableVendedCredentials;
+	opts->commitMode = DefaultRestCatalogCommitMode;
 	opts->locationPrefix = defaultLocationPrefix ? pstrdup(defaultLocationPrefix) : NULL;
 }
 
@@ -516,6 +518,87 @@ RestCatalogVendingEnabledForRelation(Oid relationId)
 
 
 /*
+ * ParseRestCatalogCommitMode returns the REST_CATALOG_COMMIT_MODE_* value of
+ * a commit_mode option, and errors on anything else.
+ */
+int
+ParseRestCatalogCommitMode(const char *value)
+{
+	if (pg_strcasecmp(value, "post_commit") == 0)
+		return REST_CATALOG_COMMIT_MODE_POST_COMMIT;
+	if (pg_strcasecmp(value, "catalog") == 0)
+		return REST_CATALOG_COMMIT_MODE_CATALOG;
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+			 errmsg("invalid %s option: \"%s\"", REST_CATALOG_COMMIT_MODE_OPTION, value),
+			 errhint("Valid values are \"post_commit\" and \"catalog\".")));
+}
+
+
+/*
+ * GetDefaultRestCatalogCommitMode returns the commit mode a new writable
+ * table in the given catalog gets: the commit_mode option of its server, else
+ * pg_lake_iceberg.default_rest_catalog_commit_mode. Like
+ * RestCatalogVendingEnabledForRelation, it reads the options directly
+ * instead of resolving credentials.
+ */
+int
+GetDefaultRestCatalogCommitMode(const char *catalog)
+{
+	Oid			serverOid = ResolveRestCatalogServerId(catalog);
+	ForeignServer *server = GetForeignServerExtended(serverOid, FSV_MISSING_OK);
+
+	if (server != NULL)
+	{
+		char	   *serverCommitMode = GetStringOption(server->options,
+													   REST_CATALOG_COMMIT_MODE_OPTION, false);
+
+		if (serverCommitMode != NULL)
+			return ParseRestCatalogCommitMode(serverCommitMode);
+	}
+
+	return DefaultRestCatalogCommitMode;
+}
+
+
+/*
+ * GetRestCatalogCommitModeForRelation returns the commit mode of a writable
+ * REST catalog table. CREATE TABLE records 'catalog' in the commit_mode
+ * option and the option cannot change, so a table without it, including
+ * every table created before the option existed, commits through
+ * PostgreSQL.
+ */
+int
+GetRestCatalogCommitModeForRelation(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *tableCommitMode = GetStringOption(foreignTable->options,
+												  REST_CATALOG_COMMIT_MODE_OPTION, false);
+
+	if (tableCommitMode != NULL)
+		return ParseRestCatalogCommitMode(tableCommitMode);
+
+	return REST_CATALOG_COMMIT_MODE_POST_COMMIT;
+}
+
+
+/*
+ * IsCatalogCommitRestTable returns whether the relation is a writable REST
+ * catalog table whose catalog holds its whole state. pg_lake keeps none of
+ * its data files in PostgreSQL: scans read the catalog's current snapshot,
+ * and writes go to the catalog at commit.
+ */
+bool
+IsCatalogCommitRestTable(Oid relationId)
+{
+	return IsPgLakeIcebergForeignTableById(relationId) &&
+		GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE &&
+		GetRestCatalogCommitModeForRelation(relationId) == REST_CATALOG_COMMIT_MODE_CATALOG;
+}
+
+
+/*
  * CopyRestCatalogOptions deep-copies a RestCatalogOptions into the given
  * memory context.  All string fields are duplicated so the result is
  * self-contained and independent of the source's lifetime.
@@ -539,6 +622,7 @@ CopyRestCatalogOptions(MemoryContext dst, const RestCatalogOptions * src)
 	copy->warehouse = src->warehouse ? pstrdup(src->warehouse) : NULL;
 	copy->authType = src->authType;
 	copy->enableVendedCredentials = src->enableVendedCredentials;
+	copy->commitMode = src->commitMode;
 	copy->isBuiltin = src->isBuiltin;
 
 	MemoryContextSwitchTo(oldctx);

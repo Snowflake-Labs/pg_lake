@@ -200,6 +200,7 @@ CREATE SERVER polaris TYPE 'rest'
 | `warehouse` | server | Warehouse to name when pg_lake asks the catalog for its prefix (`GET /v1/config?warehouse=...`). Polaris and Lakekeeper need it to advertise a prefix: use the catalog name on Polaris and the warehouse name on Lakekeeper, which returns the warehouse ID. `catalog_name` still wins if set. |
 | `oauth_endpoint` | server | OAuth2 token endpoint URL, if the catalog does not serve it at `<rest_endpoint>/v1/oauth/tokens`. |
 | `enable_vended_credentials` | server | Ask the catalog for temporary storage credentials instead of using pgduck_server's own. |
+| `commit_mode` | server | `post_commit` or `catalog`, for new tables that do not set their own. See [commit modes](#commit-modes). |
 | `scope` | server or user mapping | OAuth2 scope. Default `PRINCIPAL_ROLE:ALL`. The user mapping wins if both set it. |
 | `client_id`, `client_secret` | user mapping | OAuth2 client credentials. |
 
@@ -390,10 +391,63 @@ which the current metadata-file reader requires. The catalog must support staged
 and the commit operations used by pg_lake; REST catalog support alone is not sufficient.
 
 {: .warning }
-pg_lake sends its changes to the catalog after the PostgreSQL transaction commits. If the
-catalog rejects a change, for example because the location is not allowed, the transaction is
-still committed in PostgreSQL and you only get a `WARNING`. Check for warnings when you start
-using a new catalog server.
+By default, pg_lake sends its changes to the catalog after the PostgreSQL transaction commits.
+If the catalog rejects a change, for example because the location is not allowed, the
+transaction is still committed in PostgreSQL and you only get a `WARNING`. Check for warnings
+when you start using a new catalog server, or use the `catalog` [commit mode](#commit-modes).
+
+#### Commit modes
+
+The commit mode decides who commits the changes to a writable REST catalog table:
+
+| Mode | What it does |
+|:--|:--|
+| `post_commit` (default) | PostgreSQL tracks the table's data files and commits the transaction, then pg_lake sends the changes to the catalog. A rejected change only produces a `WARNING`. |
+| `catalog` | The catalog holds the table's state and commits its changes. pg_lake keeps none of the table's data files in PostgreSQL: queries read the catalog's current snapshot, and writes go to the catalog just before the PostgreSQL commit. If the catalog rejects them, the transaction aborts with an `ERROR`. |
+
+A table gets its mode when it is created, from its own `commit_mode` option, then from the
+`commit_mode` option of its catalog server, then from
+`pg_lake_iceberg.default_rest_catalog_commit_mode`, and keeps it:
+
+```sql
+-- new tables in this catalog server are committed by the catalog
+ALTER SERVER polaris OPTIONS (ADD commit_mode 'catalog');
+
+-- except this one
+CREATE TABLE staging_events (id bigint, payload text) USING iceberg
+WITH (catalog = 'polaris', commit_mode = 'post_commit');
+```
+
+In `catalog` mode, queries see the latest commit in the catalog, including commits by other
+engines, together with the changes of the current transaction. Each commit asserts that the
+table is still at the snapshot pg_lake built it on. If another engine committed to the table
+in the meantime, the catalog rejects the change with a `409` and nothing is overwritten.
+
+Tables in `catalog` mode support `INSERT`, `COPY`, `TRUNCATE` and schema changes. `UPDATE`,
+`DELETE`, `MERGE` and the `row_ids` option are not supported yet, and `VACUUM` does not
+compact their data files. PostgreSQL still keeps the table definition, the mapping of columns
+to Iceberg field IDs and partition specs, and the queue of files to delete after an aborted
+write.
+
+Because the catalog makes the decision, a transaction in `catalog` mode cannot also write to
+tables that commit through PostgreSQL: regular tables, Iceberg tables in the PostgreSQL or
+object store catalogs, and other pg_lake tables. Temporary tables are allowed.
+
+```sql
+BEGIN;
+INSERT INTO order_summary VALUES ('emea', 100);
+INSERT INTO audit_log VALUES (now(), 'order_summary');
+ERROR:  cannot write to PostgreSQL table "audit_log" in a transaction that modifies REST catalog tables
+DETAIL:  The REST catalog commits a transaction that modifies tables with commit_mode 'catalog', so it cannot include writes to PostgreSQL tables.
+HINT:  Write to the PostgreSQL tables in a separate transaction.
+ROLLBACK;
+```
+
+All tables a transaction modifies must have the same commit mode. Dropping a table does not
+count, so `DROP SCHEMA ... CASCADE` works across modes. A transaction that creates tables
+sends those first, since the catalog commits table creation separately; if the rest of the
+commit is then rejected, pg_lake drops the new tables from the catalog again. Dropped tables
+are removed from the catalog after the other changes commit.
 
 ### Change or remove a catalog server
 

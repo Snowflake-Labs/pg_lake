@@ -36,6 +36,7 @@
 #include "foreign/foreign.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
+#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/permissions/roles.h"
 #include "pg_lake/copy/copy_format.h"
@@ -619,6 +620,12 @@ InitPgLakeIcebergOptions(void)
 		 */
 		{ICEBERG_COMPATIBILITY_MODE_OPTION, ForeignTableRelationId},
 
+		/*
+		 * when a writable REST catalog table commits: 'post_commit' or
+		 * 'catalog', defaults to its catalog server's commit_mode
+		 */
+		{REST_CATALOG_COMMIT_MODE_OPTION, ForeignTableRelationId},
+
 		{NULL, InvalidOid}
 	};
 
@@ -704,6 +711,9 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	/* if not provided, assume postgres catalog */
 	IcebergCatalogType icebergCatalogType = POSTGRES_CATALOG;
 	bool		readOnlyExternalCatalogTable = false;
+	bool		commitModeProvided = false;
+	int			commitMode = REST_CATALOG_COMMIT_MODE_POST_COMMIT;
+	bool		rowIds = false;
 	bool		lowercaseColumnNames = false;
 	char	   *catalogName = NULL;
 	char	   *catalogTableName = NULL;
@@ -865,7 +875,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "row_ids") == 0)
 		{
 			/* only accept boolean */
-			(void) defGetBoolean(def);
+			rowIds = defGetBoolean(def);
 		}
 		else if (catalog == ForeignTableRelationId && strcmp(def->defname, "partition_by") == 0)
 		{
@@ -945,6 +955,12 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			/* errors on an unrecognized value; single source of truth */
 			(void) ParseIcebergCompatibilityMode(defGetString(def));
 		}
+		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, REST_CATALOG_COMMIT_MODE_OPTION) == 0)
+		{
+			commitMode = ParseRestCatalogCommitMode(defGetString(def));
+			commitModeProvided = true;
+		}
 	}
 
 	/* first, adjust readable vs writable for external catalog tables */
@@ -962,6 +978,21 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 				 errmsg("\"location\" option is required for pg_lake_iceberg tables"),
 				 errhint("You can set the GUC pg_lake_iceberg.default_location_prefix "
 						 "to globally specify the location prefix.")));
+
+	if (catalog == ForeignTableRelationId && commitModeProvided &&
+		icebergCatalogType != REST_CATALOG_READ_WRITE)
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" option is only valid for writable rest catalog tables",
+						REST_CATALOG_COMMIT_MODE_OPTION)));
+
+	/* row IDs are mapped to data files in PostgreSQL */
+	if (catalog == ForeignTableRelationId && rowIds &&
+		commitMode == REST_CATALOG_COMMIT_MODE_CATALOG)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("\"row_ids\" option is not supported for tables with "
+						"commit_mode 'catalog'")));
 
 	if (catalog == ForeignTableRelationId && readOnlyExternalCatalogTable &&
 		!(icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY))
