@@ -20,6 +20,7 @@
 
 #include <inttypes.h>
 
+#include "access/relation.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
@@ -478,7 +479,7 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 
 	bool		emitsFilename =
 		GetBoolOption(GetForeignTable(relationId)->options, "filename", false);
-	Relation	rel = RelationIdGetRelation(relationId);
+	Relation	rel = relation_open(relationId, NoLock);
 	TupleDesc	tupleDesc = RelationGetDescr(rel);
 	char	   *unmatchedColumn = NULL;
 
@@ -497,7 +498,7 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 		break;
 	}
 
-	RelationClose(rel);
+	relation_close(rel, NoLock);
 
 	if (unmatchedColumn != NULL)
 		ereport(ERROR,
