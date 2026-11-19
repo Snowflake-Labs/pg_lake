@@ -2373,6 +2373,48 @@ def test_partition_pruning_after_type_promotion(
 
 
 # this test file aims to ensure partition pruning works
+@pytest.mark.parametrize("composite_column_first", [False, True])
+def test_partition_pruning_when_field_ids_differ_from_attnums(
+    s3,
+    disable_data_file_pruning,
+    pg_conn,
+    extension,
+    with_default_location,
+    composite_column_first,
+):
+    """The fields of a composite column take field ids too, so a column after
+    it has a field id above its attribute number."""
+    schema = "prune_field_id_attnum"
+    columns = "id int, pair prune_field_id_attnum.pair, region text"
+    if not composite_column_first:
+        columns = "id int, region text"
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    run_command(f"CREATE TYPE {schema}.pair AS (x int, y int)", pg_conn)
+    run_command(
+        f"CREATE TABLE {schema}.t ({columns}) USING iceberg WITH (partition_by = 'region')",
+        pg_conn,
+    )
+    for id, region in [(1, "a"), (2, "b"), (3, "c")]:
+        run_command(
+            f"INSERT INTO {schema}.t (id, region) VALUES ({id}, '{region}')", pg_conn
+        )
+    pg_conn.commit()
+
+    try:
+        results = run_query(
+            f"EXPLAIN (analyze, verbose, format json) SELECT id FROM {schema}.t WHERE region = 'a'",
+            pg_conn,
+        )
+        assert fetch_data_files_used(results) == "1"
+        assert run_query(f"SELECT id FROM {schema}.t WHERE region = 'a'", pg_conn) == [
+            [1]
+        ]
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+        pg_conn.commit()
+
+
 @pytest.fixture(scope="module")
 def disable_data_file_pruning(superuser_conn):
 
