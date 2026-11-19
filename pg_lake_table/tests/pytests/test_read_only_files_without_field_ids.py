@@ -34,6 +34,21 @@ def test_file_without_field_ids_reads_through_name_mapping(table_with_added_file
     ]
 
 
+def test_copy_from_metadata_reads_through_name_mapping(table_with_added_file):
+    namespace, table, pg_conn = table_with_added_file({"id": [1, 2], "v": ["a", "b"]})
+    run_command(f'CREATE SCHEMA "{namespace}"', pg_conn)
+    run_command(f'CREATE TABLE "{namespace}".copied (id bigint, v text)', pg_conn)
+    run_command(
+        f"""COPY "{namespace}".copied FROM '{table.metadata_location}'
+            WITH (format 'iceberg')""",
+        pg_conn,
+    )
+
+    assert run_query(
+        f'SELECT id, v FROM "{namespace}".copied ORDER BY id', pg_conn
+    ) == [[1, "a"], [2, "b"]]
+
+
 def test_name_mapping_keeps_the_names_of_renamed_columns(table_with_added_file):
     namespace, table, pg_conn = table_with_added_file({"id": [1, 2], "v": ["a", "b"]})
     with table.update_schema() as update:
