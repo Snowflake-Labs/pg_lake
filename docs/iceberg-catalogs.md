@@ -307,6 +307,11 @@ field IDs and file inventory from whatever produced them, which pg_lake does not
 only to tables it created. To move existing data under pg_lake, create a new table and copy
 into it.
 
+pg_lake reads manifests and manifest lists that are uncompressed or compressed with deflate
+(Iceberg's default, `gzip`) or snappy. A table whose manifests are compressed with zstd or
+bzip2, as PyIceberg writes them when `write.avro.compression-codec` is set to one of those,
+cannot be read: queries fail with `File header contains an unknown codec`.
+
 #### Lowercase column names from external engines
 
 Some engines write Iceberg column names in uppercase. PostgreSQL folds unquoted identifiers to
@@ -587,6 +592,7 @@ resolving the credentials a query needs fails.
 ```
 a table uses Iceberg deletion vectors, which pg_lake does not support
 a table uses Iceberg column default values, which pg_lake does not support
+a table uses Iceberg files in a format other than Parquet, which pg_lake does not support
 a table uses Iceberg format version <version>, which pg_lake cannot read
 a table uses Iceberg format version <version>, which pg_lake cannot write
 a table uses the Iceberg type <type>, which pg_lake does not support

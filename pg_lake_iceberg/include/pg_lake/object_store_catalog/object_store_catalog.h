@@ -13,7 +13,6 @@ extern PGDLLEXPORT int ObjectStoreCatalogMaxAge;
 extern PGDLLEXPORT char *ObjectStoreCatalogLocationPrefix;
 extern PGDLLEXPORT char *ExternalObjectStorePrefix;
 extern PGDLLEXPORT char *InternalObjectStorePrefix;
-extern PGDLLEXPORT char *ExternalObjectStoreCatalogDatabaseSuffix;
 
 extern PGDLLEXPORT void InitObjectStoreCatalog(void);
 extern PGDLLEXPORT void RemoveLegacyAzureObjectStoreCatalog(void);
