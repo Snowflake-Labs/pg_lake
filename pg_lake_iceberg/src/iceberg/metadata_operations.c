@@ -154,6 +154,7 @@ static HTAB *MakePartitionManifestEntryHash(void);
 static void AddManifestEntryToHash(HTAB *hash, int32 partitionSpecId,
 								   IcebergManifestEntry * entry);
 static bool HasCreateTableOperation(List *metadataOperations);
+static bool IsUnderTableLocation(const char *path, const char *tableLocation);
 static void DeleteInProgressManifests(Oid relationId, List *manifests);
 
 
@@ -404,8 +405,13 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 	if (writableRestCatalogTable)
 	{
-		if (metadataPath)
-			InsertDeletionQueueRecord(metadataPath, relationId, GetCurrentTransactionStartTimestamp());
+		/*
+		 * The REST commit is sent only after the local transaction commits,
+		 * and may fail, so the catalog's current metadata file is not ours to
+		 * queue yet.  Queue the one it already replaced instead.
+		 */
+		QueueSupersededRestCatalogMetadata(metadata, relationId,
+										   GetCurrentTransactionStartTimestamp());
 
 		/*
 		 * We are done, writable rest catalog iceberg tables have their
@@ -1524,6 +1530,95 @@ GetWritableRestCatalogTableMetadata(Oid relationId, char **metadataLocation)
 	return ParseIcebergTableMetadata(result.metadata);
 }
 
+
+
+
+/*
+ * QueueSupersededRestCatalogMetadata queues the metadata file a writable REST
+ * catalog replaced last, the newest entry of its metadata-log, which no later
+ * commit can bring back.  The path comes from the catalog and will be deleted,
+ * so it has to be under the table's location.
+ */
+void
+QueueSupersededRestCatalogMetadata(IcebergTableMetadata * metadata, Oid relationId,
+								   TimestampTz orphanedAt)
+{
+	if (metadata->metadata_log_length == 0)
+		return;
+
+	IcebergMetadataLogEntry *superseded =
+		&metadata->metadata_log[metadata->metadata_log_length - 1];
+
+	if (!IsUnderTableLocation(superseded->metadata_file, metadata->location))
+		return;
+
+	InsertSupersededRestCatalogMetadataRecord((char *) superseded->metadata_file,
+											  relationId, orphanedAt);
+}
+
+
+/*
+ * TryQueueSupersededRestCatalogMetadataOnDrop queues, for a writable REST
+ * table being dropped, the metadata file its last write replaced: each write
+ * queues only the file its predecessor replaced, so that one is left for the
+ * drop.  Failing to reach the catalog only warns, as the rest of the drop's
+ * cleanup does.
+ */
+void
+TryQueueSupersededRestCatalogMetadataOnDrop(Oid relationId)
+{
+	MemoryContext savedContext = CurrentMemoryContext;
+	IcebergTableMetadata *volatile metadata = NULL;
+
+	PG_TRY();
+	{
+		metadata = GetWritableRestCatalogTableMetadata(relationId, NULL);
+	}
+	PG_CATCH();
+	{
+		MemoryContextSwitchTo(savedContext);
+		ErrorData  *edata = CopyErrorData();
+
+		if (edata->sqlerrcode == ERRCODE_QUERY_CANCELED)
+			PG_RE_THROW();
+
+		FlushErrorState();
+
+		ereport(WARNING,
+				(errmsg("could not read REST catalog metadata for %s: %s",
+						get_rel_name(relationId), edata->message),
+				 errdetail("Its last replaced metadata file will not be "
+						   "marked for deletion.")));
+		FreeErrorData(edata);
+	}
+	PG_END_TRY();
+
+	if (metadata != NULL)
+		QueueSupersededRestCatalogMetadata(metadata, InvalidOid,
+										   GetCurrentTimestamp());
+}
+
+/*
+ * IsUnderTableLocation returns whether path is a file below the table's base
+ * location.  A path a catalog lists is queued for deletion, so it has to stay
+ * inside the table, whose location was validated when it was loaded.
+ */
+static bool
+IsUnderTableLocation(const char *path, const char *tableLocation)
+{
+	if (path == NULL || tableLocation == NULL)
+		return false;
+
+	size_t		locationLength = strlen(tableLocation);
+
+	while (locationLength > 0 && tableLocation[locationLength - 1] == '/')
+		locationLength--;
+
+	return locationLength > 0 &&
+		strncmp(path, tableLocation, locationLength) == 0 &&
+		path[locationLength] == '/' &&
+		strstr(path + locationLength, "/../") == NULL;
+}
 
 /*
  * DeleteInProgressManifests deletes the given manifests from the remote storage.
