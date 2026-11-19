@@ -454,6 +454,17 @@ GetDataFileSchemaForExternalIcebergTable(Oid relationId, char *metadataPath,
 	schema->fields = icebergSchema->fields;
 	schema->nfields = icebergSchema->fields_length;
 
+	/* the scan reads files that predate a column as its initial-default */
+	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
+	{
+		DataFileSchemaField *field = &schema->fields[fieldIdx];
+
+		if (field->initialDefault != NULL)
+			field->duckSerializedInitialDefault =
+				GetDuckSerializedIcebergFieldInitialDefault(field->initialDefault,
+															field->type);
+	}
+
 	return schema;
 }
 

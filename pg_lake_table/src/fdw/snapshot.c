@@ -477,8 +477,8 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 		/*
 		 * Compare the id fields. We deliberately don't compare defaults:
 		 * read-only external Iceberg tables don't carry iceberg
-		 * writeDefault/initialDefault onto pg_attribute, and defaults don't
-		 * affect read behavior anyway.
+		 * writeDefault/initialDefault onto pg_attribute, and the scan takes
+		 * initialDefault from the metadata.
 		 */
 		if (icebergField->id != postgresField->id ||
 			NullSafeStrcmp(icebergField->name, postgresField->name) != 0 ||
