@@ -1,5 +1,8 @@
 """Pruning skips partition fields with a void transform, which a v1 table
-leaves behind when a partition field is dropped."""
+leaves behind when a partition field is dropped. It also skips a partition
+field id that a v1 table reuses with another transform: the void field keeps
+the dropped field's id, so the null value of a file written after the drop
+would be tested against the old identity transform, and the file pruned."""
 
 import json
 
