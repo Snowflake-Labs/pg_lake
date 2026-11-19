@@ -6,7 +6,7 @@ import uuid
 import pyarrow
 import pytest
 from pyiceberg.schema import Schema
-from pyiceberg.types import LongType, NestedField, StringType, StructType
+from pyiceberg.types import ListType, LongType, NestedField, StringType, StructType
 
 from helpers.polaris import *
 from utils_pytest import *
@@ -52,21 +52,34 @@ def test_multibyte_name_truncated_at_a_character(pg_conn, rest_table):
 
 
 def test_multibyte_nested_field_name(pg_conn, rest_table):
-    namespace, _ = rest_table(nested="é" * 40)
+    namespace, _ = rest_table(nested=["é" * 40])
     create_read_only_table(pg_conn, namespace)
 
-    struct_type = run_query(
-        "SELECT atttypid FROM pg_attribute "
-        f"WHERE attrelid = '\"{namespace}\".t'::regclass AND attname = 's'",
-        pg_conn,
-    )[0][0]
-    assert run_query(
-        "SELECT attname FROM pg_attribute "
-        f"WHERE attrelid = (SELECT typrelid FROM pg_type WHERE oid = {struct_type}) "
-        "AND attnum > 0",
-        pg_conn,
-    ) == [["é" * 31]]
+    assert struct_field_names(pg_conn, namespace) == ["é" * 31]
     assert run_query(f'SELECT id, s FROM "{namespace}".t', pg_conn) == [[1, "(v)"]]
+    pg_conn.rollback()
+
+
+def test_long_field_name_of_a_struct_in_a_list(pg_conn, rest_table):
+    namespace, _ = rest_table(nested=[LONG_NAME], in_list=True)
+    create_read_only_table(pg_conn, namespace)
+
+    assert struct_field_names(pg_conn, namespace) == [TRUNCATED_NAME]
+    assert run_query(f'SELECT id, s[1] FROM "{namespace}".t', pg_conn) == [[1, "(v)"]]
+    pg_conn.rollback()
+
+
+def test_nested_names_that_truncate_to_the_same_name(pg_conn, rest_table):
+    namespace, _ = rest_table(nested=["x" * 63 + "a", "x" * 63 + "b"])
+
+    run_command(f'CREATE SCHEMA "{namespace}"', pg_conn)
+    error = run_command(
+        f"""CREATE TABLE "{namespace}".t () USING iceberg
+            WITH (catalog='rest', read_only=True)""",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "have the same name when truncated to a Postgres identifier" in str(error)
     pg_conn.rollback()
 
 
@@ -108,15 +121,30 @@ def rest_table(
     namespace = f"long_names_{uuid.uuid4().hex[:8]}"
     catalog = create_iceberg_rest_catalog(namespace)
 
-    def create(*names, nested=None):
+    def create(*names, nested=(), in_list=False):
+        """Columns id and the given names, and a struct column s with the
+        nested field names, as a list of structs with in_list."""
         fields = [NestedField(1, "id", LongType())] + [
             NestedField(i + 2, name, StringType()) for i, name in enumerate(names)
         ]
         row = {"id": 1} | {name: "v" for name in names}
-        if nested is not None:
-            struct = StructType(NestedField(len(fields) + 2, nested, StringType()))
-            fields.append(NestedField(len(fields) + 1, "s", struct, required=False))
-            row["s"] = {nested: "v"}
+        if nested:
+            next_id = len(fields) + 2
+            struct = StructType(
+                *[
+                    NestedField(next_id + i, name, StringType())
+                    for i, name in enumerate(nested)
+                ]
+            )
+            value = {name: "v" for name in nested}
+            if in_list:
+                list_type = ListType(
+                    next_id + len(nested), struct, element_required=False
+                )
+                field_type, row["s"] = list_type, [value]
+            else:
+                field_type, row["s"] = struct, value
+            fields.append(NestedField(len(fields) + 1, "s", field_type, required=False))
         table = catalog.create_table(f"{namespace}.t", schema=Schema(*fields))
         table.append(pyarrow.Table.from_pylist([row], table.schema().as_arrow()))
         return namespace, table
@@ -138,6 +166,20 @@ def create_read_only_table(pg_conn, namespace, columns="()"):
         pg_conn,
     )
     pg_conn.commit()
+
+
+def struct_field_names(pg_conn, namespace):
+    """The field names of the composite type of column s, or of its elements."""
+    rows = run_query(
+        "SELECT a.attname FROM pg_attribute c "
+        "JOIN pg_type t ON t.oid = c.atttypid "
+        "JOIN pg_type s ON s.oid = CASE WHEN t.typcategory = 'A' THEN t.typelem ELSE t.oid END "
+        "JOIN pg_attribute a ON a.attrelid = s.typrelid AND a.attnum > 0 "
+        f"WHERE c.attrelid = '\"{namespace}\".t'::regclass AND c.attname = 's' "
+        "ORDER BY a.attnum",
+        pg_conn,
+    )
+    return [row[0] for row in rows]
 
 
 def column_names(pg_conn, namespace):

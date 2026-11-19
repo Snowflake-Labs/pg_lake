@@ -262,7 +262,7 @@ static void
 TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
 						   bool nested, bool warn)
 {
-	const char **originalNames = palloc0(sizeof(char *) * (elementCount + 1));
+	const char **originalNames = palloc0(sizeof(char *) * elementCount);
 
 	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
 	{
