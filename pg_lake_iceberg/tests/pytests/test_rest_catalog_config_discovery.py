@@ -25,7 +25,6 @@ import pytest
 
 from utils_pytest import *
 
-
 # ---------------------------------------------------------------------------
 # Mock REST catalog server
 # ---------------------------------------------------------------------------
@@ -232,6 +231,29 @@ def test_no_prefix_returns_null(
     httpd, port = _start_mock_server({"/v1/config": (200, config_body)})
     endpoint = f"http://127.0.0.1:{port}"
     server_name = "cfg_disc_test_no_prefix"
+
+    try:
+        _create_server(superuser_conn, server_name, endpoint)
+        result = _call_fetch(pg_conn, server_name)
+        assert result is None, f"Expected None, got {result!r}"
+    finally:
+        _drop_server(superuser_conn, server_name)
+        httpd.shutdown()
+
+
+@pytest.mark.parametrize(
+    "config_body",
+    ["", "<html>catalog</html>", '{"defaults": {"prefix": null}}', "[1, 2]"],
+    ids=["empty", "not_json", "null_prefix", "not_object"],
+)
+def test_unusable_body_returns_null(
+    create_config_helper, superuser_conn, pg_conn, extension, config_body
+):
+    """NULL is returned when a 200 response carries no usable prefix, for
+    example the empty or HTML body of a proxy in front of the catalog."""
+    httpd, port = _start_mock_server({"/v1/config": (200, config_body)})
+    endpoint = f"http://127.0.0.1:{port}"
+    server_name = "cfg_disc_test_unusable_body"
 
     try:
         _create_server(superuser_conn, server_name, endpoint)
