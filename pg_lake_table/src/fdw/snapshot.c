@@ -299,6 +299,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		/* fold names before the schema check, which looks them up as attnames */
 		if (LowercasesColumnNames(relationId))
 			LowercaseIcebergTableMetadataNames(metadata);
+		TruncateIcebergTableMetadataNames(metadata, false, false);
 
 		/*
 		 * We cannot afford to have a different schema between the Postgres

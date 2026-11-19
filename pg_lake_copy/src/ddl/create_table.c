@@ -245,7 +245,7 @@ ProcessCreateFromFile(CreateStmt *createStmt,
 		/* set the new column definition list */
 		List	   *dataFileColumns = DescribeColumnsForURL(definitionFromURL,
 															format, compression,
-															copyOptions);
+															copyOptions, true);
 
 		createStmt->tableElts = dataFileColumns;
 	}
