@@ -43,6 +43,7 @@ static IcebergTableMetadata * ParseIcebergTableMetadataReadFrom(Jsonb *tableMeta
 static void ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * metadata);
 static void ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema * schema);
 static void ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field);
+static void ReadFieldDefault(JsonbContainer *json, const char *name, const char **value);
 static void ReadIcebergPartitionSpec(JsonbContainer *json, IcebergPartitionSpec * spec);
 static void ReadIcebergPartitionSpecField(JsonbContainer *json, IcebergPartitionSpecField * field);
 static void ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot * snapshot);
@@ -193,10 +194,10 @@ NameOfFieldWithInitialDefault(Field * field)
  *
  * A column added with a default is not rewritten into the files that
  * predate it; the default is what those rows are supposed to read back
- * as.  Reading here takes the schema from the catalog's metadata, and
- * nothing on that path applies the default, so those rows would come
- * back NULL -- an answer that is wrong rather than merely incomplete.
- * v2 never had this field, so this only ever fires for v3.
+ * as.  The scan applies the initial-default of a top-level column, which
+ * pg_lake also writes into the v2 metadata of its own tables, but not of
+ * a field nested in a struct, list or map: those rows would come back
+ * NULL -- an answer that is wrong rather than merely incomplete.
  */
 static void
 ErrorIfSchemaDeclaresInitialDefault(IcebergTableMetadata * metadata)
@@ -358,6 +359,21 @@ ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema * schema)
 }
 
 
+/*
+ * ReadFieldDefault reads a field's default as JSON text into *value. A JSON
+ * null is a null default, which is the same as having none.
+ */
+static void
+ReadFieldDefault(JsonbContainer *json, const char *name, const char **value)
+{
+	size_t		length = 0;
+
+	if (JsonExtractFieldAsJsonString(json, name, FIELD_OPTIONAL, value, &length) &&
+		strcmp(*value, "null") == 0)
+		*value = NULL;
+}
+
+
 static void
 ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field)
 {
@@ -378,15 +394,8 @@ ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field)
 
 	JsonExtractStringField(json, "doc", FIELD_OPTIONAL, &field->doc, &docLength);
 
-	size_t		initialDefaultLength = 0;
-
-	JsonExtractFieldAsJsonString(json, "initial-default", FIELD_OPTIONAL, &field->initialDefault,
-								 &initialDefaultLength);
-
-	size_t		writeDefaultLength = 0;
-
-	JsonExtractFieldAsJsonString(json, "write-default", FIELD_OPTIONAL, &field->writeDefault,
-								 &writeDefaultLength);
+	ReadFieldDefault(json, "initial-default", &field->initialDefault);
+	ReadFieldDefault(json, "write-default", &field->writeDefault);
 }
 
 
@@ -603,6 +612,9 @@ ReadIcebergTypeFieldElement(JsonbContainer *json, DataFileSchemaField * fieldEle
 	size_t		docLength = 0;
 
 	JsonExtractStringField(json, "doc", FIELD_OPTIONAL, &fieldElement->doc, &docLength);
+
+	ReadFieldDefault(json, "initial-default", &fieldElement->initialDefault);
+	ReadFieldDefault(json, "write-default", &fieldElement->writeDefault);
 
 	/* recurse into "type" field */
 	JsonExtractField(json, "type", FIELD_REQUIRED, &fieldElement->type);
