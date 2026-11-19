@@ -23,6 +23,8 @@
 #include "pg_lake/util/table_type.h"
 
 #define S3_URL_PREFIX "s3://"
+#define S3A_URL_PREFIX "s3a://"
+#define S3N_URL_PREFIX "s3n://"
 #define GCS_URL_PREFIX "gs://"
 #define GCS_ALT_URL_PREFIX "gcs://"
 #define AZURE_URL_PREFIX "azure://"
@@ -96,6 +98,7 @@ extern PGDLLEXPORT const char *FormatToFileExtension(CopyDataFormat format,
 													 CopyDataCompression compression);
 
 extern PGDLLEXPORT bool IsSupportedURL(const char *path);
+extern PGDLLEXPORT char *S3URLFromHadoopScheme(const char *url);
 
 extern PGDLLEXPORT char *GetPgLakeStageLocation(void);
 extern PGDLLEXPORT char *ResolveStageURL(const char *path);

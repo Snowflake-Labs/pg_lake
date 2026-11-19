@@ -73,7 +73,8 @@ DescribeColumnsForURL(char *url,
 	if (format == DATA_FORMAT_ICEBERG)
 	{
 		bool		emitFilename = GetBoolOption(copyOptions, "filename", false);
-		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(url);
+		IcebergTableMetadata *metadata =
+			ReadIcebergTableMetadata(S3URLFromHadoopScheme(url));
 
 		if (HasLowercaseColumnNamesOption(copyOptions))
 			LowercaseIcebergTableMetadataNames(metadata);

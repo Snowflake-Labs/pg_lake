@@ -576,6 +576,7 @@ resolving the credentials a query needs fails.
 ```
 a table uses Iceberg deletion vectors, which pg_lake does not support
 a table uses Iceberg column default values, which pg_lake does not support
+a table uses Iceberg files in a format other than Parquet, which pg_lake does not support
 a table uses Iceberg format version <version>, which pg_lake cannot read
 a table uses Iceberg format version <version>, which pg_lake cannot write
 a table uses the Iceberg type <type>, which pg_lake does not support
