@@ -830,6 +830,34 @@ def test_alter_server_endpoints_allowed_without_dependents(superuser_conn, exten
         superuser_conn.commit()
 
 
+def test_create_iceberg_rest_server(superuser_conn, extension):
+    """TYPE 'iceberg-rest' is accepted for a user-created server and can be
+    named in the catalog option of a table."""
+    run_command(
+        """
+        CREATE SERVER test_iceberg_rest_type TYPE 'iceberg-rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint 'http://localhost:8181',
+                     rest_auth_type 'none')
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        result = run_query(
+            "SELECT srvtype FROM pg_foreign_server "
+            "WHERE srvname = 'test_iceberg_rest_type'",
+            superuser_conn,
+        )
+        assert result[0]["srvtype"] == "iceberg-rest"
+    finally:
+        run_command(
+            "DROP SERVER IF EXISTS test_iceberg_rest_type CASCADE", superuser_conn
+        )
+        superuser_conn.commit()
+
+
 def test_alter_server_endpoint_redirect_repro_blocked(superuser_conn, extension):
     """Two-role end-to-end form: server owner attempts to redirect
     oauth_endpoint on a server another role has a USER MAPPING on.

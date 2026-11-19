@@ -383,11 +383,11 @@ ValidateIcebergCatalogServerDDL(ProcessUtilityParams * processUtilityParams,
 							 "or create a server of type 'rest'.",
 							 POSTGRES_CATALOG_NAME, OBJECT_STORE_CATALOG_NAME)));
 
-		if (stmt->servertype == NULL ||
-			pg_strcasecmp(stmt->servertype, REST_CATALOG_NAME) != 0)
+		if (!IsRestCatalogServerType(stmt->servertype))
 			ereport(ERROR,
 					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("iceberg_catalog server requires TYPE 'rest'")));
+					 errmsg("iceberg_catalog server requires TYPE '%s' or '%s'",
+							REST_CATALOG_NAME, ICEBERG_REST_CATALOG_SERVER_TYPE)));
 	}
 	else if (IsA(parsetree, RenameStmt))
 	{

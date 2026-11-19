@@ -34,6 +34,13 @@
 #define SNOWFLAKE_CATALOG_NAME "snowflake"
 
 /*
+ * Server TYPE of a user-created iceberg_catalog server whose REST routes
+ * carry no {prefix} segment (/v1/namespaces/...), as in the Iceberg
+ * reference REST catalog.  REST_CATALOG_NAME is the other accepted TYPE.
+ */
+#define ICEBERG_REST_CATALOG_SERVER_TYPE "iceberg-rest"
+
+/*
  * Built-in iceberg_catalog server names.  Pre-created by the extension
  * upgrade script and exist purely as anchors for pg_depend edges and the
  * uniform server-lookup path.  All ALTER/DROP/RENAME on these names is
@@ -95,5 +102,6 @@ extern PGDLLEXPORT bool HasLowercaseColumnNamesOption(List *options);
 extern PGDLLEXPORT bool LowercasesColumnNames(Oid relationId);
 extern PGDLLEXPORT bool IsCatalogOwnedByExtension(const char *catalog);
 extern PGDLLEXPORT bool IsRestCatalog(const char *catalog);
+extern PGDLLEXPORT bool IsRestCatalogServerType(const char *serverType);
 extern PGDLLEXPORT const char *ResolveCatalogServerName(const char *catalog);
 extern PGDLLEXPORT bool IsBuiltinCatalogServerName(const char *serverName);
