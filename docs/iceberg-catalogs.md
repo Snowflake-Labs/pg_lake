@@ -298,6 +298,11 @@ of the names the mapping lists for its field ID, and a column the mapping does n
 as NULL. If the table has no name mapping, a query that reads a column from such a file fails
 with `the file has no field ids to match its columns by`.
 
+Fields nested in a struct are read by their current names instead, in files with or without
+field IDs. A nested field renamed in the source catalog therefore reads as NULL from the files
+written before the rename, and a query fails with `STRUCT to STRUCT cast must have at least one
+matching member` if no field of the struct kept its name.
+
 Attached tables cannot be written to. Writing would mean taking over the table's metadata,
 field IDs and file inventory from whatever produced them, which pg_lake does not do: it writes
 only to tables it created. To move existing data under pg_lake, create a new table and copy
