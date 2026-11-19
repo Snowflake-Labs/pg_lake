@@ -2457,7 +2457,9 @@ def test_pruning_truncate_partition_after_int_promoted_to_long(
         f"CREATE TABLE {table_name} (id bigint, x int) USING iceberg "
         "PARTITIONED BY (truncate(10, x))"
     )
-    spark_session.sql(f"INSERT INTO {table_name} VALUES (1, 5), (2, 15), (3, 25)")
+    spark_session.sql(
+        f"INSERT INTO {table_name} VALUES (1, 5), (2, 15), (3, 25), (5, -5)"
+    )
     spark_session.sql(f"ALTER TABLE {table_name} ALTER COLUMN x TYPE bigint")
     spark_session.sql(f"INSERT INTO {table_name} VALUES (4, 35)")
     metadata_location = (
@@ -2478,7 +2480,7 @@ def test_pruning_truncate_partition_after_int_promoted_to_long(
             pg_conn,
         )
 
-        for id, x in [(1, 5), (2, 15), (3, 25), (4, 35)]:
+        for id, x in [(1, 5), (2, 15), (3, 25), (4, 35), (5, -5)]:
             assert run_query(
                 f"SELECT id FROM test_truncate_partition_int_to_long WHERE x = {x}",
                 pg_conn,
