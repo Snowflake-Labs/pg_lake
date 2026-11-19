@@ -584,9 +584,11 @@ def start_postgres(db_path, db_user, db_port):
 
 def initdb(initdb_bindir, db_path, db_user):
     locale_setting = None
+    locale_args = []
     if platform.system() == "Darwin":
-        # macOS
+        # macOS; collate by bytes, as C.UTF-8 does on Linux
         locale_setting = "en_US.UTF-8"
+        locale_args = ["--lc-collate", "C"]
     elif platform.system() == "Linux":
         # Linux
         locale_setting = "C.UTF-8"
@@ -605,6 +607,7 @@ def initdb(initdb_bindir, db_path, db_user):
             db_user,
             "--locale",
             locale_setting,
+            *locale_args,
             "--data-checksums",
             "--set",
             "shared_preload_libraries=pgaudit,pg_cron,pg_extension_base,auto_explain,pg_stat_statements",
