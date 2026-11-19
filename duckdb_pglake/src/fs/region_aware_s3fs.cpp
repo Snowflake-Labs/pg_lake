@@ -642,13 +642,9 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 	FileOpenerInfo s3UrlInfo = {url};
 	S3AuthParams authParams = S3AuthResolver::Resolve(opener, s3UrlInfo);
 
-	/*
-	 * Construct the https:// URL of the bucket. The bucket is in the host for
-	 * virtual-hosted URLs and in the path otherwise, which httpfs picks for
-	 * bucket names that cannot be a host label, such as ones containing dots.
-	 */
+	/* Construct the https:// URL from the S3 URL */
 	ParsedS3Url parsedUrl = S3Url::Parse(url, authParams);
-	string httpUrl = parsedUrl.GetBucketHTTPUrl();
+	string httpUrl = parsedUrl.GetHTTPUrl();
 
 	/* parse the https:// URL and obtain protocol/host/port (the base URL) */
 	string path, baseUrl;
@@ -662,7 +658,7 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 	HTTPHeaders requestHeaders;
 
 	/* HeadRequestInfo keeps a reference to the URL, so it has to outlive the request */
-	string bucketRootUrl = StringUtil::EndsWith(httpUrl, "/") ? httpUrl : httpUrl + "/";
+	string bucketRootUrl = baseUrl + "/";
 
 	HeadRequestInfo headRequest(bucketRootUrl, requestHeaders, *httpParams);
 

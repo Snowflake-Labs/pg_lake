@@ -1277,7 +1277,7 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 	{
 		char	   *lambdaVariable = psprintf("_x%d", depth);
 
-		appendStringInfo(buf, "list_transform(%s, %s -> ",
+		appendStringInfo(buf, "list_transform(%s, lambda %s: ",
 						 expression, lambdaVariable);
 
 		/*
@@ -1314,7 +1314,7 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 
 		appendStringInfo(buf,
 						 "map_from_entries(list_transform(map_entries(%s), "
-						 "%s -> struct_pack(key := ",
+						 "lambda %s: struct_pack(key := ",
 						 expression, lambdaVariable);
 
 		/*

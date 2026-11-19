@@ -38,7 +38,7 @@ ValidateGDALLayer(char *pathExpression, char *layerName)
 {
 	char	   *layerExists =
 		GetSingleValueFromPGDuck(psprintf("SELECT list_contains("
-										  "list_transform(layers, l -> l.name), %s) "
+										  "list_transform(layers, lambda l: l.name), %s) "
 										  "FROM st_read_meta(%s)",
 										  quote_literal_cstr(layerName),
 										  pathExpression));
@@ -48,7 +48,7 @@ ValidateGDALLayer(char *pathExpression, char *layerName)
 
 	char	   *layerNames =
 		GetSingleValueFromPGDuck(psprintf("SELECT list_aggregate("
-										  "list_transform(layers, l -> l.name), "
+										  "list_transform(layers, lambda l: l.name), "
 										  "'string_agg', ', ') "
 										  "FROM st_read_meta(%s)",
 										  pathExpression));
