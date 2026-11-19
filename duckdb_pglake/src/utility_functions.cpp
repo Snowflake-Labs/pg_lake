@@ -387,6 +387,7 @@ PgLakeUtilityFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BOOLEAN,
 						   SleepScalarFun);
 
+		pg_lake_sleep.SetFallible();
 		loader.RegisterFunction(pg_lake_sleep);
 	}
 

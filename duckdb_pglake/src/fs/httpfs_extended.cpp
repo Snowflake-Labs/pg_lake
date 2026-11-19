@@ -16,28 +16,14 @@
  */
 
 #include "duckdb.hpp"
-
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httplib.hpp"
+#include "duckdb/main/http/http_util.hpp"
 
 #include "http/httpfs.hpp"
+#include "http/http_request_session.hpp"
 #include "pg_lake/fs/httpfs_extended.hpp"
 
 
 namespace duckdb {
-
-/*
- * initialize_http_headers is a private function copied ad verbatim from httpfs.cp
- */
-static unique_ptr<duckdb_httplib_openssl::Headers>
-initialize_http_headers(HTTPHeaders &header_map)
-{
-	auto headers = make_uniq<duckdb_httplib_openssl::Headers>();
-	for (auto &entry : header_map) {
-		headers->insert(entry);
-	}
-	return headers;
-}
 
 /*
  * GetHTTPError describes a failed request.
@@ -49,7 +35,7 @@ initialize_http_headers(HTTPHeaders &header_map)
  */
 HTTPException
 PgLakeHTTPFileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &response, RequestType request_type,
-                                   const string &url)
+																	 const string &url)
 {
 	if (response.status == HTTPStatusCode::INVALID && response.HasRequestError()) {
 		return HTTPException(response, "%s", response.GetRequestError());
@@ -69,34 +55,35 @@ PgLakeHTTPFileSystem::GetHTTPError(FileHandle &handle, const HTTPResponse &respo
 int64_t
 PgLakeHTTPFileSystem::Download(ClientContext &context, FileHandle &inputHandle, string inputUrl, HTTPHeaders headerMap, FileHandle &outputHandle)
 {
-    auto &hfh = inputHandle.Cast<HTTPFileHandle>();
-	auto &http_util = hfh.http_params.http_util;
+	auto &hfh = inputHandle.Cast<HTTPFileHandle>();
 
-	D_ASSERT(hfh.cached_file_handle);
+	long unsigned int total_request_bytes = 0;
 
-    long unsigned int total_request_bytes = 0;
+	auto captured = hfh.request_session->Capture();
+	auto session_request = captured.snapshot->CreateRequest(std::move(headerMap));
 
-	auto http_client = hfh.GetClient();
 	GetRequestInfo get_request(
-							   inputUrl, headerMap, hfh.http_params,
-							   [&](const HTTPResponse &response) {
-								   if (static_cast<int>(response.status) >= 400) {
-									   throw GetHTTPError(inputHandle, response, RequestType::GET_REQUEST, inputUrl);
-								   }
-								   return true;
-							   },
-							   [&](const_data_ptr_t data, idx_t data_length) {
-								   total_request_bytes += data_length;
-								   if (context.IsInterrupted())
-									   throw InterruptException();
+								 inputUrl, session_request.headers, *session_request.params,
+								 [&](const HTTPResponse &response) {
+									 if (static_cast<int>(response.status) >= 400) {
+										 throw GetHTTPError(inputHandle, response, RequestType::GET_REQUEST, inputUrl);
+									 }
+									 return true;
+								 },
+								 [&](const_data_ptr_t data, idx_t data_length) {
+									 total_request_bytes += data_length;
+									 if (context.IsInterrupted())
+										 throw InterruptException();
 
-								   outputHandle.Write((void *) data, data_length);
-								   return true;
-							   });
+									 outputHandle.Write((void *) data, data_length);
+									 return true;
+								 });
 
-	auto response = http_util.Request(get_request, http_client);
+	auto response = hfh.request_session->Request(get_request);
 
-	hfh.StoreClient(std::move(http_client));
+	if (response->HasRequestError())
+		throw IOException("HTTP download of \"%s\" could not be completed: %s",
+							inputUrl, response->GetRequestError());
 
 	/*
 	 * The byte count is verified by FileUtils::CopyFile, which does it for every

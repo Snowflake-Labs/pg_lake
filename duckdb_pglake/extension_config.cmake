@@ -22,3 +22,9 @@ duckdb_extension_load(azure
 duckdb_extension_load(duckdb_pglake
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
 )
+
+# Since DuckDB 2.0, a loaded extension is only built, and linked into libduckdb
+# only when listed here. The order is also the load order: duckdb_pglake comes
+# last because it replaces the file systems httpfs and azure register. tpch is
+# built through BUILD_EXTENSIONS and provides dbgen for pg_lake_benchmark.
+duckdb_extension_statically_link(tpch httpfs aws azure duckdb_pglake)

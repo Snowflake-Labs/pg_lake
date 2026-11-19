@@ -11,7 +11,12 @@ EXT_FLAGS=-DBUILD_EXTENSIONS="tpch;json;icu"
 # GitHub actions uses a hash of the Makefile and source
 # files as a cache key. When we update the DuckDB version,
 # we should update the line below to trigger a new hash.
-DUCKDB_VERSION=2.0.0-dev
+#
+# Since DuckDB 2.0 the build no longer derives its version from git tags,
+# and without one it reports a -dev version and installs extensions (like
+# spatial) by commit hash, which extensions.duckdb.org does not serve for
+# releases. It has to match the tag duckdb/ is checked out at.
+DUCKDB_VERSION=2.0.0
 
 # We install libduckdb.so into the postgres direcotry
 PG_CONFIG ?= pg_config
@@ -67,7 +72,7 @@ endif
 #### Configuration for this extension
 EXTENSION_FLAGS=-DDUCKDB_EXTENSION_CONFIGS='${EXT_CONFIG}' -DPG_INCLUDEDIR='${PG_INCLUDEDIR}' -DPG_LIBDIR='${PG_LIBDIR}'
 
-BUILD_FLAGS=-DEXTENSION_STATIC_BUILD=1 $(EXTENSION_FLAGS) ${EXT_FLAGS} $(CORE_EXTENSION_VAR) $(OSX_BUILD_FLAG) $(RUST_FLAGS) $(TOOLCHAIN_FLAGS) -DDUCKDB_EXPLICIT_PLATFORM='${DUCKDB_PLATFORM}' -DCUSTOM_LINKER=${CUSTOM_LINKER}
+BUILD_FLAGS=-DEXTENSION_STATIC_BUILD=1 -DOVERRIDE_GIT_DESCRIBE=v$(DUCKDB_VERSION) $(EXTENSION_FLAGS) ${EXT_FLAGS} $(CORE_EXTENSION_VAR) $(OSX_BUILD_FLAG) $(RUST_FLAGS) $(TOOLCHAIN_FLAGS) -DDUCKDB_EXPLICIT_PLATFORM='${DUCKDB_PLATFORM}' -DCUSTOM_LINKER=${CUSTOM_LINKER}
 
 # Detect operating system
 UNAME_S := $(shell uname -s)

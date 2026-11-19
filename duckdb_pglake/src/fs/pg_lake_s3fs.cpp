@@ -17,42 +17,22 @@
 
 #include <regex>
 
-#include "crypto.hpp"
 #include "duckdb.hpp"
-#include "duckdb/common/crypto/md5.hpp"
 #include "duckdb/common/exception/http_exception.hpp"
-#include "duckdb/common/types/blob.hpp"
 #include "duckdb/function/scalar/string_common.hpp"
-#include "duckdb/main/client_context_file_opener.hpp"
-#include "duckdb/main/secret/secret_manager.hpp"
+#include "duckdb/main/http/http_util.hpp"
 
-#define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "create_secret_functions.hpp"
 #include "http/httpfs.hpp"
 #include "s3/s3fs.hpp"
-#include "httplib.hpp"
+#include "s3/s3_list.hpp"
+#include "s3/s3_request.hpp"
+#include "s3/s3_url.hpp"
 
 #include "pg_lake/fs/pg_lake_s3fs.hpp"
-#include "pg_lake/fs/httpfs_extended.hpp"
-#include "pg_lake/fs/file_cache_manager.hpp"
-#include "pg_lake/fs/file_utils.hpp"
 #include "pg_lake/utils/pgduck_log_utils.h"
 
 
 namespace duckdb {
-
-static constexpr idx_t MD5_HASH_LENGTH_BASE64 = 24;
-
-/*
- * S3 DeleteObjects accepts at most 1000 keys in a single request.
- */
-static constexpr idx_t S3_DELETE_OBJECTS_MAX_KEYS = 1000;
-
-/*
- * A DeleteObjects response can report an error per key, so up to 1000 of them.
- * Name the first few in the error we throw and only count the rest.
- */
-static constexpr idx_t S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS = 3;
 
 /*
  * Name of the setting that specifies the location of pg_lake managed storage bucket.
@@ -65,33 +45,6 @@ const string MANAGED_STORAGE_BUCKET_SETTING = "pg_lake_managed_storage_bucket";
  */
 const string MANAGED_STORAGE_KEY_ID_SETTING = "pg_lake_managed_storage_key_id";
 
-
-
-void
-PgLakeS3FileSystem::RegisterContext(const shared_ptr<HTTPInput> &input, optional_ptr<ClientContext> context)
-{
-	lock_guard<mutex> guard(context_mutex_);
-
-	/* Lazily clean up entries for destroyed handles */
-	for (auto it = context_map_.begin(); it != context_map_.end();) {
-		if (it->second.input_ref.expired())
-			it = context_map_.erase(it);
-		else
-			++it;
-	}
-
-	context_map_[input.get()] = {input, context};
-}
-
-optional_ptr<ClientContext>
-PgLakeS3FileSystem::LookupContext(HTTPInput *input)
-{
-	lock_guard<mutex> guard(context_mutex_);
-	auto it = context_map_.find(input);
-	if (it != context_map_.end() && !it->second.input_ref.expired())
-		return it->second.context;
-	return nullptr;
-}
 
 /*
  * PgLakeIsValidS3Region returns whether region is a syntactically valid AWS
@@ -117,67 +70,133 @@ PgLakeIsValidS3Region(const string &region)
 }
 
 
+
 /*
- * RewriteAmazonEndpointForRegion adapts an ".amazonaws.com" endpoint to the
- * resolved region, i.e. turns it into "s3.<region>.amazonaws.com".
- *
- * This works around an incomplete change made in
- * https://github.com/duckdb/duckdb-httpfs/pull/83/files: the endpoint is not
- * adapted to the s3_region query parameter, which we rely on for region
- * injection.
- *
- * A non-empty region that is not a valid region name is refused rather than
- * formatted into the host.
+ * IsPgLakeManagedStoragePath returns whether the given URL is in the
+ * managed storage bucket.
  */
-static void
-RewriteAmazonEndpointForRegion(S3AuthParams &auth_params)
+static bool
+IsPgLakeManagedStoragePath(optional_ptr<ClientContext> context, const string &path)
 {
-	if (!StringUtil::EndsWith(auth_params.endpoint, ".amazonaws.com"))
-		return;
+	if (context == nullptr)
+		return false;
 
-	if (!auth_params.region.empty() && !PgLakeIsValidS3Region(auth_params.region))
-		throw InvalidInputException(
-			"invalid S3 region \"%s\": a region name may only contain "
-			"lowercase letters, digits, and hyphens",
-			auth_params.region);
+	Value setting;
 
-	auth_params.endpoint = StringUtil::Format("s3.%s.amazonaws.com", auth_params.region);
+	if (!context->TryGetCurrentSetting(Identifier(MANAGED_STORAGE_BUCKET_SETTING), setting))
+		return false;
+
+	string managedStorageBucket = setting.ToString();
+
+	/* we ignore empty string and "NULL", the latter is used in case of reset */
+	if (managedStorageBucket.empty() || managedStorageBucket == "NULL")
+		return false;
+
+	/* remove trailing slash */
+		if (managedStorageBucket.back() == '/')
+				managedStorageBucket.pop_back();
+
+	/* the path is in the bucket if the bucket URL is followed by a / or nothing */
+	return StringUtil::StartsWith(path, managedStorageBucket) &&
+			 (path.size() == managedStorageBucket.size() ||
+				path[managedStorageBucket.size()] == '/' ||
+				path[managedStorageBucket.size()] == '?');
+}
+
+
+
+/*
+ * GetManagedStorageKeyId returns the KMS key ID configured for the managed
+ * storage bucket, or an empty string if there is none.
+ */
+static string
+GetManagedStorageKeyId(ClientContext &context)
+{
+	Value setting;
+
+	if (!context.TryGetCurrentSetting(Identifier(MANAGED_STORAGE_KEY_ID_SETTING), setting) ||
+		setting.IsNull())
+		return string();
+
+	string keyId = setting.ToString();
+
+	/*
+	 * If the setting has been disabled via RESET, the value becomes "NULL" (?),
+	 * we then treat it as an empty string (ignored).
+	 */
+	if (keyId == "NULL")
+		return string();
+
+	return keyId;
 }
 
 
 /*
- * CreateHandle is copy-pasted from s3fs.cpp, but using PgLakeS3FileHandle which includes
- * a pointer to the ClientContext.
+ * IsAmazonS3Endpoint returns whether an endpoint is a regional AWS S3
+ * endpoint, that is "s3.<region>.amazonaws.com".
  */
-unique_ptr<HTTPFileHandle> PgLakeS3FileSystem::CreateHandle(const OpenFileInfo &fileInfo,
-															 FileOpenFlags flags,
-															 optional_ptr<FileOpener> opener)
+static bool
+IsAmazonS3Endpoint(const string &endpoint)
 {
-	optional_ptr<ClientContext> context = opener->TryGetClientContext();
+	return StringUtil::StartsWith(endpoint, "s3.") &&
+			 StringUtil::EndsWith(endpoint, ".amazonaws.com");
+}
 
-	FileOpenerInfo info = {fileInfo.path};
-	S3AuthParams auth_params = S3AuthParams::ReadFrom(opener, info);
 
-	// Scan the query string for any s3 authentication parameters
-	auto parsed_s3_url = S3UrlParse(fileInfo.path, auth_params);
-	ReadQueryParams(parsed_s3_url.query_param, auth_params);
+/*
+ * PgLakeS3AuthConfigCallback adjusts the S3 configuration httpfs reads for a
+ * path before it is resolved. httpfs calls it on every resolution with a
+ * FileOpener, including the one a credential refresh does, so what it sets
+ * also holds for requests sent after a refresh.
+ *
+ * It does three things:
+ *
+ * - Writes to the managed storage bucket use the customer managed key, if one
+ *   is configured. httpfs only sends the key on PutObject and
+ *   CreateMultipartUpload, as we did before.
+ *
+ * - An explicit AWS endpoint follows the region, the way the automatic one
+ *   does. RegionAwareS3FileSystem injects the region of the bucket as
+ *   ?s3_region, and the endpoint from the secret would otherwise still point
+ *   at whatever region the secret named.
+ *
+ * - The region is validated before httpfs formats it into the endpoint host
+ *   as "s3.<region>.amazonaws.com".
+ */
+void
+PgLakeS3AuthConfigCallback(optional_ptr<FileOpener> opener, const string &path,
+							 S3AuthConfig &config)
+{
+	if (config.route.type != S3ProviderType::S3)
+		return;
 
-	// Work around incomplete change made in https://github.com/duckdb/duckdb-httpfs/pull/83/files
-	// The endpoint is not adapted to the s3_region query parameter, which we rely on for
-	// region injection. The region is validated before it is formatted into the host.
-	RewriteAmazonEndpointForRegion(auth_params);
+	/* ?s3_region and ?s3_endpoint are only applied after this callback */
+	S3Url::ApplyAuthQueryParameters(path, config);
 
-	auto &http_util = HTTPFSUtil::GetHTTPUtil(opener);
-	auto params = http_util.InitializeParameters(opener, info);
+	bool regionInHost = config.endpoint_mode == S3EndpointMode::AUTOMATIC ||
+						IsAmazonS3Endpoint(config.endpoint);
 
-	auto handle = duckdb::make_uniq<PgLakeS3FileHandle>(*this, fileInfo.path, flags, context,
-	                                                     params,
-	                                                     auth_params,
-	                                                     S3ConfigParams::ReadFrom(opener));
+	if (regionInHost && !config.credentials.region.empty())
+	{
+		if (!PgLakeIsValidS3Region(config.credentials.region))
+			throw InvalidInputException(
+				"invalid S3 region \"%s\": a region name may only contain "
+				"lowercase letters, digits, and hyphens",
+				config.credentials.region);
 
-	RegisterContext(handle->http_input, context);
+		/* let httpfs derive the host from the region */
+		config.endpoint_mode = S3EndpointMode::AUTOMATIC;
+	}
 
-	return unique_ptr_cast<PgLakeS3FileHandle, HTTPFileHandle>(std::move(handle));
+	optional_ptr<ClientContext> context = FileOpener::TryGetClientContext(opener);
+
+	if (context == nullptr)
+		return;
+
+	string keyId = GetManagedStorageKeyId(*context);
+
+	if (!keyId.empty() && IsPgLakeManagedStoragePath(context, path))
+		config.request_options.kms_key_id = keyId;
 }
 
 
@@ -195,15 +214,46 @@ IsNotFoundError(const ErrorData &error)
 }
 
 
+
 /*
- * RemoveFile removes a file from S3 via the batch delete API, mainly because
- * there is no implementation of regular DELETE requests in s3fs.cpp
+ * EvictFromMetadataCache drops the HTTP metadata cache entries for a removed
+ * file, so a stale entry cannot make it look readable.
+ *
+ * Reads inject ?s3_region from cache, so the entry can be under the URL with
+ * or without its query arguments. Evict both.
+ *
+ * Even if HTTP metadata cache is disabled, GetGlobalCache returns a value
+ * and we still remove because it might be re-enabled later.
+ */
+static void
+EvictFromMetadataCache(HTTPFileSystem &fs, const string &path)
+{
+	optional_ptr<HTTPMetadataCache> metadataCache = fs.GetGlobalCache();
+
+	if (metadataCache == nullptr)
+		return;
+
+	metadataCache->Erase(path);
+
+	auto queryPos = path.find('?');
+	if (queryPos != string::npos)
+		metadataCache->Erase(path.substr(0, queryPos));
+}
+
+
+/*
+ * RemoveFile removes a file from S3 and evicts it from the HTTP metadata cache.
  */
 void
 PgLakeS3FileSystem::RemoveFile(const string &filename,
 								optional_ptr<FileOpener> opener)
 {
-	TryRemoveFile(filename, opener);
+	EvictFromMetadataCache(*this, filename);
+
+	S3FileSystem::RemoveFile(filename, opener);
+
+	/* a concurrent reader can cache the entry again before the delete */
+	EvictFromMetadataCache(*this, filename);
 }
 
 
@@ -212,811 +262,165 @@ PgLakeS3FileSystem::RemoveFile(const string &filename,
  * begin with, so that a caller deleting a file that is already gone does not
  * have to treat that as a failure. Every other error, a permissions error in
  * particular, is still raised.
+ *
+ * S3 reports success on deleting a key that does not exist, so we find out
+ * whether it is there with a HEAD request first.
  */
 bool
 PgLakeS3FileSystem::TryRemoveFile(const string &filename,
-								  optional_ptr<FileOpener> opener)
+									optional_ptr<FileOpener> opener)
 {
 	try
 	{
-		RemoveFileFromS3(filename, opener);
+		unique_ptr<FileHandle> handle =
+			OpenFile(filename, FileFlags::FILE_FLAGS_READ | FileFlags::FILE_FLAGS_NULL_IF_NOT_EXISTS, opener);
+
+		if (handle == nullptr)
+		{
+			EvictFromMetadataCache(*this, filename);
+			return false;
+		}
 	}
 	catch (HTTPException &ex)
 	{
 		ErrorData error(ex);
 
-		PGDUCK_SERVER_DEBUG("Remove failed: %s", error.Message().c_str());
-
-		/*
-		 * A file that is not found counts as removed, so the caller does not
-		 * treat it as a failure. Checking the status code is cheaper and more
-		 * reliable than FileExists, which opens the file and returns false on
-		 * any exception, but we do want to surface permissions errors.
-		 */
 		if (!IsNotFoundError(error))
 			throw;
 
+		PGDUCK_SERVER_DEBUG("Remove failed: %s", error.Message().c_str());
+		EvictFromMetadataCache(*this, filename);
 		return false;
 	}
 
+	RemoveFile(filename, opener);
 	return true;
 }
 
 
 /*
- * EscapeXmlText escapes a string for use as XML character data. S3 object keys
- * may contain any UTF-8, including '&' and '<', so a key cannot be pasted into
- * a request body verbatim: an unescaped '&' makes the whole DeleteObjects body
- * malformed XML and S3 rejects the batch, and a key holding '<' could otherwise
- * inject elements and change which objects the request targets.
+ * RemoveFiles deletes many files with batched DeleteObjects requests, and
+ * evicts them from the HTTP metadata cache.
  *
- * Not handled: S3 also allows bytes 0x00-0x1f in a key, and XML 1.0 cannot
- * represent those at all, not even as a character reference. Such a key makes
- * the body malformed and so takes its whole batch down with it, where the
- * one-key-per-request version only failed its own delete.
- */
-static string
-EscapeXmlText(const string &text)
-{
-	string escaped;
-	escaped.reserve(text.size());
-
-	for (char c : text)
-	{
-		switch (c)
-		{
-			case '&':
-				escaped += "&amp;";
-				break;
-			case '<':
-				escaped += "&lt;";
-				break;
-			case '>':
-				escaped += "&gt;";
-				break;
-			default:
-				escaped += c;
-				break;
-		}
-	}
-
-	return escaped;
-}
-
-
-/*
- * ExtractXmlElementText returns the character data of the first <tag>...</tag>
- * in xml, or an empty string if there is none.
+ * One request carries one signature, so S3FileSystem::RemoveFiles sends a
+ * request per set of credentials the paths resolve to, but in no particular
+ * order. We hand it one such set at a time instead, in the order of the first
+ * path of each, so that when one set is refused the ones before it were
+ * deleted, and which ones those are does not depend on hashing.
  *
- * This is not an XML parser: we only use it on the elements of a DeleteResult
- * body, which S3 generates and which carry no attributes or CDATA sections. The
- * text comes back as S3 escaped it.
- */
-static string
-ExtractXmlElementText(const string &xml, const string &tag)
-{
-	string openTag = "<" + tag + ">";
-	string closeTag = "</" + tag + ">";
-
-	size_t textStart = xml.find(openTag);
-
-	if (textStart == string::npos)
-		return string();
-
-	textStart += openTag.size();
-
-	size_t textEnd = xml.find(closeTag, textStart);
-
-	if (textEnd == string::npos)
-		return string();
-
-	return xml.substr(textStart, textEnd - textStart);
-}
-
-
-/*
- * PostDeleteObjects issues a single S3 DeleteObjects request for the keys in
- * [begin, end). s3Handle must already be pointed at "<prefix><bucket>/" so the
- * POST targets /?delete, and every key must live in that bucket. The caller is
- * responsible for keeping the range within S3_DELETE_OBJECTS_MAX_KEYS.
- *
- * credentialScopeUrl is the object URL the handle took its credentials from, so
- * that a refresh looks up the same secret the request was signed with. It is not
- * the bucket URL: a secret can be scoped to a prefix inside the bucket, and the
- * bucket URL would then select a different one.
- *
- * Throws on a malformed response or if S3 reports per-key <Error> entries.
- * Deleting a key that does not exist is not an error in S3, so a well-formed
- * DeleteResult that still carries an <Error> means a real failure (e.g. access
- * denied) that we must surface rather than silently dropping keys.
- *
- * The response also lists the keys that were deleted, but for a request without
- * errors that is simply the keys we asked for, and when there are errors we
- * throw. So we only read the <Error> entries.
- */
-static void
-PostDeleteObjects(PgLakeS3FileSystem &fs, S3FileHandle *s3Handle,
-				  const string &credentialScopeUrl,
-				  const vector<string> &keys, idx_t begin, idx_t end)
-{
-	/*
-	 * Following S3FileSystem::FinalizeMultipartUpload
-	 */
-	std::stringstream ss;
-	ss << "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">";
-	for (idx_t i = begin; i < end; i++)
-		ss << "<Object><Key>" << EscapeXmlText(keys[i]) << "</Key></Object>";
-	ss << "</Delete>";
-	string body = ss.str();
-
-	/* PostRequest assigns the response body, so it needs no room up front */
-	string responseBuffer;
-
-	/* Perform the batch deletion */
-	unique_ptr<HTTPResponse> postResponse =
-		fs.PostRequestForCredentialScope(*s3Handle->http_input, s3Handle->path,
-										 credentialScopeUrl, responseBuffer,
-										 (char *) body.c_str(), body.length(), "delete=");
-
-	/* Body of the POST response */
-	const string &result = responseBuffer;
-
-	if (result.find("<DeleteResult", 0) == string::npos)
-		throw HTTPException(*postResponse,
-							"Unexpected response during S3 DeleteObjects: %d\n\n%s",
-							postResponse->status,
-		                    result);
-
-	/*
-	 * Name the keys that failed and why, instead of handing the caller a body
-	 * that can hold a thousand entries.
-	 */
-	idx_t errorCount = 0;
-	string errorDetails;
-
-	for (size_t errorPos = result.find("<Error>");
-		 errorPos != string::npos;
-		 errorPos = result.find("<Error>", errorPos + 1))
-	{
-		errorCount++;
-
-		if (errorCount > S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS)
-			continue;
-
-		/* limit the search to this entry, in case one of the elements is absent */
-		size_t errorEnd = result.find("</Error>", errorPos);
-		string errorEntry = result.substr(errorPos, errorEnd == string::npos
-												   ? string::npos : errorEnd - errorPos);
-
-		if (!errorDetails.empty())
-			errorDetails += ", ";
-
-		errorDetails += StringUtil::Format("%s: %s (%s)",
-										   ExtractXmlElementText(errorEntry, "Key"),
-										   ExtractXmlElementText(errorEntry, "Code"),
-										   ExtractXmlElementText(errorEntry, "Message"));
-	}
-
-	if (errorCount > 0)
-	{
-		if (errorCount > S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS)
-			errorDetails += StringUtil::Format(", and %llu more",
-											   (uint64_t) (errorCount - S3_DELETE_OBJECTS_MAX_REPORTED_ERRORS));
-
-		throw HTTPException(*postResponse,
-							"S3 DeleteObjects failed for %llu of %llu keys: %s",
-							(uint64_t) errorCount, (uint64_t) (end - begin), errorDetails);
-	}
-}
-
-
-/*
- * RemoveFileFromS3 deletes a single key from a bucket using the batch
- * deletion API.
+ * We evict both before and after each request, for the same reasons the file
+ * cache does it in PGLakeCachingFileSystem::RemoveFiles: the request throws
+ * when S3 reports a per-key error, and the keys it did delete are gone whether
+ * or not we get to the second eviction; a concurrent reader can also cache an
+ * entry again in the window between the eviction and the delete. Evicting an
+ * entry for a file that is still there only costs a HEAD.
  */
 void
-PgLakeS3FileSystem::RemoveFileFromS3(string path, optional_ptr<FileOpener> opener)
+PgLakeS3FileSystem::RemoveFiles(const vector<string> &paths,
+								optional_ptr<FileOpener> opener)
 {
-	optional_ptr<ClientContext> context = opener->TryGetClientContext();
-	FileSystem &fileSystem = FileSystem::GetFileSystem(*context);
-
-	/* parse the S3 URL */
-	FileOpenerInfo s3UrlInfo = {path};
-	S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
-	ParsedS3Url parsedUrl = S3UrlParse(path, authParams);
-
-	/* get the s3://<bucket name> */
-	string bucketUrl = parsedUrl.prefix + parsedUrl.bucket;
-
-	vector<string> keys = {parsedUrl.key};
-
 	/*
-	 * Open the file via the regular (region-aware) file system.
-	 *
-	 * This tells us the region-resolved path.
+	 * A linear scan: a set of paths to delete is one table's files or one
+	 * batch off the deletion queue, so the number of distinct credentials in
+	 * it is a handful at worst.
 	 */
-	unique_ptr<FileHandle> regionAwareFileHandle =
-		fileSystem.OpenFile(path, FileFlags::FILE_FLAGS_READ);
-
-	/* Store the region-resolved path with the auto-detected ?s3_region (if applicable) */
-	string regionResolvedPath = regionAwareFileHandle->path;
-
-	/*
-	 * Open the file via (this) PgLakeS3FileSystem.
-	 *
-	 * This gives us a file handle that we can adjust to POST to /, since
-	 * we cannot construct such a file handle directly.
-	 */
-	unique_ptr<FileHandle> fileHandle =
-		OpenFile(path, FileFlags::FILE_FLAGS_READ, opener);
-
-	S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
-
-	/* Change the file handle to / to POST to /?delete */
-	s3Handle->path = bucketUrl + "/";
-
-	PostDeleteObjects(*this, s3Handle, path, keys, 0, keys.size());
-
-	/*
-	 * Remove the file from HTTP metadata cache now that it has been deleted.
-	 *
-	 * Even if HTTP metadata cache is disabled, GetGlobalCache returns a value
-	 * and we still remove because it might be re-enabled later.
-	 *
-	 * TODO: We should consider a more general cleanup approach, since most
-	 * files that are read are never removed.
-	 */
-	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
-	metadataCache->Erase(regionResolvedPath);
-}
-
-
-/*
- * RemoveFilesFromS3 deletes many keys using the S3 DeleteObjects batch API,
- * sending up to S3_DELETE_OBJECTS_MAX_KEYS keys per request instead of one key
- * per request. It is the bulk counterpart of RemoveFileFromS3 and is meant for
- * removing a whole prefix's worth of objects (e.g. a dropped Iceberg table).
- *
- * The request itself goes to the bucket URL, which is the only URL involved:
- * the keys travel in the request body. Its credentials, on the other hand, are
- * the ones an object under that bucket resolves to, since a secret can be scoped
- * to a prefix rather than to the whole bucket. resolvedFirstPath is paths[0] with
- * the query arguments the request needs, region included, so it stands in for
- * both: RegionAwareS3FileSystem::RemoveFiles resolves the region on it and
- * guarantees that every path in paths resolves to the same credentials.
- */
-void
-PgLakeS3FileSystem::RemoveFilesFromS3(const string &resolvedFirstPath,
-									  const vector<string> &paths,
-									  optional_ptr<FileOpener> opener)
-{
-	if (paths.empty())
-		return;
-
-	optional_ptr<HTTPMetadataCache> metadataCache = GetGlobalCache();
-
-	/*
-	 * Read the auth parameters once instead of per path: ReadFrom does a dozen
-	 * secret manager and setting lookups, the caller has grouped the paths so
-	 * that they all resolve to the same ones, and the only field the bucket/key
-	 * split reads is s3_url_compatibility_mode.
-	 */
-	FileOpenerInfo s3UrlInfo = {resolvedFirstPath};
-	S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
-
-	ParsedS3Url parsedFirstPath = S3UrlParse(resolvedFirstPath, authParams);
-	string bareBucketUrl = parsedFirstPath.prefix + parsedFirstPath.bucket;
-
-	vector<string> keys;
-
-	keys.reserve(paths.size());
+	vector<pair<S3AuthParams, vector<string>>> groups;
 
 	for (const string &path : paths)
 	{
-		ParsedS3Url parsedUrl = S3UrlParse(path, authParams);
+		FileOpenerInfo info = {path};
+		S3AuthParams authParams = S3AuthResolver::Resolve(opener, info);
+		vector<string> *groupPaths = nullptr;
 
-		if (parsedUrl.prefix + parsedUrl.bucket != bareBucketUrl)
-			throw InternalException("cannot delete %s in a DeleteObjects request for %s",
-									path, bareBucketUrl);
-
-		keys.push_back(parsedUrl.key);
-	}
-
-	/*
-	 * Build one POST-capable handle and reuse it for every batch. It comes from
-	 * the first path, which selects the secret that authorizes the deletion and
-	 * carries the region the caller resolved.
-	 *
-	 * CreateHandle rather than OpenFile: we only need the auth and HTTP
-	 * parameters, and OpenFile would additionally HEAD the URL, which costs a
-	 * round trip and fails outright on an object that is already gone.
-	 */
-	unique_ptr<HTTPFileHandle> fileHandle =
-		CreateHandle(resolvedFirstPath, FileFlags::FILE_FLAGS_READ, opener);
-
-	S3FileHandle *s3Handle = (S3FileHandle *) fileHandle.get();
-
-	/*
-	 * Point the handle at / to POST to /?delete. The query arguments can come
-	 * off here: PostRequest signs with the handle's auth parameters, which
-	 * CreateHandle already read them into.
-	 */
-	s3Handle->path = bareBucketUrl + "/";
-
-	/*
-	 * Best-effort HTTP metadata cache hygiene, as in RemoveFileFromS3: drop any
-	 * cached entry for the deleted objects so a stale entry cannot make a
-	 * removed file look readable. Reads inject ?s3_region from cache, so evict
-	 * both the bare URL and the region-resolved form, which is the bucket URL's
-	 * query string on the key.
-	 */
-	string querySuffix;
-	auto queryPos = resolvedFirstPath.find('?');
-	if (queryPos != string::npos)
-		querySuffix = resolvedFirstPath.substr(queryPos);
-
-	auto evictBatch = [&](idx_t begin, idx_t end) {
-		for (idx_t i = begin; i < end; i++)
+		for (auto &group : groups)
 		{
-			string fullUrl = bareBucketUrl + "/" + keys[i];
-
-			metadataCache->Erase(fullUrl);
-			if (!querySuffix.empty())
-				metadataCache->Erase(fullUrl + querySuffix);
+			if (group.first == authParams)
+			{
+				groupPaths = &group.second;
+				break;
+			}
 		}
-	};
 
-	for (idx_t begin = 0; begin < keys.size(); begin += S3_DELETE_OBJECTS_MAX_KEYS)
+		if (groupPaths == nullptr)
+		{
+			groups.emplace_back(std::move(authParams), vector<string>());
+			groupPaths = &groups.back().second;
+		}
+
+		groupPaths->push_back(path);
+	}
+
+	for (auto &group : groups)
 	{
-		/*
-		 * Both arguments must be the same type for MinValue to deduce one: idx_t
-		 * is uint64_t, which is "unsigned long long" on macOS/arm64 but
-		 * "unsigned long" -- the same type vector::size_type already is -- on
-		 * Linux/x86_64, so leaving keys.size() unconverted only compiles there.
-		 */
-		idx_t end = MinValue<idx_t>(begin + S3_DELETE_OBJECTS_MAX_KEYS,
-									static_cast<idx_t>(keys.size()));
+		const vector<string> &groupPaths = group.second;
 
-		/*
-		 * Evict per batch rather than once at the end, and both before and after
-		 * the request, for the same reasons the file cache does it in
-		 * PGLakeCachingFileSystem::RemoveFiles: PostDeleteObjects throws when S3
-		 * reports a per-key error, and the keys it did delete are gone whether or
-		 * not we get to the second eviction; a concurrent reader can also cache
-		 * an entry again in the window between the eviction and the delete.
-		 * Evicting an entry for a file that is still there only costs a HEAD.
-		 */
-		evictBatch(begin, end);
+		for (const string &path : groupPaths)
+			EvictFromMetadataCache(*this, path);
 
-		PostDeleteObjects(*this, s3Handle, resolvedFirstPath, keys, begin, end);
+		S3FileSystem::RemoveFiles(groupPaths, opener);
 
-		evictBatch(begin, end);
+		for (const string &path : groupPaths)
+			EvictFromMetadataCache(*this, path);
 	}
 }
 
-/*
- * create_s3_header is mostly copy-pasted from s3fs.cpp with some custom
- * additions for Content-MD5.
- *
- * We need it for our custom PostRequest implementation.
- */
-static HTTPHeaders create_s3_header(string url, string query, string host, string service, string method,
-                                  const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
-                                  string payload_hash = "", string content_type = "", string content_md5 = "",
-								  string encryption = "", string customer_key_id = "") {
-
-	HTTPHeaders res;
-	res["Host"] = host;
-	// If access key is not set, we don't set the headers at all to allow accessing public files through s3 urls
-	if (auth_params.secret_access_key.empty() && auth_params.access_key_id.empty()) {
-		return res;
-	}
-
-	if (payload_hash == "") {
-		payload_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"; // Empty payload hash
-	}
-
-	// we can pass date/time but this is mostly useful in testing. normally we just get the current datetime here.
-	if (datetime_now.empty()) {
-		auto timestamp = Timestamp::GetCurrentTimestamp();
-		date_now = StrfTimeFormat::Format(timestamp, "%Y%m%d");
-		datetime_now = StrfTimeFormat::Format(timestamp, "%Y%m%dT%H%M%SZ");
-	}
-
-	res["x-amz-date"] = datetime_now;
-	res["x-amz-content-sha256"] = payload_hash;
-	if (auth_params.session_token.length() > 0) {
-		res["x-amz-security-token"] = auth_params.session_token;
-	}
-
-	/* Custom addition: Add customer managed key */
-	if (encryption.length() > 0)
-		res["x-amz-server-side-encryption"] = encryption;
-
-	if (customer_key_id.length() > 0)
-		res["x-amz-server-side-encryption-aws-kms-key-id"] = customer_key_id;
-
-	string signed_headers = "";
-	hash_bytes canonical_request_hash;
-	hash_str canonical_request_hash_str;
-
-	/* Custom addition: Add md5 if requested (needs to be before content-type) */
-	if (content_md5.length() > 0) {
-		res["content-md5"] = content_md5;
-		signed_headers += "content-md5;";
-	}
-
-	if (content_type.length() > 0) {
-		signed_headers += "content-type;";
-	}
-	signed_headers += "host;x-amz-content-sha256;x-amz-date";
-	if (auth_params.session_token.length() > 0) {
-		signed_headers += ";x-amz-security-token";
-	}
-
-	/* Custom addition: Add customer managed key */
-	if (encryption.length() > 0)
-		signed_headers += ";x-amz-server-side-encryption";
-	if (customer_key_id.length() > 0)
-		signed_headers += ";x-amz-server-side-encryption-aws-kms-key-id";
-
-	auto canonical_request = method + "\n" + S3FileSystem::UrlEncode(url) + "\n" + query;
-
-	/* Custom addition: Add md5 if requested (needs to be before content-type) */
-	if (content_md5.length() > 0) {
-		canonical_request += "\ncontent-md5:" + content_md5;
-	}
-
-	if (content_type.length() > 0) {
-		canonical_request += "\ncontent-type:" + content_type;
-	}
-
-	canonical_request += "\nhost:" + host + "\nx-amz-content-sha256:" + payload_hash + "\nx-amz-date:" + datetime_now;
-	if (auth_params.session_token.length() > 0) {
-		canonical_request += "\nx-amz-security-token:" + auth_params.session_token;
-	}
-
-	/* Custom addition: Add customer managed key */
-	if (encryption.length() > 0)
-		canonical_request += "\nx-amz-server-side-encryption:" + encryption;
-	if (customer_key_id.length() > 0)
-		canonical_request += "\nx-amz-server-side-encryption-aws-kms-key-id:" + customer_key_id;
-
-	canonical_request += "\n\n" + signed_headers + "\n" + payload_hash;
-	sha256(canonical_request.c_str(), canonical_request.length(), canonical_request_hash);
-
-	hex256(canonical_request_hash, canonical_request_hash_str);
-	auto string_to_sign = "AWS4-HMAC-SHA256\n" + datetime_now + "\n" + date_now + "/" + auth_params.region + "/" +
-	                      service + "/aws4_request\n" + string((char *)canonical_request_hash_str, sizeof(hash_str));
-	// compute signature
-	hash_bytes k_date, k_region, k_service, signing_key, signature;
-	hash_str signature_str;
-	auto sign_key = "AWS4" + auth_params.secret_access_key;
-	hmac256(date_now, sign_key.c_str(), sign_key.length(), k_date);
-	hmac256(auth_params.region, k_date, k_region);
-	hmac256(service, k_region, k_service);
-	hmac256("aws4_request", k_service, signing_key);
-	hmac256(string_to_sign, signing_key, signature);
-	hex256(signature, signature_str);
-
-	res["Authorization"] = "AWS4-HMAC-SHA256 Credential=" + auth_params.access_key_id + "/" + date_now + "/" +
-	                       auth_params.region + "/" + service + "/aws4_request, SignedHeaders=" + signed_headers +
-	                       ", Signature=" + string((char *)signature_str, sizeof(hash_str));
-
-	return res;
-}
-
-
-/*
- * GetPayloadHash is directly copy-pasted from s3fs.cpp, where it
- * declared static.
- *
- * We need it for our custom PostRequest implementation.
- */
-static string
-GetPayloadHash(char *buffer, idx_t buffer_len)
-{
-	if (buffer_len > 0) {
-		hash_bytes payload_hash_bytes;
-		hash_str payload_hash_str;
-		sha256(buffer, buffer_len, payload_hash_bytes);
-		hex256(payload_hash_bytes, payload_hash_str);
-		return string((char *)payload_hash_str, sizeof(payload_hash_str));
-	} else {
-		return "";
-	}
-}
-
-
-/*
- * MD5 calculates an MD5 hash for a given buffer using DuckDB functions.
- */
-static string
-GetMD5(char *buffer, idx_t bufferLength)
-{
-	data_t md5Blob[MD5Context::MD5_HASH_LENGTH_BINARY];
-   	MD5Context md5Context;
-	md5Context.Add((const_data_ptr_t) buffer, bufferLength);
-	md5Context.Finish(md5Blob);
-	string_t md5String((const char *) md5Blob, MD5Context::MD5_HASH_LENGTH_BINARY);
-
-	char md5Base64[MD5_HASH_LENGTH_BASE64];
-	Blob::ToBase64(md5String, md5Base64);
-
-	return string(md5Base64, MD5_HASH_LENGTH_BASE64);
-}
-
-
-/*
- * IsPgLakeManagedStorageBucket returns whether the given bucket is the
- * managed storage bucket.
- */
-static bool
-IsPgLakeManagedStorageBucket(optional_ptr<ClientContext> context, string prefix, string bucket)
-{
-	if (context == nullptr)
-		return false;
-
-	Value setting;
-
-	if (!context->TryGetCurrentSetting(Identifier(MANAGED_STORAGE_BUCKET_SETTING), setting))
-		return false;
-
-	string managedStorageBucket = setting.ToString();
-
-	/* we ignore empty string and "NULL", the latter is used in case of reset */
-	if (managedStorageBucket.empty() || managedStorageBucket == "NULL")
-		return false;
-
-	/* remove trailing slash */
-    if (managedStorageBucket.back() == '/')
-        managedStorageBucket.pop_back();
-
-   return prefix + bucket == managedStorageBucket;
-}
-
-
-/*
- * SetEncryptionFields determines the encryption and customer_key_id for a given
- * request. In particular, it sets the customer_key_id option for writes to the
- * managed storage bucket if a key ID is configured.
- */
-static void
-SetEncryptionFields(optional_ptr<ClientContext> context, ParsedS3Url &parsed_s3_url,
-					string &encryption, string &customer_key_id)
-{
-	/*
-	 * Without the context we cannot tell whether this write goes to managed
-	 * storage, nor which key it should use. Writing unencrypted would be worse
-	 * than failing. This has to stay an IOException: an INTERNAL one invalidates
-	 * the database, which pgduck_server shares across all its sessions.
-	 */
-	if (context == nullptr)
-		throw IOException("cannot determine encryption settings for write to %s: "
-						  "no client context registered for the file handle",
-						  parsed_s3_url.bucket);
-
-	Value setting;
-
-	if (context->TryGetCurrentSetting(Identifier(MANAGED_STORAGE_KEY_ID_SETTING), setting) &&
-		IsPgLakeManagedStorageBucket(context, parsed_s3_url.prefix, parsed_s3_url.bucket))
-	{
-		/* use customer managed key */
-		customer_key_id = setting.ToString();
-
-		/*
-		 * If the setting has been disabled via RESET, the value becomes "NULL" (?),
-		 * we then treat it as an empty string (ignored).
-		 */
-		if (customer_key_id == "NULL")
-			customer_key_id = "";
-
-		if (!customer_key_id.empty())
-			encryption = "aws:kms";
-	}
-}
-
-
-/*
- * IsAuthError determines whether a response failed in a way that expired
- * credentials would explain.
- *
- * S3 returns expired session tokens as HTTP 400 with an XML body whose
- * <Code> is ExpiredToken or TokenRefreshRequired, not 401/403.  Match
- * those so TryRefreshAuthParams gets a chance to refresh and retry.
- */
-static bool
-IsAuthError(const HTTPResponse &response)
-{
-  if (response.status == HTTPStatusCode::Unauthorized_401 ||
-      response.status == HTTPStatusCode::Forbidden_403)
-    return true;
-
-  if (response.status == HTTPStatusCode::BadRequest_400) {
-    string code;
-    if (S3FileSystem::TryGetS3ErrorCode(response.body, code))
-      return code == "ExpiredToken" || code == "TokenRefreshRequired";
-  }
-
-  return false;
-}
-
-
-/*
- * TryRefreshAuthParams refreshes the secret that applies to the given URL and
- * copies the resulting credentials into auth_params. Returns whether the
- * credentials changed.
- *
- * S3FileSystem does this for the requests it signs itself, but PostRequest and
- * PutRequest below sign their own requests, so they refresh their own
- * credentials. We do not write the result back into the S3HTTPInput, since
- * upstream guards that copy with a private mutex, meaning that each request
- * refreshes for itself.
- */
-static bool
-TryRefreshAuthParams(optional_ptr<ClientContext> context, const string &url, S3AuthParams &auth_params)
-{
-	if (context == nullptr)
-		return false;
-
-	auto transaction = CatalogTransaction::GetSystemCatalogTransaction(*context);
-	auto &secretManager = context->db->GetSecretManager();
-	bool refreshedSecret = false;
-
-	for (const string type : {"s3", "r2", "gcs", "aws"})
-	{
-		auto match = secretManager.LookupSecret(transaction, url, type);
-
-		if (match.HasMatch())
-			refreshedSecret |= CreateS3SecretFunctions::TryRefreshS3Secret(*context, *match.secret_entry);
-	}
-
-	if (!refreshedSecret)
-		return false;
-
-	ClientContextFileOpener opener(*context);
-	FileOpenerInfo info = {url};
-	auto refreshed = S3AuthParams::ReadFrom(opener, info);
-
-	if (refreshed.access_key_id == auth_params.access_key_id &&
-		refreshed.secret_access_key == auth_params.secret_access_key &&
-		refreshed.session_token == auth_params.session_token)
-		return false;
-
-	/*
-	 * Only take over the credentials, since the region and endpoint may have
-	 * come from the query string rather than from the secret.
-	 */
-	auth_params.access_key_id = refreshed.access_key_id;
-	auth_params.secret_access_key = refreshed.secret_access_key;
-	auth_params.session_token = refreshed.session_token;
-
-	return true;
-}
-
-
-/*
- * PostRequest is mostly copy-pasted from S3FileSystem::PostRequest,
- * but with the addition of Content-MD5, which is required for DeleteObjects.
- */
-unique_ptr<HTTPResponse>
-PgLakeS3FileSystem::PostRequest(HTTPInput &input, string url, HTTPHeaders header_map,
-                                 string &buffer_out,
-                                 char *buffer_in, idx_t buffer_in_len, string http_params)
-{
-	return PostRequestForCredentialScope(input, url, url, buffer_out, buffer_in, buffer_in_len,
-										 http_params);
-}
-
-
-/*
- * PostRequestForCredentialScope is PostRequest with the URL that a credential
- * refresh looks the secret up by given separately from the URL the request goes
- * to. They are the same URL for every caller but DeleteObjects, whose request
- * goes to the bucket while its credentials belong to the objects being deleted:
- * DuckDB selects a secret by longest matching URL prefix, so refreshing on the
- * bucket URL could pick up a different secret than the one the request was
- * signed with and replace working credentials with credentials for another scope.
- *
- * header_map is absent because the copied upstream body ignores it: the headers
- * are built from scratch below in order to sign them.
- */
-unique_ptr<HTTPResponse>
-PgLakeS3FileSystem::PostRequestForCredentialScope(HTTPInput &input, string url,
-												  const string &credentialScopeUrl,
-												  string &buffer_out, char *buffer_in,
-												  idx_t buffer_in_len, string http_params)
-{
-	auto &s3_input = input.Cast<S3HTTPInput>();
-	auto auth_params = s3_input.auth_params;
-	auto parsed_s3_url = S3UrlParse(url, auth_params);
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, http_params);
-	auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
-
-	string content_md5 = "";
-	string encryption = "";
-	string customer_key_id = "";
-
-	/*
-	 * For CreateMultipartUpload operations (?uploads=...), use the customer-managed key, if any.
-	 */
-	if (http_params.find("uploads=") != std::string::npos)
-		SetEncryptionFields(LookupContext(&input), parsed_s3_url, encryption, customer_key_id);
-
-	/*
-	 * For DeleteObjects operations we need to specify the Content-MD5 header.
-	 */
-	if (http_params.find("delete=") != std::string::npos)
-		content_md5 = GetMD5(buffer_in, buffer_in_len);
-
-	auto sendRequest = [&]() {
-		auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "POST", auth_params, "",
-		                                "", payload_hash, "application/octet-stream", content_md5, encryption, customer_key_id);
-
-		return HTTPFileSystem::PostRequest(input, http_url, headers, buffer_out, buffer_in, buffer_in_len);
-	};
-
-	auto response = sendRequest();
-
-	/* credentials can expire in the middle of a multi-part upload */
-	if (IsAuthError(*response) &&
-		TryRefreshAuthParams(LookupContext(&input), credentialScopeUrl, auth_params))
-		response = sendRequest();
-
-	return response;
-}
-
-unique_ptr<HTTPResponse>
-PgLakeS3FileSystem::PutRequest(HTTPInput &input, string url, HTTPHeaders header_map,
-								char *buffer_in, idx_t buffer_in_len, string http_params)
-{
-	auto &s3_input = input.Cast<S3HTTPInput>();
-	auto auth_params = s3_input.auth_params;
-	auto parsed_s3_url = S3UrlParse(url, auth_params);
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params, http_params);
-	auto content_type = "application/octet-stream";
-	auto payload_hash = GetPayloadHash(buffer_in, buffer_in_len);
-
-	string encryption = "";
-	string customer_key_id = "";
-
-	/*
-	 * For PutObject operations (no params), use the customer-managed key, if any.
-	 */
-	if (http_params.empty())
-		SetEncryptionFields(LookupContext(&input), parsed_s3_url, encryption, customer_key_id);
-
-	auto sendRequest = [&]() {
-		auto headers = create_s3_header(parsed_s3_url.path, http_params, parsed_s3_url.host, "s3", "PUT", auth_params, "",
-		                                "", payload_hash, content_type, "", encryption, customer_key_id);
-
-		return HTTPFileSystem::PutRequest(input, http_url, headers, buffer_in, buffer_in_len);
-	};
-
-	auto response = sendRequest();
-
-	/* credentials can expire in the middle of a multi-part upload */
-	if (IsAuthError(*response) && TryRefreshAuthParams(LookupContext(&input), url, auth_params))
-		response = sendRequest();
-
-	return response;
-}
 
 /*
  * Download performs similar logic to GetRequest, except writing the output
  * to a destination file rather than an in-memory buffer.
+ *
+ * The request goes through S3RequestExecutor, which signs it and handles
+ * credential refresh and region redirects.
  */
 int64_t
 PgLakeS3FileSystem::Download(ClientContext &context, FileHandle &inputHandle, FileHandle &outputHandle)
 {
-	auto auth_params = inputHandle.Cast<PgLakeS3FileHandle>().auth_params;
-	auto parsed_s3_url = S3UrlParse(inputHandle.path, auth_params);
-	string http_url = parsed_s3_url.GetHTTPUrl(auth_params);
-	auto headers =
-	    create_s3_header(parsed_s3_url.path, "", parsed_s3_url.host, "s3", "GET", auth_params, "", "", "", "");
+	auto &s3Handle = inputHandle.Cast<S3FileHandle>();
+	idx_t totalBytes = 0;
 
-	PgLakeHTTPFileSystem httpfs;
-	return httpfs.Download(context, inputHandle, http_url, headers, outputHandle);
+	S3RequestSpec spec {s3Handle.path, S3RequestOperation::GET_OBJECT, {}, "", "", ""};
+
+	S3RequestResult result = S3RequestExecutor::RunHandle(
+		GetEncryptionUtil(), s3Handle, spec,
+		[&](S3RequestData &requestData) {
+			/*
+			 * The executor retries failed requests. A retry that starts after we
+			 * wrote part of the body would append the object a second time.
+			 */
+			if (totalBytes > 0)
+				throw IOException("download of %s failed after %llu bytes",
+									requestData.display_url, (uint64_t) totalBytes);
+
+			auto &params = requestData.http_params->Cast<HTTPFSParams>();
+
+			GetRequestInfo getRequest(
+				requestData.http_url, requestData.headers, params,
+				[&](const HTTPResponse &response) {
+					if (static_cast<int>(response.status) >= 400)
+						throw S3RequestUtil::GetRequestError(requestData, response);
+					return true;
+				},
+				[&](const_data_ptr_t data, idx_t dataLength) {
+					totalBytes += dataLength;
+					if (context.IsInterrupted())
+						throw InterruptException();
+
+					outputHandle.Write((void *) data, dataLength);
+					return true;
+				});
+
+			return S3RequestExecutor::SendHandleRequest(s3Handle, requestData, getRequest);
+		});
+
+	if (result.response->HasRequestError())
+		throw IOException("S3 download of \"%s\" could not be completed: %s",
+							result.context.display_url, result.response->GetRequestError());
+
+	/*
+	 * The byte count is verified by FileUtils::CopyFile, which does it for every
+	 * transfer rather than only the ones that come through here.
+	 */
+	return totalBytes;
 }
 
 
@@ -1026,7 +430,7 @@ PgLakeS3FileSystem::Download(ClientContext &context, FileHandle &inputHandle, Fi
  */
 static bool
 Match(vector<string>::const_iterator key, vector<string>::const_iterator key_end,
-      vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end)
+			vector<string>::const_iterator pattern, vector<string>::const_iterator pattern_end)
 {
 	while (key != key_end && pattern != pattern_end) {
 		if (*pattern == "**") {
@@ -1051,107 +455,14 @@ Match(vector<string>::const_iterator key, vector<string>::const_iterator key_end
 }
 
 
-/*
- * ParseXmlValue is a simple parsing function for extracting a value from an
- * XML field.
- */
-static string
-ParseXmlValue(string &xmlFragment, string key)
-{
-	string openTag = "<" + key + ">";
-	string closeTag = "</" + key + ">";
-
-	auto openTagPos = xmlFragment.find(openTag);
-	if (openTagPos == string::npos)
-		throw InternalException("Failed to parse S3 result: " + openTag + " not found");
-
-	auto closeTagPos = xmlFragment.find(closeTag, openTag.length());
-	if (closeTagPos == string::npos)
-		throw InternalException("Failed to parse S3 result: " + closeTag + " not found");
-
-	return xmlFragment.substr(openTagPos + openTag.length(), closeTagPos - openTagPos - openTag.length());
-}
-
-
-/*
- * ETag is quoted, and due to encoding-type=url in the request we
- * get funky etag quoting, which is not quite consistent across
- * implementations (e.g. moto vs. S3).
- *
- * The string might look like &quot;...&quot; or &#34;...&#34;
- *
- * We replace with regular quotes in this function.
- */
-static void
-UnescapeEtag(string &etag, string quote)
-{
-	if (StringUtil::StartsWith(etag, quote))
-		etag = etag.replace(0, quote.length(), "\"");
-
-	if (StringUtil::EndsWith(etag, quote))
-		etag = etag.replace(etag.length() - quote.length(), quote.length(), "\"");
-}
-
-/*
- * ParseOpenFileInfo is based on AWSListObjectV2::ParseKey, but also parses
- * size and last modified time.
- */
-static void
-ParseOpenFileInfo(string &awsResponse, bool isGlob, vector<OpenFileInfo> &result)
-{
-	string openTag = "<Contents>";
-	string closeTag = "</Contents>";
-	idx_t currentPos = 0;
-
-	while (true) {
-		auto openTagPos = awsResponse.find(openTag, currentPos);
-		if (openTagPos == string::npos)
-			break;
-
-		auto closeTagPos = awsResponse.find(closeTag, openTagPos + openTag.length());
-		if (closeTagPos == string::npos)
-			throw InternalException("Failed to parse S3 result: " + closeTag + " not found");
-
-		string xmlFragment =
-			awsResponse.substr(openTagPos + openTag.length(), closeTagPos - openTagPos - openTag.length());
-
-		currentPos = closeTagPos + closeTag.length();
-
-		string path = S3FileSystem::UrlDecode(ParseXmlValue(xmlFragment, "Key"));
-
-		/* we exclude directories from the result */
-		if (path.back() == '/')
-			continue;
-
-		/* construct file metadata */
-		OpenFileInfo fileDesc(path);
-
-		fileDesc.extended_info = make_shared_ptr<ExtendedOpenFileInfo>();
-		auto &options = fileDesc.extended_info->options;
-		auto timestampStr = ParseXmlValue(xmlFragment, "LastModified");
-		options.emplace("file_size", Value::BIGINT(std::stol(ParseXmlValue(xmlFragment, "Size"))));
-		options.emplace("last_modified", Value::TIMESTAMP(Timestamp::FromCString(timestampStr.c_str(), timestampStr.length())));
-
-		/* for pg_lake list we also want etag */
-		if (!isGlob)
-		{
-			auto etag = ParseXmlValue(xmlFragment, "ETag");
-			UnescapeEtag(etag, "&quot;");
-			UnescapeEtag(etag, "&#34;");
-			options.emplace("etag", etag);
-		}
-
-		result.push_back(fileDesc);
-	}
-}
-
 
 /*
  * List returns a list of file descriptions that match the given glob
- * pattern, including size and last modified time.
+ * pattern, including size, last modified time and, outside globs, etag.
  *
- * Mostly copy-pasted from Glob in s3fs.cpp (code style preserved),
- * modified to return a vector of OpenFileInfo instead of keys only.
+ * Based on Glob in s3fs.cpp, modified to return a vector of OpenFileInfo
+ * instead of keys only, and to list without a delimiter so that a single
+ * request set returns every key under the prefix.
  */
 vector<OpenFileInfo>
 PgLakeS3FileSystem::List(const string &glob_pattern, bool is_glob, FileOpener *opener)
@@ -1163,110 +474,76 @@ PgLakeS3FileSystem::List(const string &glob_pattern, bool is_glob, FileOpener *o
 	optional_ptr<ClientContext> context = opener->TryGetClientContext();
 
 	FileOpenerInfo info = {glob_pattern};
-
-	// Trim any query parameters from the string
-	S3AuthParams s3_auth_params = S3AuthParams::ReadFrom(opener, info);
+	S3AuthParams s3_auth_params = S3AuthResolver::Resolve(opener, info);
 
 	// In url compatibility mode, we ignore globs allowing users to query files with the glob chars
-	if (s3_auth_params.s3_url_compatibility_mode && is_glob) {
-		OpenFileInfo fileDesc(glob_pattern);
-		return {fileDesc};
+	if (s3_auth_params.GetURLParams().compatibility_mode && is_glob) {
+		return {OpenFileInfo(glob_pattern)};
 	}
 
-	auto parsed_s3_url = S3UrlParse(glob_pattern, s3_auth_params);
-	auto parsed_glob_url = parsed_s3_url.trimmed_s3_url;
+	ParsedS3Url parsed_s3_url = S3Url::Parse(glob_pattern, s3_auth_params);
+	string bucket_url = parsed_s3_url.GetPrefix() + parsed_s3_url.GetBucket();
+	const string &glob_key = parsed_s3_url.GetKey();
 
 	// AWS matches on prefix, not glob pattern, so we take a substring until the first wildcard char for the aws calls
-	auto first_wildcard_pos = parsed_glob_url.find_first_of("*[\\");
+	auto first_wildcard_pos = glob_key.find_first_of("*[\\");
 	if (first_wildcard_pos == string::npos && is_glob) {
-		OpenFileInfo fileDesc(glob_pattern);
-
-		return {fileDesc};
+		return {OpenFileInfo(glob_pattern)};
 	}
 
-	string shared_path = parsed_glob_url.substr(0, first_wildcard_pos);
+	string shared_path = bucket_url + "/" + glob_key.substr(0, first_wildcard_pos);
 
-	auto db = opener->TryGetDatabase();
-	auto &http_util = HTTPUtil::Get(*db);
-	auto http_params = http_util.InitializeParameters(*context, glob_pattern);
+	// The session refreshes expired credentials and follows region redirects
+	auto session = S3RequestExecutor::CreateSession(opener, glob_pattern, s3_auth_params);
 
-	ReadQueryParams(parsed_s3_url.query_param, s3_auth_params);
-
-	// Work around incomplete change made in https://github.com/duckdb/duckdb-httpfs/pull/83/files
-	// The endpoint is not adapted to the s3_region query parameter, which we rely on for
-	// region injection. The region is validated before it is formatted into the host.
-	RewriteAmazonEndpointForRegion(s3_auth_params);
-
-	// Do main listobjectsv2 request
 	vector<OpenFileInfo> s3_file_descs;
-	string main_continuation_token;
+	string continuation_token;
 
-	// Main paging loop
+	// Paging loop
 	do {
-		if (context->IsInterrupted())
+		if (context && context->IsInterrupted())
 			throw InterruptException();
 
-		// List without a delimiter so that a single request set returns every key
-		// under the prefix, and pass the opener so expired credentials can be
-		// refreshed for list requests too.
-		string response_str = AWSListObjectV2::Request(shared_path, *http_params, s3_auth_params,
-		                                               main_continuation_token, false, optional_idx(), opener);
-		if (response_str.empty())
-			throw HTTPException("no list response (most likely the wrong region)");
+		S3ListObjectsV2Result response = AWSListObjectV2::Request(GetEncryptionUtil(), *session, shared_path,
+																														 continuation_token, S3ListMode::FLAT);
+		AWSListObjectV2::AppendFileList(response, s3_file_descs);
+		continuation_token = response.continuation_token;
+	} while (!continuation_token.empty());
 
-		main_continuation_token = AWSListObjectV2::ParseContinuationToken(response_str);
-		ParseOpenFileInfo(response_str, is_glob, s3_file_descs);
-
-		// Repeat requests until the keys of all common prefixes are parsed.
-		auto common_prefixes = AWSListObjectV2::ParseCommonPrefix(response_str);
-		while (!common_prefixes.empty()) {
-			// ListObjectsV2 is called with encoding-type=url, so the prefixes come back
-			// percent-encoded while AWSListObjectV2::Request encodes the path again.
-			// Decode here or the follow-up request lists a prefix that does not exist,
-			// e.g. a partition directory named "a b" becomes "a%2520b". Upstream does the
-			// same decode for its common prefixes in S3GlobResult.
-			auto prefix_path = S3FileSystem::UrlDecode(
-			    parsed_s3_url.prefix + parsed_s3_url.bucket + '/' + common_prefixes.back());
-			common_prefixes.pop_back();
-
-			// TODO we could optimize here by doing a match on the prefix, if it doesn't match we can skip this prefix
-			// Paging loop for common prefix requests
-			string common_prefix_continuation_token;
-			do {
-				auto prefix_res = AWSListObjectV2::Request(prefix_path, *http_params, s3_auth_params,
-				                                           common_prefix_continuation_token, false, optional_idx(),
-				                                           opener);
-				ParseOpenFileInfo(prefix_res, is_glob, s3_file_descs);
-				auto more_prefixes = AWSListObjectV2::ParseCommonPrefix(prefix_res);
-				common_prefixes.insert(common_prefixes.end(), more_prefixes.begin(), more_prefixes.end());
-				common_prefix_continuation_token = AWSListObjectV2::ParseContinuationToken(prefix_res);
-			} while (!common_prefix_continuation_token.empty());
-		}
-	} while (!main_continuation_token.empty());
-
-	vector<string> pattern_splits = StringUtil::Split(parsed_s3_url.key, "/");
+	vector<string> pattern_splits = StringUtil::Split(glob_key, "/");
 	vector<OpenFileInfo> result;
 
 	for (OpenFileInfo &s3_file_desc : s3_file_descs) {
-        string s3_key = s3_file_desc.path;
-		vector<string> key_splits = StringUtil::Split(s3_key, "/");
+		vector<string> key_splits = StringUtil::Split(s3_file_desc.path, "/");
 		bool is_match = Match(key_splits.begin(), key_splits.end(), pattern_splits.begin(), pattern_splits.end());
 
-		if (is_match) {
-			string result_full_url = parsed_s3_url.prefix + parsed_s3_url.bucket + "/" + s3_key;
+		if (!is_match)
+			continue;
 
-			// if a ? char was present, we re-add it here as the url parsing will have trimmed it.
-			if (is_glob && !parsed_s3_url.query_param.empty()) {
-				result_full_url += '?' + parsed_s3_url.query_param;
-			}
+		string result_full_url = bucket_url + "/" + s3_file_desc.path;
 
-            s3_file_desc.path = result_full_url;
-			result.push_back(s3_file_desc);
+		// if a ? char was present, we re-add it here as the url parsing will have trimmed it.
+		if (is_glob && !parsed_s3_url.GetQueryString().empty()) {
+			result_full_url += '?' + parsed_s3_url.GetQueryString();
 		}
+
+		s3_file_desc.path = result_full_url;
+
+		auto &options = s3_file_desc.extended_info->options;
+
+		/* pg_lake_list_files returns the size as a bigint */
+		auto file_size = options.find("file_size");
+		if (file_size != options.end())
+			file_size->second = file_size->second.DefaultCastAs(LogicalType::BIGINT);
+
+		/* only pg_lake list wants the etag */
+		if (is_glob)
+			options.erase("etag");
+
+		result.push_back(std::move(s3_file_desc));
 	}
+
 	return result;
 }
-
-
 
 } // namespace duckdb

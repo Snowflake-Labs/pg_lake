@@ -804,6 +804,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   {LogicalType::VARCHAR},
 						   LogicalType::VARCHAR,
 						   CacheFileLocalPathScalarFun);
+	    pg_lake_cache_file_local_path.SetFallible();
 	    loader.RegisterFunction(pg_lake_cache_file_local_path);
 	}
 
@@ -864,6 +865,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BIGINT,
 						   FileSizeScalarFun);
 
+        pg_lake_file_size.SetFallible();
         loader.RegisterFunction(pg_lake_file_size);
 	}
 
@@ -875,6 +877,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BOOLEAN,
 						   RemoveFileScalarFun);
 
+		pg_lake_remove_file.SetFallible();
 		loader.RegisterFunction(pg_lake_remove_file);
 	}
 
@@ -885,6 +888,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   {LogicalType::VARCHAR},
 						   LogicalType::VARCHAR,
 						   AddS3ExpressRegionEndpointScalarFun);
+	    pg_lake_test_add_s3_express.SetFallible();
 	    loader.RegisterFunction(pg_lake_test_add_s3_express);
 	}
 
@@ -908,6 +912,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BOOLEAN,
 						   FileExistsScalarFun);
 
+		pg_lake_file_exists.SetFallible();
 		loader.RegisterFunction(pg_lake_file_exists);
 	}
 
@@ -919,6 +924,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::VARCHAR,
 						   GetBucketRegionScalarFun);
 
+		pg_lake_get_bucket_region.SetFallible();
 		loader.RegisterFunction(pg_lake_get_bucket_region);
 	}
 
@@ -930,6 +936,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BOOLEAN,
 						   ClearRegionCacheScalarFun);
 
+		pg_lake_clear_region_cache.SetFallible();
 		loader.RegisterFunction(pg_lake_clear_region_cache);
 	}
 
@@ -941,6 +948,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::VARCHAR,
 						   GetManagedStorageRegionScalarFun);
 
+		pg_lake_get_managed_storage_region.SetFallible();
 		loader.RegisterFunction(pg_lake_get_managed_storage_region);
 	}
 

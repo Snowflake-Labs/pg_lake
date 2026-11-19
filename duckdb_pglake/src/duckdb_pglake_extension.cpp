@@ -754,35 +754,43 @@ static void LoadInternal(ExtensionLoader &loader) {
 
     /* Register functions */
     auto to_date_function = ScalarFunction("to_date", {LogicalType::DOUBLE}, LogicalType::DATE, ToDateScalarFun);
+    to_date_function.SetFallible();
     loader.RegisterFunction(to_date_function);
 
     auto acosh_function = ScalarFunction("acosh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AcoshPG);
+    acosh_function.SetFallible();
     loader.RegisterFunction(acosh_function);
 
 	auto atanh_function = ScalarFunction("atanh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AtanhPG);
+	atanh_function.SetFallible();
 	loader.RegisterFunction(atanh_function);
 
 	auto initcap_function = ScalarFunction("initcap_pg", {LogicalType::VARCHAR}, LogicalType::VARCHAR, InitcapPG);
 	loader.RegisterFunction(initcap_function);
 
 	auto uuid_extract_timestamp_function = ScalarFunction("uuid_extract_timestamp_pg", {LogicalType::UUID, LogicalType::INTEGER}, LogicalType::TIMESTAMP_TZ, UuidExtractTimestampPG);
+	uuid_extract_timestamp_function.SetFallible();
 	loader.RegisterFunction(uuid_extract_timestamp_function);
 
 	auto uuid_extract_version_function = ScalarFunction("uuid_extract_version_pg", {LogicalType::UUID}, LogicalType::SMALLINT, UuidExtractVersionPG);
+	uuid_extract_version_function.SetFallible();
 	loader.RegisterFunction(uuid_extract_version_function);
 
 	auto nullify_any_type = ScalarFunction("nullify_any_type", {LogicalType::ANY}, LogicalType::SQLNULL, NullifyAnyType);
 	loader.RegisterFunction(nullify_any_type);
 
 	auto throw_internal_error = ScalarFunction("pg_lake_throw_internal_error", {LogicalType::VARCHAR}, LogicalType::SQLNULL, ThrowInternalError);
+	throw_internal_error.SetFallible();
 	loader.RegisterFunction(throw_internal_error);
 
     auto lake_nth_suffix = ScalarFunction("lake_nth_suffix", {LogicalType::INTEGER}, LogicalType::VARCHAR, NthSuffixScalarFun);
+    lake_nth_suffix.SetFallible();
     loader.RegisterFunction(lake_nth_suffix);
 
 	ScalarFunctionSet substr("substring_pg");
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
+	substr.SetFallible();
 	loader.RegisterFunction(substr);
 
 	{
@@ -798,6 +806,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 									   LogicalType::ANY,
 									   PgErrorNestedListFun,
 									   NestedListBind);
+		pg_error_nested.SetFallible();
 		loader.RegisterFunction(pg_error_nested);
 	}
 
@@ -844,6 +853,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			 LogicalType::VARCHAR},
 			LogicalType::LIST(LogicalType::ANY),
 			IcebergSizeClampContainerPassthroughFun, NestedListBind));
+		iceberg_size_check_text.SetFallible();
 		loader.RegisterFunction(iceberg_size_check_text);
 
 		ScalarFunctionSet iceberg_size_check_blob("iceberg_size_check_blob");
@@ -856,6 +866,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			 LogicalType::VARCHAR},
 			LogicalType::LIST(LogicalType::ANY),
 			IcebergSizeClampContainerPassthroughFun, NestedListBind));
+		iceberg_size_check_blob.SetFallible();
 		loader.RegisterFunction(iceberg_size_check_blob);
 
 		ScalarFunction iceberg_byte_size(
@@ -864,6 +875,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			LogicalType::BIGINT,
 			IcebergByteSizeFun,
 			IcebergByteSizeBind);
+		iceberg_byte_size.SetFallible();
 		loader.RegisterFunction(iceberg_byte_size);
 	}
 
@@ -873,6 +885,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	/* Replace the S3 and HTTP file system with wrappers */
 	auto &instance = loader.GetDatabaseInstance();
 	auto &fs = instance.GetFileSystem();
+
+	/* managed storage encryption and region handling for every S3 request */
+	S3AuthResolver::config_callback = PgLakeS3AuthConfigCallback;
 
 	fs.UnregisterSubSystem("S3FileSystem");
 	fs.RegisterSubSystem(

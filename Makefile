@@ -98,9 +98,10 @@ reindent: typedefs
 submodules:
 	git submodule init
 	git submodule update
-	# duckdb-postgres needs its own header-only database-connector submodule;
-	# init it explicitly rather than recursively, so we do not clone the nested
-	# duckdb/extension-ci-tools copies we never build.
+	# duckdb-postgres needs its own database-connector submodule, whose sources
+	# duckdb_pglake/CMakeLists.txt compiles in; init it explicitly rather than
+	# recursively, so we do not clone the nested duckdb/extension-ci-tools
+	# copies we never build.
 	git -C duckdb_pglake/duckdb-postgres submodule update --init database-connector
 
 ## module declarations; each extension should have its dependencies spelled out here
