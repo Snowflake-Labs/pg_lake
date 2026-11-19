@@ -234,6 +234,57 @@ LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata)
 
 
 /*
+ * TruncateIcebergTableMetadataNames truncates the column names of the current
+ * schema to the longest identifier Postgres keeps, in place, as the parser
+ * truncates a column name it is given. With warn, it says so for each name.
+ * Two columns whose names become the same cannot both be columns of a table.
+ */
+void
+TruncateIcebergTableMetadataNames(IcebergTableMetadata * metadata, bool warn)
+{
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+	const char **originalNames = palloc0(sizeof(char *) * (schema->fields_length + 1));
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+	{
+		FieldStructElement *field = &schema->fields[fieldIdx];
+
+		originalNames[fieldIdx] = field->name;
+
+		if (field->name == NULL || strlen(field->name) < NAMEDATALEN)
+			continue;
+
+		char	   *truncatedName = pstrdup(field->name);
+
+		truncate_identifier(truncatedName, strlen(truncatedName), warn);
+		field->name = truncatedName;
+	}
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+	{
+		const char *name = schema->fields[fieldIdx].name;
+
+		/* Iceberg names are unique, so a collision involves a truncated one */
+		if (name == NULL || name == originalNames[fieldIdx])
+			continue;
+
+		for (size_t otherIdx = 0; otherIdx < schema->fields_length; otherIdx++)
+		{
+			const char *otherName = schema->fields[otherIdx].name;
+
+			if (otherIdx != fieldIdx && otherName != NULL && strcmp(name, otherName) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_COLUMN),
+						 errmsg("Iceberg columns \"%s\" and \"%s\" have the same name "
+								"when truncated to %d bytes",
+								originalNames[fieldIdx], originalNames[otherIdx],
+								NAMEDATALEN - 1)));
+		}
+	}
+}
+
+
+/*
  * LowercaseStructElementNames folds the names of the given sibling fields and
  * of everything nested below them. Two siblings that differ only in case
  * would become one name, which neither Postgres nor DuckDB can represent.

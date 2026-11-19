@@ -77,6 +77,7 @@ DescribeColumnsForURL(char *url,
 
 		if (HasLowercaseColumnNamesOption(copyOptions))
 			LowercaseIcebergTableMetadataNames(metadata);
+		TruncateIcebergTableMetadataNames(metadata, true);
 
 		return DescribeColumnsFromIcebergMetadata(metadata, emitFilename);
 	}

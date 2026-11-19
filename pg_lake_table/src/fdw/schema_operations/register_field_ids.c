@@ -497,6 +497,7 @@ GetDataFileSchemaForExternalIcebergTable(Oid relationId, char *metadataPath,
 
 	if (lowercaseNames)
 		LowercaseIcebergTableMetadataNames(metadata);
+	TruncateIcebergTableMetadataNames(metadata, false);
 
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
 
