@@ -1,6 +1,6 @@
 """
 Verify postgres_scanner behavior when pgduck_server scans PostgreSQL tables
-via postgres_scan().
+via an attached database (ATTACH ... (TYPE postgres)).
 
 Scenarios covered:
 - Composite types read as structs with correct field values
@@ -33,8 +33,33 @@ def _connstr():
     )
 
 
+PG_SCAN_DB = "pg_scanner"
+
+
+def _quote_ident(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _scan(table, schema="public"):
-    return f"postgres_scan('{_connstr()}', '{schema}', '{table}')"
+    return f"{PG_SCAN_DB}.{_quote_ident(schema)}.{_quote_ident(table)}"
+
+
+@pytest.fixture(autouse=True)
+def pg_scanner_attached(postgres, pgduck_conn):
+    """Attach the test database for _scan.
+
+    duckdb-postgres removed postgres_scan in favour of ATTACH, which reads
+    through the same scanner. An attached database caches its catalog, so
+    attach it afresh for each test to see the tables its fixtures created.
+    """
+    # the previous test's reads leave their transaction open on the database
+    pgduck_conn.rollback()
+    run_command(f"DETACH DATABASE IF EXISTS {PG_SCAN_DB}", pgduck_conn)
+    run_command(
+        f"ATTACH '{_connstr()}' AS {PG_SCAN_DB} (TYPE postgres, READ_ONLY)",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
 
 
 @pytest.fixture(scope="module")
@@ -359,7 +384,7 @@ def test_composite_same_name_different_schemas(pg_tables, pgduck_conn):
 
 def test_composite_special_characters(pg_tables, pgduck_conn):
     """Composite type with quotes and special chars in schema, type, and fields."""
-    scan = _scan('comp "tbl', schema="scan\"er''s schema!")
+    scan = _scan('comp "tbl', schema="scan\"er's schema!")
     rows = perform_query_on_cursor(
         f"SELECT struct_extract(c, 'id col'), "
         f"""struct_extract(c, 'na"me'), """

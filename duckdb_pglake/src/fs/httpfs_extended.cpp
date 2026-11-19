@@ -68,6 +68,18 @@ PgLakeHTTPFileSystem::Download(ClientContext &context, FileHandle &inputHandle, 
 									 if (static_cast<int>(response.status) >= 400) {
 										 throw GetHTTPError(inputHandle, response, RequestType::GET_REQUEST, inputUrl);
 									 }
+
+									 /*
+										* The client streams the body as it arrives and retries a
+										* transfer that broke off, which calls us again for the new
+										* response. Start the output over so the retry does not
+										* append to what the broken attempt wrote.
+										*/
+									 if (total_request_bytes > 0) {
+										 outputHandle.Truncate(0);
+										 outputHandle.Seek(0);
+										 total_request_bytes = 0;
+									 }
 									 return true;
 								 },
 								 [&](const_data_ptr_t data, idx_t data_length) {

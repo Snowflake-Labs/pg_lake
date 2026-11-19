@@ -36,11 +36,11 @@ def test_geometry_column_sent_as_hex_wkb(pgduck_conn):
     [
         ("'101'::BIT", "BIT"),
         ("union_value(a := 1)", "UNION"),
-        # VARIANT is 41, one past the `duckType <= DUCKDB_TYPE_GEOMETRY` bound,
-        # so it has no TypeInfo row at all. It has to be caught by the bounds
-        # check and named from duck_type_error_name's switch. This is the case
-        # that breaks first if a later bump adds a type and moves the bound.
-        ("'{\"a\": 1}'::VARIANT", "VARIANT"),
+        # TIMESTAMPTZ_NS is 42, one past the `duckType <= DUCKDB_TYPE_VARIANT`
+        # bound, so it has no TypeInfo row at all. It has to be caught by the
+        # bounds check and named from duck_type_error_name's switch. This is the
+        # case that breaks first if a later bump adds a type and moves the bound.
+        ("TIMESTAMPTZ_NS '2024-01-01 00:00:00+00'", "TIMESTAMPTZ_NS"),
     ],
 )
 def test_unsupported_type_names_type_and_column(pgduck_conn, expr, typename):

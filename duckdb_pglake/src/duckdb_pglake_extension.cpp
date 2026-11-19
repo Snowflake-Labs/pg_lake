@@ -1021,6 +1021,16 @@ DUCKDB_EXTENSION_API const char * duckdb_pglake_date_to_string(duckdb_date input
 	return strdup(duckdb::Date::ToString(duckdb::date_t(input.days)).c_str());
 }
 
+/*
+ * duckdb_pglake_vector_value_to_string renders the value at row of a vector the
+ * way DuckDB prints it. It is for types the C API has no accessor for, such as
+ * VARIANT, which DuckDB 2.0 returns from COPY ... (RETURN_STATS).
+ */
+DUCKDB_EXTENSION_API const char * duckdb_pglake_vector_value_to_string(duckdb_vector vector, idx_t row) {
+	auto &input = *reinterpret_cast<duckdb::Vector *>(vector);
+	return strdup(input.GetValue(row).ToString().c_str());
+}
+
 DUCKDB_EXTENSION_API const char * duckdb_pglake_geometry_to_string(duckdb_database database, duckdb_string_t input) {
 	duckdb::DatabaseWrapper *wrapper = reinterpret_cast<duckdb::DatabaseWrapper *>(database);
 	duckdb::shared_ptr<duckdb::DatabaseInstance> db = wrapper->database->instance;

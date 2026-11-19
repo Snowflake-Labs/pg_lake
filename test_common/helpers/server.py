@@ -451,10 +451,13 @@ def is_server_listening(socket_path, timeout=5, interval=0.01):
 
 
 def has_duckdb_created_file(duckdb_database_file_path):
-    pattern = struct.Struct("<8x4sQ")
+    # Check the magic bytes only: the version field after them changes between
+    # DuckDB releases, and since 2.0 holds a placeholder for the deprecated
+    # header layout.
+    pattern = struct.Struct("<8x4s")
 
     with open(duckdb_database_file_path, "rb") as fh:
-        return pattern.unpack(fh.read(pattern.size)) == (b"DUCK", 64)
+        return pattern.unpack(fh.read(pattern.size)) == (b"DUCK",)
 
     return False
 

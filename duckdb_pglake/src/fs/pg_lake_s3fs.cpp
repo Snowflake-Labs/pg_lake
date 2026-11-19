@@ -383,14 +383,6 @@ PgLakeS3FileSystem::Download(ClientContext &context, FileHandle &inputHandle, Fi
 	S3RequestResult result = S3RequestExecutor::RunHandle(
 		GetEncryptionUtil(), s3Handle, spec,
 		[&](S3RequestData &requestData) {
-			/*
-			 * The executor retries failed requests. A retry that starts after we
-			 * wrote part of the body would append the object a second time.
-			 */
-			if (totalBytes > 0)
-				throw IOException("download of %s failed after %llu bytes",
-									requestData.display_url, (uint64_t) totalBytes);
-
 			auto &params = requestData.http_params->Cast<HTTPFSParams>();
 
 			GetRequestInfo getRequest(
@@ -398,6 +390,19 @@ PgLakeS3FileSystem::Download(ClientContext &context, FileHandle &inputHandle, Fi
 				[&](const HTTPResponse &response) {
 					if (static_cast<int>(response.status) >= 400)
 						throw S3RequestUtil::GetRequestError(requestData, response);
+
+					/*
+					 * The client streams the body as it arrives, and both it and the
+					 * executor retry a transfer that broke off, which calls us again
+					 * for the new response. Start the output over so the retry does
+					 * not append to what the broken attempt wrote.
+					 */
+					if (totalBytes > 0)
+					{
+						outputHandle.Truncate(0);
+						outputHandle.Seek(0);
+						totalBytes = 0;
+					}
 					return true;
 				},
 				[&](const_data_ptr_t data, idx_t dataLength) {

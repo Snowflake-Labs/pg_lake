@@ -1,5 +1,5 @@
 """
-Verify postgres_scan handles PostGIS geometry columns correctly.
+Verify the postgres scanner handles PostGIS geometry columns correctly.
 
 PostGIS emits EWKB (with the SRID flag bit and embedded SRID) for binary
 output, but DuckDB spatial expects standard WKB. The scanner rewrites
@@ -23,8 +23,33 @@ def _connstr():
     )
 
 
+PG_SCAN_DB = "pg_scanner"
+
+
+def _quote_ident(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _scan(table, schema="public"):
-    return f"postgres_scan('{_connstr()}', '{schema}', '{table}')"
+    return f"{PG_SCAN_DB}.{_quote_ident(schema)}.{_quote_ident(table)}"
+
+
+@pytest.fixture(autouse=True)
+def pg_scanner_attached(postgres, pgduck_conn):
+    """Attach the test database for _scan.
+
+    duckdb-postgres removed postgres_scan in favour of ATTACH, which reads
+    through the same scanner. An attached database caches its catalog, so
+    attach it afresh for each test to see the tables its fixtures created.
+    """
+    # the previous test's reads leave their transaction open on the database
+    pgduck_conn.rollback()
+    run_command(f"DETACH DATABASE IF EXISTS {PG_SCAN_DB}", pgduck_conn)
+    run_command(
+        f"ATTACH '{_connstr()}' AS {PG_SCAN_DB} (TYPE postgres, READ_ONLY)",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
 
 
 @pytest.fixture(scope="module")
