@@ -25,6 +25,7 @@
 #include "pg_lake/extensions/pg_lake_iceberg.h"
 #include "pg_lake/iceberg/api/datafile.h"
 #include "pg_lake/iceberg/api/snapshot.h"
+#include "pg_lake/iceberg/catalog_log.h"
 
 
 /*
@@ -158,6 +159,7 @@ FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata * metadat
 	{
 		DataFile   *dataFile = lfirst(dataFileCell);
 
+		ErrorIfDataFileNotParquet(dataFile);
 		*dataFilePaths = lappend(*dataFilePaths, pstrdup(dataFile->file_path));
 	}
 
@@ -167,8 +169,41 @@ FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata * metadat
 	{
 		DataFile   *deleteFile = lfirst(deleteFileCell);
 
+		ErrorIfDataFileNotParquet(deleteFile);
 		*deleteFilePaths = lappend(*deleteFilePaths, pstrdup(deleteFile->file_path));
 	}
+}
+
+
+/*
+ * ErrorIfDataFileNotParquet refuses a data or position delete file that is
+ * not Parquet, which DuckDB would fail on as malformed Parquet.  Other
+ * engines can also write these files in ORC or Avro.
+ *
+ * Only call it for a file a read is about to open: a table rewritten from
+ * ORC to Parquet still lists the ORC files as deleted entries until its next
+ * commit, and pruning can skip the files of another format altogether.  An
+ * equality delete file is checked where it is applied.
+ */
+void
+ErrorIfDataFileNotParquet(DataFile * dataFile)
+{
+	if (dataFile->content == ICEBERG_DATA_FILE_CONTENT_EQUALITY_DELETES ||
+		dataFile->file_format == NULL ||
+		pg_strcasecmp(dataFile->file_format, "PARQUET") == 0)
+		return;
+
+	LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_FILE_FORMAT);
+
+	ereport(ERROR,
+			(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			 errmsg("pg_lake_iceberg: %s files are not supported",
+					dataFile->file_format),
+			 errdetail("Table references the %s file \"%s\".",
+					   dataFile->file_format, dataFile->file_path),
+			 errhint("pg_lake reads Iceberg data and delete files in "
+					 "Parquet only; rewrite the table's files as Parquet "
+					 "to read it.")));
 }
 
 /*
