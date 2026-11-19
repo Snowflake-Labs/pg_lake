@@ -291,6 +291,12 @@ WITH (catalog = 'sales_catalog', read_only = true);
 For equality-delete support and its limitations, see
 [Reading external equality deletes](#reading-external-equality-deletes).
 
+pg_lake reads columns by their Iceberg field IDs. Data files written without field IDs, as
+added by `add_files` or left by `migrate` and `snapshot`, can only be read through the table's
+name mapping (`schema.name-mapping.default`), which pg_lake does not support: a query that
+reads a column from such a file fails with `the file has no field ids to match its columns
+by`.
+
 Attached tables cannot be written to. Writing would mean taking over the table's metadata,
 field IDs and file inventory from whatever produced them, which pg_lake does not do: it writes
 only to tables it created. To move existing data under pg_lake, create a new table and copy
