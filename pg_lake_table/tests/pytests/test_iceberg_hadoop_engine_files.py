@@ -108,8 +108,9 @@ def test_non_parquet_files_only_refused_when_read(
     installcheck, spark_session, s3, pg_conn, extension
 ):
     """A rewrite from ORC to Parquet leaves the ORC files in the current
-    snapshot as deleted entries, and pruning can skip the ORC files of a
-    mixed-format table; neither is a file the read opens."""
+    snapshot as deleted entries, and pruning can skip the ORC data files of
+    a mixed-format table; neither is a file the read opens. Delete files are
+    not pruned, so an ORC delete file is refused whenever the table is read."""
     if installcheck:
         pytest.skip("requires the Spark integration fixture")
 
@@ -173,6 +174,7 @@ def test_hadoop_scheme_path_only_for_iceberg(pg_conn, extension):
         raise_error=False,
     )
     assert "unsupported URL" in str(error)
+    assert "only in Iceberg tables" in str(error)
     pg_conn.rollback()
 
 
