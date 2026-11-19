@@ -1,8 +1,8 @@
 diff --git a/lang/c/src/avro/io.h b/lang/c/src/avro/io.h
-index ffbb68dc5..5bb2ee699 100644
+index ffbb68dc5..aef862c7e 100644
 --- a/lang/c/src/avro/io.h
 +++ b/lang/c/src/avro/io.h
-@@ -109,12 +109,17 @@ int avro_file_writer_create_with_codec(const char *path,
+@@ -109,18 +109,24 @@ int avro_file_writer_create_with_codec(const char *path,
  int avro_file_writer_create_with_codec_fp(FILE *fp, const char *path, int should_close,
  				avro_schema_t schema, avro_file_writer_t * writer,
  				const char *codec, size_t block_size);
@@ -20,8 +20,15 @@ index ffbb68dc5..5bb2ee699 100644
  avro_schema_t
  avro_file_reader_get_writer_schema(avro_file_reader_t reader);
  
+ int avro_file_writer_sync(avro_file_writer_t writer);
+ int avro_file_writer_flush(avro_file_writer_t writer);
+ int avro_file_writer_close(avro_file_writer_t writer);
++int avro_file_writer_discard(avro_file_writer_t writer);
+ 
+ int avro_file_reader_close(avro_file_reader_t reader);
+ 
 diff --git a/lang/c/src/datafile.c b/lang/c/src/datafile.c
-index c9d4dfeb6..dcb6f50cc 100644
+index c9d4dfeb6..f04ece354 100644
 --- a/lang/c/src/datafile.c
 +++ b/lang/c/src/datafile.c
 @@ -73,7 +73,7 @@ static int write_sync(avro_file_writer_t w)
@@ -303,6 +310,29 @@ index c9d4dfeb6..dcb6f50cc 100644
  int avro_file_reader(const char *path, avro_file_reader_t * reader)
  {
  	FILE *fp;
+@@ -685,6 +870,22 @@ int avro_file_writer_close(avro_file_writer_t w)
+ 	return 0;
+ }
+ 
++/*
++ * Release the writer without flushing or writing to its file. For callers
++ * that own the FILE and may already have closed it, e.g. on error cleanup.
++ */
++int avro_file_writer_discard(avro_file_writer_t w)
++{
++	avro_schema_decref(w->writers_schema);
++	avro_writer_free(w->datum_writer);
++	avro_writer_free(w->writer);
++	avro_free(w->datum_buffer, w->datum_buffer_size);
++	avro_codec_reset(w->codec);
++	avro_freet(struct avro_codec_t_, w->codec);
++	avro_freet(struct avro_file_writer_t_, w);
++	return 0;
++}
++
+ int avro_file_reader_read(avro_file_reader_t r, avro_schema_t readers_schema,
+ 			  avro_datum_t * datum)
+ {
 diff --git a/lang/c/src/schema.c b/lang/c/src/schema.c
 index a4d8e9f89..cddea00cc 100644
 --- a/lang/c/src/schema.c

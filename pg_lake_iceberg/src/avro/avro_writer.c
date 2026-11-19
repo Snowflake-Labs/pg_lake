@@ -194,16 +194,24 @@ AvroFileWriterClose(AvroWriter * writer)
 
 
 /*
- * AvroFileWriterCloseCallback closes the writer from a memory context reset.
+ * AvroFileWriterCloseCallback releases the writer from a memory context reset.
  *
- * The result is ignored: a reset callback must not throw, and this only runs
- * ahead of AvroWriterClose() when the transaction is failing anyway, in which
- * case the file is discarded with it.
+ * This only runs ahead of AvroWriterClose() when the transaction is failing,
+ * and by then AtEOXact_Files() has already closed the FILE we got from
+ * AllocateFile(). Flushing would write into the freed FILE and corrupt the
+ * heap, so discard the writer without touching the file; the file is thrown
+ * away with the transaction anyway.
  */
 static void
 AvroFileWriterCloseCallback(void *arg)
 {
-	(void) AvroFileWriterClose((AvroWriter *) arg);
+	AvroWriter *writer = (AvroWriter *) arg;
+
+	if (writer->initializedDataWriter)
+	{
+		writer->initializedDataWriter = false;
+		avro_file_writer_discard(writer->dataWriter);
+	}
 }
 
 
