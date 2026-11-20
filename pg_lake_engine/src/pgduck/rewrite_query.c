@@ -34,12 +34,14 @@
 #include "pg_lake/parsetree/columns.h"
 #include "pg_lake/parsetree/expression.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/rewrite_left_join.h"
 #include "pg_lake/pgduck/rewrite_or_join.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/shippable_builtin_functions.h"
 #include "pg_lake/pgduck/to_char.h"
+#include "pg_lake/util/numeric.h"
 #include "pg_lake/util/operator_utils.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -50,6 +52,7 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -144,6 +147,9 @@ static bool IsJsonbCast(Node *node);
 static Node *WrapPgLakeInternalJsonbFunction(Node *data);
 static Node *FindArgForNode(Node *inputNode);
 static Node *RewriteParam(Param *paramExpr);
+static int32 NumericTypmodForDuckDB(Oid typeId, int32 typmod);
+static Node *RewriteUnboundedNumericCast(Node *node);
+static Const *RewriteIntegralNumericConst(Const *constExpr);
 
 static RewriteRule *GetRewriteRuleForFunctionId(Oid functionId);
 static ExpressionRewriter GetFunctionCallRewriter(Oid functionId, int *intArg);
@@ -620,7 +626,7 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 
 	if (IsA(node, Const))
 	{
-		Const	   *constExpr = (Const *) node;
+		Const	   *constExpr = RewriteIntegralNumericConst((Const *) node);
 
 		node = RewriteConst(constExpr);
 	}
@@ -699,7 +705,7 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 		}
 	}
 
-	return node;
+	return RewriteUnboundedNumericCast(node);
 }
 
 
@@ -1084,12 +1090,159 @@ RewriteParam(Param *paramExpr)
 
 	coerceExpr->arg = (Expr *) paramExpr;
 	coerceExpr->resulttype = paramExpr->paramtype;
-	coerceExpr->resulttypmod = paramExpr->paramtypmod;
+	coerceExpr->resulttypmod = NumericTypmodForDuckDB(paramExpr->paramtype,
+													  paramExpr->paramtypmod);
 	coerceExpr->resultcollid = paramExpr->paramcollid;
 	coerceExpr->relabelformat = COERCE_EXPLICIT_CAST;
 	coerceExpr->location = -1;
 
 	return (Node *) coerceExpr;
+}
+
+
+/*
+ * NumericTypmodForDuckDB returns the type modifier to name a type with in the
+ * query sent to DuckDB. DuckDB reads a bare NUMERIC as DECIMAL(18,3), which
+ * rounds to 3 decimal places and holds 15 digits before the point, so an
+ * unconstrained numeric gets the precision and scale of unbounded numeric
+ * columns instead.
+ */
+static int32
+NumericTypmodForDuckDB(Oid typeId, int32 typmod)
+{
+	if (!IsUnboundedNumeric(typeId, typmod))
+		return typmod;
+
+	return make_numeric_typmod(UnboundedNumericDefaultPrecision,
+							   UnboundedNumericDefaultScale);
+}
+
+
+/*
+ * RewriteUnboundedNumericCast gives a cast to an unconstrained numeric, such as
+ * ('1.5'::text)::numeric or bigint_column::numeric, a precision and scale, so
+ * that DuckDB does not read it as DECIMAL(18,3). The deparser also prints
+ * implicit casts that are operator arguments, so those are rewritten too.
+ *
+ * A cast from an integer type gets the fewest digits that hold every value of
+ * it, with no fraction: DuckDB widens the decimals of a VALUES list or a UNION
+ * to one type, which keeps only 38 digits, so a wider integer would push the
+ * fractions of the other values out. Other casts get the precision and scale
+ * of unbounded numeric columns.
+ *
+ * A cast function or an I/O coercion has no type modifier of its own, so it is
+ * deparsed without its cast and wrapped in a RelabelType that names the type.
+ */
+static Node *
+RewriteUnboundedNumericCast(Node *node)
+{
+	int32		typmod = NumericTypmodForDuckDB(NUMERICOID, -1);
+
+	if (IsA(node, RelabelType))
+	{
+		RelabelType *relabelExpr = (RelabelType *) node;
+
+		if (relabelExpr->relabelformat != COERCE_EXPLICIT_CALL)
+			relabelExpr->resulttypmod =
+				NumericTypmodForDuckDB(relabelExpr->resulttype,
+									   relabelExpr->resulttypmod);
+
+		return node;
+	}
+	else if (IsA(node, FuncExpr))
+	{
+		FuncExpr   *funcExpr = (FuncExpr *) node;
+
+		/*
+		 * A cast to numeric(p,s) parses as a cast to numeric under a length
+		 * coercion that names the precision and scale, as in a query parsed
+		 * from deparsed SQL, so the inner cast needs none of its own.
+		 */
+		if (funcExpr->funcresulttype == NUMERICOID &&
+			exprIsLengthCoercion(node, NULL) &&
+			IsA(linitial(funcExpr->args), RelabelType) &&
+			((RelabelType *) linitial(funcExpr->args))->resulttype == NUMERICOID)
+		{
+			linitial(funcExpr->args) = ((RelabelType *) linitial(funcExpr->args))->arg;
+			return node;
+		}
+
+		if (funcExpr->funcformat == COERCE_EXPLICIT_CALL ||
+			list_length(funcExpr->args) != 1 ||
+			!IsUnboundedNumeric(funcExpr->funcresulttype, exprTypmod(node)))
+			return node;
+
+		Oid			argType = exprType(linitial(funcExpr->args));
+
+		if (argType == INT2OID)
+			typmod = make_numeric_typmod(5, 0);
+		else if (argType == INT4OID)
+			typmod = make_numeric_typmod(10, 0);
+		else if (argType == INT8OID)
+			typmod = make_numeric_typmod(19, 0);
+
+		funcExpr->funcformat = COERCE_IMPLICIT_CAST;
+	}
+	else if (IsA(node, CoerceViaIO))
+	{
+		CoerceViaIO *coerceExpr = (CoerceViaIO *) node;
+
+		if (coerceExpr->coerceformat == COERCE_EXPLICIT_CALL ||
+			coerceExpr->resulttype != NUMERICOID)
+			return node;
+
+		coerceExpr->coerceformat = COERCE_IMPLICIT_CAST;
+	}
+	else
+		return node;
+
+	RelabelType *castExpr = makeNode(RelabelType);
+
+	castExpr->arg = (Expr *) node;
+	castExpr->resulttype = NUMERICOID;
+	castExpr->resulttypmod = typmod;
+	castExpr->resultcollid = InvalidOid;
+	castExpr->relabelformat = COERCE_EXPLICIT_CAST;
+	castExpr->location = -1;
+
+	return (Node *) castExpr;
+}
+
+
+/*
+ * RewriteIntegralNumericConst gives an unconstrained numeric constant that
+ * holds a whole number the type modifier numeric(<its digits>, 0). The
+ * deparser labels such a constant with ::numeric, which DuckDB reads as
+ * DECIMAL(18,3), so a constant past 15 digits fails to cast and one in
+ * arithmetic shrinks the room left before the point. A constant with a
+ * fraction is deparsed without a label and DuckDB infers its type.
+ */
+static Const *
+RewriteIntegralNumericConst(Const *constExpr)
+{
+	if (constExpr->constisnull ||
+		!IsUnboundedNumeric(constExpr->consttype, constExpr->consttypmod))
+		return constExpr;
+
+	Numeric		value = DatumGetNumeric(constExpr->constvalue);
+
+	if (numeric_is_nan(value) || numeric_is_inf(value))
+		return constExpr;
+
+	char	   *valueText = DatumGetCString(DirectFunctionCall1(numeric_out,
+																NumericGetDatum(value)));
+
+	if (strpbrk(valueText, ".eE") != NULL)
+		return constExpr;
+
+	int			digits = strlen(valueText) - (valueText[0] == '-' ? 1 : 0);
+
+	Const	   *integralConst = copyObject(constExpr);
+
+	integralConst->consttypmod =
+		make_numeric_typmod(Min(digits, DUCKDB_MAX_NUMERIC_PRECISION), 0);
+
+	return integralConst;
 }
 
 
