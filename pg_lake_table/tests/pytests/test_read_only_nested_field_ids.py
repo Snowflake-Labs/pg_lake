@@ -2,6 +2,7 @@
 field ids, so a nested field renamed, or dropped and added again, in the
 source catalog reads from the right field of each data file."""
 
+import json
 import uuid
 
 import pyarrow
@@ -21,6 +22,11 @@ from pyiceberg.types import (
 
 from helpers.polaris import *
 from utils_pytest import *
+
+
+NESTED_FIELDS_TYPE = (
+    "STRUCT(parent_id INTEGER, field_id INTEGER, name VARCHAR, names VARCHAR[])[]"
+)
 
 
 @pytest.mark.parametrize("fields", [["a", "k"], ["a"]])
@@ -107,19 +113,11 @@ def test_renamed_struct_field_in_a_file_without_field_ids(rest_namespace):
     table = catalog.create_table(
         f"{namespace}.t", schema=Schema(id_field(), struct_field(2, "s", ["a", "k"], 3))
     )
-    path = f"s3://{TEST_BUCKET}/{namespace}/added/f.parquet"
-    pyarrow.parquet.write_table(
+    add_file_without_field_ids(
+        namespace,
+        table,
         pyarrow.Table.from_pylist([{"id": 1, "s": {"a": "v_a", "k": "v_k"}}]),
-        path.removeprefix("s3://"),
-        filesystem=fs.S3FileSystem(
-            access_key=TEST_AWS_ACCESS_KEY_ID,
-            secret_key=TEST_AWS_SECRET_ACCESS_KEY,
-            endpoint_override=f"http://localhost:{MOTO_PORT}",
-            scheme="http",
-            region=TEST_AWS_REGION,
-        ),
     )
-    table.add_files([path])
     with table.update_schema() as update:
         update.rename_column("s.a", "renamed")
     create_pg_table(namespace, pg_conn)
@@ -128,6 +126,140 @@ def test_renamed_struct_field_in_a_file_without_field_ids(rest_namespace):
     assert run_query(f'SELECT (s).renamed, (s).k FROM "{namespace}".t', pg_conn) == [
         ["v_a", "v_k"]
     ]
+
+
+def test_struct_field_the_name_mapping_leaves_out_reads_null(rest_namespace):
+    namespace, catalog, pg_conn = rest_namespace
+    table = catalog.create_table(
+        f"{namespace}.t", schema=Schema(id_field(), struct_field(2, "s", ["a", "k"], 3))
+    )
+    add_file_without_field_ids(
+        namespace,
+        table,
+        pyarrow.Table.from_pylist([{"id": 1, "s": {"a": "v_a", "k": "v_k"}}]),
+    )
+    # the file names its field k as the table does, but the mapping leaves it out
+    table.transaction().set_properties(
+        {
+            "schema.name-mapping.default": json.dumps(
+                [
+                    {"field-id": 1, "names": ["id"]},
+                    {
+                        "field-id": 2,
+                        "names": ["s"],
+                        "fields": [{"field-id": 3, "names": ["a"]}],
+                    },
+                ]
+            )
+        }
+    ).commit_transaction()
+    create_pg_table(namespace, pg_conn)
+
+    assert run_query(f'SELECT (s).a, (s).k FROM "{namespace}".t', pg_conn) == [
+        ["v_a", None]
+    ]
+
+
+def test_fields_in_a_list_and_a_map_in_a_file_without_field_ids(rest_namespace):
+    namespace, catalog, pg_conn = rest_namespace
+    table = catalog.create_table(
+        f"{namespace}.t",
+        schema=Schema(
+            id_field(),
+            NestedField(
+                2,
+                "l",
+                ListType(3, StructType(NestedField(4, "a", StringType())), False),
+                required=False,
+            ),
+            NestedField(
+                5,
+                "m",
+                MapType(
+                    6,
+                    StringType(),
+                    7,
+                    StructType(NestedField(8, "a", StringType())),
+                    False,
+                ),
+                required=False,
+            ),
+        ),
+    )
+    element = pyarrow.struct([pyarrow.field("a", pyarrow.string())])
+    file_schema = pyarrow.schema(
+        [
+            pyarrow.field("id", pyarrow.int64()),
+            pyarrow.field("l", pyarrow.list_(pyarrow.field("element", element))),
+            pyarrow.field("m", pyarrow.map_(pyarrow.string(), element)),
+        ]
+    )
+    add_file_without_field_ids(
+        namespace,
+        table,
+        pyarrow.Table.from_pylist(
+            [{"id": 1, "l": [{"a": "in_list"}], "m": [("k", {"a": "in_map"})]}],
+            file_schema,
+        ),
+    )
+    with table.update_schema() as update:
+        update.rename_column("l.element.a", "list_renamed")
+        update.rename_column("m.value.a", "map_renamed")
+    create_pg_table(namespace, pg_conn)
+
+    assert (
+        run_query(
+            f"""SELECT (l[1]).list_renamed, (map_type.extract(m, 'k')).map_renamed
+            FROM "{namespace}".t""",
+            pg_conn,
+        )
+        == [["in_list", "in_map"]]
+    )
+
+
+def test_mixed_case_and_long_struct_field_names_in_a_file_without_field_ids(
+    rest_namespace,
+):
+    """The file's names are matched as the name mapping spells them, whatever
+    PostgreSQL makes of them."""
+    namespace, catalog, pg_conn = rest_namespace
+    long_name = "f" * 70
+    table = catalog.create_table(
+        f"{namespace}.t",
+        schema=Schema(id_field(), struct_field(2, "s", ["MixedCase", long_name], 3)),
+    )
+    add_file_without_field_ids(
+        namespace,
+        table,
+        pyarrow.Table.from_pylist(
+            [{"id": 1, "s": {"MixedCase": "v1", long_name: "v2"}}]
+        ),
+    )
+    create_pg_table(namespace, pg_conn, "lowercase_column_names = true")
+
+    assert run_query(
+        f'SELECT (s).mixedcase, (s)."{long_name[:63]}" FROM "{namespace}".t', pg_conn
+    ) == [["v1", "v2"]]
+
+
+def test_file_that_nests_a_field_differently_is_refused(pgduck_conn, s3):
+    path = f"s3://{TEST_BUCKET}/nested_ids_{uuid.uuid4().hex[:8]}/f.parquet"
+    run_command(
+        f"""COPY (SELECT {{'a': {{'x': 1}}}} AS s) TO '{path}'
+            (FORMAT PARQUET, FIELD_IDS {{s: {{__duckdb_field_id: 1, a: {{__duckdb_field_id: 2, x: 3}}}}}})""",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
+
+    error = run_query(
+        f"""SELECT s FROM read_parquet('{path}', schema=map {{
+                1: {{name: 's', type: 'STRUCT(a INTEGER)', default_value: NULL,
+                     nested: [{{parent_id: 1, field_id: 2, name: 'a', names: NULL}}]::{NESTED_FIELDS_TYPE}}}}})""",
+        pgduck_conn,
+        False,
+    )
+    assert 'nests the fields of column "s" differently' in str(error)
+    pgduck_conn.rollback()
 
 
 def test_promoted_struct_field(rest_namespace):
@@ -191,11 +323,27 @@ def rows(table, values):
     return pyarrow.Table.from_pylist(values, table.schema().as_arrow())
 
 
-def create_pg_table(namespace, pg_conn):
+def add_file_without_field_ids(namespace, table, rows):
+    path = f"s3://{TEST_BUCKET}/{namespace}/added/f.parquet"
+    pyarrow.parquet.write_table(
+        rows,
+        path.removeprefix("s3://"),
+        filesystem=fs.S3FileSystem(
+            access_key=TEST_AWS_ACCESS_KEY_ID,
+            secret_key=TEST_AWS_SECRET_ACCESS_KEY,
+            endpoint_override=f"http://localhost:{MOTO_PORT}",
+            scheme="http",
+            region=TEST_AWS_REGION,
+        ),
+    )
+    table.add_files([path])
+
+
+def create_pg_table(namespace, pg_conn, options=""):
     run_command(f'CREATE SCHEMA "{namespace}"', pg_conn)
     run_command(
         f"""CREATE TABLE "{namespace}".t () USING iceberg
-            WITH (catalog='rest', read_only=True)""",
+            WITH (catalog='rest', read_only=True{", " + options if options else ""})""",
         pg_conn,
     )
     pg_conn.commit()

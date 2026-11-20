@@ -10,7 +10,7 @@
 +	int32_t parent_id;
 +	int32_t field_id;
 +	string name;
-+	//! Names a struct field can have in a file whose nested fields have no field ids
++	//! Names a struct field has in files written without field ids (an Iceberg name mapping)
 +	vector<string> names;
 +};
 +
@@ -106,13 +106,42 @@
  	if (key_type.id() != LogicalTypeId::INTEGER && key_type.id() != LogicalTypeId::VARCHAR) {
 --- a/extension/parquet/parquet_reader.cpp
 +++ b/extension/parquet/parquet_reader.cpp
-@@ -841,6 +841,68 @@
- 	}
+@@ -810,8 +810,9 @@
  }
  
-+//! Gives the fields nested in a column that have no field id in the file the ids of the schema option's nested
-+//! fields under the same parent: a struct field by one of its names, a list element and a map key and value by
-+//! their position.
+ //! Gives the top-level columns of a file written without field ids the field ids their names map to, as Iceberg
+-//! readers do with a table's name mapping. A file with field ids keeps them, mapped names or not.
+-static void AssignFieldIdsFromMappedNames(vector<MultiFileColumnDefinition> &columns,
++//! readers do with a table's name mapping, and returns whether it did. A file with field ids keeps them, mapped names
++//! or not.
++static bool AssignFieldIdsFromMappedNames(vector<MultiFileColumnDefinition> &columns,
+                                           const vector<ParquetColumnDefinition> &schema) {
+ 	unordered_map<string, Value> field_ids;
+ 	for (auto &column : schema) {
+@@ -823,11 +824,11 @@
+ 		}
+ 	}
+ 	if (field_ids.empty()) {
+-		return;
++		return false;
+ 	}
+ 	for (auto &column : columns) {
+ 		if (!column.identifier.IsNull() && column.GetIdentifierFieldId() != MultiFileReader::ORDINAL_FIELD_ID) {
+-			return;
++			return false;
+ 		}
+ 	}
+ 	for (auto &column : columns) {
+@@ -839,6 +840,69 @@
+ 			column.identifier = entry->second;
+ 		}
+ 	}
++	return true;
++}
++
++//! Gives the fields nested in a column of a file written without field ids the ids of the schema option's nested
++//! fields under the same parent: a struct field by one of the names the name mapping gives it, a list element and a
++//! map key and value by their position.
 +static void AssignNestedFieldIds(MultiFileColumnDefinition &column, const vector<ParquetNestedField> &nested) {
 +	if (column.identifier.IsNull() || column.identifier.type().id() != LogicalTypeId::INTEGER) {
 +		return;
@@ -170,20 +199,21 @@
 +			}
 +		}
 +	}
-+}
-+
- void ParquetReader::InitializeSchema(ClientContext &context) {
- 	auto file_meta_data = GetFileMetadata();
+ }
  
-@@ -861,6 +923,7 @@
+ void ParquetReader::InitializeSchema(ClientContext &context) {
+@@ -860,7 +924,9 @@
+ 		auto &element = root_schema->children[i];
  		columns.push_back(ParseColumnDefinition(*file_meta_data, element));
  	}
- 	AssignFieldIdsFromMappedNames(columns, parquet_options.schema);
-+	AssignNestedFieldIds(columns, parquet_options.schema);
+-	AssignFieldIdsFromMappedNames(columns, parquet_options.schema);
++	if (AssignFieldIdsFromMappedNames(columns, parquet_options.schema)) {
++		AssignNestedFieldIds(columns, parquet_options.schema);
++	}
  }
  
  void ParquetReader::AddVirtualColumn(column_t virtual_column_id) {
-@@ -897,10 +960,33 @@
+@@ -897,10 +963,33 @@
  		throw BinderException("Unable to cast Parquet schema default_value \"%s\" to %s", children[2].ToString(),
  		                      result.type.ToString());
  	}
@@ -223,64 +253,82 @@
  	}
 --- a/src/common/multi_file/multi_file_column_mapper.cpp
 +++ b/src/common/multi_file/multi_file_column_mapper.cpp
-@@ -537,6 +537,51 @@
+@@ -537,6 +537,53 @@
  	return result;
  }
  
-+//! Whether a file's column nests its fields as the schema's column does, matching them by field id, so that they can
-+//! be remapped. A column whose file nests a field differently, such as a list where the schema has a scalar, is cast
-+//! as a whole instead, as a column without nested field ids is.
-+static bool NestingMatches(const MultiFileColumnDefinition &global_column,
-+                           const MultiFileColumnDefinition &local_column) {
++//! How a file's column nests its fields, matched by field id, compared with the schema's column. Iceberg cannot change
++//! how a field nests, but pg_lake writes a clamped multidimensional array as a list of lists into a list column, whose
++//! values are all NULL; such a list is cast as a whole, as a column without nested field ids is.
++enum class NestingComparison : uint8_t { MATCHES, LIST_FOR_SCALAR, DIFFERS };
++
++static NestingComparison CompareNesting(const MultiFileColumnDefinition &global_column,
++                                        const MultiFileColumnDefinition &local_column) {
 +	if (global_column.children.empty()) {
-+		return global_column.type.IsNested() || !local_column.type.IsNested();
++		if (global_column.type.IsNested() || !local_column.type.IsNested()) {
++			return NestingComparison::MATCHES;
++		}
++		return local_column.type.id() == LogicalTypeId::LIST ? NestingComparison::LIST_FOR_SCALAR
++		                                                     : NestingComparison::DIFFERS;
 +	}
 +	if (local_column.type.id() != global_column.type.id()) {
-+		return false;
++		return NestingComparison::DIFFERS;
 +	}
-+	auto child_matches = [](const MultiFileColumnDefinition &global_child,
-+	                        const vector<MultiFileColumnDefinition> &local_children) {
++	auto result = NestingComparison::MATCHES;
++	auto compare_child = [&result](const MultiFileColumnDefinition &global_child,
++	                               const vector<MultiFileColumnDefinition> &local_children) {
 +		for (auto &local_child : local_children) {
 +			if (!local_child.identifier.IsNull() && local_child.identifier == global_child.identifier) {
-+				return NestingMatches(global_child, local_child);
++				result = MaxValue(result, CompareNesting(global_child, local_child));
++				return;
 +			}
 +		}
-+		return true;
 +	};
 +	switch (global_column.type.id()) {
 +	case LogicalTypeId::STRUCT:
-+		for (auto &global_child : global_column.children) {
-+			if (!child_matches(global_child, local_column.children)) {
-+				return false;
-+			}
-+		}
-+		return true;
 +	case LogicalTypeId::LIST:
-+		return child_matches(global_column.children[0], local_column.children);
++		for (auto &global_child : global_column.children) {
++			compare_child(global_child, local_column.children);
++		}
++		return result;
 +	case LogicalTypeId::MAP:
 +		if (local_column.children.size() != 1) {
-+			return false;
++			return NestingComparison::DIFFERS;
 +		}
 +		for (auto &global_child : global_column.children) {
-+			if (!child_matches(global_child, local_column.children[0].children)) {
-+				return false;
-+			}
++			compare_child(global_child, local_column.children[0].children);
 +		}
-+		return true;
++		return result;
 +	default:
-+		return true;
++		return result;
 +	}
 +}
 +
  static ColumnMapResult MapColumn(ClientContext &context, const MultiFileColumnDefinition &global_column,
                                   const ColumnIndex &global_index,
                                   const vector<MultiFileColumnDefinition> &local_columns, const ColumnMapper &mapper,
-@@ -563,7 +608,7 @@
+@@ -563,7 +610,7 @@
  	}
  
  	mapping = make_uniq<MultiFileIndexMapping>(mapping_idx);
 -	if (global_column.children.empty()) {
-+	if (global_column.children.empty() || !NestingMatches(global_column, local_column)) {
++	if (global_column.children.empty() || CompareNesting(global_column, local_column) != NestingComparison::MATCHES) {
  		// not a struct - map the column directly
  		result.column_map = Value(local_column.name);
  		result.column_index = make_uniq<ColumnIndex>(local_id.GetId());
+@@ -745,6 +792,15 @@
+ 			continue;
+ 		}
+ 
++		if (!global_column.children.empty()) {
++			auto entry = mapper.Find(global_column);
++			if (entry.IsValid() &&
++			    CompareNesting(global_column, local_columns[entry.GetIndex()]) == NestingComparison::DIFFERS) {
++				throw InvalidInputException("Failed to read file \"%s\": it nests the fields of column \"%s\" differently "
++				                            "from the table's schema",
++				                            reader.GetFileName(), global_column.name);
++			}
++		}
+ 		auto column_map = MapColumn(context, global_column, global_id, local_columns, mapper, local_idx.GetIndex());
+ 		if (!column_map.column_index) {
+ 			// no columns were emitted

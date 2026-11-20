@@ -807,9 +807,9 @@ NestedFieldsToDuckDBList(Field * field, int fieldId)
 
 /*
  * AppendNestedFields appends the fields nested in a field of the given type and
- * field id: a struct field under its name, which is also the name it has in a
- * file without field ids along with the names the name mapping gives it, a
- * list element as "element", and a map key and value as "key" and "value".
+ * field id: a struct field under its name, with the names the name mapping
+ * gives it in files without field ids, a list element as "element", and a map
+ * key and value as "key" and "value".
  */
 static void
 AppendNestedFields(StringInfo list, Field * field, int parentId)
@@ -835,10 +835,9 @@ AppendNestedFields(StringInfo list, Field * field, int parentId)
 			for (size_t fieldIdx = 0; fieldIdx < field->field.structType.nfields; fieldIdx++)
 			{
 				FieldStructElement *element = &field->field.structType.fields[fieldIdx];
-				List	   *names = lcons(unconstify(char *, element->name),
-										  list_copy(element->mappedNames));
 
-				AppendNestedField(list, parentId, element->id, element->name, names);
+				AppendNestedField(list, parentId, element->id, element->name,
+								  element->mappedNames);
 				AppendNestedFields(list, element->type, element->id);
 			}
 			break;

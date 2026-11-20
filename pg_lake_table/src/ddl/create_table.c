@@ -1053,7 +1053,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 			if (HasLowercaseColumnNamesOption(createStmt->options))
 				LowercaseIcebergTableMetadataNames(metadata);
-			TruncateIcebergTableMetadataNames(metadata, true, true);
+			TruncateIcebergTableMetadataNames(metadata, true);
 
 			List	   *dataFileColumns =
 				DescribeColumnsFromIcebergMetadata(metadata, false);

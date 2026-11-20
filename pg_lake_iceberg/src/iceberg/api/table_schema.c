@@ -41,7 +41,7 @@ static List *GetLeafFieldsForField(Field * field, int fieldId, int *level);
 static void LowercaseStructElementNames(FieldStructElement * elements, size_t elementCount);
 static void LowercaseFieldNames(Field * field);
 static void TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
-									   bool nested, bool warn);
+									   bool warn);
 static void TruncateFieldNames(Field * field, bool warn);
 static void ApplyNameMappingEntries(JsonbContainer *entries, IcebergTableSchema * schema);
 static FieldStructElement * FindStructElementById(FieldStructElement * elements, size_t elementCount,
@@ -244,29 +244,29 @@ LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata)
 
 /*
  * TruncateIcebergTableMetadataNames truncates the column names of the current
- * schema to the longest identifier Postgres keeps, in place, as the parser
- * truncates a name it is given. With nested, it also truncates the names of
- * the fields in structs, which become attributes of the columns' types; a
- * scan has to keep those, as DuckDB matches a struct's fields to the ones in
- * the files by name. With warn, it says so for each name.
+ * schema, and the names of the fields in structs, which become attributes of
+ * the columns' types, to the longest identifier Postgres keeps, in place, as
+ * the parser truncates a name it is given. A scan matches the fields of the
+ * files by field id, so it can read them under the truncated names. With
+ * warn, it says so for each name.
  */
 void
-TruncateIcebergTableMetadataNames(IcebergTableMetadata * metadata, bool nested, bool warn)
+TruncateIcebergTableMetadataNames(IcebergTableMetadata * metadata, bool warn)
 {
 	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
 
-	TruncateStructElementNames(schema->fields, schema->fields_length, nested, warn);
+	TruncateStructElementNames(schema->fields, schema->fields_length, warn);
 }
 
 
 /*
- * TruncateStructElementNames truncates the names of the given sibling fields,
- * and with nested of everything below them. Two siblings whose names become
- * the same cannot both be columns of a table or attributes of a type.
+ * TruncateStructElementNames truncates the names of the given sibling fields
+ * and of everything below them. Two siblings whose names become the same
+ * cannot both be columns of a table or attributes of a type.
  */
 static void
 TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
-						   bool nested, bool warn)
+						   bool warn)
 {
 	const char **originalNames = palloc0(sizeof(char *) * elementCount);
 
@@ -284,8 +284,7 @@ TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
 			element->name = truncatedName;
 		}
 
-		if (nested)
-			TruncateFieldNames(element->type, warn);
+		TruncateFieldNames(element->type, warn);
 	}
 
 	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
@@ -336,7 +335,7 @@ TruncateFieldNames(Field * field, bool warn)
 
 		case FIELD_TYPE_STRUCT:
 			TruncateStructElementNames(field->field.structType.fields,
-									   field->field.structType.nfields, true, warn);
+									   field->field.structType.nfields, warn);
 			break;
 	}
 }
