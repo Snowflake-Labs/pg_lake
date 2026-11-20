@@ -4714,6 +4714,13 @@ postgresExecForeignTruncate(List *relations,
 		Relation	relation = lfirst(relationCell);
 		Oid			relationId = RelationGetRelid(relation);
 
+		if (IsExternalEngineTable(relationId))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot truncate foreign table \"%s\"",
+							RelationGetRelationName(relation)),
+					 errdetail("Tables of an external query engine are read-only.")));
+
 		ErrorIfReadOnlyIcebergTable(relationId);
 
 		/* extra checks */
