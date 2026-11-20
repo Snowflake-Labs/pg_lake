@@ -1,8 +1,48 @@
 import pytest
 from utils_pytest import *
+import math
 from decimal import Decimal
 
 table_types = ["pg_lake_iceberg", "pg_lake", "heap"]
+
+
+def _same_rows(pg_conn, left, right):
+    """Whether two tables hold the same rows, with floating point columns
+    compared approximately: averages computed by different DuckDB releases
+    can differ in the last digit."""
+
+    def sort_key(row):
+        return [
+            (value is None, round(value, 6) if isinstance(value, float) else value)
+            for value in row
+        ]
+
+    def rows(table):
+        return sorted(run_query(f"SELECT * FROM {table}", pg_conn), key=sort_key)
+
+    left_rows, right_rows = rows(left), rows(right)
+
+    # DuckDB's answer files have no data line for a result that is one row of
+    # NULLs (Q17 at a small scale factor), so that loads as no rows at all
+    def all_null(table_rows):
+        return len(table_rows) == 1 and all(value is None for value in table_rows[0])
+
+    if (all_null(left_rows) and not right_rows) or (
+        all_null(right_rows) and not left_rows
+    ):
+        return True
+    if len(left_rows) != len(right_rows):
+        return False
+    for left_row, right_row in zip(left_rows, right_rows):
+        for left_value, right_value in zip(left_row, right_row):
+            if isinstance(left_value, float) and isinstance(right_value, float):
+                if not math.isclose(left_value, right_value, rel_tol=1e-9):
+                    return False
+            elif left_value != right_value:
+                return False
+    return True
+
+
 scale_factors = [0, 0.001]
 iteration_counts = [1, 10]
 
@@ -131,19 +171,9 @@ def test_tpch_answers(
         )
 
         # compare the result and answer tables
-        are_same = run_query(
-            f"""
-            SELECT COUNT(*) = 0
-            FROM (
-                SELECT * FROM result_{query_nr} EXCEPT SELECT * FROM answer_{query_nr}
-                UNION ALL
-                SELECT * FROM answer_{query_nr} EXCEPT SELECT * FROM result_{query_nr}
-            ) AS t
-                    """,
-            pg_conn,
-        )[0][0]
-
-        assert are_same, f"failed for query id: {query_nr}"
+        assert _same_rows(
+            pg_conn, f"result_{query_nr}", f"answer_{query_nr}"
+        ), f"failed for query id: {query_nr}"
 
     pg_conn.rollback()
 
@@ -208,18 +238,8 @@ def test_tpch_partitioned_answers(
         )
 
         # compare the result and answer tables
-        are_same = run_query(
-            f"""
-            SELECT COUNT(*) = 0
-            FROM (
-                SELECT * FROM result_{query_nr} EXCEPT SELECT * FROM answer_{query_nr}
-                UNION ALL
-                SELECT * FROM answer_{query_nr} EXCEPT SELECT * FROM result_{query_nr}
-            ) AS t
-                    """,
-            pg_conn,
-        )[0][0]
-
-        assert are_same, f"failed for query id: {query_nr}"
+        assert _same_rows(
+            pg_conn, f"result_{query_nr}", f"answer_{query_nr}"
+        ), f"failed for query id: {query_nr}"
 
     pg_conn.rollback()

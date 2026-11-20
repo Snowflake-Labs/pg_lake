@@ -112,7 +112,9 @@ def test_tpcds_answers(
 
     result = run_query(query_6, pg_conn)
 
-    assert result == [["NC", 11], ["VA", 12]]
+    # DuckDB 2.0's dsdgen generates slightly different data at this scale
+    # factor; on the data 1.5 generated, 2.0 also answers VA 12
+    assert result == [["NC", 11], ["VA", 11]]
 
     # check query 94 result
     query_94 = run_query(

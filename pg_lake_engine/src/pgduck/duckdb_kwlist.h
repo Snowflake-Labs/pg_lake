@@ -4,7 +4,7 @@
  * AUTO-GENERATED — do not edit by hand.
  * Run:  python3 tools/generate_duckdb_kwlist.py
  *
- * Source: duckdb_pglake/duckdb/src/parser/peg/grammar/keywords/*.list
+ * Source: duckdb_pglake/duckdb/src/parser/peg/grammar/keywords/ (*_keyword.list)
  * Source SHA-256: 0475c5a6833f852d7f988c26ad7c89ffd21c5b240556d6a5dce6123fbba539b4
  *
  * This file is included by pg_lake_engine/src/pgduck/keywords.c to

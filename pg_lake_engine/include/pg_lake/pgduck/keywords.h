@@ -28,3 +28,10 @@
  * that will appear in SQL sent to pgduck_server.
  */
 PGDLLEXPORT const char *duckdb_quote_identifier(const char *ident);
+
+/*
+ * duckdb_quote_literal — like quote_literal_cstr() but for SQL sent to
+ * pgduck_server: DuckDB string literals take backslashes as they are, so it
+ * only doubles single quotes and never produces a PostgreSQL E'' string.
+ */
+PGDLLEXPORT char *duckdb_quote_literal(const char *literal);

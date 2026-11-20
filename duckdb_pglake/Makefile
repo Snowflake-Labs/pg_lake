@@ -8,6 +8,11 @@ EXT_NAME=duckdb_pglake
 EXT_CONFIG=${PROJ_DIR}extension_config.cmake
 EXT_FLAGS=-DBUILD_EXTENSIONS="tpch;json;icu"
 
+# Since DuckDB 2.0 the build links a local_extension_repository capability by
+# default, which makes automatic installs (delta, iceberg, spatial) look in
+# this build's own repository instead of extensions.duckdb.org. Leave it out.
+EXT_FLAGS+=-DDUCKDB_CAPABILITIES="httplib;loadable_extensions"
+
 # GitHub actions uses a hash of the Makefile and source
 # files as a cache key. When we update the DuckDB version,
 # we should update the line below to trigger a new hash.

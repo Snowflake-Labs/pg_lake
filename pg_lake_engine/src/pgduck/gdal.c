@@ -18,6 +18,7 @@
 #include "postgres.h"
 
 #include "commands/defrem.h"
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/client.h"
@@ -40,7 +41,7 @@ ValidateGDALLayer(char *pathExpression, char *layerName)
 		GetSingleValueFromPGDuck(psprintf("SELECT list_contains("
 										  "list_transform(layers, lambda l: l.name), %s) "
 										  "FROM st_read_meta(%s)",
-										  quote_literal_cstr(layerName),
+										  duckdb_quote_literal(layerName),
 										  pathExpression));
 
 	if (layerExists != NULL && strcmp(layerExists, "t") == 0)
@@ -92,7 +93,7 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 	 */
 	if (emitFilename)
 		appendStringInfo(&stRead, "(SELECT *, %s AS _filename FROM ",
-						 quote_literal_cstr(path));
+						 duckdb_quote_literal(path));
 
 	appendStringInfoString(&stRead, "st_read(");
 
@@ -101,7 +102,7 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 		/* add vsizip for .zip files with { } syntax */
 		appendStringInfo(&pathExpression,
 						 "'/vsizip/{'||pg_lake_cache_file_local_path(%s)||'}'",
-						 quote_literal_cstr(path));
+						 duckdb_quote_literal(path));
 
 		/* add path within zipfile */
 		DefElem    *zipPathOption = GetOption(options, "zip_path");
@@ -115,7 +116,7 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 				zipPath = psprintf("/%s", zipPath);
 
 			appendStringInfo(&pathExpression, "||%s",
-							 quote_literal_cstr(zipPath));
+							 duckdb_quote_literal(zipPath));
 		}
 	}
 	else if (compression == DATA_COMPRESSION_GZIP)
@@ -123,14 +124,14 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 		/* vsigzip for .gz */
 		appendStringInfo(&pathExpression,
 						 "'/vsigzip/'||pg_lake_cache_file_local_path(%s)",
-						 quote_literal_cstr(path));
+						 duckdb_quote_literal(path));
 	}
 	else
 	{
 		/* just use the local path */
 		appendStringInfo(&pathExpression,
 						 "pg_lake_cache_file_local_path(%s)",
-						 quote_literal_cstr(path));
+						 duckdb_quote_literal(path));
 	}
 
 	appendStringInfoString(&stRead, pathExpression.data);
@@ -151,7 +152,7 @@ GDALReadFunctionCall(char *path, CopyDataCompression compression, List *options,
 		ValidateGDALLayer(pathExpression.data, layerName);
 
 		appendStringInfo(&stRead, ", layer=%s",
-						 quote_literal_cstr(layerName));
+						 duckdb_quote_literal(layerName));
 	}
 
 	/* close st_read */

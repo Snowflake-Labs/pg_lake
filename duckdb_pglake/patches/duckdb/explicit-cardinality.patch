@@ -1,0 +1,172 @@
+Backport of duckdb/duckdb c43659e69ba: multi-file scans honor
+explicit_cardinality, and estimate from file sizes when no file is opened at
+bind.
+
+In v2.0.0 read_parquet ignores explicit_cardinality, and a scan with schema=
+opens no file at bind, so it is estimated at one row. pg_lake passes both for
+every Iceberg scan, so its plans saw one row per data file.
+
+Adapted to v2.0.0: the opened reader's row count still takes precedence over
+the bound one.
+
+diff --git a/extension/parquet/parquet_multi_file_info.cpp b/extension/parquet/parquet_multi_file_info.cpp
+index 3cb60934aaf..99f98f1338c 100644
+--- a/extension/parquet/parquet_multi_file_info.cpp
++++ b/extension/parquet/parquet_multi_file_info.cpp
+@@ -472,10 +472,6 @@ unique_ptr<NodeStatistics> ParquetMultiFileInfo::GetCardinality(ClientContext &c
+ 	}
+ 	// we don't have any scan data - check if we can get some intel from the file list
+ 	// in particular - if we have file sizes, we try to estimate rows per file from the file size
+-	MultiFileListScanData scan_data;
+-	scan_data.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
+-	bind_data.file_list->InitializeScan(scan_data);
+-	OpenFileInfo file;
+ 	idx_t initial_cardinality = MaxValue<idx_t>(parquet_data.initial_file_cardinality, 1ULL);
+ 	idx_t estimated_bytes_per_row = parquet_data.initial_file_data_size / initial_cardinality;
+ 	// for very small cardinalities, compression doesn't really work well
+@@ -486,33 +482,10 @@ unique_ptr<NodeStatistics> ParquetMultiFileInfo::GetCardinality(ClientContext &c
+ 	}
+ 	estimated_bytes_per_row = MaxValue<idx_t>(estimated_bytes_per_row, 10ULL);
+ 
+-	idx_t files_with_sizes = 0;
+-	idx_t estimated_file_row_count = 0;
+-	while (bind_data.file_list->Scan(scan_data, file)) {
+-		if (!file.extended_info) {
+-			// no extended info
+-			estimated_file_row_count = 0;
+-			break;
+-		}
+-		idx_t current_file_size;
+-		if (!file.extended_info->TryGetOption("file_size", current_file_size)) {
+-			// no file size available
+-			estimated_file_row_count = 0;
+-			break;
+-		}
+-		// we have the file size - estimate row count based on estimated bytes per row
+-		files_with_sizes++;
+-		idx_t rows_in_this_file = MaxValue<idx_t>(current_file_size / estimated_bytes_per_row, 1ULL);
+-		estimated_file_row_count += rows_in_this_file;
+-	}
+-	idx_t per_file_cardinality;
+-	if (estimated_file_row_count > 0) {
+-		// use estimate based on file sizes
+-		per_file_cardinality = estimated_file_row_count / files_with_sizes;
+-	} else {
+-		// no estimate based on file sizes - use initial file cardinality
+-		per_file_cardinality = parquet_data.initial_file_cardinality;
+-	}
++	// use the estimate based on file sizes; without one, the initial file cardinality
++	auto estimated_rows_per_file = bind_data.file_list->EstimateRowsPerFile(estimated_bytes_per_row);
++	idx_t per_file_cardinality =
++	    estimated_rows_per_file.IsValid() ? estimated_rows_per_file.GetIndex() : parquet_data.initial_file_cardinality;
+ 	// if we have several files, our cardinality estimate can be way off if our initial file is ~empty
+ 	// we set the minimum per file cardinality to 1000 just to avoid greatly underestimating
+ 	idx_t min_per_file_cardinality = 1000ULL;
+diff --git a/src/common/multi_file/multi_file_list.cpp b/src/common/multi_file/multi_file_list.cpp
+index 38ecf87cb5a..2e0e87eea9a 100644
+--- a/src/common/multi_file/multi_file_list.cpp
++++ b/src/common/multi_file/multi_file_list.cpp
+@@ -238,6 +238,28 @@ bool MultiFileList::IsEmpty() const {
+ 	return GetExpandResult() == FileExpandResult::NO_FILES;
+ }
+ 
++optional_idx MultiFileList::EstimateRowsPerFile(idx_t bytes_per_row) const {
++	D_ASSERT(bytes_per_row > 0);
++	MultiFileListScanData scan_data;
++	scan_data.scan_type = MultiFileListScanType::FETCH_IF_AVAILABLE;
++	InitializeScan(scan_data);
++	OpenFileInfo file;
++	idx_t file_count = 0;
++	idx_t row_count = 0;
++	while (Scan(scan_data, file)) {
++		idx_t file_size;
++		if (!file.extended_info || !file.extended_info->TryGetOption("file_size", file_size)) {
++			return optional_idx();
++		}
++		row_count += MaxValue<idx_t>(file_size / bytes_per_row, 1);
++		file_count++;
++	}
++	if (file_count == 0) {
++		return optional_idx();
++	}
++	return row_count / file_count;
++}
++
+ unique_ptr<MultiFileList> MultiFileList::Copy() const {
+ 	return make_uniq<SimpleMultiFileList>(GetAllFiles());
+ }
+diff --git a/src/common/multi_file/table_function_multi_file.cpp b/src/common/multi_file/table_function_multi_file.cpp
+index 4e224291a7a..420f377d227 100644
+--- a/src/common/multi_file/table_function_multi_file.cpp
++++ b/src/common/multi_file/table_function_multi_file.cpp
+@@ -702,18 +702,52 @@ shared_ptr<BaseFileReader> TableFunctionMultiFileWrapper::CreateReader(ClientCon
+ 	return std::move(result);
+ }
+ 
++//! The bytes a row is taken to have when a scan's row count is estimated from the sizes of its files alone: the
++//! floor the parquet reader puts under the ratio it measures in an opened file. A deliberate overestimate of the rows,
++//! the same for every format this wrapper serves - a read_csv or read_json row is typically much wider - since
++//! estimating too many rows is safer than estimating none.
++static constexpr idx_t MIN_ESTIMATED_BYTES_PER_ROW = 10;
++
++//! The row count the caller gives for the whole scan, read_parquet's explicit_cardinality (0 means not given). Looked
++//! up by name, by convention: read_parquet is the only wrapped function that declares it
++static optional_idx ExplicitCardinality(const TableFunctionMultiFileData &data) {
++	auto entry = data.options.named_parameters.find(Identifier("explicit_cardinality"));
++	if (entry == data.options.named_parameters.end() || entry->second.IsNull()) {
++		return optional_idx();
++	}
++	auto cardinality = entry->second.DefaultCastAs(LogicalType::UBIGINT).GetValue<uint64_t>();
++	if (cardinality == 0) {
++		return optional_idx();
++	}
++	return optional_idx(cardinality);
++}
++
+ unique_ptr<NodeStatistics> TableFunctionMultiFileWrapper::GetCardinality(ClientContext &context,
+                                                                          const MultiFileBindData &bind_data,
+                                                                          idx_t file_count) {
+ 	auto &data = bind_data.bind_data->Cast<TableFunctionMultiFileData>();
++	auto result = make_uniq<NodeStatistics>();
++	auto explicit_cardinality = ExplicitCardinality(data);
+ 	auto cardinality = data.cardinality;
+ 	if (bind_data.initial_reader) {
+ 		cardinality = bind_data.initial_reader->Cast<TableFunctionFileReader>().GetCardinality();
+ 	}
+-	if (!cardinality.IsValid()) {
+-		return nullptr;
++	if (explicit_cardinality.IsValid()) {
++		result->has_estimated_cardinality = true;
++		result->estimated_cardinality = explicit_cardinality.GetIndex();
++	} else if (cardinality.IsValid()) {
++		result->has_estimated_cardinality = true;
++		result->estimated_cardinality = cardinality.GetIndex() * file_count;
++	} else {
++		// no file was opened at bind (e.g. because the schema was given): estimate from the sizes of the files, when
++		// the file list carries them (a local glob, or a list of {filename, file_size} structs)
++		auto rows_per_file = bind_data.file_list->EstimateRowsPerFile(MIN_ESTIMATED_BYTES_PER_ROW);
++		if (rows_per_file.IsValid()) {
++			result->has_estimated_cardinality = true;
++			result->estimated_cardinality = rows_per_file.GetIndex() * file_count;
++		}
+ 	}
+-	return make_uniq<NodeStatistics>(cardinality.GetIndex() * file_count);
++	return std::move(result);
+ }
+ 
+ //===--------------------------------------------------------------------===//
+diff --git a/src/include/duckdb/common/multi_file/multi_file_list.hpp b/src/include/duckdb/common/multi_file/multi_file_list.hpp
+index 33e4d89532f..e5506c62a26 100644
+--- a/src/include/duckdb/common/multi_file/multi_file_list.hpp
++++ b/src/include/duckdb/common/multi_file/multi_file_list.hpp
+@@ -102,6 +102,10 @@ public:
+ 	OpenFileInfo GetFirstFile() const;
+ 	//! Syntactic sugar for GetExpandResult() == FileExpandResult::NO_FILES
+ 	bool IsEmpty() const;
++	//! The average row count of the files that are available without further I/O (FileIsAvailable), each estimated
++	//! from the "file_size" its extended info carries at bytes_per_row, and at least one row. Invalid when there is no
++	//! such file, or when one of them has no file_size
++	optional_idx EstimateRowsPerFile(idx_t bytes_per_row) const;
+ 
+ 	//! Virtual functions for subclasses
+ public:

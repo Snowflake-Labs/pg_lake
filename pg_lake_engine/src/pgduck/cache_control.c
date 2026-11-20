@@ -22,6 +22,7 @@
 #include "fmgr.h"
 #include "funcapi.h"
 
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/cache_control.h"
 #include "nodes/execnodes.h"
@@ -37,7 +38,7 @@ int64
 AddFileToCache(char *url, bool refresh)
 {
 	char	   *query = psprintf("CALL pg_lake_cache_file(%s,%s)",
-								 quote_literal_cstr(url),
+								 duckdb_quote_literal(url),
 								 refresh ? "true" : "false");
 	char	   *fileSizeStr = GetSingleValueFromPGDuck(query);
 	int64		fileSize = pg_strtoint64(fileSizeStr);
@@ -54,7 +55,7 @@ bool
 RemoveFileFromCache(char *url)
 {
 	char	   *query = psprintf("CALL pg_lake_uncache_file(%s)",
-								 quote_literal_cstr(url));
+								 duckdb_quote_literal(url));
 	char	   *removedString = GetSingleValueFromPGDuck(query);
 
 	return removedString[0] == 't';

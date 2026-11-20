@@ -132,7 +132,7 @@ def render(entries: list[tuple[str, str]], source_sha256: str) -> str:
          * AUTO-GENERATED — do not edit by hand.
          * Run:  python3 tools/generate_duckdb_kwlist.py
          *
-         * Source: duckdb_pglake/duckdb/src/parser/peg/grammar/keywords/*.list
+         * Source: duckdb_pglake/duckdb/src/parser/peg/grammar/keywords/ (*_keyword.list)
          * Source SHA-256: {source_sha256}
          *
          * This file is included by pg_lake_engine/src/pgduck/keywords.c to

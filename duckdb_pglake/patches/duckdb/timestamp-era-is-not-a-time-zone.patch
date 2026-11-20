@@ -1,0 +1,28 @@
+Reject BC and AD where DuckDB expects a time zone name.
+
+Since 2.0 a cast to TIMESTAMP ignores a trailing time zone name instead of
+failing, as PostgreSQL does. PostgreSQL reads BC and AD as the era, though,
+while DuckDB took them for a zone, so '0001-01-01 00:00:00 BC' silently became
+0001-01-01 AD. pg_lake loads such values from CSV and relies on them being
+rejected or range-checked.
+
+diff --git a/src/common/types/timestamp.cpp b/src/common/types/timestamp.cpp
+index 9af372bf170..366e5636a3f 100644
+--- a/src/common/types/timestamp.cpp
++++ b/src/common/types/timestamp.cpp
+@@ -107,6 +107,15 @@ TimestampCastResult Timestamp::TryConvertTimestampTZ(const char *str, idx_t len,
+ 				continue;
+ 			}
+ 			auto tz_len = str + pos - tz_name;
++			// BC and AD are eras rather than time zones: a timestamp that is ignoring its time zone would otherwise
++			// read a BC value as the same AD one
++			if (tz_len == 2) {
++				auto first = StringUtil::CharacterToUpper(tz_name[0]);
++				auto second = StringUtil::CharacterToUpper(tz_name[1]);
++				if ((first == 'B' && second == 'C') || (first == 'A' && second == 'D')) {
++					return TimestampCastResult::ERROR_INCORRECT_FORMAT;
++				}
++			}
+ 			if (tz_len) {
+ 				tz = string_t(tz_name, UnsafeNumericCast<uint32_t>(tz_len));
+ 			}
