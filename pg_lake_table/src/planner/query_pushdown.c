@@ -102,6 +102,19 @@ typedef struct IsShippableContext
 	List	   *rtable;
 }			IsShippableContext;
 
+/*
+ * FindQueryEngineUserContext keeps context during the
+ * FindQueryEngineUserWalker.
+ */
+typedef struct FindQueryEngineUserContext
+{
+	/* permission infos of the query currently being walked */
+	List	   *rteperminfos;
+
+	/* the user that the first table of an external engine is read as */
+	Oid			checkAsUser;
+}			FindQueryEngineUserContext;
+
 
 static PlannedStmt *LakeTablePlanner(Query *parse, const char *queryString,
 									 int cursorOptions, ParamListInfo boundParams
@@ -114,6 +127,10 @@ static bool ProcessNotShippableExpressionWalker(Node *node, IsShippableContext *
 static bool AddMissingRTEAliasaes(Node *node, void *context);
 static bool TargetListHasOnlyResjunk(List *targetList);
 static bool AllInheritorsAreLakeTable(Oid relationId);
+static Oid	GetRteCheckAsUser(RangeTblEntry *rte, List *rteperminfos);
+static Oid	GetQueryEngineCheckAsUser(Query *query);
+static bool FindQueryEngineUserWalker(Node *node,
+									  FindQueryEngineUserContext * context);
 static bool ExpressionHasCollation(Node *node, IsShippableContext * context);
 static bool ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext * context);
 static bool ExpressionReturnsNonShippableType(Node *node, IsShippableContext * context);
@@ -187,6 +204,7 @@ typedef struct QueryPushdownScanState
 
 	/* connection properties */
 	Oid			queryEngine;
+	Oid			checkAsUser;
 	PGDuckConnection *connection;
 	char	  **receivedValues;
 
@@ -1157,6 +1175,81 @@ AllInheritorsAreLakeTable(Oid relationId)
 
 
 /*
+ * GetRteCheckAsUser returns the user that a relation RTE of a query with the
+ * given permission infos is read as: the owner of the view it was expanded
+ * from, or InvalidOid for the current user.
+ */
+static Oid
+GetRteCheckAsUser(RangeTblEntry *rte, List *rteperminfos)
+{
+	if (rte->perminfoindex == 0)
+		return InvalidOid;
+
+	return getRTEPermissionInfo(rteperminfos, rte)->checkAsUser;
+}
+
+
+/*
+ * GetQueryEngineCheckAsUser returns the user that the tables of an external
+ * query engine in the given query are read as. They all are read as the same
+ * user, since otherwise the query would not be pushed down.
+ */
+static Oid
+GetQueryEngineCheckAsUser(Query *query)
+{
+	FindQueryEngineUserContext context = {
+		.rteperminfos = NIL,
+		.checkAsUser = InvalidOid
+	};
+
+	FindQueryEngineUserWalker((Node *) query, &context);
+
+	return context.checkAsUser;
+}
+
+
+/*
+ * FindQueryEngineUserWalker finds the first table of an external query engine
+ * and sets context->checkAsUser to the user it is read as.
+ */
+static bool
+FindQueryEngineUserWalker(Node *node, FindQueryEngineUserContext * context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+		List	   *prevRtePermInfos = context->rteperminfos;
+
+		context->rteperminfos = query->rteperminfos;
+
+		bool		found = query_tree_walker(query, FindQueryEngineUserWalker,
+											  context, QTW_EXAMINE_RTES_BEFORE);
+
+		context->rteperminfos = prevRtePermInfos;
+
+		return found;
+	}
+
+	if (IsA(node, RangeTblEntry))
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) node;
+
+		if (rte->rtekind != RTE_RELATION || !IsExternalEngineTable(rte->relid))
+			return false;
+
+		context->checkAsUser = GetRteCheckAsUser(rte, context->rteperminfos);
+
+		return true;
+	}
+
+	return expression_tree_walker(node, FindQueryEngineUserWalker, context);
+}
+
+
+/*
 * ExpressionHasCollation returns whether the given expression
 * has a collation. This check is inline with the foreign_expr_walker().
 */
@@ -1526,6 +1619,9 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 		TransformPushdownableInsertSelect(scanQuery);
 	}
 
+	/* the user that the tables of an external engine are read as */
+	scanState->checkAsUser = GetQueryEngineCheckAsUser(scanQuery);
+
 	/*
 	 * Override all the RTE_RELATIONs that are pg_lake tables with
 	 * read_table('table_name') function calls.
@@ -1572,7 +1668,8 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 
 	scanState->queryString = queryString;
 	scanState->queryEngine = GetQueryEngineForRteList(rteList);
-	scanState->connection = GetQueryEngineConnection(scanState->queryEngine);
+	scanState->connection = GetQueryEngineConnection(scanState->queryEngine,
+													 scanState->checkAsUser);
 	scanState->tupleDesc = tupleDesc;
 	scanState->attributeInputMetadata = TupleDescGetAttInMetadata(tupleDesc);
 	scanState->estate = estate;
@@ -1898,8 +1995,8 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	}
 
 
-	ExplainPGDuckQuery(scanState->queryEngine, realQuery, scanState->numParams,
-					   scanState->parameterValues, es);
+	ExplainPGDuckQuery(scanState->queryEngine, scanState->checkAsUser, realQuery,
+					   scanState->numParams, scanState->parameterValues, es);
 }
 
 

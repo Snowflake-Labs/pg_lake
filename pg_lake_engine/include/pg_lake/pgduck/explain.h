@@ -23,6 +23,7 @@
 #endif
 
 extern PGDLLEXPORT void ExplainPGDuckQuery(Oid queryEngine,
+										   Oid checkAsUser,
 										   char *query,
 										   int numParams,
 										   const char **paramValues,

@@ -1689,10 +1689,12 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 		list_nth(fsplan->fdw_private, FdwScanPrivateRteList);
 
 	/*
-	 * Get connection to the query engine that serves the scanned relations.
+	 * Get connection to the query engine that serves the scanned relations,
+	 * as the user that the planner found they are read as.
 	 */
 	fsstate->queryEngine = GetQueryEngineForRteList(rteList);
-	fsstate->conn = GetQueryEngineConnection(fsstate->queryEngine);
+	fsstate->conn = GetQueryEngineConnection(fsstate->queryEngine,
+											 fsplan->checkAsUser);
 
 	/* Assign a unique ID for my cursor */
 	fsstate->prepared_statement_sent = false;
@@ -3233,7 +3235,8 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	/*
 	 * Add EXPLAIN output for the actual query with read_parquet calls.
 	 */
-	ExplainPGDuckQuery(fsstate->queryEngine, fullQuery, numParams, paramValues, es);
+	ExplainPGDuckQuery(fsstate->queryEngine, plan->checkAsUser, fullQuery,
+					   numParams, paramValues, es);
 }
 
 
