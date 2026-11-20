@@ -36,7 +36,7 @@ test_cases = [
     (
         "float4",
         "WHERE col_float4 <= float4(1::numeric)",
-        'WHERE ("col_float4" <= ((1)::numeric)::real)',
+        'WHERE ("col_float4" <= ((1)::numeric(10,0))::real)',
     ),
     ("float4abs", "WHERE @ col_float4 > 0", "WHERE ((@ \"col_float4\") > '0'::real)"),
     ("float4um", "WHERE - col_float4 < 0", "WHERE ((- \"col_float4\") < '0'::real)"),
