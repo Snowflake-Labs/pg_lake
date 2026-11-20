@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "nodes/parsenodes.h"
 #include "nodes/pg_list.h"
 #include "pg_lake/pgduck/client.h"
 
@@ -28,13 +29,15 @@
  *
  * An external engine is reached with the user mapping of the user that the
  * table is read as: the owner of a view that reads it, or else the current
- * user.
+ * user. A query is sent to an engine as one user, so the same server read as
+ * two users counts as two engines.
  */
 #define PGDUCK_QUERY_ENGINE InvalidOid
 
 #define PG_LAKE_REMOTE_FDW_NAME "pg_lake_remote"
 
 extern PGDLLEXPORT bool IsExternalEngineTable(Oid relationId);
+extern PGDLLEXPORT bool IsQueryEngineTable(RangeTblEntry *rte);
 extern PGDLLEXPORT Oid GetRelationQueryEngine(Oid relationId);
 extern PGDLLEXPORT Oid GetQueryEngineForRteList(List *rteList);
 extern PGDLLEXPORT char *GetQueryEngineName(Oid queryEngine);

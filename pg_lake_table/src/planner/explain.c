@@ -157,6 +157,12 @@ NotShippableObjectToString(const NotShippableObject * notShippableObject)
 		case NOT_SHIPPABLE_TABLE:
 			appendStringInfo(message, "\tTable\n");
 			break;
+		case NOT_SHIPPABLE_MIXED_QUERY_ENGINES:
+			appendStringInfo(message, "\tTable on another query engine\n");
+			break;
+		case NOT_SHIPPABLE_MIXED_QUERY_ENGINE_USERS:
+			appendStringInfo(message, "\tTable read as another user\n");
+			break;
 		case NOT_SHIPPABLE_TYPE:
 			appendStringInfo(message, "\tType\n");
 			break;

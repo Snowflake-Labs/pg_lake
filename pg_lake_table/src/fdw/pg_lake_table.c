@@ -3187,7 +3187,11 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 
 	ExplainPropertyText("Engine", "DuckDB", es);
 
-	if (es->verbose)
+	if (fsstate->queryEngine != PGDUCK_QUERY_ENGINE)
+		ExplainPropertyText("Server", GetQueryEngineName(fsstate->queryEngine), es);
+
+	/* an external query engine reads no files that we know of */
+	if (es->verbose && fsstate->queryEngine == PGDUCK_QUERY_ENGINE)
 	{
 		int			dataFileScans = 0;
 		int			deleteFileScans = 0;

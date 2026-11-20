@@ -21,6 +21,7 @@
 
 #include "access/htup_details.h"
 #include "access/reloptions.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_user_mapping.h"
 #include "commands/defrem.h"
@@ -68,12 +69,29 @@ IsExternalEngineTable(Oid relationId)
 
 
 /*
+ * IsQueryEngineTable returns whether the RTE is a table that is served by a
+ * query engine: a pg_lake table or a table of an external query engine.
+ */
+bool
+IsQueryEngineTable(RangeTblEntry *rte)
+{
+	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_FOREIGN_TABLE)
+		return false;
+
+	return IsAnyLakeForeignTableById(rte->relid) || IsExternalEngineTable(rte->relid);
+}
+
+
+/*
  * GetRelationQueryEngine returns the query engine that serves the given
  * relation.
  */
 Oid
 GetRelationQueryEngine(Oid relationId)
 {
+	if (IsExternalEngineTable(relationId))
+		return GetForeignTable(relationId)->serverid;
+
 	if (!IsAnyLakeForeignTableById(relationId))
 		elog(ERROR, "relation %s is not served by a query engine",
 			 GetQualifiedRelationName(relationId));

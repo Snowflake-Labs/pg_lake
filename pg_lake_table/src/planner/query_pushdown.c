@@ -100,6 +100,17 @@ typedef struct IsShippableContext
 
 	/* range table of the query currently being walked, NIL outside a query */
 	List	   *rtable;
+
+	/* permission infos of the query currently being walked */
+	List	   *rteperminfos;
+
+	/*
+	 * query engine of the first table we found, and the user it is read as,
+	 * which all tables must share
+	 */
+	Oid			queryEngine;
+	Oid			queryEngineUser;
+	bool		hasQueryEngine;
 }			IsShippableContext;
 
 /*
@@ -417,7 +428,8 @@ AddMissingRTEAliasaes(Node *node, void *context)
 
 /*
  * HasLakeRTE recursively walks the node tree to determine
- * whether there is a pg_lake_table RangeTblEntry.
+ * whether there is a pg_lake_table RangeTblEntry, which is a table
+ * that is served by a query engine.
  */
 bool
 HasLakeRTE(Node *node, void *context)
@@ -438,7 +450,7 @@ HasLakeRTE(Node *node, void *context)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) node;
 
-		if (IsAnyLakeForeignTable(rte))
+		if (IsQueryEngineTable(rte))
 			return true;
 
 		/* query_tree_walker descends into RTEs */
@@ -668,10 +680,12 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 	{
 		bool		prevHasUnnest = context->hasUnnest;
 		List	   *prevRtable = context->rtable;
+		List	   *prevRtePermInfos = context->rteperminfos;
 		Query	   *query = (Query *) node;
 
 		/* so that a Var below can be resolved to the relation it comes from */
 		context->rtable = query->rtable;
+		context->rteperminfos = query->rteperminfos;
 
 		if (query->hasForUpdate)
 		{
@@ -717,6 +731,7 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 
 		context->hasUnnest = prevHasUnnest;
 		context->rtable = prevRtable;
+		context->rteperminfos = prevRtePermInfos;
 
 		return false;
 	}
@@ -753,12 +768,47 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 		}
 
 		/* we only support pg_lake relations for the moment */
-		if (rte->rtekind == RTE_RELATION && !IsAnyLakeForeignTable(rte))
+		if (rte->rtekind == RTE_RELATION && !IsQueryEngineTable(rte))
 		{
 			if (context->stopAtFirstNotShippable)
 				return true;
 
 			RecordNotShippableObject(context, rte->relid, RelationRelationId, NOT_SHIPPABLE_TABLE);
+		}
+		else if (rte->rtekind == RTE_RELATION)
+		{
+			/*
+			 * The query is sent to one engine, which has to serve all tables.
+			 * An external engine is reached with one user's user mapping, so
+			 * its tables also have to be read as the same user, which differs
+			 * for a table read through a view.
+			 */
+			Oid			queryEngine = GetRelationQueryEngine(rte->relid);
+			Oid			queryEngineUser = queryEngine == PGDUCK_QUERY_ENGINE ?
+				InvalidOid : GetRteCheckAsUser(rte, context->rteperminfos);
+
+			if (!context->hasQueryEngine)
+			{
+				context->queryEngine = queryEngine;
+				context->queryEngineUser = queryEngineUser;
+				context->hasQueryEngine = true;
+			}
+			else if (queryEngine != context->queryEngine)
+			{
+				if (context->stopAtFirstNotShippable)
+					return true;
+
+				RecordNotShippableObject(context, rte->relid, RelationRelationId,
+										 NOT_SHIPPABLE_MIXED_QUERY_ENGINES);
+			}
+			else if (queryEngineUser != context->queryEngineUser)
+			{
+				if (context->stopAtFirstNotShippable)
+					return true;
+
+				RecordNotShippableObject(context, rte->relid, RelationRelationId,
+										 NOT_SHIPPABLE_MIXED_QUERY_ENGINE_USERS);
+			}
 		}
 
 		if (rte->rtekind == RTE_RELATION && has_subclass(rte->relid) &&
@@ -1942,7 +1992,11 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 	ExplainPropertyText("Engine", "DuckDB", es);
 
-	if (es->verbose)
+	if (scanState->queryEngine != PGDUCK_QUERY_ENGINE)
+		ExplainPropertyText("Server", GetQueryEngineName(scanState->queryEngine), es);
+
+	/* an external query engine reads no files that we know of */
+	if (es->verbose && scanState->queryEngine == PGDUCK_QUERY_ENGINE)
 	{
 		int			dataFileScans = 0;
 		int			deleteFileScans = 0;
@@ -1954,7 +2008,10 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 		ExplainPropertyText("Data Files Scanned", dataFileScansString, es);
 		ExplainPropertyText("Deletion Files Scanned", deleteFileScansString, es);
+	}
 
+	if (es->verbose)
+	{
 		if (scanState->insertIntoRelid != InvalidOid)
 		{
 			IcebergOutOfRangePolicy outOfRangePolicy =
