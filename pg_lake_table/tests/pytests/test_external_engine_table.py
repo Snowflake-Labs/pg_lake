@@ -15,9 +15,14 @@ from utils_pytest import *
 # create the remote tables in this schema of its DuckDB database.
 ENGINE_SCHEMA = "ext_engine_remote"
 
-ENGINE_CONNINFO = (
-    f"host={server_params.PGDUCK_UNIX_DOMAIN_PATH} port={server_params.PGDUCK_PORT}"
-)
+
+def engine_conninfo():
+    # Read at run time: installcheck moves pgduck_server to another port after
+    # this module is imported.
+    return (
+        f"host={server_params.PGDUCK_UNIX_DOMAIN_PATH} port={server_params.PGDUCK_PORT}"
+    )
+
 
 # Other tests use the test PostgreSQL server as the engine, which runs the
 # simple queries they send, and which makes these remote users authenticate
@@ -68,7 +73,7 @@ def engine_server(superuser_conn, extension, engine_tables, app_user):
     run_command(
         f"""
         CREATE SERVER ext_engine FOREIGN DATA WRAPPER pg_lake_remote
-            OPTIONS (conninfo '{ENGINE_CONNINFO}');
+            OPTIONS (conninfo '{engine_conninfo()}');
 
         -- the engine uses trust authentication
         CREATE USER MAPPING FOR PUBLIC SERVER ext_engine
@@ -373,7 +378,7 @@ def test_user_mapping_options(superuser_conn, pg_conn, engine_server, app_user):
     run_command(
         f"""
         CREATE SERVER ext_engine_tls FOREIGN DATA WRAPPER pg_lake_remote
-            OPTIONS (conninfo '{ENGINE_CONNINFO} sslmode=prefer');
+            OPTIONS (conninfo '{engine_conninfo()} sslmode=prefer');
         GRANT USAGE ON FOREIGN SERVER ext_engine_tls TO {app_user};
     """,
         superuser_conn,
@@ -416,7 +421,7 @@ def test_user_mapping_options(superuser_conn, pg_conn, engine_server, app_user):
 def test_non_superuser_cannot_create_server(pg_conn, engine_server):
     error = run_command(
         f"""CREATE SERVER ext_mine FOREIGN DATA WRAPPER pg_lake_remote
-                OPTIONS (conninfo '{ENGINE_CONNINFO}')""",
+                OPTIONS (conninfo '{engine_conninfo()}')""",
         pg_conn,
         raise_error=False,
     )
@@ -852,7 +857,7 @@ def test_tables_on_different_servers(superuser_conn, pg_conn, engine_server, app
     run_command(
         f"""
         CREATE SERVER ext_engine_other FOREIGN DATA WRAPPER pg_lake_remote
-            OPTIONS (conninfo '{ENGINE_CONNINFO}');
+            OPTIONS (conninfo '{engine_conninfo()}');
         CREATE USER MAPPING FOR PUBLIC SERVER ext_engine_other
             OPTIONS (password_required 'false');
         CREATE FOREIGN TABLE ext_engine.other_users (id int, name text)
@@ -1240,7 +1245,7 @@ def test_user_mapping(superuser_conn, pg_conn, engine_server, app_user):
     run_command(
         f"""
         CREATE SERVER ext_engine_auth FOREIGN DATA WRAPPER pg_lake_remote
-            OPTIONS (conninfo '{ENGINE_CONNINFO}');
+            OPTIONS (conninfo '{engine_conninfo()}');
         GRANT USAGE ON FOREIGN SERVER ext_engine_auth TO {app_user};
         CREATE FOREIGN TABLE ext_engine.auth_users (id int, name text)
             SERVER ext_engine_auth OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'users');
@@ -1333,7 +1338,7 @@ def test_drop_server_and_table(superuser_conn, pgduck_conn, engine_server):
     run_command(
         f"""
         CREATE SERVER ext_engine_drop FOREIGN DATA WRAPPER pg_lake_remote
-            OPTIONS (conninfo '{ENGINE_CONNINFO}');
+            OPTIONS (conninfo '{engine_conninfo()}');
         CREATE USER MAPPING FOR PUBLIC SERVER ext_engine_drop;
         CREATE FOREIGN TABLE ext_engine.dropme_1 (id int)
             SERVER ext_engine_drop OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'dropme');
@@ -1404,7 +1409,7 @@ def test_pg_dump_and_restore(installcheck, superuser_conn, engine_server, app_us
     run_command(
         f"""
         CREATE SERVER ext_engine_dump FOREIGN DATA WRAPPER pg_lake_remote
-            OPTIONS (conninfo '{ENGINE_CONNINFO}');
+            OPTIONS (conninfo '{engine_conninfo()}');
         CREATE USER MAPPING FOR PUBLIC SERVER ext_engine_dump
             OPTIONS (password_required 'false');
         CREATE USER MAPPING FOR {app_user} SERVER ext_engine_dump
