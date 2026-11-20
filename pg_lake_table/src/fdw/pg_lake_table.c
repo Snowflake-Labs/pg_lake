@@ -99,6 +99,7 @@
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/explain.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/write_data.h"
@@ -160,6 +161,7 @@ typedef struct PgLakeScanState
 	List	   *retrieved_attrs;	/* list of retrieved attribute numbers */
 
 	/* for remote query execution */
+	Oid			queryEngine;	/* query engine of the scanned relations */
 	PGDuckConnection *conn;		/* connection for the scan */
 	bool		prepared_statement_sent;	/* have we executed the prepared
 											 * statement? */
@@ -1683,20 +1685,20 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	fsstate = (PgLakeScanState *) palloc0(sizeof(PgLakeScanState));
 	node->fdw_state = (void *) fsstate;
 
+	List	   *rteList =
+		list_nth(fsplan->fdw_private, FdwScanPrivateRteList);
+
 	/*
-	 * Get connection to the foreign server.  Connection manager will
-	 * establish new connection if necessary.
+	 * Get connection to the query engine that serves the scanned relations.
 	 */
-	fsstate->conn = GetPGDuckConnection();
+	fsstate->queryEngine = GetQueryEngineForRteList(rteList);
+	fsstate->conn = GetQueryEngineConnection(fsstate->queryEngine);
 
 	/* Assign a unique ID for my cursor */
 	fsstate->prepared_statement_sent = false;
 
 	/* Get private info created by planner functions. */
 	fsstate->query = strVal(list_nth(fsplan->fdw_private, FdwScanPrivateSelectSql));
-
-	List	   *rteList =
-		list_nth(fsplan->fdw_private, FdwScanPrivateRteList);
 
 	int			rtindex;
 
@@ -3231,7 +3233,7 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	/*
 	 * Add EXPLAIN output for the actual query with read_parquet calls.
 	 */
-	ExplainPGDuckQuery(fullQuery, numParams, paramValues, es);
+	ExplainPGDuckQuery(fsstate->queryEngine, fullQuery, numParams, paramValues, es);
 }
 
 

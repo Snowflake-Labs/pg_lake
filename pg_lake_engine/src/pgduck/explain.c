@@ -26,6 +26,7 @@
 #include "pg_lake/json/json_reader.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/explain.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "utils/fmgrprotos.h"
 #include "utils/jsonb.h"
 
@@ -55,21 +56,23 @@ typedef struct PhysicalOperator
 }			PhysicalOperator;
 
 
-static char *GetExplainJson(char *query, int numParams, const char **parameterValues);
+static char *GetExplainJson(Oid queryEngine, char *query, int numParams,
+							const char **parameterValues);
 static void ExplainPhysicalOperator(PhysicalOperator * operator, ExplainState *es);
 static void ReadPhysicalOperator(JsonbContainer *json, PhysicalOperator * operator);
 static void ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * property);
 
 
 /*
- * ExplainPGDuckQuery explains a query using pgduck and emits explain output
- * using the PostgreSQL API.
+ * ExplainPGDuckQuery explains a query using the given query engine and emits
+ * explain output using the PostgreSQL API.
  */
 void
-ExplainPGDuckQuery(char *query, int numParams, const char **parameterValues,
-				   ExplainState *es)
+ExplainPGDuckQuery(Oid queryEngine, char *query, int numParams,
+				   const char **parameterValues, ExplainState *es)
 {
-	char	   *explainOutput = GetExplainJson(query, numParams, parameterValues);
+	char	   *explainOutput = GetExplainJson(queryEngine, query, numParams,
+											   parameterValues);
 	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, PointerGetDatum(explainOutput));
 	Jsonb	   *explainJsonb = DatumGetJsonbP(jsonbDatum);
 
@@ -204,13 +207,14 @@ ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * property)
  * GetExplainJson gets the explain output for a query as JSON.
  */
 static char *
-GetExplainJson(char *query, int numParams, const char **parameterValues)
+GetExplainJson(Oid queryEngine, char *query, int numParams,
+			   const char **parameterValues)
 {
 	char	   *explainCommand = psprintf("explain (format 'json') %s", query);
 
 	char	   *value = NULL;
 
-	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	PGDuckConnection *pgDuckConn = GetQueryEngineConnection(queryEngine);
 
 	SendQueryWithParams(pgDuckConn, explainCommand, numParams, parameterValues);
 

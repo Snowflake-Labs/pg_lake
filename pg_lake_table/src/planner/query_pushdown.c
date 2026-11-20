@@ -52,6 +52,7 @@
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/explain.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/test/hide_lake_objects.h"
@@ -185,6 +186,7 @@ typedef struct QueryPushdownScanState
 	EState	   *estate;
 
 	/* connection properties */
+	Oid			queryEngine;
 	PGDuckConnection *connection;
 	char	  **receivedValues;
 
@@ -1569,7 +1571,8 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	scanState->queryString = queryString;
-	scanState->connection = GetPGDuckConnection();
+	scanState->queryEngine = GetQueryEngineForRteList(rteList);
+	scanState->connection = GetQueryEngineConnection(scanState->queryEngine);
 	scanState->tupleDesc = tupleDesc;
 	scanState->attributeInputMetadata = TupleDescGetAttInMetadata(tupleDesc);
 	scanState->estate = estate;
@@ -1895,7 +1898,8 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	}
 
 
-	ExplainPGDuckQuery(realQuery, scanState->numParams, scanState->parameterValues, es);
+	ExplainPGDuckQuery(scanState->queryEngine, realQuery, scanState->numParams,
+					   scanState->parameterValues, es);
 }
 
 
