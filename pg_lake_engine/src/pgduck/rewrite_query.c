@@ -34,6 +34,7 @@
 #include "pg_lake/parsetree/columns.h"
 #include "pg_lake/parsetree/expression.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/rewrite_left_join.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/shippable_builtin_functions.h"
@@ -585,6 +586,12 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 		 * the query we were given.
 		 */
 		ExpandCompositeUnnestRtes(rewrittenQuery->rtable);
+
+		/*
+		 * DuckDB cannot use a hash join for a LEFT JOIN with ON conditions on
+		 * the left side only, so fold those into the join key.
+		 */
+		RewriteLeftJoinConditions(rewrittenQuery);
 
 		return (Node *) rewrittenQuery;
 	}
