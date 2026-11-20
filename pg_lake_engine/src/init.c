@@ -45,6 +45,7 @@
 #include "pg_lake/pgduck/cache_worker.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
+#include "pg_lake/pgduck/rewrite_left_join.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "utils/guc.h"
 #include "utils/varlena.h"
@@ -118,6 +119,18 @@ _PG_init(void)
 							 &EnableCacheManager,
 							 true,
 							 PGC_SUSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							 "pg_lake_engine.enable_left_join_rewrite",
+							 gettext_noop("Folds ON conditions of a LEFT JOIN that only "
+										  "reference the left side into the join key, "
+										  "which the query engine can run as a hash join"),
+							 NULL,
+							 &EnableLeftJoinRewrite,
+							 true,
+							 PGC_USERSET,
 							 0,
 							 NULL, NULL, NULL);
 
