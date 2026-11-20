@@ -366,6 +366,10 @@ IntervalOutForPGDuck(Datum value)
  * TimeTzOutForPGDuck converts a timetz datum to a UTC time string
  * for DuckDB. Since Iceberg only supports time (no timezone), we
  * normalize to UTC and format via PG's time_out.
+ *
+ * Fields of composite types are parsed as TIMETZ rather than TIME, so the
+ * string carries an explicit +00 to keep DuckDB from applying its TimeZone.
+ * DuckDB ignores the offset when parsing TIME.
  */
 static char *
 TimeTzOutForPGDuck(Datum value)
@@ -379,7 +383,9 @@ TimeTzOutForPGDuck(Datum value)
 
 	getTypeOutputInfo(TIMEOID, &timeOutputFunc, &typIsVarlena);
 
-	return OidOutputFunctionCall(timeOutputFunc, TimeADTGetDatum(utcMicros));
+	return psprintf("%s+00",
+					OidOutputFunctionCall(timeOutputFunc,
+										  TimeADTGetDatum(utcMicros)));
 }
 
 
