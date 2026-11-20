@@ -37,11 +37,17 @@ typedef struct PGDuckConnection
 	uint32		connectionId;
 	PGconn	   *conn;
 
+	/* foreign server of an external query engine, NULL for pgduck_server */
+	char	   *serverName;
+
 }			PGDuckConnection;
 
 extern PGDLLEXPORT PGDuckConnection * GetPGDuckConnection(void);
 extern PGDLLEXPORT PGDuckConnection * GetPGDuckConnectionWithSessionTimeZone(void);
 extern PGDLLEXPORT PGDuckConnection * TryGetPGDuckConnection(char **errorMessage);
+extern PGDLLEXPORT PGDuckConnection * TryGetPGDuckConnectionWithConninfo(const char *conninfo,
+																		 const char *serverName,
+																		 char **errorMessage);
 extern PGDLLEXPORT void ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection);
 extern PGDLLEXPORT int64 ExecuteCommandInPGDuck(char *query);
 extern PGDLLEXPORT List *ExecuteCommandsInPGDuck(List *commands);
