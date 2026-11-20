@@ -28,9 +28,11 @@
 
 #include <inttypes.h>
 
+#include "libpq-fe.h"
 #include "access/reloptions.h"
 #include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
+#include "catalog/pg_user_mapping.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
 #include "foreign/foreign.h"
@@ -67,12 +69,31 @@ static PgLakeOption * pg_lake_options;
 static PgLakeOption * pg_lake_iceberg_options;
 
 /*
+ * Valid options for pg_lake_remote, whose tables are served by an external
+ * query engine. User mappings also take the libpq options that libpq marks
+ * as secret, such as password and sslpassword (see IsSecretLibpqOption).
+ */
+static const PgLakeOption pg_lake_remote_options[] = {
+	{"conninfo", ForeignServerRelationId},
+	{"user", UserMappingRelationId},
+	{"password_required", UserMappingRelationId},
+	{"sslcert", UserMappingRelationId},
+	{"sslkey", UserMappingRelationId},
+	{"table_name", ForeignTableRelationId},
+	{"schema_name", ForeignTableRelationId},
+	{NULL, InvalidOid}
+};
+
+/*
  * Helper functions
  */
 static void InitPgLakeOptions(void);
 static void InitPgLakeIcebergOptions(void);
 static bool is_valid_option_pg_lake(const char *keyword, Oid context);
 static bool is_valid_option_pg_lake_iceberg(const char *keyword, Oid context);
+static bool IsValidRemoteOption(const char *keyword, Oid context);
+static bool IsSecretLibpqOption(const char *keyword);
+static void ValidateRemoteConninfo(const char *conninfo);
 
 #include "miscadmin.h"
 
@@ -84,6 +105,7 @@ static bool is_valid_option_pg_lake_iceberg(const char *keyword, Oid context);
  */
 PG_FUNCTION_INFO_V1(pg_lake_table_validator);
 PG_FUNCTION_INFO_V1(pg_lake_iceberg_validator);
+PG_FUNCTION_INFO_V1(pg_lake_remote_validator);
 
 Datum
 pg_lake_table_validator(PG_FUNCTION_ARGS)
@@ -1038,4 +1060,240 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 		}
 	}
 	PG_RETURN_VOID();
+}
+
+
+/*
+ * pg_lake_remote_validator validates the options of pg_lake_remote servers,
+ * user mappings and foreign tables. Their tables are served by an external
+ * query engine, so there are no files to check.
+ */
+Datum
+pg_lake_remote_validator(PG_FUNCTION_ARGS)
+{
+	List	   *options_list = untransformRelOptions(PG_GETARG_DATUM(0));
+	Oid			catalog = PG_GETARG_OID(1);
+	bool		foundConninfo = false;
+	bool		foundTableName = false;
+	ListCell   *cell;
+
+	foreach(cell, options_list)
+	{
+		DefElem    *def = (DefElem *) lfirst(cell);
+
+		if (!IsValidRemoteOption(def->defname, catalog))
+		{
+			/*
+			 * Unknown option specified, complain about it. Provide a hint
+			 * with a valid option that looks similar, if there is one.
+			 */
+			const char *closest_match;
+			ClosestMatchState match_state;
+			bool		has_valid_options = false;
+
+			initClosestMatch(&match_state, def->defname, 4);
+			for (int i = 0; pg_lake_remote_options[i].keyword != NULL; i++)
+			{
+				if (catalog == pg_lake_remote_options[i].optcontext)
+				{
+					has_valid_options = true;
+					updateClosestMatch(&match_state, pg_lake_remote_options[i].keyword);
+				}
+			}
+
+			if (catalog == UserMappingRelationId)
+				updateClosestMatch(&match_state, "password");
+
+			closest_match = getClosestMatch(&match_state);
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+					 errmsg("invalid option \"%s\"", def->defname),
+					 has_valid_options ? closest_match ?
+					 errhint("Perhaps you meant the option \"%s\".",
+							 closest_match) : 0 :
+					 errhint("There are no valid options in this context.")));
+		}
+
+		if (strcmp(def->defname, "password_required") == 0)
+		{
+			/* same rule as postgres_fdw */
+			if (!defGetBoolean(def) && !superuser())
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("password_required=false is superuser-only"),
+						 errhint("User mappings with the password_required option "
+								 "set to false may only be created or modified "
+								 "by the superuser.")));
+
+			continue;
+		}
+
+		if (strlen(defGetString(def)) == 0)
+			ereport(ERROR,
+					(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+					 errmsg("option \"%s\" cannot be empty", def->defname)));
+
+		if (strcmp(def->defname, "conninfo") == 0)
+		{
+			ValidateRemoteConninfo(defGetString(def));
+			foundConninfo = true;
+		}
+		else if (strcmp(def->defname, "sslcert") == 0 ||
+				 strcmp(def->defname, "sslkey") == 0)
+		{
+			/*
+			 * Same rule as postgres_fdw: these name files on this server,
+			 * such as the server's own key.
+			 */
+			if (!superuser())
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("sslcert and sslkey are superuser-only"),
+						 errhint("User mappings with the sslcert or sslkey options "
+								 "set may only be created or modified by the "
+								 "superuser.")));
+		}
+		else if (strcmp(def->defname, "table_name") == 0 ||
+				 strcmp(def->defname, "schema_name") == 0)
+		{
+			/*
+			 * DuckDB reads a table name that is not in its catalog as a file
+			 * or URL, with the engine's own access to the file system and
+			 * object storage, so the name decides what any reader of the
+			 * table can read.
+			 */
+			if (!superuser())
+				ereport(ERROR,
+						(errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+						 errmsg("table_name and schema_name are superuser-only"),
+						 errdetail("A query engine may read a table name that "
+								   "it does not know as a file or URL."),
+						 errhint("Foreign tables of pg_lake_remote servers may "
+								 "only be created or modified by the superuser.")));
+
+			if (strcmp(def->defname, "table_name") == 0)
+				foundTableName = true;
+		}
+	}
+
+	if (catalog == ForeignServerRelationId && !foundConninfo)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("\"conninfo\" option is required for pg_lake_remote servers")));
+
+	/*
+	 * The table name is not taken from the name of the foreign table, which
+	 * its owner can rename.
+	 */
+	if (catalog == ForeignTableRelationId && !foundTableName)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_OPTION_NAME_NOT_FOUND),
+				 errmsg("\"table_name\" option is required for pg_lake_remote tables")));
+
+	PG_RETURN_VOID();
+}
+
+
+/*
+ * IsValidRemoteOption returns whether the given option is valid for the
+ * given catalog of a pg_lake_remote object.
+ */
+static bool
+IsValidRemoteOption(const char *keyword, Oid context)
+{
+	for (int i = 0; pg_lake_remote_options[i].keyword != NULL; i++)
+	{
+		if (context == pg_lake_remote_options[i].optcontext &&
+			strcmp(pg_lake_remote_options[i].keyword, keyword) == 0)
+			return true;
+	}
+
+	return context == UserMappingRelationId && IsSecretLibpqOption(keyword);
+}
+
+
+/*
+ * IsSecretLibpqOption returns whether libpq marks the given connection option
+ * as secret, as it does password, sslpassword and, since PostgreSQL 18,
+ * oauth_client_secret. Like postgres_fdw, we only accept these in user
+ * mappings, which only their user and the server owner can read.
+ */
+static bool
+IsSecretLibpqOption(const char *keyword)
+{
+	PQconninfoOption *connOptions = PQconninfoParse("", NULL);
+	bool		isSecret = false;
+
+	if (connOptions == NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_OUT_OF_MEMORY),
+				 errmsg("out of memory")));
+
+	for (PQconninfoOption *connOption = connOptions; connOption->keyword != NULL; connOption++)
+	{
+		if (strcmp(connOption->keyword, keyword) == 0)
+		{
+			isSecret = strchr(connOption->dispchar, '*') != NULL;
+			break;
+		}
+	}
+
+	PQconninfoFree(connOptions);
+
+	return isSecret;
+}
+
+
+/*
+ * ValidateRemoteConninfo checks that the conninfo of a pg_lake_remote server
+ * parses, and that it leaves the user and secrets to the user mappings.
+ *
+ * Like postgres_fdw, we also refuse the options that libpq marks as debug
+ * options, such as replication and sslkeylogfile.
+ */
+static void
+ValidateRemoteConninfo(const char *conninfo)
+{
+	char	   *errorMessage = NULL;
+	PQconninfoOption *connOptions = PQconninfoParse(conninfo, &errorMessage);
+
+	if (connOptions == NULL)
+	{
+		char	   *detail = errorMessage != NULL ? pchomp(errorMessage) : "out of memory";
+
+		PQfreemem(errorMessage);
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_ATTRIBUTE_VALUE),
+				 errmsg("invalid \"conninfo\" option"),
+				 errdetail_internal("%s", detail)));
+	}
+
+	char	   *userMappingKeyword = NULL;
+	char	   *debugKeyword = NULL;
+
+	for (PQconninfoOption *connOption = connOptions; connOption->keyword != NULL; connOption++)
+	{
+		if (connOption->val == NULL)
+			continue;
+
+		if (strcmp(connOption->keyword, "user") == 0 ||
+			strchr(connOption->dispchar, '*') != NULL)
+			userMappingKeyword = pstrdup(connOption->keyword);
+		else if (strchr(connOption->dispchar, 'D') != NULL)
+			debugKeyword = pstrdup(connOption->keyword);
+	}
+
+	PQconninfoFree(connOptions);
+
+	if (userMappingKeyword != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+				 errmsg("\"conninfo\" option cannot contain \"%s\"", userMappingKeyword),
+				 errdetail("The options of a server are visible to all users."),
+				 errhint("Set the user and secrets such as passwords in a user mapping.")));
+
+	if (debugKeyword != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
+				 errmsg("\"conninfo\" option cannot contain \"%s\"", debugKeyword)));
 }
