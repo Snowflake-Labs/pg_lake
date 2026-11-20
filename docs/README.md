@@ -17,6 +17,7 @@ The documentation is published at **https://snowflake-labs.github.io/pg_lake/**.
 - [Geospatial](./spatial.md)
 - [Performance](./performance.md)
 - [dbt](./dbt.md)
+- [External query engines](./external-query-engines.md)
 
 **Use cases**
 - [Sync Postgres tables to Iceberg](./use-case-iceberg-sync.md)
