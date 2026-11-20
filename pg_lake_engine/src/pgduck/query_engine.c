@@ -21,6 +21,7 @@
 
 #include "access/htup_details.h"
 #include "access/reloptions.h"
+#include "catalog/pg_class.h"
 #include "catalog/pg_foreign_table.h"
 #include "catalog/pg_user_mapping.h"
 #include "commands/defrem.h"
@@ -86,6 +87,20 @@ IsExternalEngineTable(Oid relationId)
 
 
 /*
+ * IsQueryEngineTable returns whether the RTE is a table that is served by a
+ * query engine: a pg_lake table or a table of an external query engine.
+ */
+bool
+IsQueryEngineTable(RangeTblEntry *rte)
+{
+	if (rte->rtekind != RTE_RELATION || rte->relkind != RELKIND_FOREIGN_TABLE)
+		return false;
+
+	return IsAnyLakeForeignTableById(rte->relid) || IsExternalEngineTable(rte->relid);
+}
+
+
+/*
  * QueryEnginesEqual returns whether a query can be sent to both engines as
  * one: the same server, read as the same user.
  */
@@ -103,6 +118,16 @@ QueryEnginesEqual(QueryEngine left, QueryEngine right)
 QueryEngine
 GetRelationQueryEngine(Oid relationId, Oid checkAsUser)
 {
+	if (IsExternalEngineTable(relationId))
+	{
+		QueryEngine queryEngine = {
+			.serverId = GetForeignTable(relationId)->serverid,
+			.userId = checkAsUser
+		};
+
+		return queryEngine;
+	}
+
 	if (!IsAnyLakeForeignTableById(relationId))
 		elog(ERROR, "relation %s is not served by a query engine",
 			 GetQualifiedRelationName(relationId));
@@ -204,7 +229,7 @@ FindQueryEngineWalker(Node *node, FindQueryEngineContext * context)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) node;
 
-		if (rte->rtekind != RTE_RELATION || !IsAnyLakeForeignTableById(rte->relid))
+		if (!IsQueryEngineTable(rte))
 			return false;
 
 		QueryEngine relationEngine = GetRteQueryEngine(rte, context->rteperminfos);

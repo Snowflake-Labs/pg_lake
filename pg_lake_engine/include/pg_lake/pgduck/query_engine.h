@@ -49,6 +49,7 @@ typedef struct QueryEngine
 #define PG_LAKE_REMOTE_FDW_NAME "pg_lake_remote"
 
 extern PGDLLEXPORT bool IsExternalEngineTable(Oid relationId);
+extern PGDLLEXPORT bool IsQueryEngineTable(RangeTblEntry *rte);
 extern PGDLLEXPORT bool QueryEnginesEqual(QueryEngine left, QueryEngine right);
 extern PGDLLEXPORT QueryEngine GetRelationQueryEngine(Oid relationId, Oid checkAsUser);
 extern PGDLLEXPORT QueryEngine GetRteQueryEngine(RangeTblEntry *rte, List *rteperminfos);

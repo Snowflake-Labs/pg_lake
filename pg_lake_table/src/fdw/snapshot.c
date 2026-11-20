@@ -40,6 +40,7 @@
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_extension_base/pg_compat.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/storage/storage_credentials.h"
@@ -139,12 +140,21 @@ CreatePgLakeScanSnapshot(List *rteList,
 			PrettyPrintBaseRestrictInfo(DEBUG2, rte, baseRestrictInfoList);
 		}
 
-		PgLakeTableScan *tableScan =
-			CreateTableScanForRelation(relationId, postgresSnapshot,
-									   uniqueRelationIdentifier,
-									   baseRestrictInfoList,
-									   includeChildren && rte->inh,
-									   isResultRelation);
+		PgLakeTableScan *tableScan = NULL;
+
+		if (IsExternalEngineTable(relationId))
+		{
+			/* an external query engine reads its own data, there are no files */
+			tableScan = palloc0(sizeof(PgLakeTableScan));
+			tableScan->relationId = relationId;
+			tableScan->uniqueRelationIdentifier = uniqueRelationIdentifier;
+		}
+		else
+			tableScan = CreateTableScanForRelation(relationId, postgresSnapshot,
+												   uniqueRelationIdentifier,
+												   baseRestrictInfoList,
+												   includeChildren && rte->inh,
+												   isResultRelation);
 
 		tableScans = lappend(tableScans, tableScan);
 	}
