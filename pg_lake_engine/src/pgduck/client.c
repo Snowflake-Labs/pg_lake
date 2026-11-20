@@ -22,7 +22,6 @@
 
 #include "access/hash.h"
 #include "access/xact.h"
-#include "libpq/libpq-be-fe-helpers.h"
 #include "pg_lake/pgduck/client.h"
 #include "pgtime.h"
 #include "storage/latch.h"
@@ -91,7 +90,7 @@ typedef struct PgDuckServerConnectionHashEntry
 	SubTransactionId subTransactionId;
 	PGDuckConnection pgDuckConnection;
 
-	/* opened by libpqsrv_connect, which reserved a file descriptor */
+	/* opened by ConnectToExternalQueryEngine, which reserved an fd */
 	bool		releaseExternalFD;
 
 }			PgDuckServerConnectionHashEntry;
@@ -256,7 +255,7 @@ TryGetPGDuckConnectionWithConninfo(const char *conninfo, const char *serverName,
 {
 	InitializePGDuckClient();
 
-	PGconn	   *connection = libpqsrv_connect(conninfo, PG_WAIT_EXTENSION);
+	PGconn	   *connection = ConnectToExternalQueryEngine(conninfo);
 
 	if (connection == NULL)
 	{
@@ -268,7 +267,7 @@ TryGetPGDuckConnectionWithConninfo(const char *conninfo, const char *serverName,
 	{
 		*errorMessage = pstrdup(PQerrorMessage(connection));
 
-		libpqsrv_disconnect(connection);
+		DisconnectFromExternalQueryEngine(connection);
 
 		return NULL;
 	}
@@ -578,7 +577,7 @@ ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection)
 		pfree(serverName);
 
 	if (releaseExternalFD)
-		libpqsrv_disconnect(conn);
+		DisconnectFromExternalQueryEngine(conn);
 	else
 		PQfinish(conn);
 }

@@ -49,6 +49,8 @@ extern PGDLLEXPORT PGDuckConnection * TryGetPGDuckConnectionWithConninfo(const c
 																		 const char *serverName,
 																		 char **errorMessage);
 extern PGDLLEXPORT void ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection);
+extern PGDLLEXPORT PGconn *ConnectToExternalQueryEngine(const char *conninfo);
+extern PGDLLEXPORT void DisconnectFromExternalQueryEngine(PGconn *connection);
 extern PGDLLEXPORT int64 ExecuteCommandInPGDuck(char *query);
 extern PGDLLEXPORT List *ExecuteCommandsInPGDuck(List *commands);
 extern PGDLLEXPORT bool ExecuteOptionalCommandInPGDuck(char *command);
