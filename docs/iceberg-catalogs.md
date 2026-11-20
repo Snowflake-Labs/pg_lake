@@ -313,6 +313,39 @@ pg_lake reads manifests and manifest lists that are uncompressed or compressed w
 bzip2, as PyIceberg writes them when `write.avro.compression-codec` is set to one of those,
 cannot be read: queries fail with `File header contains an unknown codec`.
 
+#### What read-only tables cannot read
+
+pg_lake refuses these when it reads a table written by another engine, rather than return
+incomplete results:
+
+- **Format version 1:** `unsupported iceberg format version 1`. Upgrade the table to version 2 in
+  the engine that writes it, for example with Spark's
+  `ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '2')`. A table upgraded from version 1
+  reads, including the files and manifests it wrote before the upgrade.
+- **Deletion vectors**, the row-level deletes of version 3 tables:
+  `pg_lake_iceberg: deletion vectors are not supported`. Version 3 tables without deletes read.
+- **Column defaults** in version 3 tables, on a column or a nested field (`initial-default`):
+  `iceberg column default values are not supported`.
+- **Types** `geography`, `geometry`, `timestamp_ns`, `timestamptz_ns`, `unknown` and `variant`:
+  `iceberg type <type> is not supported`.
+- **Data and delete files in ORC or Avro:** `pg_lake_iceberg: ORC files are not supported`
+  (or `AVRO`). Rewrite the table's files as Parquet to read it.
+- **Equality-delete keys** other than top-level `int`, `long` and `string` fields; see
+  [Reading external equality deletes](#reading-external-equality-deletes).
+- **Files outside the table's location**, with vended credentials: pg_lake uses a credential the
+  catalog vends only at or below the table's location. Files that `write.data.path` or
+  `write.metadata.path` put elsewhere are read with pgduck_server's own storage credentials, and
+  fail if those don't cover them.
+
+The columns of a read-only table are fixed when it is created. Reordering columns in the
+source catalog needs nothing, but after a column is added, dropped or renamed there, or its
+type or nullability changes, queries fail with `Schema mismatch between Iceberg and Postgres`.
+Drop the table and attach it again.
+
+A column name longer than 63 bytes, the longest identifier PostgreSQL keeps, is truncated the
+way PostgreSQL truncates identifiers. Two names that are the same once truncated cannot both be
+columns: `CREATE TABLE` fails with `have the same name when truncated to a Postgres identifier`.
+
 #### Lowercase column names from external engines
 
 Some engines write Iceberg column names in uppercase. PostgreSQL folds unquoted identifiers to
