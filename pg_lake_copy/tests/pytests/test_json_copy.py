@@ -459,7 +459,8 @@ def test_types(pg_conn, duckdb_conn, tmp_path):
         "c_tid": "VARCHAR",
         "c_time": "TIME",
         "c_timestamp": "TIMESTAMP",
-        "c_timestamptz": "VARCHAR",
+        # DuckDB detects timestamps with an offset as timestamptz since 2.0
+        "c_timestamptz": "TIMESTAMP WITH TIME ZONE",
         "c_timetz": "VARCHAR",
         "c_uuid": "UUID",
         "c_varbit": "VARCHAR",

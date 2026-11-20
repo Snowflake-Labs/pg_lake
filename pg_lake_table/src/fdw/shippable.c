@@ -779,6 +779,8 @@ GetNotShippableDescription(NotShippableReason reason, Oid classId, Oid objectId)
 			return "NaN numeric constant";
 		case NOT_SHIPPABLE_SQL_JSON_EXPRESSION:
 			return "SQL/JSON expression";
+		case NOT_SHIPPABLE_SQL_GROUPING_EXPR_IN_SUBQUERY:
+			return "grouping expression referenced from a subquery";
 		default:
 			return NULL;
 	}

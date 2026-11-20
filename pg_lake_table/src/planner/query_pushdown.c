@@ -112,6 +112,9 @@ static bool AdjustParseTreeForPgLake(Node *node, void *context);
 static bool ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context);
 static bool AddMissingRTEAliasaes(Node *node, void *context);
 static bool TargetListHasOnlyResjunk(List *targetList);
+#if PG_VERSION_NUM >= 190000
+static bool HasGroupingExpressionInSubquery(Query *query);
+#endif
 static bool AllInheritorsAreLakeTable(Oid relationId);
 static bool ExpressionHasCollation(Node *node, IsShippableContext * context);
 static bool ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext * context);
@@ -681,6 +684,22 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 
 		if (query_tree_walker(query, ProcessNotShippableExpressionWalker, context, QTW_EXAMINE_RTES_BEFORE))
 			return true;
+
+#if PG_VERSION_NUM >= 190000
+
+		/*
+		 * PG19 lets a subquery refer to a grouping expression of the query it
+		 * is in (GROUP BY a + b ... (SELECT ... t.a + t.b)), which DuckDB
+		 * cannot bind: it only matches a grouped column there.
+		 */
+		if (HasGroupingExpressionInSubquery(query))
+		{
+			if (context->stopAtFirstNotShippable)
+				return true;
+
+			RecordNotShippableObject(context, InvalidOid, InvalidOid, NOT_SHIPPABLE_SQL_GROUPING_EXPR_IN_SUBQUERY);
+		}
+#endif
 
 		/*
 		 * DuckDB supports unnest in most places, but not GROUP BY or window
@@ -2068,3 +2087,100 @@ CreateCustomScanOutputTargetList(List *customScanTargetList)
 
 	return scanTargetList;
 }
+
+
+#if PG_VERSION_NUM >= 190000
+
+typedef struct GroupingExpressionReferenceContext
+{
+	/* range table index of the RTE_GROUP of the query being checked */
+	Index		groupRTIndex;
+
+	/* its grouping expressions, which Vars of that RTE stand for */
+	List	   *groupExprs;
+
+	/* how many subqueries deep the walker is */
+	Index		depth;
+}			GroupingExpressionReferenceContext;
+
+
+/*
+ * GroupingExpressionReferenceWalker returns whether a subquery below the
+ * query in the context refers to one of its grouping expressions that is not
+ * a plain column.
+ */
+static bool
+GroupingExpressionReferenceWalker(Node *node, GroupingExpressionReferenceContext * context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Var))
+	{
+		Var		   *var = (Var *) node;
+
+		if (context->depth > 0 &&
+			var->varlevelsup == context->depth &&
+			var->varno == context->groupRTIndex &&
+			var->varattno > 0 &&
+			var->varattno <= list_length(context->groupExprs))
+		{
+			Node	   *groupExpr = list_nth(context->groupExprs, var->varattno - 1);
+
+			return !IsA(strip_implicit_coercions(groupExpr), Var);
+		}
+
+		return false;
+	}
+
+	if (IsA(node, Query))
+	{
+		bool		found;
+
+		context->depth++;
+		found = query_tree_walker((Query *) node, GroupingExpressionReferenceWalker,
+								  context, 0);
+		context->depth--;
+
+		return found;
+	}
+
+	return expression_tree_walker(node, GroupingExpressionReferenceWalker, context);
+}
+
+
+/*
+ * HasGroupingExpressionInSubquery returns whether a subquery of a grouped
+ * query refers to a grouping expression of it that is not a plain column,
+ * which PG19 allows (GROUP BY a + b ... (SELECT ... WHERE x = t.a + t.b)).
+ */
+static bool
+HasGroupingExpressionInSubquery(Query *query)
+{
+	GroupingExpressionReferenceContext context = {0};
+	ListCell   *rteCell = NULL;
+	Index		rtIndex = 0;
+
+	if (!query->hasGroupRTE || !query->hasSubLinks)
+		return false;
+
+	foreach(rteCell, query->rtable)
+	{
+		RangeTblEntry *rte = lfirst(rteCell);
+
+		rtIndex++;
+
+		if (rte->rtekind == RTE_GROUP)
+		{
+			context.groupRTIndex = rtIndex;
+			context.groupExprs = rte->groupexprs;
+			break;
+		}
+	}
+
+	if (context.groupRTIndex == 0)
+		return false;
+
+	return query_tree_walker(query, GroupingExpressionReferenceWalker, &context, 0);
+}
+#endif
