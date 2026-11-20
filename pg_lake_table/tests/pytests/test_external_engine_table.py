@@ -1110,6 +1110,56 @@ def test_prepared_generic_plan(pg_conn, engine_server, full_pushdown):
     pg_conn.rollback()
 
 
+@pytest.mark.parametrize("full_pushdown", [True, False], ids=["pushdown", "fdw"])
+def test_engine_uses_session_timezone(
+    superuser_conn, pg_conn, pgduck_conn, engine_server, app_user, full_pushdown
+):
+    run_command(
+        f"""
+        CREATE TABLE {ENGINE_SCHEMA}.moments (ts timestamptz);
+        INSERT INTO {ENGINE_SCHEMA}.moments
+            VALUES ('2024-01-01 20:00:00+00'), ('2024-01-02 01:00:00+00');
+    """,
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE ext_engine.moments (ts timestamptz)
+            SERVER ext_engine OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'moments');
+        GRANT SELECT ON ext_engine.moments TO {app_user};
+    """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        set_full_pushdown(full_pushdown, pg_conn)
+        run_command("SET TimeZone TO 'Asia/Tokyo'", pg_conn)
+
+        # both are on January 2 in Tokyo, but not in UTC
+        query = "SELECT date_trunc('day', ts) FROM ext_engine.moments ORDER BY ts"
+        plan = explain(query, pg_conn)
+        assert "date_trunc" in plan
+
+        expected = run_query(
+            """SELECT date_trunc('day', ts) FROM (VALUES
+                   ('2024-01-01 20:00:00+00'::timestamptz),
+                   ('2024-01-02 01:00:00+00'::timestamptz)) v(ts) ORDER BY ts""",
+            pg_conn,
+        )
+        assert run_query(query, pg_conn) == expected
+        assert len({row[0] for row in expected}) == 1
+        pg_conn.rollback()
+    finally:
+        rollback(pg_conn, superuser_conn)
+        run_command("DROP FOREIGN TABLE ext_engine.moments", superuser_conn)
+        superuser_conn.commit()
+        run_command(f"DROP TABLE {ENGINE_SCHEMA}.moments", pgduck_conn)
+        pgduck_conn.commit()
+
+
 def run_query_in_thread(query, conn):
     """Start running a query in a thread, and return the thread and its errors."""
     errors = []
@@ -1570,6 +1620,37 @@ def test_engine_errors_name_the_server(pg_conn, pg_engine):
         )
         assert 'server "ext_engine_pg" did not return a DuckDB query plan' in error
         pg_conn.rollback()
+
+
+def test_engine_gets_session_timezone(superuser_conn, pg_conn, pg_engine, app_user):
+    run_command(
+        f"""
+        CREATE VIEW {PG_ENGINE_SCHEMA}.zone AS
+            SELECT current_setting('TimeZone') AS name;
+        GRANT SELECT ON {PG_ENGINE_SCHEMA}.zone TO {PG_ENGINE_READER};
+        CREATE FOREIGN TABLE ext_engine.zone (name text)
+            SERVER ext_engine_pg OPTIONS (schema_name '{PG_ENGINE_SCHEMA}', table_name 'zone');
+        GRANT SELECT ON ext_engine.zone TO {app_user};
+    """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        for zone in ["America/New_York", "Etc/GMT-3", "UTC"]:
+            run_command(f"SET TimeZone TO '{zone}'", pg_conn)
+            assert run_query("SELECT name FROM ext_engine.zone", pg_conn) == [[zone]]
+            pg_conn.rollback()
+    finally:
+        rollback(pg_conn, superuser_conn)
+        run_command(
+            f"""
+            DROP FOREIGN TABLE ext_engine.zone;
+            DROP VIEW {PG_ENGINE_SCHEMA}.zone;
+        """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
 
 
 @pytest.mark.parametrize("full_pushdown", [True, False], ids=["pushdown", "fdw"])

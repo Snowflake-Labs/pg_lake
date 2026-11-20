@@ -141,6 +141,10 @@ DuckDB does not have. The engine has to return these columns in the declared typ
   `uuid_extract_version_pg`, and the macros `lake_regexp_matches`, `generate_series_int`,
   `generate_series_int_step` and `jsonb`. It also uses DuckDB's `json` and `icu` extensions,
   and `spatial` for geospatial queries.
+- `SET TimeZone = '<zone>'; SELECT current_setting('TimeZone')`, answered with the zone's
+  name, for IANA zone names and `Etc/GMT` offsets. pg_lake sends it on every connection, so
+  that the engine computes with the session's `TimeZone`, and falls back to `UTC` for a zone
+  that the engine does not accept.
 - `explain (format 'json') <query>`, which returns DuckDB's plan in the second column of one
   row, for `EXPLAIN`.
 - Only the engine's own tables and views for a table name. An engine must not read a name that

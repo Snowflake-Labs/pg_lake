@@ -207,6 +207,17 @@ GetExternalEngineConnection(Oid serverId, Oid userId)
 				 errhint("Target server's authentication method must be changed or set the password_required=false in the user mapping attributes.")));
 	}
 
+	PG_TRY();
+	{
+		SetQueryEngineTimeZone(connection);
+	}
+	PG_CATCH();
+	{
+		ReleasePGDuckConnection(connection);
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
+
 	return connection;
 }
 
