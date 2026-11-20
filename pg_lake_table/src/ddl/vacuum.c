@@ -1003,6 +1003,9 @@ VacuumCompactMetadata(Oid relationId, bool isVerbose)
 	if (!ActiveSnapshotSet())
 		PushActiveSnapshot(GetTransactionSnapshot());
 
+	/* keep the table from being dropped between the check and its use */
+	LockRelationOid(relationId, AccessShareLock);
+
 	PgLakeTableType tableType = GetPgLakeTableType(relationId);
 
 	if (tableType != PG_LAKE_ICEBERG_TABLE_TYPE)
@@ -1323,6 +1326,22 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 			PushActiveSnapshot(GetTransactionSnapshot());
 
 		/*
+		 * Each pass commits, so the table can be dropped between passes: lock
+		 * it until this pass commits, and stop if it is gone.
+		 */
+		if (relationId != InvalidOid)
+		{
+			LockRelationOid(relationId, AccessShareLock);
+
+			if (!IsPgLakeIcebergForeignTableById(relationId))
+			{
+				PopActiveSnapshot();
+				hasRemainingFiles = false;
+				break;
+			}
+		}
+
+		/*
 		 * We may need to rollback the initial state of the database in case
 		 * of rollback.
 		 */
@@ -1424,6 +1443,9 @@ VacuumRegisterMissingFields(Oid relationId)
 		/* nothing to do for dropped tables */
 		return;
 	}
+
+	/* keep the table from being dropped between the check and its use */
+	LockRelationOid(relationId, AccessShareLock);
 
 	if (!IsInternalIcebergTable(relationId))
 	{
