@@ -220,6 +220,17 @@ TryGetPGDuckConnectionWithConninfo(const char *conninfo, const char *serverName,
 
 
 /*
+ * SetQueryEngineTimeZone sets the session's TimeZone on a connection to an
+ * external query engine, as GetPGDuckConnection does for pgduck_server.
+ */
+void
+SetQueryEngineTimeZone(PGDuckConnection * pgDuckConnection)
+{
+	SetPGDuckTimeZone(pgDuckConnection);
+}
+
+
+/*
  * TrackPGDuckConnection adds a new connection to the hash, so that it is
  * closed when the (sub)transaction that opened it ends.
  */
