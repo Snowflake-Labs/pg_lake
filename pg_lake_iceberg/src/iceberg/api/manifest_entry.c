@@ -71,7 +71,7 @@ FetchManifestEntriesFromManifest(IcebergManifest * manifest, ManifestEntryPredic
 				 errmsg("manifest is NULL")));
 	}
 
-	List	   *manifestEntries = ReadManifestEntries(manifest->manifest_path);
+	List	   *manifestEntries = ReadManifestEntries(manifest->manifest_path, false);
 
 	List	   *filteredManifestEntries = NIL;
 

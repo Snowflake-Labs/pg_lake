@@ -374,6 +374,17 @@ GetTrackedIcebergMetadataOperations(void)
 	return TrackedIcebergMetadataOperationsHash;
 }
 
+void
+RecordRestCatalogStagedTable(Oid relationId, const char *uuid)
+{
+	TableMetadataOperationTracker *tracker =
+		hash_search(TrackedIcebergMetadataOperationsHash, &relationId, HASH_FIND, NULL);
+
+	if (tracker == NULL || !tracker->relationCreated)
+		elog(ERROR, "no tracked CREATE TABLE for relation %u", relationId);
+	tracker->stagedTableUuid = MemoryContextStrdup(TopTransactionContext, uuid);
+}
+
 
 /*
  * HasAnyTrackedIcebergMetadataChanges checks if there are any tracked
@@ -499,13 +510,17 @@ PostAllRestCatalogRequests(void)
 			if (createTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
+					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+											 REST_CATALOG_OP_PUBLISH_CREATE_TABLE, HTTP_POST,
 											 requestPerTable->tableRestUrl, createTableRequest->body,
 											 PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 				if (httpResult.status != 200)
 				{
-					ReportHTTPError(httpResult, WARNING);
+					ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_CREATE_TABLE,
+									requestPerTable->catalogName,
+									requestPerTable->catalogNamespace,
+									requestPerTable->catalogTableName);
 
 					/*
 					 * Ouch, something failed. Should we stop sending the
@@ -516,13 +531,17 @@ PostAllRestCatalogRequests(void)
 			else if (dropTableRequest != NULL)
 			{
 				HttpResult	httpResult =
-					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_DELETE,
+					SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+											 REST_CATALOG_OP_PUBLISH_DROP_TABLE, HTTP_DELETE,
 											 requestPerTable->tableRestUrl, NULL,
 											 DeleteHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 				if (httpResult.status != 204)
 				{
-					ReportHTTPError(httpResult, WARNING);
+					ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_DROP_TABLE,
+									requestPerTable->catalogName,
+									requestPerTable->catalogNamespace,
+									requestPerTable->catalogTableName);
 
 					/*
 					 * Ouch, something failed. Should we stop sending the
@@ -648,14 +667,16 @@ PostAllRestCatalogRequests(void)
 		char	   *url = psprintf(REST_CATALOG_TRANSACTION_COMMIT,
 								   PgLakeXactRestCatalog->catalogOpts->baseUri,
 								   URLEncodePrefix(catalogName));
-		HttpResult	httpResult = SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts, HTTP_POST,
+		HttpResult	httpResult = SendRequestToRestCatalog(PgLakeXactRestCatalog->catalogOpts,
+														  REST_CATALOG_OP_PUBLISH_COMMIT, HTTP_POST,
 														  url, batchRequestBody->data,
 														  PostHeadersWithAuth(PgLakeXactRestCatalog->catalogOpts));
 
 		/* Polaris and Nessie answer 204, Lakekeeper 200 */
 		if (httpResult.status != 200 && httpResult.status != 204)
 		{
-			ReportHTTPError(httpResult, WARNING);
+			ReportHTTPError(httpResult, WARNING, REST_CATALOG_OP_PUBLISH_COMMIT,
+							catalogName, NULL, NULL);
 		}
 	}
 
@@ -1214,7 +1235,8 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 				char	   *body =
 					FinishStageRestCatalogIcebergTableCreateRestRequest(relationId,
 																		createOp->newSchema,
-																		createOp->partitionSpecs);
+																		createOp->partitionSpecs,
+																		opTracker->stagedTableUuid);
 
 				RecordRestCatalogRequestInTx(relationId, REST_CATALOG_CREATE_TABLE, body);
 			}

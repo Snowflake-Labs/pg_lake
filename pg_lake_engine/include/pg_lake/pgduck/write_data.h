@@ -68,6 +68,9 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   bool wrapNativeTypes,
 													   List *partitionByExprs);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
-extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationFormat);
+extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc,
+													  CopyDataFormat destinationFormat,
+													  DataFileSchema * schema);
 extern PGDLLEXPORT char *TupleDescToProjectionListForWrite(TupleDesc tupleDesc,
-														   CopyDataFormat destinationFormat);
+														   CopyDataFormat destinationFormat,
+														   DataFileSchema * schema);

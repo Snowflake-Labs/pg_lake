@@ -23,3 +23,5 @@
 
 extern PGDLLEXPORT unsigned char *PGNumericIcebergBinarySerialize(Datum numericDatum, int icebergScale, size_t *binaryLen);
 extern PGDLLEXPORT Datum PGNumericIcebergBinaryDeserialize(unsigned char *numericBinary, size_t binaryLen, PGType pgType);
+extern PGDLLEXPORT bool PGNumericIcebergBinaryDeserializeSafe(unsigned char *numericBinary, size_t binaryLen,
+															  PGType pgType, Datum *result);

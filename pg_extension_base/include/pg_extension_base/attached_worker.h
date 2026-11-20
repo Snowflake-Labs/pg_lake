@@ -61,3 +61,5 @@ extern PGDLLEXPORT void ReadResultsFromAttachedWorker(AttachedWorker * worker,
 													  TupleDesc *resultDesc);
 extern PGDLLEXPORT bool IsAttachedWorkerRunning(AttachedWorker * worker);
 extern PGDLLEXPORT void EndAttachedWorker(AttachedWorker * worker);
+extern PGDLLEXPORT void ExecuteSqlStringDiscardingResults(const char *sql,
+														  MemoryContext parseContext);

@@ -41,3 +41,4 @@ extern PGDLLEXPORT List *FetchDataFilePathsFromSnapshot(IcebergSnapshot * snapsh
 extern PGDLLEXPORT void FetchAllDataAndDeleteFilesFromCurrentSnapshot(IcebergTableMetadata * metadata, List **dataFiles, List **deleteFiles);
 extern PGDLLEXPORT void FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata * metadata, List **dataFilePaths, List **deleteFilePaths);
 extern PGDLLEXPORT List *FetchDataFilesFromManifest(IcebergManifest * manifest, bool pathOnly, ManifestEntryPredicateFn manifestEntryPredicateFn, DataFilePredicateFn dataFilePredicateFn);
+extern PGDLLEXPORT void ErrorIfDataFileNotParquet(DataFile * dataFile);

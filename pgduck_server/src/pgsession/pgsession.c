@@ -68,6 +68,8 @@
  */
 #define TRANSMIT_PREFIX "transmit "
 #define TRANSMIT_PREFIX_LENGTH (strlen(TRANSMIT_PREFIX))
+#define TRANSMIT_BINARY_KEYWORD "binary"
+#define TRANSMIT_BINARY_KEYWORD_LENGTH (strlen(TRANSMIT_BINARY_KEYWORD))
 
 /*
  * Convenience macro for pgsession_handle_connection to terminate
@@ -86,6 +88,7 @@
 	((status) == DUCKDB_QUERY_ERROR ||			 \
 	 (status) == DUCKDB_TYPE_CONVERSION_ERROR || \
 	 (status) == DUCKDB_FATAL_ERROR || \
+	 (status) == DUCKDB_RESULT_TOO_LARGE_ERROR || \
 	 (status) == DUCKDB_OUT_OF_MEMORY_ERROR)
 
 #define IS_FATAL_DUCKDB_STATUS(status) \
@@ -117,6 +120,8 @@ static int	process_bind_message(PGSession * pgSession, StringInfo inputMessage);
 static int	process_execute_message(PGSession * pgSession, StringInfo inputMessage);
 
 static bool is_transmit_query(const char *queryString);
+static const char *parse_transmit_prefix(const char *queryString,
+										 ResponseFormat * responseFormat);
 
 /* global flag on whether to exit on OOM */
 int			oom_is_fatal = true;
@@ -285,6 +290,13 @@ pgsession_handle_connection(void *input)
 
 					const char *preparedStmtName = pq_getmsgstring(&inputMessage);
 
+					if (preparedStmtName == NULL)
+					{
+						PGDUCK_SERVER_ERROR("could not read prepared statement name for connection %d",
+											pgSession.pgClient->clientSocket);
+						goto finally;
+					}
+
 					if (strlen(preparedStmtName) != 0)
 					{
 						PGDUCK_SERVER_ERROR("pgduck_server currently does not support named prepared statements: %s",
@@ -388,19 +400,16 @@ process_query_message(PGSession * pgSession, StringInfo inputMessage)
 						QueryStringForLog(queryString, queryForLog,
 										  sizeof(queryForLog)));
 
-	ResponseFormat responseFormat = {
-		.isTransmit = is_transmit_query(queryString)
-	};
+	ResponseFormat responseFormat = {0};
 
-	if (responseFormat.isTransmit)
-	{
-		/* Skip the prefix by directly adding its length to the pointer */
-		queryString += TRANSMIT_PREFIX_LENGTH;
-	}
+	queryString = parse_transmit_prefix(queryString, &responseFormat);
 
 	char	   *errorMessage = NULL;
 	DuckDBStatus status = duckdb_session_run_command(&pgSession->duckSession, queryString,
 													 &responseFormat, &errorMessage);
+
+	if (responseFormat.targetTypeIds != NULL)
+		pfree(responseFormat.targetTypeIds);
 
 	if (status == DUCKDB_SUCCESS)
 	{
@@ -501,13 +510,9 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 
 	const char *queryString = fullQueryString;
 
-	bool		isTransmit = is_transmit_query(queryString);
+	ResponseFormat parsedFormat = {0};
 
-	if (isTransmit)
-	{
-		/* Skip the prefix by directly adding its length to the pointer */
-		queryString = fullQueryString + TRANSMIT_PREFIX_LENGTH;
-	}
+	queryString = parse_transmit_prefix(fullQueryString, &parsedFormat);
 
 	/* we need the query string to survive for a bit longer */
 	char	   *queryStringCopy = pstrdup(queryString);
@@ -523,8 +528,11 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 	pgSession->pgSessionPreparedStmt.state = PREPARED_STATEMENT_ALLOCATED;
 	pgSession->pgSessionPreparedStmt.queryString = queryStringCopy;
 
-	/* remember whether the query was prefixed with transmit */
-	pgSession->pgSessionPreparedStmt.responseFormat.isTransmit = isTransmit;
+	/*
+	 * remember whether the query was prefixed with transmit, the type ids are
+	 * freed when the prepared statement is deallocated
+	 */
+	pgSession->pgSessionPreparedStmt.responseFormat = parsedFormat;
 
 	bool		readFailed = false;
 
@@ -571,7 +579,7 @@ process_parse_message(PGSession * pgSession, StringInfo inputMessage)
 
 		char		queryForLog[QUERY_LOG_BUF_SIZE];
 
-		PGDUCK_SERVER_WARN("query from client %d failed during parse: %s; query: %.500s",
+		PGDUCK_SERVER_WARN("query from client %d failed during parse: %.4096s; query: %.500s",
 						   pgSession->pgClient->clientSocket,
 						   errorMessage,
 						   QueryStringForLog(queryStringCopy, queryForLog,
@@ -726,7 +734,7 @@ process_bind_message(PGSession * pgSession, StringInfo inputMessage)
 
 			char		queryForLog[QUERY_LOG_BUF_SIZE];
 
-			PGDUCK_SERVER_WARN("query from client %d failed during bind: %s; query: %.500s",
+			PGDUCK_SERVER_WARN("query from client %d failed during bind: %.4096s; query: %.500s",
 							   pgSession->pgClient->clientSocket,
 							   errorMessage,
 							   QueryStringForLog(pgSession->pgSessionPreparedStmt.queryString,
@@ -932,6 +940,8 @@ sqlstate_for_status(DuckDBStatus status)
 	{
 		case DUCKDB_OUT_OF_MEMORY_ERROR:
 			return PGDUCK_SQLSTATE_OUT_OF_MEMORY;
+		case DUCKDB_RESULT_TOO_LARGE_ERROR:
+			return PGDUCK_SQLSTATE_PROGRAM_LIMIT_EXCEEDED;
 		case DUCKDB_FATAL_ERROR:
 		case DUCKDB_INITIALIZATION_ERROR:
 		case DUCKDB_SESSION_INITIALIZATION_ERROR:
@@ -999,6 +1009,11 @@ handle_pgsession_error_message(DuckDBStatus status, PGSession * pgSession, char 
 			 */
 			errorRes = pgsession_send_postgres_error(pgSession, ERROR,
 													 errorMessage != NULL ? errorMessage : "Unsupported type",
+													 sqlState);
+			break;
+		case DUCKDB_RESULT_TOO_LARGE_ERROR:
+			errorRes = pgsession_send_postgres_error(pgSession, ERROR,
+													 "result value or row exceeds the maximum message size of 1 GB",
 													 sqlState);
 			break;
 		case DUCKDB_OUT_OF_MEMORY_ERROR:
@@ -1260,6 +1275,14 @@ pgsession_prepared_statement_deallocate(PGSession * pgSession)
 	{
 		duckdb_session_destroy_prepare(&pgSession->duckSession);
 		pg_free(pgSession->pgSessionPreparedStmt.queryString);
+
+		ResponseFormat *responseFormat = &pgSession->pgSessionPreparedStmt.responseFormat;
+
+		if (responseFormat->targetTypeIds != NULL)
+			pfree(responseFormat->targetTypeIds);
+
+		memset(responseFormat, 0, sizeof(ResponseFormat));
+
 		pgSession->pgSessionPreparedStmt.state = PREPARED_STATEMENT_INVALID;
 	}
 }
@@ -1276,4 +1299,101 @@ static bool
 is_transmit_query(const char *queryString)
 {
 	return strncasecmp(queryString, TRANSMIT_PREFIX, TRANSMIT_PREFIX_LENGTH) == 0;
+}
+
+
+/*
+ * parse_transmit_prefix parses an optional "TRANSMIT " or
+ * "TRANSMIT BINARY (oid, ...) " prefix, sets the response format
+ * accordingly, and returns the remainder of the query string.
+ *
+ * The oids are the PostgreSQL types the client will use to read each result
+ * column. A malformed oid list is treated as a plain TRANSMIT, and the rest
+ * of the string is passed to DuckDB as is, which will then fail to parse.
+ */
+static const char *
+parse_transmit_prefix(const char *queryString, ResponseFormat * responseFormat)
+{
+	responseFormat->isTransmit = false;
+	responseFormat->targetTypeCount = 0;
+	responseFormat->targetTypeIds = NULL;
+	responseFormat->isBinary = false;
+
+	if (!is_transmit_query(queryString))
+		return queryString;
+
+	responseFormat->isTransmit = true;
+
+	const char *afterTransmit = queryString + TRANSMIT_PREFIX_LENGTH;
+	const char *cursor = afterTransmit;
+
+	while (isspace((unsigned char) *cursor))
+		cursor++;
+
+	if (strncasecmp(cursor, TRANSMIT_BINARY_KEYWORD, TRANSMIT_BINARY_KEYWORD_LENGTH) != 0)
+		return afterTransmit;
+
+	cursor += TRANSMIT_BINARY_KEYWORD_LENGTH;
+
+	while (isspace((unsigned char) *cursor))
+		cursor++;
+
+	if (*cursor != '(')
+		return afterTransmit;
+
+	cursor++;
+
+	/* count the oids to size the array, at most one per comma plus one */
+	int			maxTypeCount = 1;
+
+	for (const char *c = cursor; *c != '\0' && *c != ')'; c++)
+		if (*c == ',')
+			maxTypeCount++;
+
+	Oid		   *typeIds = palloc(sizeof(Oid) * maxTypeCount);
+	int			typeCount = 0;
+
+	while (true)
+	{
+		while (isspace((unsigned char) *cursor))
+			cursor++;
+
+		if (*cursor == ')' && typeCount == 0)
+			break;
+
+		if (!isdigit((unsigned char) *cursor) || typeCount == maxTypeCount)
+		{
+			pfree(typeIds);
+			return afterTransmit;
+		}
+
+		char	   *end = NULL;
+		unsigned long typeId = strtoul(cursor, &end, 10);
+
+		typeIds[typeCount++] = (Oid) typeId;
+		cursor = end;
+
+		while (isspace((unsigned char) *cursor))
+			cursor++;
+
+		if (*cursor == ',')
+		{
+			cursor++;
+			continue;
+		}
+
+		if (*cursor == ')')
+			break;
+
+		pfree(typeIds);
+		return afterTransmit;
+	}
+
+	/* skip the closing parenthesis */
+	cursor++;
+
+	responseFormat->targetTypeCount = typeCount;
+	responseFormat->targetTypeIds = typeIds;
+
+	return cursor;
 }

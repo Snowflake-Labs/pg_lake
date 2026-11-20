@@ -124,6 +124,7 @@ typedef struct PgLakeDDL
 static bool Allowed(Node *arg, Oid relationId);
 static bool Disallowed(Node *arg, Oid relationId);
 static bool DisallowedAddColumnWithUnsupportedConstraints(Node *arg, Oid relationId);
+static bool DisallowedAddNotNullConstraint(Node *arg, Oid relationId);
 static bool AllowedAlterColumnTypeForIceberg(Node *arg, Oid relationId);
 static bool DisallowedForWritableRestRenameTable(Node *arg, Oid relationId);
 static bool DisallowedForWritableRestSetSchema(Node *arg, Oid relationId);
@@ -175,7 +176,8 @@ static const PgLakeDDL PgLakeDDLs[] = {
 	ALTER_TABLE_DDL(AT_GenericOptions, Allowed, Allowed),
 	ALTER_TABLE_DDL(AT_SetStorage, Allowed, Allowed),
 	ALTER_TABLE_DDL(AT_ChangeOwner, Allowed, Allowed),
-	ALTER_TABLE_DDL(AT_AddConstraint, Allowed, Allowed),
+	ALTER_TABLE_DDL(AT_AddConstraint, DisallowedAddNotNullConstraint,
+					DisallowedAddNotNullConstraint),
 	ALTER_TABLE_DDL(AT_ValidateConstraint, Allowed, Allowed),
 	ALTER_TABLE_DDL(AT_DropConstraint, Allowed, Allowed),
 	ALTER_TABLE_DDL(AT_EnableTrig, Allowed, Allowed),
@@ -1145,6 +1147,8 @@ PgLakeUnsupportedAlterTableToString(AlterTableCmd *cmd)
 			return "ALTER COLUMN ... DROP NOT NULL";
 		case AT_SetNotNull:
 			return "ALTER COLUMN ... SET NOT NULL";
+		case AT_AddConstraint:
+			return "ADD CONSTRAINT ... NOT NULL";
 #if PG_VERSION_NUM >= 170000
 		case AT_SetExpression:
 			return "ALTER COLUMN ... SET EXPRESSION";
@@ -1461,6 +1465,27 @@ DisallowedAddColumnWithUnsupportedConstraints(Node *arg, Oid relationId)
 	{
 		return false;
 	}
+
+	return true;
+}
+
+
+/*
+ * DisallowedAddNotNullConstraint rejects ADD CONSTRAINT ... NOT NULL, which
+ * does not check the existing data of a foreign table, for the same reason
+ * SET NOT NULL is rejected: pruning trusts attnotnull to mean the data files
+ * have no NULLs in the column.
+ */
+static bool
+DisallowedAddNotNullConstraint(Node *arg, Oid relationId)
+{
+	AlterTableCmd *cmd = (AlterTableCmd *) arg;
+
+	Assert(cmd->subtype == AT_AddConstraint);
+
+	if (IsA(cmd->def, Constraint) &&
+		castNode(Constraint, cmd->def)->contype == CONSTR_NOTNULL)
+		return false;
 
 	return true;
 }

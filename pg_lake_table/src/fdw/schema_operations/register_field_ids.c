@@ -55,6 +55,8 @@
 
 
 static DataFileSchema * GetDataFileSchemaForTableInternal(Oid relationId);
+static DataFileSchema * OrderFieldsByAttributeNumber(Oid relationId,
+													 DataFileSchema * schema);
 
 /*
 * RegisterPostgresColumnMappings adds entries to the
@@ -326,7 +328,7 @@ CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId)
 	char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, forUpdate);
 
 	DataFileSchema *schema =
-		GetDataFileSchemaForExternalIcebergTable(currentMetadataPath,
+		GetDataFileSchemaForExternalIcebergTable(relationId, currentMetadataPath,
 												 LowercasesColumnNames(relationId));
 
 	Relation	rel = RelationIdGetRelation(relationId);
@@ -415,10 +417,59 @@ GetDataFileSchemaForTableInternal(Oid relationId)
 		Assert(IsExternalIcebergTable(relationId));
 
 		char	   *path = GetIcebergMetadataLocation(relationId, false);
+		DataFileSchema *schema =
+			GetDataFileSchemaForExternalIcebergTable(relationId, path,
+													 LowercasesColumnNames(relationId));
 
-		return GetDataFileSchemaForExternalIcebergTable(path,
-														LowercasesColumnNames(relationId));
+		return OrderFieldsByAttributeNumber(relationId, schema);
 	}
+}
+
+
+/*
+ * OrderFieldsByAttributeNumber returns a copy of an external table's schema
+ * with its fields in the order of the columns they match by name, and the
+ * fields that match no column after them.
+ *
+ * A scan pairs the fields with the table's columns by position, while the
+ * Iceberg schema keeps its own order: a column dropped and re-added under
+ * its old name moves to the end, and an engine can reorder columns outright.
+ */
+static DataFileSchema *
+OrderFieldsByAttributeNumber(Oid relationId, DataFileSchema * schema)
+{
+	DataFileSchema *ordered = palloc0(sizeof(DataFileSchema));
+	AttrNumber *attnums = palloc(sizeof(AttrNumber) * schema->nfields);
+	AttrNumber	maxAttnum = 0;
+	size_t		nextField = 0;
+
+	ordered->nfields = schema->nfields;
+	ordered->fields = palloc(sizeof(DataFileSchemaField) * schema->nfields);
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
+	{
+		attnums[fieldIdx] = get_attnum(relationId, schema->fields[fieldIdx].name);
+		maxAttnum = Max(maxAttnum, attnums[fieldIdx]);
+	}
+
+	for (AttrNumber attnum = 1; attnum <= maxAttnum; attnum++)
+	{
+		for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
+		{
+			if (attnums[fieldIdx] == attnum)
+				ordered->fields[nextField++] = schema->fields[fieldIdx];
+		}
+	}
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
+	{
+		if (attnums[fieldIdx] <= InvalidAttrNumber)
+			ordered->fields[nextField++] = schema->fields[fieldIdx];
+	}
+
+	Assert(nextField == schema->nfields);
+
+	return ordered;
 }
 
 
@@ -435,14 +486,22 @@ GetDataFileSchemaForTable(Oid relationId)
 /*
  * GetDataFileSchemaForExternalIcebergTable gets a table schema field based
  * on the current Iceberg metadata, with names lowercased if requested.
+ * relationId is the table the metadata belongs to, or InvalidOid if none.
  */
 DataFileSchema *
-GetDataFileSchemaForExternalIcebergTable(char *metadataPath, bool lowercaseNames)
+GetDataFileSchemaForExternalIcebergTable(Oid relationId, char *metadataPath,
+										 bool lowercaseNames)
 {
-	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+	IcebergTableMetadata *metadata =
+		ReadIcebergTableMetadataForRelation(relationId, metadataPath);
 
 	if (lowercaseNames)
 		LowercaseIcebergTableMetadataNames(metadata);
+	/* without a relation, as for COPY FROM, no column takes the names */
+	if (OidIsValid(relationId))
+		TruncateIcebergTableMetadataNames(metadata, false, false);
+
+	ApplyIcebergNameMapping(metadata);
 
 	IcebergTableSchema *icebergSchema = GetCurrentIcebergTableSchema(metadata);
 
@@ -450,6 +509,17 @@ GetDataFileSchemaForExternalIcebergTable(char *metadataPath, bool lowercaseNames
 
 	schema->fields = icebergSchema->fields;
 	schema->nfields = icebergSchema->fields_length;
+
+	/* the scan reads files that predate a column as its initial-default */
+	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
+	{
+		DataFileSchemaField *field = &schema->fields[fieldIdx];
+
+		if (field->initialDefault != NULL)
+			field->duckSerializedInitialDefault =
+				GetDuckSerializedIcebergFieldInitialDefault(field->initialDefault,
+															field->type);
+	}
 
 	return schema;
 }
@@ -460,9 +530,10 @@ GetDataFileSchemaForExternalIcebergTable(char *metadataPath, bool lowercaseNames
  * Iceberg table.
  */
 List *
-GetLeafFieldsForExternalIcebergTable(char *metadataPath)
+GetLeafFieldsForExternalIcebergTable(Oid relationId, char *metadataPath)
 {
-	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+	IcebergTableMetadata *metadata =
+		ReadIcebergTableMetadataForRelation(relationId, metadataPath);
 
 	return GetLeafFieldsFromIcebergMetadata(metadata);
 }
@@ -487,7 +558,7 @@ GetLeafFieldsForTable(Oid relationId)
 
 		char	   *path = GetIcebergMetadataLocation(relationId, false);
 
-		return GetLeafFieldsForExternalIcebergTable(path);
+		return GetLeafFieldsForExternalIcebergTable(relationId, path);
 	}
 }
 

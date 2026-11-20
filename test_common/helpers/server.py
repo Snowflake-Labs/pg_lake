@@ -479,6 +479,27 @@ def run_cli_command(command):
 # ---------------------------------------------------------------------------
 
 
+CATALOG_LOG_PREFIX = "pg_lake_catalog: "
+
+
+def server_log_offset():
+    """The size of the test server's log, to read what is logged after it."""
+    return os.path.getsize(f"{server_params.PG_DIR}/logfile")
+
+
+def catalog_log_lines(offset):
+    """The pg_lake_catalog sentences logged since offset, without the prefix."""
+    with open(f"{server_params.PG_DIR}/logfile") as f:
+        f.seek(offset)
+        delta = f.read()
+
+    return [
+        line.split(CATALOG_LOG_PREFIX, 1)[1]
+        for line in delta.splitlines()
+        if CATALOG_LOG_PREFIX in line
+    ]
+
+
 def start_postgres(db_path, db_user, db_port):
     # Stop any leftover PostgreSQL from a previous interrupted run.
     stop_postgres(db_path)
@@ -563,9 +584,11 @@ def start_postgres(db_path, db_user, db_port):
 
 def initdb(initdb_bindir, db_path, db_user):
     locale_setting = None
+    locale_args = []
     if platform.system() == "Darwin":
-        # macOS
+        # macOS; collate by bytes, as C.UTF-8 does on Linux
         locale_setting = "en_US.UTF-8"
+        locale_args = ["--lc-collate", "C"]
     elif platform.system() == "Linux":
         # Linux
         locale_setting = "C.UTF-8"
@@ -584,6 +607,7 @@ def initdb(initdb_bindir, db_path, db_user):
             db_user,
             "--locale",
             locale_setting,
+            *locale_args,
             "--data-checksums",
             "--set",
             "shared_preload_libraries=pgaudit,pg_cron,pg_extension_base,auto_explain,pg_stat_statements",

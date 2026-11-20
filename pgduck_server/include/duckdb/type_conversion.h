@@ -21,11 +21,42 @@
 #include <duckdb.h>
 #include "catalog/pg_type_d.h"
 #include "duckdb/duckdb.h"
+#include "lib/stringinfo.h"
 
 /*
  * We should have a relatively large buffer allocated for hugint
  */
 #define	STACK_ALLOCATED_OUTPUT_BUFFER_SIZE 42
+
+/*
+ * Upper bound on the size of a StringInfo that holds result data, matching
+ * MaxAllocSize. The frontend enlargeStringInfo() calls exit() when a buffer
+ * would grow past this, which takes down the whole pgduck_server rather than
+ * only the current query, so result values must be checked before they are
+ * appended.
+ */
+#define MAX_RESULT_BUFFER_SIZE ((size_t) 0x3fffffff)
+
+/*
+ * StringInfoHasRoomFor returns whether extraBytes more bytes (plus the
+ * terminating NUL) fit in buf without exceeding MAX_RESULT_BUFFER_SIZE.
+ */
+static inline bool
+StringInfoHasRoomFor(StringInfo buf, size_t extraBytes)
+{
+	return extraBytes < MAX_RESULT_BUFFER_SIZE - (size_t) buf->len;
+}
+
+/*
+ * MaxEscapedTextSize returns an upper bound on the number of bytes that
+ * appending value with quoting and escaping (array, record, or CSV) can add,
+ * including a little slack for delimiters.
+ */
+static inline size_t
+MaxEscapedTextSize(const char *value)
+{
+	return (value == NULL ? 0 : strlen(value) * 2) + 8;
+}
 
 /*
  * The buffer can be allocated on the stack or on the heap, depending on the

@@ -35,7 +35,8 @@ static void InsertIcebergPartitionSpec(Oid relationId,
 static void InsertIcebergPartitionField(Oid relationId,
 										int specId,
 										IcebergPartitionSpecField * field);
-static List *GetAllPartitionSpecFieldsForExternalIcebergTable(char *metadataPath);
+static List *GetAllPartitionSpecFieldsForExternalIcebergTable(Oid relationId,
+															  char *metadataPath);
 static List *GetAllPartitionSpecFieldsForInternalIcebergTable(Oid relationId);
 
 
@@ -447,9 +448,10 @@ InsertIcebergPartitionField(Oid relationId, int specId, IcebergPartitionSpecFiel
  * for the external Iceberg table.
  */
 static List *
-GetAllPartitionSpecFieldsForExternalIcebergTable(char *metadataPath)
+GetAllPartitionSpecFieldsForExternalIcebergTable(Oid relationId, char *metadataPath)
 {
-	IcebergTableMetadata *metadata = ReadIcebergTableMetadata(metadataPath);
+	IcebergTableMetadata *metadata =
+		ReadIcebergTableMetadataForRelation(relationId, metadataPath);
 
 	List	   *allPartitionFields = NIL;
 
@@ -684,7 +686,7 @@ GetAllPartitionSpecFields(Oid relationId)
 		/* external iceberg table, get from remote metadata */
 		char	   *currentMetadataPath = GetIcebergMetadataLocation(relationId, false);
 
-		return GetAllPartitionSpecFieldsForExternalIcebergTable(currentMetadataPath);
+		return GetAllPartitionSpecFieldsForExternalIcebergTable(relationId, currentMetadataPath);
 	}
 }
 

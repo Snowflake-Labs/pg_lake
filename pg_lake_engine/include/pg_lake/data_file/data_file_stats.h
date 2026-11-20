@@ -117,7 +117,5 @@ extern PGDLLEXPORT StatsCollector * ExecuteCopyToCommandOnPGDuckConnection(char 
 																		   CopyDataFormat destinationFormat);
 extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
 extern PGDLLEXPORT DataFileStats * CreateDataFileStatsForDataFile(char *dataFilePath,
-																  int64 rowCount, int64 deletedRowCount,
-																  List *leafFields);
+																  int64 rowCount, int64 deletedRowCount);
 extern PGDLLEXPORT void ApplyColumnStatsModeForAllFileStats(Oid relationId, List *dataFileStats);
-extern PGDLLEXPORT List *GetRemoteParquetColumnStats(char *path, List *leafFields);

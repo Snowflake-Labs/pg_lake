@@ -42,7 +42,11 @@
  * unambiguous even under SPI_START_EXTENSION_OWNER's locked-down
  * search_path.
  */
-#define TX_DATA_FILES_TABLE_NAME "pg_temp.pg_lake_tx_data_file_ids"
+#define TX_DATA_FILES_TABLE_RELNAME "pg_lake_tx_data_file_ids"
+#define TX_DATA_FILES_TABLE_NAME "pg_temp." TX_DATA_FILES_TABLE_RELNAME
+
+/* Whether the tracker table exists; errors if the session user made it. */
+bool		TxDataFileIdsTableExists(void);
 
 /* True when adjacent ops of this type can be collapsed into one bulk SQL. */
 bool		BatchableType(TableMetadataOperationType type);

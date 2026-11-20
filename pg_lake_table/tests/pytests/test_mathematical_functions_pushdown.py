@@ -207,6 +207,12 @@ test_agg_cases = [
         '"atanh_pg"(',
         True,
     ),
+    (
+        "sign(double precision)",
+        "WHERE sign(col_double) >= 0",
+        '"sign"(',
+        True,
+    ),
 ]
 
 
@@ -331,6 +337,8 @@ def create_hyperbolic_values_table(pg_conn, s3, extension):
             UNION ALL SELECT 'infinity'::double precision
             UNION ALL SELECT '-infinity'::double precision
             UNION ALL SELECT 'nan'::double precision
+            UNION ALL SELECT '1e-320'::double precision
+            UNION ALL SELECT '-1e-320'::double precision
         ) TO '{url}' WITH (FORMAT 'parquet');
         """,
         pg_conn,
@@ -380,6 +388,90 @@ def test_hyperbolic_functions_specific_values(
         f"(SELECT {func}(col_val) FROM hyperbolic_vals.fdw_tbl) fdw",
         f"(SELECT {func}(col_val) FROM hyperbolic_vals.heap_tbl) heap",
     )
+
+
+def test_sign_float8_pushdown(create_hyperbolic_values_table, pg_conn):
+    """Push down sign(float8) and match Postgres on IEEE specials.
+
+    Covers positive/negative finite values, +/-0, NULL, +/-infinity, and NaN
+    (both engines return 0 for NaN). Also checks an FDW predicate with full
+    query pushdown off.
+    """
+    select_query = "SELECT sign(col_val) AS sign_val FROM {table}"
+    pushed_query = select_query.format(table="hyperbolic_vals.fdw_tbl")
+    assert_query_pushdownable(pushed_query, pg_conn)
+    assert_remote_query_contains_expression(pushed_query, '"sign"(', pg_conn)
+
+    # Compare the pushed query's own rows with Postgres. Wrapping both sides in
+    # EXCEPT ALL would run sign() in Postgres on the foreign table side.
+    pushed_rows = run_query(pushed_query, pg_conn)
+    heap_rows = run_query(
+        select_query.format(table="hyperbolic_vals.heap_tbl"), pg_conn
+    )
+    # sign() never returns NaN, so sorting the values is well defined.
+    float_key = lambda value: (value is None, value or 0.0)
+    assert all(
+        isinstance(row["sign_val"], float) or row["sign_val"] is None
+        for row in pushed_rows
+    )
+    assert sorted((row["sign_val"] for row in pushed_rows), key=float_key) == sorted(
+        (row["sign_val"] for row in heap_rows), key=float_key
+    )
+
+    run_command(
+        "SET pg_lake_table.enable_full_query_pushdown TO false;",
+        pg_conn,
+    )
+    try:
+        predicate_query = (
+            "SELECT col_val FROM hyperbolic_vals.fdw_tbl WHERE sign(col_val) = 1"
+        )
+        assert_query_not_pushdownable(predicate_query, pg_conn)
+        assert_remote_query_contains_expression(predicate_query, '"sign"(', pg_conn)
+        assert_table_contents_match(
+            pg_conn,
+            "(SELECT col_val FROM hyperbolic_vals.fdw_tbl "
+            "WHERE sign(col_val) = 1) fdw",
+            "(SELECT col_val FROM hyperbolic_vals.heap_tbl "
+            "WHERE sign(col_val) = 1) heap",
+        )
+    finally:
+        run_command("RESET pg_lake_table.enable_full_query_pushdown;", pg_conn)
+
+
+def test_sign_float8_negated_zero_pushdown(create_hyperbolic_values_table, pg_conn):
+    """Negating a pushed sign(float8) of zero must give -0, as in Postgres.
+
+    sign() returns a float8 zero, so its negation is -0 and atan2(-0, -1) is
+    -pi. An integer zero has no sign, which would turn both into 0 and pi.
+    """
+    select_query = (
+        "SELECT -sign(col_val) AS neg_sign, "
+        "atan2(-sign(col_val), -1) AS angle FROM {table}"
+    )
+    pushed_query = select_query.format(table="hyperbolic_vals.fdw_tbl")
+    assert_query_pushdownable(pushed_query, pg_conn)
+    assert_remote_query_contains_expression(pushed_query, '"sign"(', pg_conn)
+
+    # Fetch each side on its own: a query joining both tables would not be
+    # fully pushed, and Postgres would evaluate sign() for the foreign table.
+    pushed_rows = run_query(pushed_query, pg_conn)
+    heap_rows = run_query(
+        select_query.format(table="hyperbolic_vals.heap_tbl"), pg_conn
+    )
+
+    # Python's == treats -0.0 and 0.0 as equal, so compare copysign as well.
+    def row_values(row):
+        neg_sign = row["neg_sign"]
+        zero_sign = None if neg_sign is None else math.copysign(1.0, neg_sign)
+        return (
+            neg_sign is None,
+            neg_sign or 0.0,
+            zero_sign or 0.0,
+            row["angle"] or 0.0,
+        )
+
+    assert sorted(map(row_values, pushed_rows)) == sorted(map(row_values, heap_rows))
 
 
 @pytest.fixture(scope="module")

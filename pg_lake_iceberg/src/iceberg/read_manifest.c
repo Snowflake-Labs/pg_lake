@@ -29,6 +29,7 @@
 #include "utils/wait_event.h"
 
 #include "pg_lake/iceberg/manifest_spec.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/avro/avro_reader.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/permissions/roles.h"
@@ -68,10 +69,15 @@ typedef struct ManifestReaderContext
 	/* partition field name => field id mapping */
 	HTAB	   *partitionFieldMap;
 	bool		isV1Manifest;
+
+	/* whether to read s3a:// and s3n:// URLs as s3:// */
+	bool		rewriteHadoopSchemes;
 }			ManifestReaderContext;
 
 
 static void ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary * summary, void *context);
+static void ReadColumnStatsFromAvro(avro_value_t * record, char *fieldName,
+									ColumnStat * *stats, size_t *length, void *context);
 static void ReadColumnStatFromAvro(avro_value_t * record, ColumnStat * stat, void *context);
 static void ReadColumnBoundFromAvro(avro_value_t * record, ColumnBound * bound, void *context);
 static void ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderContext * context);
@@ -88,10 +94,18 @@ static PartitionFieldIdMapEntry * ReferencedPartitionField(avro_schema_t partiti
 
 /*
  * ReadIcebergManifests reads manifests from manifest list path.
+ *
+ * A read takes s3a:// and s3n:// URLs as the s3:// URLs of the same objects
+ * (see S3URLFromHadoopScheme).  A write (forWrite) keeps refusing them: it
+ * would write the s3:// form back, which the engine that wrote the table no
+ * longer matches against its own position deletes.
  */
 List *
-ReadIcebergManifests(const char *manifestListPath)
+ReadIcebergManifests(const char *manifestListPath, bool forWrite)
 {
+	if (!forWrite)
+		manifestListPath = S3URLFromHadoopScheme(manifestListPath);
+
 	ValidateStorageURL(manifestListPath);
 
 	size_t		contentLength = 0;
@@ -119,12 +133,13 @@ ReadIcebergManifests(const char *manifestListPath)
 	IcebergManifest *manifest = palloc0(sizeof(IcebergManifest));
 	AvroReader *manifestListReader = AvroReaderCreate(manifestListLocalPath);
 
-	void	   *context = NULL;
+	ManifestReaderContext context = {.rewriteHadoopSchemes = !forWrite};
 
 	while (AvroReaderReadRecord(manifestListReader,
 								(AvroParseFunction) ReadIcebergManifestFromAvro,
-								manifest, context))
+								manifest, &context))
 	{
+		ErrorIfURLLeavesObjectStorage(manifest->manifest_path, manifestListPath);
 		manifests = lappend(manifests, manifest);
 		manifest = palloc0(sizeof(IcebergManifest));
 	}
@@ -137,11 +152,15 @@ ReadIcebergManifests(const char *manifestListPath)
 
 /*
  * ReadManifestEntries reads an Iceberg manifest file and
- * returns a list of manifest entries.
+ * returns a list of manifest entries.  forWrite is as for
+ * ReadIcebergManifests.
  */
 List *
-ReadManifestEntries(const char *manifestPath)
+ReadManifestEntries(const char *manifestPath, bool forWrite)
 {
+	if (!forWrite)
+		manifestPath = S3URLFromHadoopScheme(manifestPath);
+
 	ValidateStorageURL(manifestPath);
 
 	size_t		contentLength = 0;
@@ -172,11 +191,13 @@ ReadManifestEntries(const char *manifestPath)
 	ManifestReaderContext *context = palloc0(sizeof(ManifestReaderContext));
 
 	context->partitionFieldMap = CreateManifestPartitionFieldMap(manifestReader);
+	context->rewriteHadoopSchemes = !forWrite;
 
 	while (AvroReaderReadRecord(manifestReader,
 								(AvroParseFunction) ReadIcebergManifestEntryFromAvro,
 								manifestEntry, context))
 	{
+		ErrorIfURLLeavesObjectStorage(manifestEntry->data_file.file_path, manifestPath);
 		manifestEntries = lappend(manifestEntries, manifestEntry);
 		manifestEntry = palloc0(sizeof(IcebergManifestEntry));
 	}
@@ -192,6 +213,11 @@ ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, v
 {
 	memset(manifest, '\0', sizeof(IcebergManifest));
 	AvroGetStringField(record, "manifest_path", AVRO_FIELD_REQUIRED, &manifest->manifest_path, &manifest->manifest_path_length);
+	if (((ManifestReaderContext *) context)->rewriteHadoopSchemes)
+	{
+		manifest->manifest_path = S3URLFromHadoopScheme(manifest->manifest_path);
+		manifest->manifest_path_length = strlen(manifest->manifest_path);
+	}
 	AvroGetInt64Field(record, "manifest_length", AVRO_FIELD_REQUIRED, &manifest->manifest_length);
 	AvroGetInt32Field(record, "partition_spec_id", AVRO_FIELD_REQUIRED, &manifest->partition_spec_id);
 	/* v1 manifest lists have neither content nor sequence numbers. */
@@ -304,6 +330,11 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 		ereport(ERROR, (errcode(ERRCODE_DATA_EXCEPTION),
 						errmsg("invalid Iceberg data file content %d", dataFile->content)));
 	AvroGetStringField(record, "file_path", AVRO_FIELD_REQUIRED, &dataFile->file_path, &dataFile->file_path_length);
+	if (context->rewriteHadoopSchemes)
+	{
+		dataFile->file_path = S3URLFromHadoopScheme(dataFile->file_path);
+		dataFile->file_path_length = strlen(dataFile->file_path);
+	}
 
 	ValidateStorageURL(dataFile->file_path);
 
@@ -320,6 +351,9 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 	if (dataFile->content == ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES &&
 		dataFile->file_format != NULL &&
 		pg_strcasecmp(dataFile->file_format, "PUFFIN") == 0)
+	{
+		LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_DELETION_VECTORS);
+
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("pg_lake_iceberg: deletion vectors are not supported"),
@@ -327,29 +361,18 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 						   dataFile->file_path),
 				 errhint("Deletion vectors are an Iceberg v3 feature; rewrite "
 						 "the table with positional delete files to read it.")));
+	}
 
 	AvroGetRecordField(record, "partition", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadPartitionFromAvro, &dataFile->partition, context);
 	AvroGetInt64Field(record, "record_count", AVRO_FIELD_REQUIRED, &dataFile->record_count);
 	AvroGetInt64Field(record, "file_size_in_bytes", AVRO_FIELD_REQUIRED, &dataFile->file_size_in_bytes);
-	AvroGetObjectArrayField(record, "column_sizes", AVRO_FIELD_OPTIONAL,
-							(AvroParseFunction) ReadColumnStatFromAvro,
-							sizeof(ColumnStat),
-							(void **) &dataFile->column_sizes,
+	ReadColumnStatsFromAvro(record, "column_sizes", &dataFile->column_sizes,
 							&dataFile->column_sizes_length, context);
-	AvroGetObjectArrayField(record, "value_counts", AVRO_FIELD_OPTIONAL,
-							(AvroParseFunction) ReadColumnStatFromAvro,
-							sizeof(ColumnStat),
-							(void **) &dataFile->value_counts,
+	ReadColumnStatsFromAvro(record, "value_counts", &dataFile->value_counts,
 							&dataFile->value_counts_length, context);
-	AvroGetObjectArrayField(record, "null_value_counts", AVRO_FIELD_OPTIONAL,
-							(AvroParseFunction) ReadColumnStatFromAvro,
-							sizeof(ColumnStat),
-							(void **) &dataFile->null_value_counts,
+	ReadColumnStatsFromAvro(record, "null_value_counts", &dataFile->null_value_counts,
 							&dataFile->null_value_counts_length, context);
-	AvroGetObjectArrayField(record, "nan_value_counts", AVRO_FIELD_OPTIONAL,
-							(AvroParseFunction) ReadColumnStatFromAvro,
-							sizeof(ColumnStat),
-							(void **) &dataFile->nan_value_counts,
+	ReadColumnStatsFromAvro(record, "nan_value_counts", &dataFile->nan_value_counts,
 							&dataFile->nan_value_counts_length, context);
 	AvroGetObjectArrayField(record, "lower_bounds", AVRO_FIELD_OPTIONAL,
 							(AvroParseFunction) ReadColumnBoundFromAvro,
@@ -817,10 +840,39 @@ ReadFieldSummaryFromAvro(avro_value_t * record, FieldSummary * summary, void *co
 	AvroGetBinaryField(record, "upper_bound", AVRO_FIELD_OPTIONAL, (const void **) &summary->upper_bound, &summary->upper_bound_length);
 }
 
+/* ReadColumnStatsFromAvro drops unusable optional metrics. */
+static void
+ReadColumnStatsFromAvro(avro_value_t * record, char *fieldName,
+						ColumnStat * *stats, size_t *length, void *context)
+{
+	AvroGetObjectArrayField(record, fieldName, AVRO_FIELD_OPTIONAL,
+							(AvroParseFunction) ReadColumnStatFromAvro,
+							sizeof(ColumnStat), (void **) stats, length, context);
+
+	size_t		validCount = 0;
+
+	for (size_t i = 0; i < *length; i++)
+	{
+		/* Iceberg field IDs are positive; zero marks an unreadable entry. */
+		if ((*stats)[i].column_id > 0)
+			(*stats)[validCount++] = (*stats)[i];
+	}
+	*length = validCount;
+}
+
+
 static void
 ReadColumnStatFromAvro(avro_value_t * record, ColumnStat * stat, void *context)
 {
 	memset(stat, '\0', sizeof(ColumnStat));
+
+	/*
+	 * A missing count must remain unknown, not prove the absence of NULLs or
+	 * NaNs.
+	 */
+	if (!AvroFieldExists(record, "key") || !AvroFieldExists(record, "value"))
+		return;
+
 	AvroGetInt32Field(record, "key", AVRO_FIELD_REQUIRED, &stat->column_id);
 	AvroGetInt64Field(record, "value", AVRO_FIELD_REQUIRED, &stat->value);
 }

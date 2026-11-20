@@ -25,6 +25,7 @@
 #include "utils/builtins.h"
 #include "utils/memutils.h"
 
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 PG_FUNCTION_INFO_V1(register_namespace_to_rest_catalog);
@@ -37,6 +38,7 @@ PG_FUNCTION_INFO_V1(set_test_rest_catalog_auth_response);
 PG_FUNCTION_INFO_V1(test_rest_catalog_auth_provider_calls);
 PG_FUNCTION_INFO_V1(test_rest_catalog_auth_provider_endpoints);
 PG_FUNCTION_INFO_V1(fetch_rest_catalog_config_prefix_from_server);
+PG_FUNCTION_INFO_V1(catalog_stats_through_rendezvous);
 
 /*
 * register_namespace_to_rest_catalog is a test function that registers
@@ -354,4 +356,25 @@ fetch_rest_catalog_config_prefix_from_server(PG_FUNCTION_ARGS)
 		PG_RETURN_NULL();
 
 	PG_RETURN_TEXT_P(cstring_to_text(prefix));
+}
+
+
+/*
+ * catalog_stats_through_rendezvous returns the counters the way another
+ * extension does: through the function pg_lake_iceberg leaves in its
+ * rendezvous variable, with this function's own fcinfo.  An empty slot is an
+ * error here, where such an extension would return no rows.
+ */
+Datum
+catalog_stats_through_rendezvous(PG_FUNCTION_ARGS)
+{
+	void	  **slot = find_rendezvous_variable(PG_LAKE_CATALOG_STATS_FUNCTION);
+	PGFunction	stats = (PGFunction) *slot;
+
+	if (stats == NULL)
+		ereport(ERROR,
+				(errmsg("pg_lake_iceberg left no function in \"%s\"",
+						PG_LAKE_CATALOG_STATS_FUNCTION)));
+
+	return stats(fcinfo);
 }

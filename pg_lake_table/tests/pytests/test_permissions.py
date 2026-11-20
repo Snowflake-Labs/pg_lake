@@ -880,3 +880,87 @@ def test_query_user(pg_conn, s3, superuser_conn, app_user, with_default_location
         superuser_conn,
     )
     superuser_conn.commit()
+
+
+def test_struct_type_reuse_requires_ownership(
+    duckdb_conn, user_conn, superuser_conn, s3
+):
+    "Inferred struct types owned by other roles should not be reused"
+
+    url = f"s3://{TEST_BUCKET}/test_struct_type_reuse_requires_ownership/data.parquet"
+    location = f"s3://{TEST_BUCKET}/test_struct_type_reuse_requires_ownership/tbl/"
+
+    run_command(
+        f"""
+        COPY (SELECT 1 AS id, {{ a: 1, b: 'hello' }} AS payload) TO '{url}';
+        """,
+        duckdb_conn,
+    )
+
+    # another role creates matching struct types, both under an arbitrary
+    # name and under the generated name by importing the same file
+    run_command(
+        f"""
+        CREATE ROLE struct_other;
+        GRANT ALL ON SCHEMA public TO struct_other;
+        GRANT lake_read TO struct_other;
+        SET ROLE struct_other;
+        CREATE TABLE public.struct_other_tbl () WITH (definition_from='{url}');
+        RESET ROLE;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    other_type = run_query(
+        """
+        SELECT atttypid::regtype::text FROM pg_attribute
+        WHERE attrelid = 'public.struct_other_tbl'::regclass AND attname = 'payload'
+        """,
+        superuser_conn,
+    )[0][0]
+
+    run_command(
+        f"""
+        CREATE SCHEMA test_struct_owner;
+        CREATE TABLE test_struct_owner.tbl () USING iceberg
+        WITH (definition_from='{url}', location='{location}');
+        """,
+        user_conn,
+    )
+    user_conn.commit()
+
+    res = run_query(
+        """
+        SELECT atttypid::regtype::text, pg_get_userbyid(typowner) = current_user
+        FROM pg_attribute JOIN pg_type ON (atttypid = pg_type.oid)
+        WHERE attrelid = 'test_struct_owner.tbl'::regclass AND attname = 'payload'
+        """,
+        user_conn,
+    )
+    assert res[0][0] != other_type
+    assert res[0][1]
+
+    # dropping the other role's types does not affect our table
+    run_command(
+        f"""
+        DROP TABLE public.struct_other_tbl;
+        DROP OWNED BY struct_other CASCADE;
+        DROP ROLE struct_other;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    res = run_query(
+        """
+        SELECT count(*) FROM pg_attribute
+        WHERE attrelid = 'test_struct_owner.tbl'::regclass
+        AND attname = 'payload' AND NOT attisdropped
+        """,
+        user_conn,
+    )
+    assert res[0][0] == 1
+
+    run_command("DROP SCHEMA test_struct_owner CASCADE", user_conn)
+    user_conn.commit()

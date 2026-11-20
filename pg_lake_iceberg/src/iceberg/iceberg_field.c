@@ -38,6 +38,7 @@
 #include "pg_lake/extensions/pg_lake_engine.h"
 #include "pg_lake/extensions/pg_lake_spatial.h"
 #include "pg_lake/extensions/postgis.h"
+#include "pg_lake/iceberg/catalog_log.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
 #include "pg_lake/permissions/roles.h"
@@ -579,10 +580,14 @@ GetIcebergTypeInfoFromTypeName(const char *typeName)
 		 * (decimal(10,2))
 		 *
 		 * We need to find the longest prefix match since we have types like
-		 * timestamp and timestamptz.
+		 * timestamp and timestamptz. The match must end the name or start its
+		 * arguments: timestamp_ns is not a timestamp.
 		 */
 		if (currentTypeNameLen > longestPrefixLen &&
-			strncasecmp(currentTypeName, typeName, currentTypeNameLen) == 0)
+			strncasecmp(currentTypeName, typeName, currentTypeNameLen) == 0 &&
+			(typeName[currentTypeNameLen] == '\0' ||
+			 typeName[currentTypeNameLen] == '(' ||
+			 typeName[currentTypeNameLen] == '['))
 		{
 			icebergTypeInfo->type = IcebergToDuckDBTypes[typeIndex].icebergType;
 			longestPrefixLen = currentTypeNameLen;
@@ -606,6 +611,8 @@ GetIcebergTypeInfoFromTypeName(const char *typeName)
 
 	if (icebergTypeInfo->type == ICEBERG_TYPE_INVALID)
 	{
+		LogCatalogUnsupportedType(typeName);
+
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("iceberg type %s is not supported", typeName)));

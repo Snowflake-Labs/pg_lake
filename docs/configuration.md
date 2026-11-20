@@ -167,6 +167,16 @@ no account (`az://<container>/...`); configure a pgduck_server Azure secret for 
 | `r2://` | Cloudflare R2 | Yes | Yes |
 | `https://`, `http://` | Public web servers | Yes | No |
 
+Iceberg tables that engines built on Hadoop wrote can also name their files by `s3a://` or
+`s3n://` URLs. pg_lake reads those as `s3://` URLs for the same objects, in a table's metadata,
+manifests and position delete files, in the storage locations a catalog vends credentials for,
+and in the `path` option of an Iceberg foreign table. It does not write to a table that names
+its files this way.
+
+A catalog can only point pg_lake to object storage. pg_lake refuses an `https://` or `http://`
+URL that a catalog answers with, and one inside Iceberg metadata, a manifest list or a manifest,
+unless that file was itself read from a web server.
+
 pg_lake detects the region of S3 buckets automatically. For the best performance and to avoid
 data transfer charges, keep buckets that you write to or query often in the same region as
 your server.

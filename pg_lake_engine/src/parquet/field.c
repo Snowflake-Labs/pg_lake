@@ -113,6 +113,16 @@ DeepCopyFieldStructElement(FieldStructElement * structElementField)
 	copiedStructElementField->duckSerializedInitialDefault = (structElementField->duckSerializedInitialDefault) ? pstrdup(structElementField->duckSerializedInitialDefault) : NULL;
 	copiedStructElementField->type = DeepCopyField(structElementField->type);
 
+	ListCell   *nameCell = NULL;
+
+	foreach(nameCell, structElementField->mappedNames)
+	{
+		char	   *name = lfirst(nameCell);
+
+		copiedStructElementField->mappedNames =
+			lappend(copiedStructElementField->mappedNames, pstrdup(name));
+	}
+
 	return copiedStructElementField;
 }
 

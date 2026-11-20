@@ -124,7 +124,7 @@ DeleteFromParquetQuery(char *sourceDataFilePath, List *positionDeleteFiles,
 	char	   *readFileQuery =
 		ReadDataSourceQuery(list_make1(sourceDataFilePath), positionDeleteFiles,
 							DATA_FORMAT_PARQUET, DATA_COMPRESSION_INVALID,
-							expectedDesc, formatOptions, schema,
+							expectedDesc, formatOptions, schema, NULL,
 							stats, READ_DATA_READ_ROW_LOCATION);
 
 	appendStringInfo(&command,

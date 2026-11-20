@@ -38,6 +38,40 @@ def test_copy_to_parquet_s3(s3, pgduck_conn):
     pgduck_conn.rollback()
 
 
+def test_s3_upload_part_size(s3, pgduck_conn):
+    """
+    The S3 uploader holds one part buffer per file being written, sized as
+    s3_uploader_max_filesize / s3_uploader_max_parts_per_file. At DuckDB's
+    800GB default that is 76.5MiB, more than the whole memory_limit below.
+    """
+    results = perform_query_on_cursor(
+        "SELECT current_setting('s3_uploader_max_filesize')", pgduck_conn
+    )
+    assert results[0][0] == "50GB"
+
+    prefix = "test_s3_upload_part_size"
+    perform_query("SET GLOBAL memory_limit TO '64MB'", pgduck_conn)
+    try:
+        # ~16MB of incompressible CSV, so the upload spans several 5MiB parts
+        perform_query(
+            f"""
+            COPY (SELECT range, md5(range::text) || md5((range + 1)::text) FROM range(250000))
+            TO 's3://{TEST_BUCKET}/{prefix}/data.csv';
+        """,
+            pgduck_conn,
+        )
+    finally:
+        perform_query("RESET GLOBAL memory_limit", pgduck_conn)
+
+    results = perform_query_on_cursor(
+        f"SELECT count(*) FROM read_csv('s3://{TEST_BUCKET}/{prefix}/data.csv')",
+        pgduck_conn,
+    )
+    assert results[0][0] == 250000
+
+    pgduck_conn.rollback()
+
+
 def test_copy_to_parquet_gcs(gcs, pgduck_conn):
     perform_query(
         f"""

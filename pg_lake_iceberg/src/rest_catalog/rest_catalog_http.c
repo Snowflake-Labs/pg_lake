@@ -23,8 +23,9 @@
  * backoff), and 419 or a first 401 (force-refresh the credential via the
  * auth layer and patch the Authorization header before retrying).
  *
- * ReportHTTPError translates a non-200 HttpResult into a Postgres
- * ereport, parsing the standard REST-catalog error envelope:
+ * ReportHTTPError translates a failed HttpResult into a Postgres ereport
+ * that names the failed operation, parsing the standard REST-catalog
+ * error envelope:
  *
  *     { "error": { "message": ..., "type": ..., "code": ... } }
  *
@@ -40,12 +41,15 @@
 #include "fmgr.h"
 #include "lib/stringinfo.h"
 #include "nodes/miscnodes.h"
+#include "portability/instr_time.h"
 #include "utils/builtins.h"
 #include "utils/jsonb.h"
 #include "utils/numeric.h"
 
 #include "pg_extension_base/base_workers.h"
 #include "pg_lake/http/http_client.h"
+#include "pg_lake/iceberg/catalog_log.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 /* error bodies are small; anything larger or deeper is not worth parsing */
@@ -146,11 +150,14 @@ ClassifyRestCatalogRequestRetry(long status, int maxRetry, int retryNo,
  * canRefreshCredential is false only for the credential request itself
  * (see SendCredentialRequestToRestCatalog), both to avoid recursion and so
  * that its own 401 is reported as the authentication failure it is.
+ *
+ * A failure is logged under op once retries are over; logging must not
+ * throw, for the same post-commit reason.
  */
 static HttpResult
-SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
-					   HttpMethod method, const char *url,
-					   const char *body, List *headers)
+SendRestCatalogRequest(RestCatalogOptions * opts, RestCatalogOp op,
+					   bool canRefreshCredential, HttpMethod method,
+					   const char *url, const char *body, List *headers)
 {
 	const int	MAX_HTTP_RETRY_FOR_REST_CATALOG = 3;
 
@@ -170,19 +177,30 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
 		HTTP_TLS_DEPLOYMENT_CLIENT_CERT : HTTP_TLS_NO_CLIENT_CERT;
 
 	HttpResult	result;
+	bool		done = false;
+	CatalogRetryReason retryReason = CATALOG_RETRY_RATE_LIMITED;
+	instr_time	startTime;
+	instr_time	elapsed;
 
-	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG; retryNo++)
+	INSTR_TIME_SET_CURRENT(startTime);
+
+	for (int retryNo = 1; retryNo <= MAX_HTTP_RETRY_FOR_REST_CATALOG && !done; retryNo++)
 	{
+		if (retryNo > 1)
+			CountCatalogRetry(opts, op, retryReason);
+
 		result = SendHttpRequest(method, url, body, headers, clientAuth);
 
 		switch (ClassifyRestCatalogRequestRetry(result.status, MAX_HTTP_RETRY_FOR_REST_CATALOG,
 												retryNo, canRefreshCredential, authAlreadyRefreshed))
 		{
 			case REST_CATALOG_RETRY_BACKOFF_SHORT:
+				retryReason = CATALOG_RETRY_RATE_LIMITED;
 				LightSleep(LinearBackoffSleepMs(500, retryNo));
 				continue;
 
 			case REST_CATALOG_RETRY_BACKOFF_LONG:
+				retryReason = CATALOG_RETRY_UNAVAILABLE;
 				LightSleep(LinearBackoffSleepMs(5000, retryNo));
 				continue;
 
@@ -198,13 +216,21 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
 
 					UpdateAuthorizationHeader(headers, fresh);
 					authAlreadyRefreshed = true;
+					retryReason = CATALOG_RETRY_AUTH_REFRESH;
 					continue;
 				}
 
 			case REST_CATALOG_RETRY_STOP:
-				return result;
+				done = true;
+				break;
 		}
 	}
+
+	INSTR_TIME_SET_CURRENT(elapsed);
+	INSTR_TIME_SUBTRACT(elapsed, startTime);
+
+	LogCatalogRequest(opts, op, &result);
+	CountCatalogRequest(opts, op, &result, INSTR_TIME_GET_MICROSEC(elapsed));
 
 	return result;
 }
@@ -221,12 +247,14 @@ SendRestCatalogRequest(RestCatalogOptions * opts, bool canRefreshCredential,
  * forced false for it, same as the credential request itself below.
  */
 HttpResult
-SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method, const char *url,
+SendRequestToRestCatalog(RestCatalogOptions * opts, RestCatalogOp op,
+						 HttpMethod method, const char *url,
 						 const char *body, List *headers)
 {
 	bool		canRefreshCredential = (opts->authType != REST_CATALOG_AUTH_TYPE_NONE);
 
-	return SendRestCatalogRequest(opts, canRefreshCredential, method, url, body, headers);
+	return SendRestCatalogRequest(opts, op, canRefreshCredential, method, url,
+								  body, headers);
 }
 
 
@@ -240,7 +268,8 @@ SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
 {
 	bool		canRefreshCredential = false;
 
-	return SendRestCatalogRequest(opts, canRefreshCredential, HTTP_POST, url, body, headers);
+	return SendRestCatalogRequest(opts, REST_CATALOG_OP_TOKEN, canRefreshCredential,
+								  HTTP_POST, url, body, headers);
 }
 
 
@@ -285,15 +314,18 @@ IsParseableErrorBody(const char *body)
 
 /*
  * GetRestCatalogErrorFields sets the error message and type from a REST
- * catalog error response, or leaves them NULL.
+ * catalog error response, or leaves them NULL.  The type is the Iceberg
+ * error envelope's, or the error code of an OAuth2 error response, which has
+ * no message.
  *
- * ReportHTTPError also runs after commit, where any ERROR becomes a PANIC,
- * and the body can be anything a catalog or a proxy in front of it sent.
- * So parse it without raising errors and skip what does not fit.  A soft
- * parse still raises on deep nesting (check_stack_depth) and on oversized
- * jsonb, so bodies that could hit either are skipped before parsing.
+ * ReportHTTPError and the catalog error log also run after commit, where any
+ * ERROR becomes a PANIC, and the body can be anything a catalog or a proxy
+ * in front of it sent.  So parse it without raising errors and skip what
+ * does not fit.  A soft parse still raises on deep nesting
+ * (check_stack_depth) and on oversized jsonb, so bodies that could hit
+ * either are skipped before parsing.
  */
-static void
+void
 GetRestCatalogErrorFields(const char *body, const char **message, const char **type)
 {
 	ErrorSaveContext escontext = {T_ErrorSaveContext};
@@ -310,6 +342,12 @@ GetRestCatalogErrorFields(const char *body, const char **message, const char **t
 		return;
 
 	JsonbValue *error = getKeyJsonValueFromContainer(&jsonb->root, "error", strlen("error"), NULL);
+
+	if (error != NULL && error->type == jbvString)
+	{
+		*type = pnstrdup(error->val.string.val, error->val.string.len);
+		return;
+	}
 
 	if (error == NULL || error->type != jbvBinary ||
 		!JsonContainerIsObject(error->val.binary.data))
@@ -329,18 +367,105 @@ GetRestCatalogErrorFields(const char *body, const char **message, const char **t
 
 
 /*
-* Reports an HTTP error by raising an appropriate error message.
-* The error format of rest catalog is follows:
-* {
-*  "error": {
-*    "message": "Malformed request",
-*    "type": "BadRequestException",
-*    "code": 400
-*  }
-*/
-void
-ReportHTTPError(HttpResult httpResult, int level)
+ * RestCatalogRequestFailure describes the request that failed, naming the
+ * catalog object it was for.
+ */
+static char *
+RestCatalogRequestFailure(RestCatalogOp op, const char *catalogName,
+						  const char *namespaceName, const char *tableName)
 {
+	StringInfoData object;
+
+	initStringInfo(&object);
+	appendStringInfoString(&object, catalogName);
+	if (namespaceName != NULL)
+		appendStringInfo(&object, ".%s", namespaceName);
+	if (tableName != NULL)
+		appendStringInfo(&object, ".%s", tableName);
+
+	switch (op)
+	{
+		case REST_CATALOG_OP_LIST_NAMESPACES:
+			return psprintf("could not list the namespaces of catalog \"%s\" in the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_GET_NAMESPACE:
+			return psprintf("could not look up namespace \"%s\" in the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_CREATE_NAMESPACE:
+			return psprintf("could not create namespace \"%s\" in the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_LOAD_TABLE:
+			return psprintf("could not load table \"%s\" from the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_CREATE_TABLE:
+		case REST_CATALOG_OP_PUBLISH_CREATE_TABLE:
+			return psprintf("could not create table \"%s\" in the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_PUBLISH_DROP_TABLE:
+			return psprintf("could not drop table \"%s\" from the REST catalog",
+							object.data);
+
+		case REST_CATALOG_OP_PUBLISH_COMMIT:
+			return psprintf("could not commit changes to catalog \"%s\" in the REST catalog",
+							object.data);
+
+		default:
+			return pstrdup("REST catalog request failed");
+	}
+}
+
+
+/*
+ * RestCatalogErrorCode picks the SQLSTATE for a failed REST catalog
+ * response, so clients can tell a missing grant or a missing object from
+ * other failures without parsing the message.
+ */
+static int
+RestCatalogErrorCode(long status, const char *type)
+{
+	if (status == HTTP_STATUS_FORBIDDEN)
+		return ERRCODE_INSUFFICIENT_PRIVILEGE;
+
+	if (status == HTTP_STATUS_NOT_FOUND && type != NULL)
+	{
+		if (strcmp(type, "NoSuchTableException") == 0)
+			return ERRCODE_UNDEFINED_TABLE;
+		if (strcmp(type, "NoSuchNamespaceException") == 0)
+			return ERRCODE_UNDEFINED_SCHEMA;
+	}
+
+	return ERRCODE_EXTERNAL_ROUTINE_EXCEPTION;
+}
+
+
+/*
+ * ReportHTTPError reports a failed REST catalog request.  The primary
+ * message names the operation and the catalog object, followed by the
+ * message from the catalog's error response:
+ *
+ * {
+ *  "error": {
+ *    "message": "Malformed request",
+ *    "type": "BadRequestException",
+ *    "code": 400
+ *  }
+ * }
+ *
+ * namespaceName and tableName are NULL for a request that is not about one.
+ */
+void
+ReportHTTPError(HttpResult httpResult, int level, RestCatalogOp op,
+				const char *catalogName, const char *namespaceName,
+				const char *tableName)
+{
+	char	   *failure = RestCatalogRequestFailure(op, catalogName, namespaceName,
+													tableName);
+
 	/*
 	 * This is a curl error, so we don't have a proper HttpResult, don't even
 	 * try to parse the response.
@@ -349,7 +474,8 @@ ReportHTTPError(HttpResult httpResult, int level)
 	{
 		ereport(level,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-				 errmsg("HTTP request failed %s", httpResult.errorMsg ? httpResult.errorMsg : "unknown error")));
+				 errmsg("%s: %s", failure,
+						httpResult.errorMsg ? httpResult.errorMsg : "unknown error")));
 
 		return;
 	}
@@ -360,10 +486,11 @@ ReportHTTPError(HttpResult httpResult, int level)
 	GetRestCatalogErrorFields(httpResult.body, &message, &type);
 
 	ereport(level,
-			(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-			 errmsg("HTTP request failed (HTTP %ld)", httpResult.status),
-			 message ? errdetail_internal("%s", message) : 0,
-			 type ? errhint("The rest catalog returned error type: %s", type) : 0));
+			(errcode(RestCatalogErrorCode(httpResult.status, type)),
+			 message ? errmsg("%s: %s", failure, message) : errmsg("%s", failure),
+			 type ? errdetail("The REST catalog returned HTTP %ld (%s).",
+							  httpResult.status, type) :
+			 errdetail("The REST catalog returned HTTP %ld.", httpResult.status)));
 }
 
 

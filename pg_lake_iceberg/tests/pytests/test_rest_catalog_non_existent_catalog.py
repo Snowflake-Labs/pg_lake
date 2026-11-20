@@ -17,6 +17,7 @@ import socket
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
+import psycopg2
 import pytest
 from utils_pytest import *
 
@@ -411,7 +412,7 @@ def _catalog_identifier_options(conn, table_name):
 
 
 def _create_read_only_table(
-    conn, table_name, server_name, catalog_name, namespace, table
+    conn, table_name, server_name, catalog_name, namespace, table, raise_error=False
 ):
     return run_command(
         f"""
@@ -424,7 +425,7 @@ def _create_read_only_table(
         )
         """,
         conn,
-        raise_error=False,
+        raise_error=raise_error,
     )
 
 
@@ -535,6 +536,115 @@ def test_read_only_table_uppercase_fallback_reports_given_names(
             'namespace "public" does not exist in the rest catalog while creating on catalog "MYDB"'
             in str(res)
         ), res
+    finally:
+        pg_conn.rollback()
+        _drop_server(superuser_conn, server_name)
+        httpd.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Errors the catalog answers with
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_BODY = json.dumps(
+    {
+        "error": {
+            "message": "Authorization failed",
+            "type": "ForbiddenException",
+            "code": 403,
+        }
+    }
+)
+
+_TABLE_NOT_FOUND_BODY = json.dumps(
+    {
+        "error": {
+            "message": "Table does not exist: PUBLIC.MISSING",
+            "type": "NoSuchTableException",
+            "code": 404,
+        }
+    }
+)
+
+_NAMESPACE_FOUND = (200, json.dumps({"namespace": ["PUBLIC"]}))
+
+
+@pytest.mark.parametrize(
+    "get_responses,table,sqlstate,message,detail",
+    [
+        (
+            {
+                "/v1/MYDB/namespaces/PUBLIC": _NAMESPACE_FOUND,
+                "/v1/MYDB/namespaces/PUBLIC/tables/NOT_GRANTED": (403, _FORBIDDEN_BODY),
+            },
+            "NOT_GRANTED",
+            "42501",
+            'could not load table "MYDB.PUBLIC.NOT_GRANTED" from the REST catalog: '
+            "Authorization failed",
+            "The REST catalog returned HTTP 403 (ForbiddenException).",
+        ),
+        (
+            {
+                "/v1/MYDB/namespaces/PUBLIC": _NAMESPACE_FOUND,
+                "/v1/MYDB/namespaces/PUBLIC/tables/MISSING": (
+                    404,
+                    _TABLE_NOT_FOUND_BODY,
+                ),
+            },
+            "MISSING",
+            "42P01",
+            'could not load table "MYDB.PUBLIC.MISSING" from the REST catalog: '
+            "Table does not exist: PUBLIC.MISSING",
+            "The REST catalog returned HTTP 404 (NoSuchTableException).",
+        ),
+        (
+            {"/v1/MYDB/namespaces/PUBLIC": (403, _FORBIDDEN_BODY)},
+            "ORDERS",
+            "42501",
+            'could not look up namespace "MYDB.PUBLIC" in the REST catalog: '
+            "Authorization failed",
+            "The REST catalog returned HTTP 403 (ForbiddenException).",
+        ),
+        (
+            {
+                "/v1/MYDB/namespaces/PUBLIC": _NAMESPACE_FOUND,
+                "/v1/MYDB/namespaces/PUBLIC/tables/ORDERS": (400, "bad request"),
+            },
+            "ORDERS",
+            "38000",
+            'could not load table "MYDB.PUBLIC.ORDERS" from the REST catalog\n',
+            "The REST catalog returned HTTP 400.",
+        ),
+    ],
+    ids=["table-forbidden", "table-missing", "namespace-forbidden", "no-envelope"],
+)
+def test_read_only_table_reports_catalog_error(
+    superuser_conn, pg_conn, extension, get_responses, table, sqlstate, message, detail
+):
+    """A failed catalog request names the operation and the object in the
+    primary message, with a SQLSTATE that tells a missing grant or object
+    apart from other failures."""
+    httpd, port, handler = _start_mock_server(get_responses=get_responses)
+    server_name = "test_srv_ro_catalog_error"
+
+    try:
+        _create_server(superuser_conn, server_name, f"http://127.0.0.1:{port}")
+
+        with pytest.raises(psycopg2.Error) as exc_info:
+            _create_read_only_table(
+                pg_conn,
+                "catalog_error",
+                server_name,
+                "MYDB",
+                "PUBLIC",
+                table,
+                raise_error=True,
+            )
+
+        error = exc_info.value
+        assert error.pgcode == sqlstate, error.pgerror
+        assert message in error.pgerror, error.pgerror
+        assert detail in error.pgerror, error.pgerror
     finally:
         pg_conn.rollback()
         _drop_server(superuser_conn, server_name)

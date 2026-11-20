@@ -20,6 +20,7 @@
 
 #include <inttypes.h>
 
+#include "access/relation.h"
 #include "catalog/pg_inherits.h"
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
@@ -52,6 +53,7 @@
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 #include "utils/lsyscache.h"
+#include "utils/rel.h"
 #include "utils/typcache.h"
 
 static PgLakeTableScan * CreateTableScanForRelation(Oid relationId,
@@ -274,24 +276,30 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 	}
 	else if (IsExternalIcebergTable(relationId))
 	{
+		char	   *path = GetIcebergMetadataLocation(relationId, false);
+
 		/*
 		 * Single choke point for storage credentials on the read path: both
 		 * the plain FDW scan path and the query-pushdown path funnel through
 		 * CreatePgLakeScanSnapshot -> here, and a table pg_lake did not
 		 * create is the only kind whose files a catalog vends credentials
 		 * for.  It has to happen before the metadata read just below, which
-		 * is itself a read of that storage.  The resolver no-ops for
-		 * everything but a read-only REST-catalog table.
+		 * is itself a read of that storage, and after the catalog lookup
+		 * above, whose answer decides whether credentials vended earlier
+		 * still stand.  Under REPEATABLE READ and SERIALIZABLE that lookup is
+		 * answered once per transaction, so the answer its first statement
+		 * got stands until the transaction ends, or until those credentials
+		 * near expiry.  The resolver no-ops for everything but a read-only
+		 * REST-catalog table.
 		 */
 		EnsureStorageCredentialsForRelation(relationId);
 
-		char	   *path = GetIcebergMetadataLocation(relationId, false);
-
-		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(path);
+		IcebergTableMetadata *metadata = ReadIcebergTableMetadataForRelation(relationId, path);
 
 		/* fold names before the schema check, which looks them up as attnames */
 		if (LowercasesColumnNames(relationId))
 			LowercaseIcebergTableMetadataNames(metadata);
+		TruncateIcebergTableMetadataNames(metadata, false, false);
 
 		/*
 		 * We cannot afford to have a different schema between the Postgres
@@ -458,6 +466,50 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 	}
 
 	/*
+	 * Each field found a column above, but a column that no field names (one
+	 * dropped or renamed in the catalog) leaves the counts equal.
+	 */
+	Bitmapset  *mappedAttnums = NULL;
+
+	foreach_ptr(PostgresColumnMapping, columnMapping, postgresColumnMappings)
+	{
+		if (columnMapping->attrNum > InvalidAttrNumber)
+			mappedAttnums = bms_add_member(mappedAttnums, columnMapping->attrNum);
+	}
+
+	bool		emitsFilename =
+		GetBoolOption(GetForeignTable(relationId)->options, "filename", false);
+	Relation	rel = relation_open(relationId, NoLock);
+	TupleDesc	tupleDesc = RelationGetDescr(rel);
+	char	   *unmatchedColumn = NULL;
+
+	for (int attIdx = 0; attIdx < tupleDesc->natts; attIdx++)
+	{
+		Form_pg_attribute attr = TupleDescAttr(tupleDesc, attIdx);
+
+		if (attr->attisdropped || bms_is_member(attr->attnum, mappedAttnums))
+			continue;
+
+		/* the scan fills the filename column, not a field */
+		if (emitsFilename && strcmp(NameStr(attr->attname), "_filename") == 0)
+			continue;
+
+		unmatchedColumn = pstrdup(NameStr(attr->attname));
+		break;
+	}
+
+	relation_close(rel, NoLock);
+
+	if (unmatchedColumn != NULL)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("Schema mismatch between Iceberg and Postgres for relation \"%s\"",
+						get_rel_name(relationId)),
+				 errdetail("Postgres column \"%s\" has no matching Iceberg field.",
+						   unmatchedColumn),
+				 errhint("Please drop and recreate the table \"%s\"", get_rel_name(relationId))));
+
+	/*
 	 * now iterate on the fields, and throw error in case anything doesn't
 	 * match
 	 */
@@ -472,8 +524,8 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 		/*
 		 * Compare the id fields. We deliberately don't compare defaults:
 		 * read-only external Iceberg tables don't carry iceberg
-		 * writeDefault/initialDefault onto pg_attribute, and defaults don't
-		 * affect read behavior anyway.
+		 * writeDefault/initialDefault onto pg_attribute, and the scan takes
+		 * initialDefault from the metadata.
 		 */
 		if (icebergField->id != postgresField->id ||
 			NullSafeStrcmp(icebergField->name, postgresField->name) != 0 ||
@@ -669,6 +721,8 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 	{
 		DataFile   *dataFile = lfirst(dataFileCell);
 
+		ErrorIfDataFileNotParquet(dataFile);
+
 		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
 
 		fileScan->path = (char *) dataFile->file_path;
@@ -685,6 +739,8 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 
 		if (dataFile->content != ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES)
 			continue;
+
+		ErrorIfDataFileNotParquet(dataFile);
 
 		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
 

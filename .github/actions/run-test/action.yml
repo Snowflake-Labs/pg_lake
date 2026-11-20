@@ -84,6 +84,7 @@ runs:
       run: |
         chmod 755 /home/postgres/pgsql-${{ inputs.pg_version }}/bin/pgduck_server
         chmod 755 /home/postgres/pgsql-${{ inputs.pg_version }}/lib/*.so
+        chmod 755 /home/postgres/pgsql-${{ inputs.pg_version }}/bin/lakekeeper
 
         if [ ${{ inputs.upgrade }} == 'true' ]; then
           chmod 755 /home/postgres/pgsql-${{ inputs.from_pg_version }}/bin/pgduck_server

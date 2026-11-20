@@ -79,6 +79,13 @@ runs:
       run: |
         make -j16 install-rest_catalog
 
+    # Not cached: the download takes seconds, and a version bump should not
+    # rebuild Polaris.
+    - name: Install Lakekeeper
+      shell: bash
+      run: |
+        make install-lakekeeper
+
     - name: Install the test extensions
       shell: bash
       run: |

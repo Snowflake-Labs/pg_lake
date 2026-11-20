@@ -109,6 +109,17 @@ typedef struct ResponseFormat
 	 * data to clients.
 	 */
 	bool		isTransmit;
+
+	/*
+	 * targetTypeIds is set for TRANSMIT BINARY (oid, ...) and lists the
+	 * PostgreSQL type of each result column. If all columns can be sent in
+	 * the binary send format of their target type, isBinary is set when the
+	 * result is described and the COPY data uses the binary COPY format.
+	 * Otherwise the result falls back to CSV.
+	 */
+	int			targetTypeCount;
+	Oid		   *targetTypeIds;
+	bool		isBinary;
 }			ResponseFormat;
 
 

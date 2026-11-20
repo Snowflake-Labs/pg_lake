@@ -84,8 +84,13 @@ endif
 
 typedefs: $(TYPEDEFS)
 
+# The buildfarm is sometimes unreachable for a few minutes, so retry, and
+# download to a temporary name so a failed attempt does not leave a file that
+# make would take as up to date.
 $(TYPEDEFS):
-	curl -o $(TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PGINDENT_PG_VERSION)_STABLE
+	curl --fail --silent --show-error --connect-timeout 30 --retry 5 \
+		-o $(TYPEDEFS).tmp https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PGINDENT_PG_VERSION)_STABLE
+	mv $(TYPEDEFS).tmp $(TYPEDEFS)
 
 check-indent: typedefs
 	pgindent --typedefs=$(TYPEDEFS) --check --diff $(INDENT_TARGETS)
@@ -276,7 +281,15 @@ REST_INSTALL_FILE := $(PG_BINDIR)/polaris-admin.jar
 $(REST_INSTALL_FILE): rest_submodule
 	$(MAKE) -C test_common/rest_catalog install
 
-install-rest_catalog: $(REST_INSTALL_FILE)
+LAKEKEEPER_INSTALL_FILE := $(PG_BINDIR)/lakekeeper
+
+# Reinstall when the pinned version changes.
+$(LAKEKEEPER_INSTALL_FILE): test_common/rest_catalog/lakekeeper.mk
+	$(MAKE) -C test_common/rest_catalog install-lakekeeper
+
+install-lakekeeper: $(LAKEKEEPER_INSTALL_FILE)
+
+install-rest_catalog: $(REST_INSTALL_FILE) $(LAKEKEEPER_INSTALL_FILE)
 
 rest_submodule:
 	git submodule init test_common/rest_catalog/polaris

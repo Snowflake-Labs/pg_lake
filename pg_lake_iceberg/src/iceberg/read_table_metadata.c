@@ -21,9 +21,12 @@
 #include "libpq-fe.h"
 #include "miscadmin.h"
 
+#include "pg_lake/iceberg/catalog_log.h"
+#include "pg_lake/iceberg/external_catalog_cache.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/json/json_reader.h"
+#include "pg_lake/permissions/roles.h"
 #include "pg_lake/util/s3_reader_utils.h"
 
 #include "utils/json.h"
@@ -35,9 +38,12 @@ static const char *SnapshotReferenceTypeName[] = {
 };
 
 
+static IcebergTableMetadata * ParseIcebergTableMetadataReadFrom(Jsonb *tableMetadataJson,
+																const char *sourcePath);
 static void ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * metadata);
 static void ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema * schema);
 static void ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field);
+static void ReadFieldDefault(JsonbContainer *json, const char *name, const char **value);
 static void ReadIcebergPartitionSpec(JsonbContainer *json, IcebergPartitionSpec * spec);
 static void ReadIcebergPartitionSpecField(JsonbContainer *json, IcebergPartitionSpecField * field);
 static void ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot * snapshot);
@@ -59,16 +65,41 @@ static bool JsonExtractField(JsonbContainer *topLevelJsonContainer,
 
 /*
  * ReadIcebergTableMetadata reads the Iceberg table metadata from the given URI.
- * The URI is validated by GetTextFromURI.
+ * The URI can come from a catalog, so it is held to ValidateStorageURL like
+ * the manifest paths read out of the metadata.
  */
 IcebergTableMetadata *
 ReadIcebergTableMetadata(const char *tableMetadataPath)
 {
+	ValidateStorageURL(tableMetadataPath);
+
 	char	   *tableMetadataText = GetTextFromURI(tableMetadataPath);
 	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, PointerGetDatum(tableMetadataText));
 	Jsonb	   *jsonb = DatumGetJsonbP(jsonbDatum);
 
-	return ParseIcebergTableMetadata(jsonb);
+	return ParseIcebergTableMetadataReadFrom(jsonb, tableMetadataPath);
+}
+
+
+/*
+ * ReadIcebergTableMetadataForRelation reads the Iceberg metadata of a table
+ * at the given location.  When the REST catalog of a read-only table already
+ * sent the document at this location in the current version scope, parse
+ * that instead of reading the file, which may be compressed in a way pg_lake
+ * cannot read (#823).
+ */
+IcebergTableMetadata *
+ReadIcebergTableMetadataForRelation(Oid relationId, const char *tableMetadataPath)
+{
+	ValidateStorageURL(tableMetadataPath);
+
+	Jsonb	   *catalogMetadata =
+		FindHeldRestCatalogMetadata(relationId, tableMetadataPath);
+
+	if (catalogMetadata != NULL)
+		return ParseIcebergTableMetadata(catalogMetadata);
+
+	return ReadIcebergTableMetadata(tableMetadataPath);
 }
 
 
@@ -80,9 +111,28 @@ ReadIcebergTableMetadata(const char *tableMetadataPath)
 IcebergTableMetadata *
 ParseIcebergTableMetadata(Jsonb *tableMetadataJson)
 {
+	return ParseIcebergTableMetadataReadFrom(tableMetadataJson, NULL);
+}
+
+
+/*
+ * ParseIcebergTableMetadataReadFrom reads a metadata document that was read
+ * from sourcePath, or that a catalog sent when sourcePath is NULL.
+ *
+ * Of the paths in the document, only the manifest lists are ever fetched, so
+ * only they are checked: pg_lake never reads the files that metadata-log,
+ * statistics or partition-statistics point to.
+ */
+static IcebergTableMetadata *
+ParseIcebergTableMetadataReadFrom(Jsonb *tableMetadataJson, const char *sourcePath)
+{
 	IcebergTableMetadata *metadata = palloc0(sizeof(IcebergTableMetadata));
 
 	ReadIcebergTableMetadataFromJson(&tableMetadataJson->root, metadata);
+
+	for (size_t i = 0; i < metadata->snapshots_length; i++)
+		ErrorIfURLLeavesObjectStorage(metadata->snapshots[i].manifest_list,
+									  sourcePath);
 
 	return metadata;
 }
@@ -144,10 +194,10 @@ NameOfFieldWithInitialDefault(Field * field)
  *
  * A column added with a default is not rewritten into the files that
  * predate it; the default is what those rows are supposed to read back
- * as.  Reading here takes the schema from the catalog's metadata, and
- * nothing on that path applies the default, so those rows would come
- * back NULL -- an answer that is wrong rather than merely incomplete.
- * v2 never had this field, so this only ever fires for v3.
+ * as.  The scan applies the initial-default of a top-level column, which
+ * pg_lake also writes into the v2 metadata of its own tables, but not of
+ * a field nested in a struct, list or map: those rows would come back
+ * NULL -- an answer that is wrong rather than merely incomplete.
  */
 static void
 ErrorIfSchemaDeclaresInitialDefault(IcebergTableMetadata * metadata)
@@ -165,14 +215,18 @@ ErrorIfSchemaDeclaresInitialDefault(IcebergTableMetadata * metadata)
 			const char *named = field->initialDefault != NULL ?
 				field->name : NameOfFieldWithInitialDefault(field->type);
 
-			if (named != NULL)
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("iceberg column default values are not supported"),
-						 errdetail("Column \"%s\" declares an initial-default, "
-								   "which rows written before the column was "
-								   "added would have to read back as.",
-								   named)));
+			if (named == NULL)
+				continue;
+
+			LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_COLUMN_DEFAULTS);
+
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("iceberg column default values are not supported"),
+					 errdetail("Column \"%s\" declares an initial-default, "
+							   "which rows written before the column was "
+							   "added would have to read back as.",
+							   named)));
 		}
 	}
 }
@@ -209,6 +263,8 @@ ReadIcebergTableMetadataFromJson(JsonbContainer *json, IcebergTableMetadata * me
 	 */
 	if (metadata->format_version != 2 && metadata->format_version != 3)
 	{
+		LogCatalogUnsupportedFormatVersion(metadata->format_version, false);
+
 		ereport(ERROR, (errmsg("unsupported iceberg format version %d",
 							   metadata->format_version)));
 	}
@@ -303,6 +359,21 @@ ReadIcebergTableSchema(JsonbContainer *json, IcebergTableSchema * schema)
 }
 
 
+/*
+ * ReadFieldDefault reads a field's default as JSON text into *value. A JSON
+ * null is a null default, which is the same as having none.
+ */
+static void
+ReadFieldDefault(JsonbContainer *json, const char *name, const char **value)
+{
+	size_t		length = 0;
+
+	if (JsonExtractFieldAsJsonString(json, name, FIELD_OPTIONAL, value, &length) &&
+		strcmp(*value, "null") == 0)
+		*value = NULL;
+}
+
+
 static void
 ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field)
 {
@@ -323,15 +394,8 @@ ReadIcebergTableSchemaField(JsonbContainer *json, DataFileSchemaField * field)
 
 	JsonExtractStringField(json, "doc", FIELD_OPTIONAL, &field->doc, &docLength);
 
-	size_t		initialDefaultLength = 0;
-
-	JsonExtractFieldAsJsonString(json, "initial-default", FIELD_OPTIONAL, &field->initialDefault,
-								 &initialDefaultLength);
-
-	size_t		writeDefaultLength = 0;
-
-	JsonExtractFieldAsJsonString(json, "write-default", FIELD_OPTIONAL, &field->writeDefault,
-								 &writeDefaultLength);
+	ReadFieldDefault(json, "initial-default", &field->initialDefault);
+	ReadFieldDefault(json, "write-default", &field->writeDefault);
 }
 
 
@@ -443,7 +507,8 @@ ReadIcebergSnapshot(JsonbContainer *json, IcebergSnapshot * snapshot)
 	memset(snapshot, '\0', sizeof(IcebergSnapshot));
 	JsonExtractInt64Field(json, "snapshot-id", FIELD_REQUIRED, &snapshot->snapshot_id);
 	JsonExtractInt64Field(json, "parent-snapshot-id", FIELD_OPTIONAL, &snapshot->parent_snapshot_id);
-	JsonExtractInt64Field(json, "sequence-number", FIELD_REQUIRED, &snapshot->sequence_number);
+	/* omitted for a snapshot taken while the table was v1, whose number is 0 */
+	JsonExtractInt64Field(json, "sequence-number", FIELD_OPTIONAL, &snapshot->sequence_number);
 	JsonExtractInt64Field(json, "timestamp-ms", FIELD_REQUIRED, &snapshot->timestamp_ms);
 	JsonExtractStringField(json, "manifest-list", FIELD_REQUIRED, &snapshot->manifest_list, &snapshot->manifest_list_length);
 	/* required by spec, but not generated by reference implementation */
@@ -549,6 +614,9 @@ ReadIcebergTypeFieldElement(JsonbContainer *json, DataFileSchemaField * fieldEle
 
 	JsonExtractStringField(json, "doc", FIELD_OPTIONAL, &fieldElement->doc, &docLength);
 
+	ReadFieldDefault(json, "initial-default", &fieldElement->initialDefault);
+	ReadFieldDefault(json, "write-default", &fieldElement->writeDefault);
+
 	/* recurse into "type" field */
 	JsonExtractField(json, "type", FIELD_REQUIRED, &fieldElement->type);
 	EnsureIcebergField(fieldElement->type);
@@ -643,6 +711,8 @@ JsonExtractField(JsonbContainer *topLevelJsonContainer, char *fieldName, FieldRe
 		}
 		else
 		{
+			LogCatalogUnsupportedType(subfieldType);
+
 			ereport(ERROR, (errmsg("unsupported Iceberg type: %s", subfieldType)));
 		}
 

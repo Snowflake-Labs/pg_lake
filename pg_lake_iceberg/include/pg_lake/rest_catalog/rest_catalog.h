@@ -40,6 +40,25 @@ extern char *RestCatalogScope;
 extern int	RestCatalogAuthType;
 extern bool RestCatalogEnableVendedCredentials;
 
+/*
+ * What a request to a REST catalog is for, as reported in the catalog error
+ * log (see catalog_log.h).
+ */
+typedef enum RestCatalogOp
+{
+	REST_CATALOG_OP_CONFIG,
+	REST_CATALOG_OP_TOKEN,
+	REST_CATALOG_OP_LIST_NAMESPACES,
+	REST_CATALOG_OP_GET_NAMESPACE,
+	REST_CATALOG_OP_CREATE_NAMESPACE,
+	REST_CATALOG_OP_LOAD_TABLE,
+	REST_CATALOG_OP_CREATE_TABLE,
+	REST_CATALOG_OP_PUBLISH_CREATE_TABLE,
+	REST_CATALOG_OP_PUBLISH_DROP_TABLE,
+	REST_CATALOG_OP_PUBLISH_COMMIT,
+	REST_CATALOG_OP_COUNT
+}			RestCatalogOp;
+
 
 /*
  * Temporary storage credentials received from an Iceberg REST catalog
@@ -102,6 +121,13 @@ typedef struct RestCatalogLoadTableResult
 	 * files and the metadata directory.
 	 */
 	List	   *vendedCredentials;
+
+	/*
+	 * The table's base directory, the scope of a credential vended for the
+	 * whole table; set when credentials were requested, NULL when the
+	 * response yields none.
+	 */
+	char	   *tableRoot;
 }			RestCatalogLoadTableResult;
 
 
@@ -399,9 +425,15 @@ List	   *JsonbGetArrayElementObjects(Jsonb *jb, const char *arrayKey,
 										const char *objectKey,
 										const char *elementStringKey);
 
-extern PGDLLEXPORT void RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
-extern PGDLLEXPORT void StartStageRestCatalogIcebergTableCreate(Oid relationId);
-extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs);
+extern PGDLLEXPORT char *RegisterNamespaceToRestCatalog(RestCatalogOptions * opts, const char *catalogName, const char *namespaceName);
+typedef struct RestCatalogStagedTable
+{
+	char	   *uuid;
+	char	   *location;
+}			RestCatalogStagedTable;
+
+extern PGDLLEXPORT RestCatalogStagedTable StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema, const char *requestedLocation);
+extern PGDLLEXPORT char *FinishStageRestCatalogIcebergTableCreateRestRequest(Oid relationId, DataFileSchema * dataFileSchema, List *partitionSpecs, const char *stagedUuid);
 extern PGDLLEXPORT RestCatalogLoadTableResult ResolveReadOnlyRestCatalogTable(RestCatalogOptions * opts, char **catalogName,
 																			  char **namespaceName, char **tableName);
 extern PGDLLEXPORT char *GetRestCatalogName(Oid relationId);
@@ -422,12 +454,19 @@ extern PGDLLEXPORT bool RestCatalogVendingEnabledForRelation(Oid relationId);
  * (storage/storage_credentials.c) on the way to pgduck_server.
  */
 extern PGDLLEXPORT List *IcebergProvideStorageCredentials(Oid relationId);
+extern void ErrorIfVendedCredentialsWithheld(Oid relationId);
 extern PGDLLEXPORT void InvalidateVendedCredentialsCache(void);
-extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level);
+extern PGDLLEXPORT void ReportHTTPError(HttpResult httpResult, int level, RestCatalogOp op,
+										const char *catalogName,
+										const char *namespaceName,
+										const char *tableName);
+extern void GetRestCatalogErrorFields(const char *body, const char **message,
+									  const char **type);
 extern PGDLLEXPORT List *PostHeadersWithAuth(RestCatalogOptions * opts);
 extern PGDLLEXPORT List *DeleteHeadersWithAuth(RestCatalogOptions * opts);
-extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(RestCatalogOptions * opts, HttpMethod method,
-													   const char *url, const char *body, List *headers);
+extern PGDLLEXPORT HttpResult SendRequestToRestCatalog(RestCatalogOptions * opts, RestCatalogOp op,
+													   HttpMethod method, const char *url,
+													   const char *body, List *headers);
 extern PGDLLEXPORT HttpResult SendCredentialRequestToRestCatalog(RestCatalogOptions * opts, const char *url,
 																 const char *body, List *headers);
 extern PGDLLEXPORT RestCatalogRequest * GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId);

@@ -26,18 +26,23 @@
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/iceberg/iceberg_type_json_serde.h"
+#include "pg_lake/json/json_reader.h"
 #include "pg_lake/parquet/leaf_field.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/util/catalog_type.h"
 #include "catalog/heap.h"
 #include "parser/scansup.h"
 #include "utils/builtins.h"
+#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 
 static IcebergTableSchema * GetIcebergTableSchemaById(IcebergTableMetadata * metadata, int schemaId);
 static List *GetLeafFieldsForField(Field * field, int fieldId, int *level);
 static void LowercaseStructElementNames(FieldStructElement * elements, size_t elementCount);
 static void LowercaseFieldNames(Field * field);
+static void TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
+									   bool nested, bool warn);
+static void TruncateFieldNames(Field * field, bool warn);
 
 /*
  * GetIcebergTableSchemaByIdFromTableMetadata gets the schema by id from given table metadata.
@@ -229,6 +234,175 @@ LowercaseIcebergTableMetadataNames(IcebergTableMetadata * metadata)
 							"name when lowercased", columnName),
 					 errhint("Create the table without the %s option.",
 							 LOWERCASE_COLUMN_NAMES_OPTION)));
+	}
+}
+
+
+/*
+ * TruncateIcebergTableMetadataNames truncates the column names of the current
+ * schema to the longest identifier Postgres keeps, in place, as the parser
+ * truncates a name it is given. With nested, it also truncates the names of
+ * the fields in structs, which become attributes of the columns' types; a
+ * scan has to keep those, as DuckDB matches a struct's fields to the ones in
+ * the files by name. With warn, it says so for each name.
+ */
+void
+TruncateIcebergTableMetadataNames(IcebergTableMetadata * metadata, bool nested, bool warn)
+{
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+
+	TruncateStructElementNames(schema->fields, schema->fields_length, nested, warn);
+}
+
+
+/*
+ * TruncateStructElementNames truncates the names of the given sibling fields,
+ * and with nested of everything below them. Two siblings whose names become
+ * the same cannot both be columns of a table or attributes of a type.
+ */
+static void
+TruncateStructElementNames(FieldStructElement * elements, size_t elementCount,
+						   bool nested, bool warn)
+{
+	const char **originalNames = palloc0(sizeof(char *) * elementCount);
+
+	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
+	{
+		FieldStructElement *element = &elements[elementIdx];
+
+		originalNames[elementIdx] = element->name;
+
+		if (element->name != NULL && strlen(element->name) >= NAMEDATALEN)
+		{
+			char	   *truncatedName = pstrdup(element->name);
+
+			truncate_identifier(truncatedName, strlen(truncatedName), warn);
+			element->name = truncatedName;
+		}
+
+		if (nested)
+			TruncateFieldNames(element->type, warn);
+	}
+
+	for (size_t elementIdx = 0; elementIdx < elementCount; elementIdx++)
+	{
+		const char *name = elements[elementIdx].name;
+
+		/* Iceberg names are unique, so a collision involves a truncated one */
+		if (name == NULL || name == originalNames[elementIdx])
+			continue;
+
+		for (size_t otherIdx = 0; otherIdx < elementCount; otherIdx++)
+		{
+			const char *otherName = elements[otherIdx].name;
+
+			if (otherIdx != elementIdx && otherName != NULL && strcmp(name, otherName) == 0)
+				ereport(ERROR,
+						(errcode(ERRCODE_DUPLICATE_COLUMN),
+						 errmsg("Iceberg fields \"%s\" and \"%s\" have the same name "
+								"when truncated to a Postgres identifier",
+								originalNames[elementIdx], originalNames[otherIdx]),
+						 errdetail("Postgres keeps at most the first %d bytes of a name.",
+								   NAMEDATALEN - 1)));
+		}
+	}
+}
+
+
+/*
+ * TruncateFieldNames truncates the struct field names nested in the given
+ * type.
+ */
+static void
+TruncateFieldNames(Field * field, bool warn)
+{
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			break;
+
+		case FIELD_TYPE_LIST:
+			TruncateFieldNames(field->field.list.element, warn);
+			break;
+
+		case FIELD_TYPE_MAP:
+			TruncateFieldNames(field->field.map.key, warn);
+			TruncateFieldNames(field->field.map.value, warn);
+			break;
+
+		case FIELD_TYPE_STRUCT:
+			TruncateStructElementNames(field->field.structType.fields,
+									   field->field.structType.nfields, true, warn);
+			break;
+	}
+}
+
+
+/*
+ * ApplyIcebergNameMapping records on each top-level column of the current
+ * schema the names the table's name mapping (schema.name-mapping.default)
+ * gives it, which is how the columns of a data file written without field ids
+ * are matched. Nested fields are matched by name in any case.
+ */
+void
+ApplyIcebergNameMapping(IcebergTableMetadata * metadata)
+{
+	const char *mappingString = NULL;
+
+	for (size_t propertyIdx = 0; propertyIdx < metadata->properties_length; propertyIdx++)
+	{
+		if (strcmp(metadata->properties[propertyIdx].key, "schema.name-mapping.default") == 0)
+			mappingString = metadata->properties[propertyIdx].value;
+	}
+
+	if (mappingString == NULL)
+		return;
+
+	Jsonb	   *mapping = DatumGetJsonbP(DirectFunctionCall1(jsonb_in,
+															 CStringGetDatum(mappingString)));
+
+	if (!JB_ROOT_IS_ARRAY(mapping) || JB_ROOT_IS_SCALAR(mapping))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("Iceberg table property schema.name-mapping.default is not a JSON array")));
+
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+	uint32		entryCount = JB_ROOT_COUNT(mapping);
+
+	for (uint32 entryIdx = 0; entryIdx < entryCount; entryIdx++)
+	{
+		JsonbValue *entry = getIthJsonbValueFromContainer(&mapping->root, entryIdx);
+		int32		fieldId = 0;
+
+		/* an entry without a field id lists names that map to no field */
+		if (entry == NULL || entry->type != jbvBinary ||
+			!JsonExtractInt32Field(entry->val.binary.data, "field-id", FIELD_OPTIONAL, &fieldId))
+			continue;
+
+		FieldStructElement *field = NULL;
+
+		for (size_t fieldIdx = 0; fieldIdx < schema->fields_length; fieldIdx++)
+		{
+			if (schema->fields[fieldIdx].id == fieldId)
+				field = &schema->fields[fieldIdx];
+		}
+
+		JsonbValue *names = getKeyJsonValueFromContainer(entry->val.binary.data,
+														 "names", strlen("names"), NULL);
+
+		if (field == NULL || names == NULL || names->type != jbvBinary)
+			continue;
+
+		uint32		nameCount = JsonContainerSize(names->val.binary.data);
+
+		for (uint32 nameIdx = 0; nameIdx < nameCount; nameIdx++)
+		{
+			JsonbValue *name = getIthJsonbValueFromContainer(names->val.binary.data, nameIdx);
+
+			if (name != NULL && name->type == jbvString)
+				field->mappedNames = lappend(field->mappedNames,
+											 pnstrdup(name->val.string.val, name->val.string.len));
+		}
 	}
 }
 

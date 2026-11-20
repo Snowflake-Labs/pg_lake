@@ -38,6 +38,7 @@
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/planner/explain.h"
 #include "pg_lake/planner/pushdown_utils.h"
@@ -1542,13 +1543,17 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 		CreatePgLakeScanSnapshot(rteList, relationRestrictionsList, paramListInfo,
 								 includeChildren, InvalidOid);
 
+	bool		explainRequested = eflags & EXEC_FLAG_EXPLAIN_ONLY;
+
+	if (!explainRequested)
+		CountCatalogTableScans(rteList);
+
 	/*
 	 * Deparse the query and replace read_table('table_name') with the
 	 * appropriate file scan functions.
 	 */
 	char	   *pgDuckSQLTemplate = PreparePGDuckSQLTemplate(scanQuery);
 
-	bool		explainRequested = eflags & EXEC_FLAG_EXPLAIN_ONLY;
 	char	   *queryString = ReplaceReadTableFunctionCalls(pgDuckSQLTemplate,
 															snapshot,
 															explainRequested);
@@ -1681,20 +1686,29 @@ QueryPushdownScanNextInternal(CustomScanState *node)
 		return NULL;
 	}
 
-	PGresult   *result = WaitForResult(scanState->connection);
+	PGresult   *result = NULL;
+
+	/*
+	 * The empty PGRES_TUPLES_OK ends the rows, but ReadyForQuery may still be
+	 * pending. Consume it before reporting EOF and releasing the connection.
+	 */
+	for (;;)
+	{
+		result = WaitForResult(scanState->connection);
+		if (result == NULL || PQresultStatus(result) != PGRES_TUPLES_OK ||
+			PQntuples(result) != 0)
+			break;
+
+		PQclear(result);
+		result = NULL;
+	}
 
 	if (result == NULL)
 	{
 		return NULL;
 	}
 
-	/* one way of SingleRowMode to indicate we are at the end */
-	if (PQresultStatus(result) == PGRES_TUPLES_OK && PQntuples(result) == 0)
-	{
-		PQclear(result);
-		return NULL;
-	}
-	else if (PQresultStatus(result) != PGRES_SINGLE_TUPLE)
+	if (PQresultStatus(result) != PGRES_SINGLE_TUPLE)
 	{
 		CheckPGDuckResult(scanState->connection, result);
 	}
@@ -1845,13 +1859,16 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 		{
 			IcebergOutOfRangePolicy outOfRangePolicy =
 				GetIcebergOutOfRangePolicyForTable(scanState->insertIntoRelid);
+			DataFileSchema *insertSchema =
+				GetDataFileSchemaForTable(scanState->insertIntoRelid);
 
 			if (outOfRangePolicy != ICEBERG_OOR_NONE)
 				queryString =
 					IcebergWrapQueryWithErrorOrClampChecks(queryString,
 														   scanState->insertTargetTupleDesc,
 														   outOfRangePolicy,
-														   false);
+														   false,
+														   insertSchema);
 
 			if (IsWritableIcebergTable(scanState->insertIntoRelid))
 			{
@@ -1861,7 +1878,7 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 												 false,
 												 ICEBERG_REWRITE_NATIVE_ENCODE |
 												 ICEBERG_REWRITE_STORAGE_CAST,
-												 GetDataFileSchemaForTable(scanState->insertIntoRelid));
+												 insertSchema);
 			}
 		}
 

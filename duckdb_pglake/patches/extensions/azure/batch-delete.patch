@@ -1,8 +1,8 @@
 diff --git a/src/azure_blob_filesystem.cpp b/src/azure_blob_filesystem.cpp
-index f342821..83383c5 100644
+index 0bd6bf4..526c54c 100644
 --- a/src/azure_blob_filesystem.cpp
 +++ b/src/azure_blob_filesystem.cpp
-@@ -18,8 +18,11 @@
+@@ -18,8 +18,12 @@
  #include <azure/core/io/body_stream.hpp>
  #include <azure/storage/blobs.hpp>
  #include <azure/storage/blobs/blob_options.hpp>
@@ -10,11 +10,12 @@ index f342821..83383c5 100644
  
  #include <cstdlib>
 +#include <map>
++#include <tuple>
 +#include <vector>
  
  namespace duckdb {
  
-@@ -416,6 +419,93 @@ bool AzureBlobStorageFileSystem::TryRemoveFile(const string &filename, optional_
+@@ -395,6 +399,112 @@ bool AzureBlobStorageFileSystem::TryRemoveFile(const string &filename, optional_
  	return blob_client.DeleteIfExists().Value.Deleted;
  }
  
@@ -41,27 +42,46 @@ index f342821..83383c5 100644
 +
 +	/*
 +	 * Group paths by container, because SubmitBatch targets one container at a
-+	 * time (BlobContainerBatch is scoped to its BlobContainerClient).
++	 * time (BlobContainerBatch is scoped to its BlobContainerClient), and by
++	 * what the storage client is built from: the secret that matches the path,
++	 * and the account and endpoint when the URL names them. Paths in different
++	 * accounts can have containers of the same name.
 +	 */
-+	std::map<string, vector<AzureParsedUrl>> paths_by_container;
++	struct ContainerBatch {
++		string first_path;
++		vector<AzureParsedUrl> container_paths;
++	};
++	using BatchKey = std::tuple<string, string, string, string, string>;
++	std::map<BatchKey, ContainerBatch> batches;
 +
 +	for (const string &path : paths) {
 +		auto parsed = ParseUrl(path);
-+		paths_by_container[parsed.container].push_back(std::move(parsed));
++
++		string secret_storage;
++		string secret_name;
++		auto secret_match = LookupSecret(opener, path);
++		if (secret_match.HasMatch()) {
++			secret_storage = secret_match.secret_entry->storage_mode;
++			secret_name = secret_match.GetSecret().GetName();
++		}
++
++		BatchKey key {secret_storage, secret_name, parsed.storage_account_name, parsed.endpoint, parsed.container};
++		auto &batch = batches[key];
++		if (batch.container_paths.empty()) {
++			batch.first_path = path;
++		}
++		batch.container_paths.push_back(std::move(parsed));
 +	}
 +
-+	for (auto &entry : paths_by_container) {
-+		const string &container_name = entry.first;
-+		vector<AzureParsedUrl> &container_paths = entry.second;
++	for (auto &entry : batches) {
++		const string &container_name = std::get<4>(entry.first);
++		vector<AzureParsedUrl> &container_paths = entry.second.container_paths;
 +
 +		/*
-+		 * Get a storage context from the first path in this container. All paths
-+		 * in the same container share the same account and credentials.
++		 * Every path in the group gets the same client, so build it from the
++		 * first path as the caller passed it.
 +		 */
-+		string first_path_url = (container_paths[0].prefix.empty() ? PATH_PREFIX : container_paths[0].prefix) +
-+		                        container_name + "/" + container_paths[0].path;
-+		auto storage_context = GetOrCreateStorageContext(opener, first_path_url,
-+		                                                 container_paths[0]);
++		auto storage_context = GetOrCreateStorageContext(opener, entry.second.first_path, container_paths[0]);
 +		auto container_client =
 +		    storage_context->As<AzureBlobContextState>().GetBlobContainerClient(container_name);
 +
@@ -109,7 +129,7 @@ index f342821..83383c5 100644
                                             idx_t buffer_out_len) {
  	auto &afh = handle.Cast<AzureBlobStorageFileHandle>();
 diff --git a/src/include/azure_blob_filesystem.hpp b/src/include/azure_blob_filesystem.hpp
-index 088a65f..4d17cc5 100644
+index 67bfebd..2ea7d49 100644
 --- a/src/include/azure_blob_filesystem.hpp
 +++ b/src/include/azure_blob_filesystem.hpp
 @@ -10,6 +10,7 @@
@@ -120,7 +140,7 @@ index 088a65f..4d17cc5 100644
  
  namespace duckdb {
  
-@@ -73,6 +74,7 @@ public:
+@@ -71,6 +72,7 @@ public:
  
  	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener) override;
  	virtual bool TryRemoveFile(const string &filename, optional_ptr<FileOpener> opener) override;

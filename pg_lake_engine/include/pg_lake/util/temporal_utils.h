@@ -27,6 +27,7 @@ extern PGDLLEXPORT int GetYearFromTimestamp(Timestamp ts);
 extern PGDLLEXPORT Timestamp IcebergTimestampMsToPostgresTimestamp(Timestamp icebergTimestampMs);
 extern PGDLLEXPORT Timestamp PostgresTimestampToIcebergTimestampMs(void);
 extern PGDLLEXPORT Timestamp AdjustTimestampFromUnixToPostgres(Timestamp timestamp);
+extern PGDLLEXPORT bool UnixTimestampFitsPostgresEpoch(Timestamp timestamp);
 extern PGDLLEXPORT Timestamp AdjustTimestampFromPostgresToUnix(Timestamp timestamp);
 extern PGDLLEXPORT DateADT AdjustDateFromPostgresToUnix(DateADT date);
 extern PGDLLEXPORT DateADT AdjustDateFromUnixToPostgres(DateADT date);

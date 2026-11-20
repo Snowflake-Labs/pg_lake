@@ -82,6 +82,19 @@ _PG_init(void)
 							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
 							 NULL, NULL, NULL);
 
+	DefineCustomBoolVariable(
+							 "pg_lake_copy.enable_binary_transmit",
+							 gettext_noop("Use the binary COPY format to receive rows from pgduck_server"),
+							 gettext_noop("When on (the default), COPY .. FROM a data lake file "
+										  "that is not pushed down to pgduck_server receives "
+										  "rows in the binary COPY format if all columns have "
+										  "types that support it, avoiding text conversion."),
+							 &EnableBinaryTransmit,
+							 true,
+							 PGC_USERSET,
+							 GUC_NO_SHOW_ALL | GUC_NOT_IN_SAMPLE,
+							 NULL, NULL, NULL);
+
 	/*
 	 * Hidden, test-only knob controlling who handles a JSON COPY. We follow
 	 * the same rule as CSV: Postgres gets precedence whenever it natively

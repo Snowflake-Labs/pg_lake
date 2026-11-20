@@ -49,6 +49,9 @@ typedef struct S3InheritedSettings
 	char	   *useSsl;
 }			S3InheritedSettings;
 
+/* The start of a vended secret's name: its database and server OIDs. */
+#define VENDED_SECRET_NAME_PREFIX "pglake_vended_%u_%u_"
+
 
 /*
  * GenerateVendedSecretName produces a deterministic name for a vended
@@ -69,7 +72,7 @@ GenerateVendedSecretName(Oid serverOid, const char *secretId)
 	uint64		keyHash = hash_bytes_extended((const unsigned char *) secretId,
 											  strlen(secretId), 0);
 
-	return psprintf("pglake_vended_%u_%u_%016llx",
+	return psprintf(VENDED_SECRET_NAME_PREFIX "%016llx",
 					MyDatabaseId, serverOid, (unsigned long long) keyHash);
 }
 
@@ -463,12 +466,14 @@ PushVendedSecretToPGDuck(PGDuckConnection * conn,
 }
 
 
-void
-DropVendedSecretFromPGDuck(PGDuckConnection * conn,
-						   Oid serverOid, const char *secretId)
+/*
+ * DropNamedSecret removes one secret from pgduck_server, if it exists.
+ */
+static void
+DropNamedSecret(PGDuckConnection * conn, const char *secretName)
 {
-	char	   *secretName = GenerateVendedSecretName(serverOid, secretId);
-	char	   *sql = psprintf("DROP SECRET IF EXISTS \"%s\"", secretName);
+	char	   *sql = psprintf("DROP SECRET IF EXISTS %s",
+							   quote_identifier(secretName));
 
 	elog(DEBUG2, "dropping vended secret \"%s\" from pgduck_server",
 		 secretName);
@@ -479,5 +484,134 @@ DropVendedSecretFromPGDuck(PGDuckConnection * conn,
 	PQclear(result);
 
 	pfree(sql);
+}
+
+
+void
+DropVendedSecretFromPGDuck(PGDuckConnection * conn,
+						   Oid serverOid, const char *secretId)
+{
+	char	   *secretName = GenerateVendedSecretName(serverOid, secretId);
+
+	DropNamedSecret(conn, secretName);
 	pfree(secretName);
+}
+
+
+/*
+ * DropVendedSecretsUnderScopeFromPGDuck looks the secrets up in
+ * duckdb_secrets() rather than naming them, since neither the principal
+ * nor the scope a secret another backend pushed was named after is known
+ * here.  Only the name prefix ties a secret to its database and server.
+ */
+List *
+DropVendedSecretsUnderScopeFromPGDuck(PGDuckConnection * conn, Oid serverOid,
+									  const char *scopePrefix)
+{
+	List	   *names = NIL;
+
+	/* An empty prefix would cover every secret of the server. */
+	if (scopePrefix == NULL || scopePrefix[0] == '\0')
+		return NIL;
+
+	char	   *namePrefix = psprintf(VENDED_SECRET_NAME_PREFIX, MyDatabaseId,
+									  serverOid);
+	char	   *escapedScope = EscapeSingleQuotes(scopePrefix);
+	char	   *query =
+		psprintf("SELECT DISTINCT name FROM ("
+				 "SELECT name, unnest(scope) AS prefix "
+				 "FROM duckdb_secrets() "
+				 "WHERE starts_with(name, '%s')) s "
+				 "WHERE starts_with(prefix, '%s')",
+				 namePrefix, escapedScope);
+
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, query);
+
+	PG_TRY();
+	{
+		ThrowIfPGDuckResultHasError(conn, result);
+
+		for (int row = 0; row < PQntuples(result); row++)
+			names = lappend(names, pstrdup(PQgetvalue(result, row, 0)));
+	}
+	PG_FINALLY();
+	{
+		PQclear(result);
+	}
+	PG_END_TRY();
+
+	ListCell   *nameCell;
+
+	foreach(nameCell, names)
+		DropNamedSecret(conn, lfirst(nameCell));
+
+	pfree(query);
+	pfree(escapedScope);
+	pfree(namePrefix);
+
+	return names;
+}
+
+
+void
+EvictCachedFilesUnderScopeFromPGDuck(PGDuckConnection * conn,
+									 const char *scopePrefix)
+{
+	List	   *urls = NIL;
+
+	/* An empty prefix would cover the whole cache. */
+	if (scopePrefix == NULL || scopePrefix[0] == '\0')
+		return;
+
+	char	   *escapedScope = EscapeSingleQuotes(scopePrefix);
+	char	   *query =
+		psprintf("SELECT url FROM pg_lake_list_cache() "
+				 "WHERE starts_with(url, '%s')",
+				 escapedScope);
+
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(conn, query);
+
+	PG_TRY();
+	{
+		/* the cache-manager worker recognizes a disabled cache the same way */
+		bool		cachingDisabled =
+			PQresultStatus(result) != PGRES_TUPLES_OK &&
+			strstr(PQresultErrorMessage(result),
+				   "caching is currently disabled") != NULL;
+
+		if (!cachingDisabled)
+		{
+			ThrowIfPGDuckResultHasError(conn, result);
+
+			for (int row = 0; row < PQntuples(result); row++)
+				urls = lappend(urls, pstrdup(PQgetvalue(result, row, 0)));
+		}
+	}
+	PG_FINALLY();
+	{
+		PQclear(result);
+	}
+	PG_END_TRY();
+
+	ListCell   *urlCell;
+
+	foreach(urlCell, urls)
+	{
+		char	   *escapedUrl = EscapeSingleQuotes(lfirst(urlCell));
+		char	   *sql = psprintf("SELECT removed FROM pg_lake_uncache_file('%s')",
+								   escapedUrl);
+		PGresult   *uncacheResult = ExecuteQueryOnPGDuckConnection(conn, sql);
+
+		CheckPGDuckResult(conn, uncacheResult);
+		PQclear(uncacheResult);
+
+		pfree(sql);
+		pfree(escapedUrl);
+	}
+
+	elog(DEBUG2, "evicted %d cached files under \"%s\" from pgduck_server",
+		 list_length(urls), scopePrefix);
+
+	pfree(query);
+	pfree(escapedScope);
 }

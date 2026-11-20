@@ -7,7 +7,10 @@ DATA = $(wildcard $(EXTENSION)--*--*.sql) $(EXTENSION)--3.0.sql
 PG_CONFIG ?= pg_config
 PG_LIBDIR := $(shell $(PG_CONFIG) --libdir)
 
+EXTVERSION := $(shell sed -n "s/^default_version = '\(.*\)'$$/\1/p" $(EXTENSION).control)
+
 PG_CPPFLAGS = -I$(libpq_srcdir) -Iinclude -std=gnu11 -g -I../pg_lake_engine/include -I../pg_extension_base/include
+PG_CPPFLAGS += -DPG_LAKE_HTTP_USER_AGENT=\"pg_lake/$(EXTVERSION)\"
 SHLIB_LINK_INTERNAL = $(libpq)
 PG_LDFLAGS  = -L$(PG_LIBDIR) -Wl,-rpath,$(PG_LIBDIR) -lavro -lcurl
 

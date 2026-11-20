@@ -133,17 +133,21 @@ release: patch_duckdb
 #### Misc
 
 patch_duckdb: $(shell find patches -type f -name '*.patch')
+	# Reset each submodule to its pinned commit, including any files a previous
+	# run's patches created, so that every run applies the patches to pristine
+	# sources. Stop at the first patch that does not apply.
+	set -e ; \
 	for patchdir in duckdb duckdb-postgres ; do \
-		(cd $$patchdir && \
-		git checkout -f . && \
-		find ../patches/$$patchdir -type f -name '*.patch' -print | sort | xargs -0 printf '%s ' | \
-		while read -r patch; do \
+		git -C $$patchdir checkout -f . ; \
+		git -C $$patchdir clean -fdq ; \
+		for patch in $$(find patches/$$patchdir -type f -name '*.patch' | sort) ; do \
 			echo "applying $$patch to $$patchdir" ; \
-			git apply --ignore-whitespace "$$patch"; \
-		done;) \
+			git -C $$patchdir apply --ignore-whitespace "$(CURDIR)/$$patch" ; \
+		done ; \
 	done
 	# Out-of-tree extensions are fetched by CMake, which applies the patches it
 	# finds in the DuckDB source tree, so copy ours there before building.
+	set -e ; \
 	for extdir in patches/extensions/*/ ; do \
 		[ -d "$$extdir" ] || continue ; \
 		ext=$$(basename $$extdir) ; \
@@ -155,8 +159,8 @@ patch_duckdb: $(shell find patches -type f -name '*.patch')
 
 clean_patches:
 	for patchdir in duckdb duckdb-postgres ; do \
-		(cd $$patchdir && \
-		git checkout -f . ); \
+		git -C $$patchdir checkout -f . && \
+		git -C $$patchdir clean -fdq ; \
 	done
 	for extdir in patches/extensions/*/ ; do \
 		[ -d "$$extdir" ] || continue ; \

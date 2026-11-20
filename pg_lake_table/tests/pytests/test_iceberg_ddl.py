@@ -1776,6 +1776,53 @@ def test_set_not_null(pg_conn, s3, with_default_location):
     pg_conn.rollback()
 
 
+def test_add_not_null_constraint(pg_conn, s3, with_default_location):
+    """ADD CONSTRAINT ... NOT NULL does not check the existing data of a
+    foreign table, so it is rejected like SET NOT NULL. Otherwise a DELETE
+    could treat a file holding NULLs as fully matched by its min/max stats."""
+    if get_pg_version_num(pg_conn) < 180000:
+        return
+
+    run_command("CREATE SCHEMA test_add_not_null;", pg_conn)
+    run_command(
+        "CREATE TABLE test_add_not_null.test_table (k int, a int) USING iceberg;",
+        pg_conn,
+    )
+    run_command(
+        "INSERT INTO test_add_not_null.test_table VALUES (1, 5), (2, NULL), (3, 7);",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    for constraint in ["NOT NULL a", "NOT NULL a NOT VALID"]:
+        res = run_command(
+            f"ALTER TABLE test_add_not_null.test_table ADD CONSTRAINT nn {constraint};",
+            pg_conn,
+            raise_error=False,
+        )
+        assert (
+            "ALTER TABLE ADD CONSTRAINT ... NOT NULL command not supported for pg_lake_iceberg tables"
+            in str(res)
+        )
+        pg_conn.rollback()
+
+    # other constraints are still allowed
+    run_command(
+        "ALTER TABLE test_add_not_null.test_table ADD CONSTRAINT k_positive CHECK (k > 0);",
+        pg_conn,
+    )
+
+    run_command(
+        "DELETE FROM test_add_not_null.test_table WHERE a BETWEEN 0 AND 100;", pg_conn
+    )
+    res = run_query("SELECT k FROM test_add_not_null.test_table", pg_conn)
+    assert res == [[2]]
+
+    pg_conn.rollback()
+    run_command("DROP SCHEMA test_add_not_null CASCADE;", pg_conn)
+    pg_conn.commit()
+
+
 def test_transaction_ddl(pg_conn, s3, with_default_location):
 
     run_command("BEGIN", pg_conn)

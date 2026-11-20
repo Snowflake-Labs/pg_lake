@@ -32,9 +32,14 @@
  * query in a volatile function takes a new snapshot.
  *
  * A REST catalog answers per table, so we hold the metadata location of each
- * relation asked about. An object store catalog publishes all of its tables
- * as one document, so we hold the document, which keeps its tables
- * consistent with each other.
+ * relation asked about, along with the metadata document the catalog inlined
+ * in the same answer.  ReadIcebergTableMetadataForRelation uses that document
+ * for the same relation instead of reading the file, which may be in a format
+ * pg_lake cannot read, such as gzip (#823).  A metadata file is never
+ * rewritten, so the document stays valid for its location.  It is not used
+ * for other tables, since the catalog chooses the location.  An object store
+ * catalog publishes all of its tables as one document, so we hold the
+ * document, which keeps its tables consistent with each other.
  *
  * Held answers live in TopTransactionContext and are dropped when Postgres
  * releases the resource owner they were held for.
@@ -45,6 +50,8 @@
 #include "access/xact.h"
 #include "nodes/pg_list.h"
 #include "tcop/pquery.h"
+#include "utils/builtins.h"
+#include "utils/jsonb.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/portal.h"
@@ -52,6 +59,7 @@
 
 /* foreach_ptr() on the versions of Postgres that do not have it yet */
 #include "pg_extension_base/pg_compat.h"
+#include "pg_lake/copy/copy_format.h"
 #include "pg_lake/iceberg/external_catalog_cache.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
@@ -61,8 +69,9 @@
 
 /*
  * An answer an external catalog gave, held until scopeOwner is released.
- * The key is "rest:<relation oid>" for a REST table location, or the path of
- * an object store catalog document.
+ * The key is "rest:<relation oid>" for a REST table location,
+ * "rest-metadata:<relation oid>:<metadata location>" for the document a REST
+ * catalog inlined for that location, or the path of an object store catalog document.
  */
 typedef struct HeldAnswer
 {
@@ -109,7 +118,7 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 		tableProperties.format == DATA_FORMAT_ICEBERG)
 	{
 		/* the location is a table option, which the relation lock keeps still */
-		return GetForeignTablePath(relationId);
+		return S3URLFromHadoopScheme(GetForeignTablePath(relationId));
 	}
 
 	ereport(ERROR,
@@ -132,14 +141,53 @@ ResolveRestCatalogTable(Oid relationId)
 
 	if (metadataLocation == NULL)
 	{
-		metadataLocation =
-			GetMetadataLocationForRestCatalogForIcebergTable(relationId);
+		RestCatalogLoadTableResult result =
+			LoadTableFromRestCatalogForIcebergTable(relationId);
 
+		metadataLocation = result.metadataLocation;
 		HoldAnswer(scopeOwner, key, metadataLocation);
+
+		/* the field is required, but a catalog that omits it still works */
+		if (result.metadata != NULL)
+		{
+			char	   *metadataKey = psprintf("rest-metadata:%u:%s", relationId,
+											   metadataLocation);
+
+			if (FindHeldAnswer(scopeOwner, metadataKey) == NULL)
+				HoldAnswer(scopeOwner, metadataKey,
+						   JsonbToCString(NULL, &result.metadata->root,
+										  VARSIZE(result.metadata)));
+		}
 	}
 
 	/* the scope can end before whatever the caller keeps this in */
 	return pstrdup(metadataLocation);
+}
+
+
+/*
+ * FindHeldRestCatalogMetadata returns the metadata document the REST catalog
+ * of a read-only table inlined for metadataLocation in the current version
+ * scope, or NULL if no catalog answer for that table in this scope carried it.
+ *
+ * The document is only used for the relation it was loaded for, since the
+ * catalog chooses the location it is held under.
+ */
+Jsonb *
+FindHeldRestCatalogMetadata(Oid relationId, const char *metadataLocation)
+{
+	if (HeldAnswers == NIL || !IsTransactionState())
+		return NULL;
+
+	char	   *metadataKey = psprintf("rest-metadata:%u:%s", relationId,
+									   metadataLocation);
+	char	   *document = FindHeldAnswer(GetVersionScopeOwner(), metadataKey);
+
+	pfree(metadataKey);
+	if (document == NULL)
+		return NULL;
+
+	return DatumGetJsonbP(DirectFunctionCall1(jsonb_in, CStringGetDatum(document)));
 }
 
 

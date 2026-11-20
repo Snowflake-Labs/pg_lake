@@ -1250,6 +1250,82 @@ def test_vended_credentials_storage_credentials_array(
         _stop(httpd, thread)
 
 
+@pytest.mark.parametrize("scheme", ["s3a", "s3n"])
+def test_vended_credentials_hadoop_s3_scheme(
+    superuser_conn, iceberg_extension, installcheck, scheme
+):
+    """
+    A table that an engine built on Hadoop wrote can carry s3a:// or s3n://
+    locations, and a catalog can scope its credential that way.  pg_lake reads
+    the table's files through s3://, so the secret has to be scoped there to
+    be found.
+    """
+    if installcheck:
+        return
+
+    def _make_handler():
+        class _Handler(BaseHTTPRequestHandler):
+            def _handle(self):
+                length = int(self.headers.get("Content-Length", 0))
+                if length > 0:
+                    self.rfile.read(length)
+                if _oauth_or_none(self):
+                    return
+                if "/tables/" in self.path and self.command == "GET":
+                    _reply(
+                        self,
+                        {
+                            "metadata-location": f"{scheme}://hadoop-bucket/ns/tbl/metadata/v1.metadata.json",
+                            "metadata": {
+                                "format-version": 2,
+                                "table-uuid": str(uuid.uuid4()),
+                                "location": f"{scheme}://hadoop-bucket/ns/tbl",
+                            },
+                            "storage-credentials": [
+                                {
+                                    "prefix": f"{scheme}://hadoop-bucket/ns/tbl/data/",
+                                    "config": {
+                                        "s3.access-key-id": "HADOOP_ACCESS_KEY",
+                                        "s3.secret-access-key": "HADOOP_SECRET_KEY",
+                                        "s3.session-token": "HADOOP_TOKEN",
+                                        "client.region": "us-west-2",
+                                    },
+                                }
+                            ],
+                        },
+                    )
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            do_GET = _handle
+            do_POST = _handle
+
+            def log_message(self, fmt, *args):
+                pass
+
+        return _Handler
+
+    httpd, thread = _serve(_make_handler())
+    try:
+        summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
+
+        access_key, scope, has_token, expiry, region, url_style = summary.split("|")
+        assert access_key == "HADOOP_ACCESS_KEY"
+        # Narrower than the table root, so it stands only if it is compared
+        # to the root in the same scheme.
+        assert scope == "s3://hadoop-bucket/ns/tbl/data/"
+        assert region == "us-west-2"
+
+    finally:
+        run_command(
+            "DROP FUNCTION IF EXISTS get_rest_vended_credentials(TEXT, TEXT, TEXT)",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        _stop(httpd, thread)
+
+
 def test_vended_credentials_region_falls_back_to_table_config(
     superuser_conn, iceberg_extension, installcheck
 ):
@@ -2001,6 +2077,7 @@ def test_vended_credentials_credential_pg_lake_cannot_use_is_reported(
     httpd, thread = _serve_provider_case(shape, location, vended_config, superuser_conn)
     try:
         superuser_conn.notices.clear()
+        offset = server_log_offset()
         summary = _run_vended_creds(superuser_conn, "postgres", "ns", "tbl")
 
         assert summary is None, f"expected no usable credential, got {summary!r}"
@@ -2008,6 +2085,10 @@ def test_vended_credentials_credential_pg_lake_cannot_use_is_reported(
             f"ignoring vended credentials for {provider}" in n
             for n in superuser_conn.notices
         ), "\n".join(superuser_conn.notices)
+        assert catalog_log_lines(offset) == [
+            f"ignoring vended credentials for {provider} from the built-in REST "
+            "catalog that pg_lake cannot use"
+        ]
 
     finally:
         _drop_vended_creds_fn(superuser_conn)
@@ -2384,6 +2465,7 @@ def test_vended_credentials_azure_endpoint_is_held_to_the_host_allowlist(
     if installcheck:
         return
 
+    offset = server_log_offset()
     cred = _azure_credential(
         superuser_conn,
         "storage-credentials",
@@ -2401,6 +2483,9 @@ def test_vended_credentials_azure_endpoint_is_held_to_the_host_allowlist(
     assert any(
         "ignoring the endpoint the catalog vended" in n for n in superuser_conn.notices
     ), "\n".join(superuser_conn.notices)
+    assert catalog_log_lines(offset) == [
+        "ignoring a vended Azure endpoint that is not allowed"
+    ]
 
 
 @pytest.mark.parametrize(

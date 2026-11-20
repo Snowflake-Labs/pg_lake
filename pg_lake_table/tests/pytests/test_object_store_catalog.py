@@ -2366,3 +2366,86 @@ def test_read_only_lowercase_column_names(
 
     run_command("DROP SCHEMA object_store_sc1, object_store_sc2 CASCADE", pg_conn)
     pg_conn.commit()
+
+
+def test_force_push_sees_latest_in_repeatable_read(
+    pg_conn,
+    superuser_conn,
+    s3,
+    extension,
+    with_default_location,
+    adjust_object_store_settings,
+):
+    """
+    Verify that force_push_object_store_catalog always exports the latest
+    committed catalog state, even when the caller is in a REPEATABLE READ
+    transaction that started before the newest table was committed.
+
+    The background export has already published both tables by the time the
+    force-push runs, so a force-push on a stale snapshot is visible as
+    tbl_after disappearing from catalog.json again.
+    """
+    run_command("CREATE SCHEMA object_store_sc1", pg_conn)
+    run_command(
+        "CREATE TABLE object_store_sc1.tbl_before(a int) "
+        "USING iceberg WITH (catalog='object_store')",
+        pg_conn,
+    )
+    pg_conn.commit()
+    wait_until_object_store_writable_table_pushed(
+        pg_conn, "object_store_sc1", "tbl_before"
+    )
+
+    # A second connection pins a REPEATABLE READ snapshot that does NOT
+    # include tbl_after.  Everything that uses it runs under try/finally: the
+    # force-push below reads lake_iceberg.tables_internal, and those locks are
+    # only released at end of transaction, so an assertion failure that left
+    # the transaction open would block this module's teardown DROP EXTENSION
+    # indefinitely rather than just failing the test.
+    rr_conn = open_pg_conn()
+    try:
+        rr_conn.autocommit = False
+        run_command("BEGIN ISOLATION LEVEL REPEATABLE READ", rr_conn)
+        # read something to pin the snapshot
+        run_query("SELECT 1", rr_conn)
+
+        # On the first connection, create a second table and commit.
+        run_command(
+            "CREATE TABLE object_store_sc1.tbl_after(a int) "
+            "USING iceberg WITH (catalog='object_store')",
+            pg_conn,
+        )
+        pg_conn.commit()
+        wait_until_object_store_writable_table_pushed(
+            pg_conn, "object_store_sc1", "tbl_after"
+        )
+
+        # Force-push from the REPEATABLE READ connection.  Before the fix this
+        # rewrote catalog.json from the stale transaction snapshot, dropping
+        # tbl_after from the exported catalog.
+        run_command("SELECT lake_iceberg.force_push_object_store_catalog()", rr_conn)
+    finally:
+        rr_conn.rollback()
+        rr_conn.close()
+
+    # Read catalog.json from storage and check both tables are present.
+    dbname = run_query("SELECT current_database()", pg_conn)[0][0]
+    prefix = run_query(
+        "SHOW pg_lake_iceberg.internal_object_store_catalog_prefix",
+        superuser_conn,
+    )[0][0]
+    superuser_conn.commit()
+    key = f"{prefix}/catalog/{dbname}/catalog.json"
+    catalog = json.loads(s3.get_object(Bucket=TEST_BUCKET, Key=key)["Body"].read())
+
+    table_names = {t["table-name"] for t in catalog["tables"]}
+    assert (
+        "tbl_before" in table_names
+    ), f"tbl_before missing from catalog: {table_names}"
+    assert "tbl_after" in table_names, (
+        f"tbl_after missing from catalog after force-push from REPEATABLE READ "
+        f"transaction: {table_names}"
+    )
+
+    run_command("DROP SCHEMA object_store_sc1 CASCADE", pg_conn)
+    pg_conn.commit()

@@ -61,3 +61,22 @@ FindLeafField(List *leafFieldList, int fieldId)
 
 	return NULL;
 }
+
+
+/*
+ * LeafFieldIsFloatingPoint returns whether the leaf field is stored as an
+ * Iceberg float or double. Their min/max statistics leave out NaN, which
+ * Postgres orders above every other value. That includes an unbounded numeric
+ * stored as a double.
+ */
+bool
+LeafFieldIsFloatingPoint(LeafField * leafField)
+{
+	if (leafField->field == NULL || leafField->field->type != FIELD_TYPE_SCALAR)
+		return false;
+
+	const char *typeName = leafField->field->field.scalar.typeName;
+
+	return typeName != NULL &&
+		(strcmp(typeName, "float") == 0 || strcmp(typeName, "double") == 0);
+}

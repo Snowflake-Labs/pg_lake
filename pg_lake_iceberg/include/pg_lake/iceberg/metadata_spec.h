@@ -289,6 +289,8 @@ typedef struct IcebergTableMetadata
 }			IcebergTableMetadata;
 
 extern PGDLLEXPORT IcebergTableMetadata * ReadIcebergTableMetadata(const char *tableMetadataPath);
+extern PGDLLEXPORT IcebergTableMetadata * ReadIcebergTableMetadataForRelation(Oid relationId,
+																			  const char *tableMetadataPath);
 extern PGDLLEXPORT IcebergTableMetadata * ParseIcebergTableMetadata(Jsonb *tableMetadataJson);
 extern PGDLLEXPORT char *WriteIcebergTableMetadataToJson(IcebergTableMetadata * metadata);
 extern PGDLLEXPORT void AppendIcebergTableSchema(StringInfo command, IcebergTableSchema * schema);

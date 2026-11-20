@@ -85,6 +85,7 @@
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/multi_data_file_dest.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/iceberg/catalog_stats.h"
 #include "pg_lake/iceberg/compatibility_mode.h"
 #include "pg_lake/iceberg/operations/manifest_merge.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
@@ -1743,6 +1744,9 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 		CreatePgLakeScanSnapshot(rteList, restrictionList, paramListInfo,
 								 includeChildren, fsstate->resultRelationId);
 
+	if (!(eflags & EXEC_FLAG_EXPLAIN_ONLY))
+		CountCatalogTableScans(rteList);
+
 	/*
 	 * We do some extra bookkeeping for scans that are part of an
 	 * update/delete to interpret the row identifier (filename,
@@ -2366,6 +2370,18 @@ postgresExecForeignDelete(EState *estate,
 	/* get the ctid value produced by RowIdRecordStringToItemPointer */
 	ItemPointer ctid = (ItemPointer) DatumGetPointer(ctidDatum);
 
+	/*
+	 * If the row was already deleted, we skip subsequent deletes in the same
+	 * command to match the behaviour of PostgreSQL. Otherwise, duplicates
+	 * would inflate the deleted row count of the file, which could cause the
+	 * whole file to be removed.
+	 */
+	if (fmstate->requiresUpdateTracking &&
+		!IsFirstUpdateOfTuple(&fmstate->updateTrackingState, ctid))
+	{
+		return NULL;
+	}
+
 	/* write a delete record for the file name and row number to a delete file */
 	DeleteSingleRow(fmstate, ctid);
 
@@ -2696,10 +2712,10 @@ IcebergErrorOrClampSlotInPlace(TupleTableSlot *slot, TupleDesc tupleDesc,
 		/*
 		 * Safe to assign directly: - temporal types
 		 * (date/timestamp/timestamptz) are pass-by-value, so clamped values
-		 * need no detoasting or copying. - numeric is pass-by-reference, but
-		 * the clamp function either returns the original datum unchanged or
-		 * sets isNull = true (NaN case), so no new allocation needs to be
-		 * managed.
+		 * need no detoasting or copying. - numeric and interval are
+		 * pass-by-reference, but the clamp function either returns the
+		 * original datum unchanged or sets isNull = true (NaN or infinite
+		 * interval), so no new allocation needs to be managed.
 		 */
 		slot->tts_values[i] = clamped;
 		slot->tts_isnull[i] = isNull;
@@ -3525,7 +3541,22 @@ fetch_more_data(ForeignScanState *node)
 		int			numrows;
 		int			i;
 
-		res = WaitForResult(fsstate->conn);
+		/*
+		 * The empty PGRES_TUPLES_OK ends the rows, but ReadyForQuery may
+		 * still be pending. Consume it before reporting EOF and closing the
+		 * connection.
+		 */
+		for (;;)
+		{
+			res = WaitForResult(fsstate->conn);
+			if (res == NULL || PQresultStatus(res) != PGRES_TUPLES_OK ||
+				PQntuples(res) != 0)
+				break;
+
+			PQclear(res);
+			res = NULL;
+		}
+
 		if (res == NULL)
 		{
 			fsstate->eof_reached = true;
@@ -3535,10 +3566,7 @@ fetch_more_data(ForeignScanState *node)
 		{
 			numrows = PQntuples(res);
 
-			/* one way of SingleRowMode to indicate we are at the end */
-			if (PQresultStatus(res) == PGRES_TUPLES_OK && numrows == 0)
-				fsstate->eof_reached = true;
-			else if (PQresultStatus(res) != PGRES_SINGLE_TUPLE)
+			if (PQresultStatus(res) != PGRES_SINGLE_TUPLE)
 			{
 				ThrowIfPGDuckResultHasError(fsstate->conn, res);
 			}
@@ -3755,11 +3783,12 @@ create_foreign_modify(Relation rel,
 
 			/*
 			 * If our subplan is not a foreign scan (of the relation being
-			 * updated), then it may produce duplicates and we need
+			 * updated or deleted), then it may produce duplicates and we need
 			 * deduplication.
 			 */
 			fmstate->requiresUpdateTracking =
-				operation == CMD_UPDATE && !IsA(subPlan, ForeignScan);
+				(operation == CMD_UPDATE || operation == CMD_DELETE) &&
+				!IsA(subPlan, ForeignScan);
 		}
 
 		/*

@@ -55,9 +55,11 @@ extern PGDLLEXPORT List *CreatePostgresColumnMappingsForColumnDefs(Oid relationI
 extern PGDLLEXPORT List *CreatePostgresColumnMappingsForIcebergTableFromExternalMetadata(Oid relationId);
 extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForTable(Oid relationId);
 extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForTableWithExclusion(Oid relationId, List *excludedColumns);
-extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForExternalIcebergTable(char *metadataPath,
+extern PGDLLEXPORT DataFileSchema * GetDataFileSchemaForExternalIcebergTable(Oid relationId,
+																			 char *metadataPath,
 																			 bool lowercaseNames);
-extern PGDLLEXPORT List *GetLeafFieldsForExternalIcebergTable(char *metadataPath);
+extern PGDLLEXPORT List *GetLeafFieldsForExternalIcebergTable(Oid relationId,
+															  char *metadataPath);
 extern PGDLLEXPORT List *GetLeafFieldsForTable(Oid relationId);
 extern PGDLLEXPORT const char *GetDuckSerializedIcebergFieldInitialDefault(const char *initialDefault,
 																		   Field * field);

@@ -141,6 +141,18 @@ AdjustTimestampFromUnixToPostgres(Timestamp timestamp)
 
 
 /*
+ * UnixTimestampFitsPostgresEpoch returns whether AdjustTimestampFromUnixToPostgres
+ * can move the timestamp without wrapping around. The earliest Unix timestamps
+ * wrap to a valid looking far-future one.
+ */
+bool
+UnixTimestampFitsPostgresEpoch(Timestamp timestamp)
+{
+	return timestamp >= PG_INT64_MIN + PostgresToUnixEpochDiffInMicrosecs;
+}
+
+
+/*
  * AdjustTimestampFromPostgresToUnix adjusts timestamp or timestamptz
  * from Postgres epoch to Unix epoch. Postgres epoch is 2000-01-01, while Unix
  * epoch is 1970-01-01.

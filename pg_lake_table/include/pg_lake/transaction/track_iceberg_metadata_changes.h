@@ -27,6 +27,7 @@ typedef struct TableMetadataOperationTracker
 	Oid			relationId;
 
 	bool		relationCreated;
+	char	   *stagedTableUuid;
 	bool		relationAltered;
 	bool		relationPartitionByChanged;
 	bool		relationDataFileChanged;
@@ -77,3 +78,4 @@ extern PGDLLEXPORT void RegisterRestCatalogXactCaptureCallback(void);
 extern PGDLLEXPORT void IcebergMetadataSubXactCallback(SubXactEvent event,
 													   SubTransactionId mySubid,
 													   SubTransactionId parentSubid, void *arg);
+extern PGDLLEXPORT void RecordRestCatalogStagedTable(Oid relationId, const char *uuid);

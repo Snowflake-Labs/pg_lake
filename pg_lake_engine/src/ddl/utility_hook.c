@@ -131,7 +131,6 @@ PgLakeCommonProcessUtility(ProcessUtilityParams * processUtilityParams)
 		IsA(parsetree, NotifyStmt) ||
 		IsA(parsetree, ExecuteStmt) ||
 		IsA(parsetree, PrepareStmt) ||
-		IsA(parsetree, DiscardStmt) ||
 		IsA(parsetree, DeallocateStmt) ||
 		IsA(parsetree, DeclareCursorStmt) ||
 		IsA(parsetree, FetchStmt))
