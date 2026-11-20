@@ -43,6 +43,7 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
 #include "pg_lake/parsetree/rte.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/planner/restriction_collector.h"
 #include "pg_lake/extensions/postgis.h"
@@ -81,7 +82,8 @@ static bool FixCtidVarWalker(Node *node,
 
 /*
  * ReplacePgLakeTableWithReadTableFunc replaces all occurrences of
- * pg_lake tables with read_table(..) function calls.
+ * tables that are served by a query engine with read_table(..) function
+ * calls.
  */
 List *
 ReplacePgLakeTableWithReadTableFunc(Node *node)
@@ -173,7 +175,7 @@ ReplacePgLakeTableWalker(Node *node, ReplacePgLakeTableContext * context)
 
 	RangeTblEntry *rte = (RangeTblEntry *) node;
 
-	if (IsAnyLakeForeignTable(rte))
+	if (IsQueryEngineTable(rte))
 	{
 		char	   *qualifiedRelationName = GetQualifiedRelationName(rte->relid);
 

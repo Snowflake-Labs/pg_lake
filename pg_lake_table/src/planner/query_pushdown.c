@@ -100,7 +100,31 @@ typedef struct IsShippableContext
 
 	/* range table of the query currently being walked, NIL outside a query */
 	List	   *rtable;
+
+	/* permission infos of the query currently being walked */
+	List	   *rteperminfos;
+
+	/*
+	 * query engine of the first table we found, and the user it is read as,
+	 * which all tables must share
+	 */
+	Oid			queryEngine;
+	Oid			queryEngineUser;
+	bool		hasQueryEngine;
 }			IsShippableContext;
+
+/*
+ * FindQueryEngineUserContext keeps context during the
+ * FindQueryEngineUserWalker.
+ */
+typedef struct FindQueryEngineUserContext
+{
+	/* permission infos of the query currently being walked */
+	List	   *rteperminfos;
+
+	/* the user that the first table of an external engine is read as */
+	Oid			checkAsUser;
+}			FindQueryEngineUserContext;
 
 
 static PlannedStmt *LakeTablePlanner(Query *parse, const char *queryString,
@@ -114,6 +138,10 @@ static bool ProcessNotShippableExpressionWalker(Node *node, IsShippableContext *
 static bool AddMissingRTEAliasaes(Node *node, void *context);
 static bool TargetListHasOnlyResjunk(List *targetList);
 static bool AllInheritorsAreLakeTable(Oid relationId);
+static Oid	GetRteCheckAsUser(RangeTblEntry *rte, List *rteperminfos);
+static Oid	GetQueryEngineCheckAsUser(Query *query);
+static bool FindQueryEngineUserWalker(Node *node,
+									  FindQueryEngineUserContext * context);
 static bool ExpressionHasCollation(Node *node, IsShippableContext * context);
 static bool ExpressionHasNonShippableObject(Node *node, bool srfAllowed, IsShippableContext * context);
 static bool ExpressionReturnsNonShippableType(Node *node, IsShippableContext * context);
@@ -187,6 +215,7 @@ typedef struct QueryPushdownScanState
 
 	/* connection properties */
 	Oid			queryEngine;
+	Oid			checkAsUser;
 	PGDuckConnection *connection;
 	char	  **receivedValues;
 
@@ -399,7 +428,8 @@ AddMissingRTEAliasaes(Node *node, void *context)
 
 /*
  * HasLakeRTE recursively walks the node tree to determine
- * whether there is a pg_lake_table RangeTblEntry.
+ * whether there is a pg_lake_table RangeTblEntry, which is a table
+ * that is served by a query engine.
  */
 bool
 HasLakeRTE(Node *node, void *context)
@@ -420,7 +450,7 @@ HasLakeRTE(Node *node, void *context)
 	{
 		RangeTblEntry *rte = (RangeTblEntry *) node;
 
-		if (IsAnyLakeForeignTable(rte))
+		if (IsQueryEngineTable(rte))
 			return true;
 
 		/* query_tree_walker descends into RTEs */
@@ -650,10 +680,12 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 	{
 		bool		prevHasUnnest = context->hasUnnest;
 		List	   *prevRtable = context->rtable;
+		List	   *prevRtePermInfos = context->rteperminfos;
 		Query	   *query = (Query *) node;
 
 		/* so that a Var below can be resolved to the relation it comes from */
 		context->rtable = query->rtable;
+		context->rteperminfos = query->rteperminfos;
 
 		if (query->hasForUpdate)
 		{
@@ -699,6 +731,7 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 
 		context->hasUnnest = prevHasUnnest;
 		context->rtable = prevRtable;
+		context->rteperminfos = prevRtePermInfos;
 
 		return false;
 	}
@@ -735,12 +768,47 @@ ProcessNotShippableExpressionWalker(Node *node, IsShippableContext * context)
 		}
 
 		/* we only support pg_lake relations for the moment */
-		if (rte->rtekind == RTE_RELATION && !IsAnyLakeForeignTable(rte))
+		if (rte->rtekind == RTE_RELATION && !IsQueryEngineTable(rte))
 		{
 			if (context->stopAtFirstNotShippable)
 				return true;
 
 			RecordNotShippableObject(context, rte->relid, RelationRelationId, NOT_SHIPPABLE_TABLE);
+		}
+		else if (rte->rtekind == RTE_RELATION)
+		{
+			/*
+			 * The query is sent to one engine, which has to serve all tables.
+			 * An external engine is reached with one user's user mapping, so
+			 * its tables also have to be read as the same user, which differs
+			 * for a table read through a view.
+			 */
+			Oid			queryEngine = GetRelationQueryEngine(rte->relid);
+			Oid			queryEngineUser = queryEngine == PGDUCK_QUERY_ENGINE ?
+				InvalidOid : GetRteCheckAsUser(rte, context->rteperminfos);
+
+			if (!context->hasQueryEngine)
+			{
+				context->queryEngine = queryEngine;
+				context->queryEngineUser = queryEngineUser;
+				context->hasQueryEngine = true;
+			}
+			else if (queryEngine != context->queryEngine)
+			{
+				if (context->stopAtFirstNotShippable)
+					return true;
+
+				RecordNotShippableObject(context, rte->relid, RelationRelationId,
+										 NOT_SHIPPABLE_MIXED_QUERY_ENGINES);
+			}
+			else if (queryEngineUser != context->queryEngineUser)
+			{
+				if (context->stopAtFirstNotShippable)
+					return true;
+
+				RecordNotShippableObject(context, rte->relid, RelationRelationId,
+										 NOT_SHIPPABLE_MIXED_QUERY_ENGINE_USERS);
+			}
 		}
 
 		if (rte->rtekind == RTE_RELATION && has_subclass(rte->relid) &&
@@ -1157,6 +1225,81 @@ AllInheritorsAreLakeTable(Oid relationId)
 
 
 /*
+ * GetRteCheckAsUser returns the user that a relation RTE of a query with the
+ * given permission infos is read as: the owner of the view it was expanded
+ * from, or InvalidOid for the current user.
+ */
+static Oid
+GetRteCheckAsUser(RangeTblEntry *rte, List *rteperminfos)
+{
+	if (rte->perminfoindex == 0)
+		return InvalidOid;
+
+	return getRTEPermissionInfo(rteperminfos, rte)->checkAsUser;
+}
+
+
+/*
+ * GetQueryEngineCheckAsUser returns the user that the tables of an external
+ * query engine in the given query are read as. They all are read as the same
+ * user, since otherwise the query would not be pushed down.
+ */
+static Oid
+GetQueryEngineCheckAsUser(Query *query)
+{
+	FindQueryEngineUserContext context = {
+		.rteperminfos = NIL,
+		.checkAsUser = InvalidOid
+	};
+
+	FindQueryEngineUserWalker((Node *) query, &context);
+
+	return context.checkAsUser;
+}
+
+
+/*
+ * FindQueryEngineUserWalker finds the first table of an external query engine
+ * and sets context->checkAsUser to the user it is read as.
+ */
+static bool
+FindQueryEngineUserWalker(Node *node, FindQueryEngineUserContext * context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+		List	   *prevRtePermInfos = context->rteperminfos;
+
+		context->rteperminfos = query->rteperminfos;
+
+		bool		found = query_tree_walker(query, FindQueryEngineUserWalker,
+											  context, QTW_EXAMINE_RTES_BEFORE);
+
+		context->rteperminfos = prevRtePermInfos;
+
+		return found;
+	}
+
+	if (IsA(node, RangeTblEntry))
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) node;
+
+		if (rte->rtekind != RTE_RELATION || !IsExternalEngineTable(rte->relid))
+			return false;
+
+		context->checkAsUser = GetRteCheckAsUser(rte, context->rteperminfos);
+
+		return true;
+	}
+
+	return expression_tree_walker(node, FindQueryEngineUserWalker, context);
+}
+
+
+/*
 * ExpressionHasCollation returns whether the given expression
 * has a collation. This check is inline with the foreign_expr_walker().
 */
@@ -1526,6 +1669,9 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 		TransformPushdownableInsertSelect(scanQuery);
 	}
 
+	/* the user that the tables of an external engine are read as */
+	scanState->checkAsUser = GetQueryEngineCheckAsUser(scanQuery);
+
 	/*
 	 * Override all the RTE_RELATIONs that are pg_lake tables with
 	 * read_table('table_name') function calls.
@@ -1572,7 +1718,8 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 
 	scanState->queryString = queryString;
 	scanState->queryEngine = GetQueryEngineForRteList(rteList);
-	scanState->connection = GetQueryEngineConnection(scanState->queryEngine);
+	scanState->connection = GetQueryEngineConnection(scanState->queryEngine,
+													 scanState->checkAsUser);
 	scanState->tupleDesc = tupleDesc;
 	scanState->attributeInputMetadata = TupleDescGetAttInMetadata(tupleDesc);
 	scanState->estate = estate;
@@ -1845,7 +1992,11 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 	ExplainPropertyText("Engine", "DuckDB", es);
 
-	if (es->verbose)
+	if (scanState->queryEngine != PGDUCK_QUERY_ENGINE)
+		ExplainPropertyText("Server", GetQueryEngineName(scanState->queryEngine), es);
+
+	/* an external query engine reads no files that we know of */
+	if (es->verbose && scanState->queryEngine == PGDUCK_QUERY_ENGINE)
 	{
 		int			dataFileScans = 0;
 		int			deleteFileScans = 0;
@@ -1857,7 +2008,10 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 
 		ExplainPropertyText("Data Files Scanned", dataFileScansString, es);
 		ExplainPropertyText("Deletion Files Scanned", deleteFileScansString, es);
+	}
 
+	if (es->verbose)
+	{
 		if (scanState->insertIntoRelid != InvalidOid)
 		{
 			IcebergOutOfRangePolicy outOfRangePolicy =
@@ -1898,8 +2052,8 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	}
 
 
-	ExplainPGDuckQuery(scanState->queryEngine, realQuery, scanState->numParams,
-					   scanState->parameterValues, es);
+	ExplainPGDuckQuery(scanState->queryEngine, scanState->checkAsUser, realQuery,
+					   scanState->numParams, scanState->parameterValues, es);
 }
 
 

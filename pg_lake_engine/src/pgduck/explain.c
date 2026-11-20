@@ -56,8 +56,8 @@ typedef struct PhysicalOperator
 }			PhysicalOperator;
 
 
-static char *GetExplainJson(Oid queryEngine, char *query, int numParams,
-							const char **parameterValues);
+static char *GetExplainJson(Oid queryEngine, Oid checkAsUser, char *query,
+							int numParams, const char **parameterValues);
 static void ExplainPhysicalOperator(PhysicalOperator * operator, ExplainState *es);
 static void ReadPhysicalOperator(JsonbContainer *json, PhysicalOperator * operator);
 static void ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * property);
@@ -65,14 +65,15 @@ static void ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * pr
 
 /*
  * ExplainPGDuckQuery explains a query using the given query engine and emits
- * explain output using the PostgreSQL API.
+ * explain output using the PostgreSQL API. checkAsUser is the user that the
+ * scan reads its tables as (see GetQueryEngineConnection).
  */
 void
-ExplainPGDuckQuery(Oid queryEngine, char *query, int numParams,
+ExplainPGDuckQuery(Oid queryEngine, Oid checkAsUser, char *query, int numParams,
 				   const char **parameterValues, ExplainState *es)
 {
-	char	   *explainOutput = GetExplainJson(queryEngine, query, numParams,
-											   parameterValues);
+	char	   *explainOutput = GetExplainJson(queryEngine, checkAsUser, query,
+											   numParams, parameterValues);
 	Datum		jsonbDatum = DirectFunctionCall1(jsonb_in, PointerGetDatum(explainOutput));
 	Jsonb	   *explainJsonb = DatumGetJsonbP(jsonbDatum);
 
@@ -207,14 +208,15 @@ ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * property)
  * GetExplainJson gets the explain output for a query as JSON.
  */
 static char *
-GetExplainJson(Oid queryEngine, char *query, int numParams,
+GetExplainJson(Oid queryEngine, Oid checkAsUser, char *query, int numParams,
 			   const char **parameterValues)
 {
 	char	   *explainCommand = psprintf("explain (format 'json') %s", query);
 
 	char	   *value = NULL;
 
-	PGDuckConnection *pgDuckConn = GetQueryEngineConnection(queryEngine);
+	PGDuckConnection *pgDuckConn = GetQueryEngineConnection(queryEngine,
+															checkAsUser);
 
 	SendQueryWithParams(pgDuckConn, explainCommand, numParams, parameterValues);
 
@@ -227,6 +229,18 @@ GetExplainJson(Oid queryEngine, char *query, int numParams,
 	{
 		int			rowCount = PQntuples(result);
 		int			columnCount = PQnfields(result);
+
+		/* DuckDB returns the plan in the second of two columns */
+		if (queryEngine != PGDUCK_QUERY_ENGINE && (columnCount < 2 || rowCount < 1))
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_ERROR),
+					 errmsg("server \"%s\" did not return a DuckDB query plan",
+							GetQueryEngineName(queryEngine)),
+					 errdetail("EXPLAIN shows the plan that the query engine "
+							   "returns for DuckDB's explain (format 'json'), "
+							   "which has a row with two columns. The engine "
+							   "returned %d rows with %d columns.",
+							   rowCount, columnCount)));
 
 		if (columnCount < 2)
 			ereport(ERROR, (errmsg("unexpected column count %d", columnCount)));

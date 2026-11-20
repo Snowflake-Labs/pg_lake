@@ -31,6 +31,7 @@
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/util/rel_utils.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -45,6 +46,7 @@ static RangeTblEntry *GetSelectRteFromInsertSelect(Query *query);
 static RangeTblEntry *GetInsertRteFromInsertSelect(Query *query);
 static bool TypeContainsUnsuitableForPushdown(Oid typeId, int32 typmod);
 static bool QueryIntroducesNanNumeric(Node *node, void *context);
+static bool QueryReadsExternalEngineTable(Node *node, void *context);
 
 /* pg_lake_table.enable_insert_select_pushdown setting */
 bool		EnableInsertSelectPushdown = true;
@@ -160,6 +162,15 @@ IsPushdownableInsertSelectQuery(Query *query)
 		ereport(DEBUG4,
 				(errmsg("INSERT..SELECT that can produce a NaN numeric is not "
 						"pushdownable")));
+		return false;
+	}
+
+	/* pgduck_server writes the rows, so it also has to run the SELECT */
+	if (QueryReadsExternalEngineTable((Node *) query, NULL))
+	{
+		ereport(DEBUG4,
+				(errmsg("INSERT..SELECT from a table of an external query "
+						"engine is not pushdownable")));
 		return false;
 	}
 
@@ -452,6 +463,31 @@ QueryIntroducesNanNumeric(Node *node, void *context)
 		return true;
 
 	return expression_tree_walker(node, QueryIntroducesNanNumeric, context);
+}
+
+
+/*
+ * QueryReadsExternalEngineTable returns whether the query reads a table of an
+ * external query engine, including in its CTEs and subqueries.
+ */
+static bool
+QueryReadsExternalEngineTable(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+		return query_tree_walker((Query *) node, QueryReadsExternalEngineTable,
+								 context, QTW_EXAMINE_RTES_BEFORE);
+
+	if (IsA(node, RangeTblEntry))
+	{
+		RangeTblEntry *rte = (RangeTblEntry *) node;
+
+		return rte->rtekind == RTE_RELATION && IsExternalEngineTable(rte->relid);
+	}
+
+	return expression_tree_walker(node, QueryReadsExternalEngineTable, context);
 }
 
 

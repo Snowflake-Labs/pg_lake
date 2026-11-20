@@ -63,6 +63,10 @@ All three can be used in the same query and the same transaction. `load_from` an
 `COPY ... FROM` load files into heap or Iceberg tables, and `COPY ... TO` writes any query result
 back out as files.
 
+A `pg_lake_remote` foreign table reads a table of an
+[external query engine](external-query-engines.md), another server that runs DuckDB SQL, instead
+of files.
+
 ## What happens when you query
 
 When you query an Iceberg table or a data lake file table:
