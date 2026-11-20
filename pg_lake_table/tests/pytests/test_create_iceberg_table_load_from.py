@@ -516,9 +516,10 @@ def test_create_iceberg_table_from_json(
         pg_conn,
     )
     assert len(result) == 6
+    # DuckDB detects JSON timestamps with an offset as timestamptz since 2.0
     assert result == [
         ["s", "bigint"],
-        ["t", "text"],
+        ["t", "timestamp with time zone"],
         ["d", "double precision"],
         ["b", "bigint"],
         ["h", "text"],

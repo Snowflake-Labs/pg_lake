@@ -23,6 +23,7 @@
 #include "access/tupdesc.h"
 #include "commands/defrem.h"
 #include "common/string.h"
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/csv/csv_options.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/pgduck/client.h"
@@ -66,7 +67,7 @@ PerformDeleteFromParquet(char *sourcePath,
 
 	appendStringInfo(&command, "COPY (%s) TO %s",
 					 remainderQuery,
-					 quote_literal_cstr(destinationPath));
+					 duckdb_quote_literal(destinationPath));
 
 	/* start WITH options */
 	appendStringInfoString(&command, " WITH (format 'parquet'");
@@ -82,7 +83,7 @@ PerformDeleteFromParquet(char *sourcePath,
 			CopyDataCompressionToName(destinationCompression);
 
 		appendStringInfo(&command, ", compression %s",
-						 quote_literal_cstr(compressionName));
+						 duckdb_quote_literal(compressionName));
 	}
 
 	if (schema && schema->nfields > 0)
@@ -136,7 +137,7 @@ DeleteFromParquetQuery(char *sourceDataFilePath, List *positionDeleteFiles,
 					 readFileQuery,
 	/* position delete files adds a WHERE clause, so then we should use AND */
 					 positionDeleteFiles != NIL ? "AND" : "WHERE",
-					 quote_literal_cstr(deletionFilePath));
+					 duckdb_quote_literal(deletionFilePath));
 
 	return command.data;
 }

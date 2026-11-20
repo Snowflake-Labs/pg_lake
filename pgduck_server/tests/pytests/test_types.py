@@ -1311,18 +1311,22 @@ def test_unsupported(setup_table, pgduck_conn):
         )
 
 
-def test_unsupported_variant(pgduck_conn):
-    """VARIANT arrived with DuckDB 1.5 and has no conversion function, so the
-    error has to name it: casting the one column is the only way forward, and a
-    bare "Unsupported type" does not say which column to cast."""
+def test_variant(pgduck_conn):
+    """VARIANT is sent as the text DuckDB prints for it, the same as casting it.
+
+    Since DuckDB 2.0, COPY ... (RETURN_STATS) returns a MAP(VARCHAR, VARIANT)
+    column, so pg_lake reads one on every write; nested in a MAP is the case
+    that has to work."""
     variant = "CAST('{\"a\": 1}' AS JSON)::VARIANT"
 
-    error = run_query(f"SELECT {variant} AS v", pgduck_conn, raise_error=False)
-    assert 'Unsupported type VARIANT in column "v"' in error
+    result = run_query(f"SELECT {variant} AS v", pgduck_conn)
+    cast = run_query(f"SELECT CAST({variant} AS TEXT) AS v", pgduck_conn)
+    assert len(result) == 1 and result[0]["v"] == cast[0]["v"] == "{'a': 1}"
 
-    # the cast the error points at does work
-    result = run_query(f"SELECT CAST({variant} AS TEXT) AS v", pgduck_conn)
-    assert len(result) == 1 and result[0]["v"] == "{'a': 1}"
+    result = run_query(
+        "SELECT MAP {'row_group_count': 3::UBIGINT::VARIANT} AS m", pgduck_conn
+    )
+    assert len(result) == 1 and result[0]["m"] == '{"(row_group_count,3)"}'
 
 
 def perform_transmit_query(command, pgduck_conn, tmp_path):

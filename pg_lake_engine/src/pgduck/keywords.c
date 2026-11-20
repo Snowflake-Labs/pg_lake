@@ -28,6 +28,7 @@
 
 #include "postgres.h"
 #include "miscadmin.h"
+#include "lib/stringinfo.h"
 #include "utils/builtins.h"
 
 #include <string.h>
@@ -133,4 +134,34 @@ duckdb_quote_identifier(const char *ident)
 	}
 
 	return ident;
+}
+
+
+/*
+ * duckdb_quote_literal quotes a string for use as a string literal in SQL
+ * sent to pgduck_server.
+ *
+ * quote_literal_cstr() writes a value that contains a backslash as an E''
+ * string with the backslash doubled, which DuckDB 2.0 no longer unescapes in
+ * every position (map keys, for instance, keep both backslashes). DuckDB
+ * string literals take backslashes as they are, so double only the quotes.
+ */
+char *
+duckdb_quote_literal(const char *literal)
+{
+	StringInfoData buf;
+
+	initStringInfo(&buf);
+	appendStringInfoChar(&buf, '\'');
+
+	for (const char *c = literal; *c != '\0'; c++)
+	{
+		if (*c == '\'')
+			appendStringInfoChar(&buf, '\'');
+		appendStringInfoChar(&buf, *c);
+	}
+
+	appendStringInfoChar(&buf, '\'');
+
+	return buf.data;
 }

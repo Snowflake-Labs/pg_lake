@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from utils_pytest import *
 
 CACHE_FILE_PREFIX = "pgl-cache."
@@ -100,7 +100,8 @@ TRUNCATED_BODY_SENT = 4 * 1024
 
 @pytest.fixture
 def flaky_http_server():
-    """Truncate the first GET of the body, then serve it in full.
+    """Truncate the first GET of the body, then serve it in full, or truncate
+    every GET once the test sets state["truncate_all"].
 
     This is the case that corrupts silently. A body that is *always* short ends
     up failing anyway, because HTTPUtil::SendRequest runs out of retries and
@@ -112,7 +113,7 @@ def flaky_http_server():
     and the fixture is per-test so each test sees a fresh first attempt.
     """
 
-    state = {"gets": 0}
+    state = {"gets": 0, "truncate_all": False}
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -128,13 +129,13 @@ def flaky_http_server():
 
         def do_GET(self):
             state["gets"] += 1
-            first = state["gets"] == 1
+            truncate = state["gets"] == 1 or state["truncate_all"]
             self._headers()
             self.wfile.write(
-                b"x" * (TRUNCATED_BODY_SENT if first else TRUNCATED_BODY_SIZE)
+                b"x" * (TRUNCATED_BODY_SENT if truncate else TRUNCATED_BODY_SIZE)
             )
             self.wfile.flush()
-            if first:
+            if truncate:
                 self.close_connection = True
 
         def log_message(self, *args):
@@ -144,7 +145,9 @@ def flaky_http_server():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    # Threaded, because the client keeps connections open for reuse, and a
+    # single-threaded server stuck serving one of them never gets to shut down.
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
@@ -171,11 +174,11 @@ def httplib_http_client(pgduck_conn):
 def test_retried_download_starts_clean(flaky_http_server, pgduck_conn):
     """On the default client, a retry replaces the partial attempt.
 
-    The curl client collects the whole body in memory and only hands it to the
-    content handler once the transfer came back CURLE_OK, so a truncated attempt
-    writes nothing and the retry starts from an empty output file. The size check
-    still guards the outcome, which is what this asserts: the entry that gets
-    published is the object, byte for byte.
+    The curl client streams the body to the content handler as it arrives, so a
+    truncated attempt has already written part of the object when the retry
+    starts. Download starts the output over when the retry's response arrives.
+    The size check still guards the outcome, which is what this asserts: the
+    entry that gets published is the object, byte for byte.
     """
     port, state = flaky_http_server
     url = f"http://127.0.0.1:{port}/flaky.bin"
@@ -198,24 +201,50 @@ def test_retried_download_starts_clean(flaky_http_server, pgduck_conn):
     assert not stage_path.exists(), f"staging file was left behind: {stage_path}"
 
 
-def test_retried_download_is_not_cached(
+def test_retried_download_starts_clean_on_httplib(
     flaky_http_server, httplib_http_client, pgduck_conn
 ):
-    """A download whose retry succeeded must still match the object.
+    """On the httplib client too, a retry replaces the partial attempt.
 
-    On the httplib client, HTTPUtil::SendRequest retries a request error by
-    re-running the content handler from the start of the body, and the handler
-    appends to an output file that still holds whatever the previous attempt
-    delivered. So a retry that succeeds leaves a partial copy followed by a
-    complete one: longer than the object, with no exception, and reported as
-    success.
-
-    Nothing revalidates a finalized cache entry against object storage, so that
-    entry would be served for every later read of the URL. For an Avro manifest
-    the second copy begins exactly where the reader looks for the next block
-    header, which is the shape that produces the corruption in #550.
+    HTTPUtil::SendRequest retries a request error by running the request
+    again, and the content handler appends to the output file. Download starts
+    the output over when the retry's response arrives, so what gets published
+    is the object, byte for byte, rather than the partial attempt followed by a
+    complete one -- which for an Avro manifest is the shape that produces the
+    corruption in #550.
     """
     port, state = flaky_http_server
+    url = f"http://127.0.0.1:{port}/flaky.bin"
+    cached_path = Path(
+        f"{server_params.PGDUCK_CACHE_DIR}/http/127.0.0.1:{port}"
+        f"/{CACHE_FILE_PREFIX}flaky.bin"
+    )
+    stage_path = Path(f"{cached_path}.pgl-stage")
+
+    run_command(f"CALL pg_lake_cache_file('{url}');", pgduck_conn)
+    pgduck_conn.rollback()
+
+    # Guards against the test passing for the wrong reason: the request has to
+    # have been retried, otherwise this is just a plain download.
+    assert state["gets"] >= 2, (
+        f"the download was not retried ({state['gets']} GET(s)), so the "
+        f"retry behaviour this test is about never happened"
+    )
+
+    assert cached_path.exists(), f"the retried download was not cached: {cached_path}"
+    assert cached_path.read_bytes() == b"x" * TRUNCATED_BODY_SIZE
+    assert not stage_path.exists(), f"staging file was left behind: {stage_path}"
+
+
+def test_incomplete_download_is_not_cached(flaky_http_server, pgduck_conn):
+    """A download that never completes must not be cached.
+
+    Every attempt is cut short, so the client runs out of retries. Nothing
+    revalidates a finalized cache entry against object storage, so a partial
+    copy would be served for every later read of the URL.
+    """
+    port, state = flaky_http_server
+    state["truncate_all"] = True
     url = f"http://127.0.0.1:{port}/flaky.bin"
     cached_path = Path(
         f"{server_params.PGDUCK_CACHE_DIR}/http/127.0.0.1:{port}"
@@ -228,19 +257,14 @@ def test_retried_download_is_not_cached(
     )
     pgduck_conn.rollback()
 
-    # Guards against the test passing for the wrong reason: the request has to
-    # have been retried, otherwise this is just a plain failed download.
-    assert state["gets"] >= 2, (
-        f"the download was not retried ({state['gets']} GET(s)), so the "
-        f"accumulation this test is about never happened"
-    )
+    assert state["gets"] >= 2, f"the download was not retried ({state['gets']} GET(s))"
 
     cached_size = cached_path.stat().st_size if cached_path.exists() else None
     assert isinstance(error, str), (
-        f"a retried download was cached as {cached_size} bytes for a "
+        f"an incomplete download was cached as {cached_size} bytes for a "
         f"{TRUNCATED_BODY_SIZE}-byte object"
     )
-    assert not cached_path.exists(), f"over-long download was published: {cached_path}"
+    assert not cached_path.exists(), f"incomplete download was published: {cached_path}"
 
     # The rejected download stays staged, which is deliberate: the sweep at the
     # top of ManageCache reclaims it. Nothing races us for it here -- this suite
@@ -283,7 +307,7 @@ def status_http_server():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
@@ -1731,7 +1755,7 @@ def test_pg_lake_remove_file_azure_batch_per_secret(azure, pgduck_conn):
     for url in proxied_urls + direct_urls:
         run_command(f"COPY (SELECT 1) TO '{url}';", pgduck_conn)
 
-    proxy = HTTPServer(("127.0.0.1", 0), Proxy)
+    proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
     thread = threading.Thread(target=proxy.serve_forever)
     thread.start()
     connection_string = AZURITE_CONNECTION_STRING.replace(

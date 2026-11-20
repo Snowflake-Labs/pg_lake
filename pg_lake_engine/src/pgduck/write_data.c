@@ -208,7 +208,7 @@ WriteQueryResultTo(char *query,
 
 	appendStringInfo(&command, "COPY (%s) TO %s",
 					 query,
-					 quote_literal_cstr(destinationPath));
+					 duckdb_quote_literal(destinationPath));
 
 	/* start WITH options */
 	appendStringInfoString(&command, " WITH (");
@@ -221,7 +221,7 @@ WriteQueryResultTo(char *query,
 		"parquet" : CopyDataFormatToName(destinationFormat);
 
 	appendStringInfo(&command, "format %s",
-					 quote_literal_cstr(formatName));
+					 duckdb_quote_literal(formatName));
 
 	switch (destinationFormat)
 	{
@@ -241,7 +241,7 @@ WriteQueryResultTo(char *query,
 						CopyDataCompressionToName(destinationCompression);
 
 					appendStringInfo(&command, ", compression %s",
-									 quote_literal_cstr(compressionName));
+									 duckdb_quote_literal(compressionName));
 				}
 
 				ListCell   *optionCell = NULL;
@@ -255,7 +255,7 @@ WriteQueryResultTo(char *query,
 						char	   *fileSizeStr = defGetString(option);
 
 						appendStringInfo(&command, ", file_size_bytes %s",
-										 quote_literal_cstr(fileSizeStr));
+										 duckdb_quote_literal(fileSizeStr));
 					}
 				}
 
@@ -278,7 +278,7 @@ WriteQueryResultTo(char *query,
 					if (geoParquetMeta != NULL)
 					{
 						appendStringInfo(&command, ", kv_metadata { geo: %s }",
-										 quote_literal_cstr(geoParquetMeta));
+										 duckdb_quote_literal(geoParquetMeta));
 					}
 				}
 
@@ -321,7 +321,7 @@ WriteQueryResultTo(char *query,
 					CopyDataCompressionToName(destinationCompression);
 
 				appendStringInfo(&command, ", compression %s",
-								 quote_literal_cstr(compressionName));
+								 duckdb_quote_literal(compressionName));
 
 				/* FORCE_ARRAY maps to DuckDB's ARRAY (single JSON array). */
 				if (GetBoolOption(formatOptions, "force_array", false))
@@ -343,7 +343,7 @@ WriteQueryResultTo(char *query,
 					CopyDataCompressionToName(destinationCompression);
 
 				appendStringInfo(&command, ", compression %s",
-								 quote_literal_cstr(compressionName));
+								 duckdb_quote_literal(compressionName));
 
 				/*
 				 * We normalize the list of options to include default values
@@ -371,28 +371,28 @@ WriteQueryResultTo(char *query,
 						char	   *delimiter = defGetString(option);
 
 						appendStringInfo(&command, ", delim %s",
-										 quote_literal_cstr(delimiter));
+										 duckdb_quote_literal(delimiter));
 					}
 					else if (strcmp(option->defname, "quote") == 0)
 					{
 						char	   *quote = defGetString(option);
 
 						appendStringInfo(&command, ", quote %s",
-										 quote_literal_cstr(quote));
+										 duckdb_quote_literal(quote));
 					}
 					else if (strcmp(option->defname, "escape") == 0)
 					{
 						char	   *escape = defGetString(option);
 
 						appendStringInfo(&command, ", escape %s",
-										 quote_literal_cstr(escape));
+										 duckdb_quote_literal(escape));
 					}
 					else if (strcmp(option->defname, "null") == 0)
 					{
 						char	   *null = defGetString(option);
 
 						appendStringInfo(&command, ", nullstr %s",
-										 quote_literal_cstr(null));
+										 duckdb_quote_literal(null));
 					}
 					else if (strcmp(option->defname, "force_quote") == 0)
 					{
@@ -582,9 +582,9 @@ TupleDescToColumnMapForWrite(TupleDesc tupleDesc, CopyDataFormat destinationForm
 
 		appendStringInfo(&map, "%s%s:%s",
 						 hasColumns ? "," : "",
-						 quote_literal_cstr(DuckDBNameForColumn(schema, columnName,
-																hasCollision)),
-						 quote_literal_cstr(duckdbType.typeName));
+						 duckdb_quote_literal(DuckDBNameForColumn(schema, columnName,
+																  hasCollision)),
+						 duckdb_quote_literal(duckdbType.typeName));
 
 		hasColumns = true;
 	}
@@ -622,7 +622,7 @@ AppendNamedFields(StringInfo map, DataFileSchema * schema, bool duckNames)
 
 		appendStringInfo(map, "%s%s: ",
 						 addComma ? ", " : "",
-						 quote_literal_cstr(fieldName));
+						 duckdb_quote_literal(fieldName));
 
 		AppendFieldIdValue(map, field->type, field->id);
 

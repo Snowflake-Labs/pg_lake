@@ -116,6 +116,7 @@ static DuckDBStatus blob_to_text(duckdb_vector vector, duckdb_logical_type blobT
 static DuckDBStatus decimal_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus enum_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus geometry_to_text(duckdb_vector vector, duckdb_logical_type geometryType, int row, TextOutputBuffer * toTextBuffer);
+static DuckDBStatus variant_to_text(duckdb_vector vector, duckdb_logical_type variantType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus list_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus map_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
 static DuckDBStatus struct_to_text(duckdb_vector vector, duckdb_logical_type logicalType, int row, TextOutputBuffer * toTextBuffer);
@@ -365,6 +366,15 @@ static DuckDBTypeInfo TypeInfo[] =
 	{
 		 /* 40 */ DUCKDB_TYPE_GEOMETRY, geometry_to_text
 	},
+
+	/*
+	 * VARIANT arrived with DuckDB 1.5. Since 2.0, COPY ... (RETURN_STATS)
+	 * returns it in extra_info, so a result we read on every write carries
+	 * one. We send the text DuckDB prints for it.
+	 */
+	{
+		 /* 41 */ DUCKDB_TYPE_VARIANT, variant_to_text
+	},
 };
 
 
@@ -374,7 +384,7 @@ static DuckDBTypeInfo TypeInfo[] =
 DuckDBTypeInfo *
 find_duck_type_info(duckdb_type duckType)
 {
-	if (duckType > DUCKDB_TYPE_INVALID && duckType <= DUCKDB_TYPE_GEOMETRY)
+	if (duckType > DUCKDB_TYPE_INVALID && duckType <= DUCKDB_TYPE_VARIANT)
 		return &TypeInfo[duckType];
 
 	return NULL;
@@ -410,8 +420,8 @@ duck_type_error_name(duckdb_type duckType)
 			return "INTEGER_LITERAL";
 		case DUCKDB_TYPE_TIME_NS:
 			return "TIME_NS";
-		case DUCKDB_TYPE_VARIANT:
-			return "VARIANT";
+		case DUCKDB_TYPE_TIMESTAMP_TZ_NS:
+			return "TIMESTAMPTZ_NS";
 		default:
 			return NULL;
 	}
@@ -518,6 +528,8 @@ duckdb_type_to_pg_oid(duckdb_type duckType)
 		case DUCKDB_TYPE_MAP:
 			return TEXTOID;
 		case DUCKDB_TYPE_UNION:
+			return TEXTOID;
+		case DUCKDB_TYPE_VARIANT:
 			return TEXTOID;
 
 		default:
@@ -748,6 +760,29 @@ geometry_to_text(duckdb_vector vector, duckdb_logical_type geometryType, int row
 	}
 
 	toTextBuffer->buffer = hexWkb;
+	toTextBuffer->needsFree = true;
+
+	return DUCKDB_SUCCESS;
+}
+
+
+/*
+ * variant_to_text converts a VARIANT to the text DuckDB prints for it. The C
+ * API has no accessor for VARIANT values, so duckdb_pglake reads it.
+ */
+static DuckDBStatus
+variant_to_text(duckdb_vector vector, duckdb_logical_type variantType, int row, TextOutputBuffer * toTextBuffer)
+{
+	char	   *text = (char *) duckdb_pglake_vector_value_to_string(vector, row);
+
+	if (text == NULL)
+	{
+		toTextBuffer->buffer = NULL;
+		return DUCKDB_OUT_OF_MEMORY_ERROR;
+	}
+
+	toTextBuffer->buffer = text;
+
 	toTextBuffer->needsFree = true;
 
 	return DUCKDB_SUCCESS;

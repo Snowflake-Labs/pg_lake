@@ -14,13 +14,13 @@ find_package(azure-identity-cpp CONFIG)
 find_package(azure-storage-blobs-cpp CONFIG)
 find_package(azure-storage-files-datalake-cpp CONFIG)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 # Optimize Github Actions builds by avoiding vcpkg rebuild
 set(VCPKG_DISABLE_COMPILER_TRACKING on)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 project(${TARGET_NAME})
@@ -43,9 +43,23 @@ file(GLOB POSTGRES_SOURCES
      "duckdb-postgres/src/storage/*.cpp"
 )
 
+# The sources of database-connector that duckdb-postgres compiles, from
+# duckdb-postgres/src/dbconnector/CMakeLists.txt
+set(DBCONNECTOR_PATH duckdb-postgres/database-connector/src)
+set(DBCONNECTOR_SOURCES
+    ${DBCONNECTOR_PATH}/attached/attached_catalog.cpp
+    ${DBCONNECTOR_PATH}/attached/attached_table.cpp
+    ${DBCONNECTOR_PATH}/functions/configure_pool.cpp
+    ${DBCONNECTOR_PATH}/query/query_writer.cpp
+    ${DBCONNECTOR_PATH}/table_scan/filter_pushdown.cpp
+    ${DBCONNECTOR_PATH}/table_scan/filter_util.cpp
+    ${DBCONNECTOR_PATH}/optimizer/optimizer_util.cpp
+)
+
 set(EXTENSION_SOURCES
     ${PGCOMPAT_SOURCES}
     ${POSTGRES_SOURCES}
+    ${DBCONNECTOR_SOURCES}
 )
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})

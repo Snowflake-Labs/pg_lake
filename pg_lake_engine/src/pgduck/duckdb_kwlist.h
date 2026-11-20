@@ -4,8 +4,8 @@
  * AUTO-GENERATED — do not edit by hand.
  * Run:  python3 tools/generate_duckdb_kwlist.py
  *
- * Source: duckdb_pglake/duckdb/third_party/libpg_query/include/parser/kwlist.hpp
- * Source SHA-256: a14dafc04193e9b70eceed4cb0e83011a328a32f446ca47eed08d8835fc0e65c
+ * Source: duckdb_pglake/duckdb/src/parser/peg/grammar/keywords/ (*_keyword.list)
+ * Source SHA-256: 0475c5a6833f852d7f988c26ad7c89ffd21c5b240556d6a5dce6123fbba539b4
  *
  * This file is included by pg_lake_engine/src/pgduck/keywords.c to
  * initialise the DuckDB keyword lookup table used by
@@ -80,6 +80,10 @@
 
 {
 	"any", RESERVED_KEYWORD
+},
+
+{
+	"approx", UNRESERVED_KEYWORD
 },
 
 {
@@ -295,6 +299,10 @@
 },
 
 {
+	"connect", UNRESERVED_KEYWORD
+},
+
+{
 	"connection", UNRESERVED_KEYWORD
 },
 
@@ -439,6 +447,10 @@
 },
 
 {
+	"destroy", UNRESERVED_KEYWORD
+},
+
+{
 	"detach", UNRESERVED_KEYWORD
 },
 
@@ -452,6 +464,14 @@
 
 {
 	"discard", UNRESERVED_KEYWORD
+},
+
+{
+	"disconnect", UNRESERVED_KEYWORD
+},
+
+{
+	"distance", UNRESERVED_KEYWORD
 },
 
 {
@@ -516,6 +536,10 @@
 
 {
 	"event", UNRESERVED_KEYWORD
+},
+
+{
+	"exact", UNRESERVED_KEYWORD
 },
 
 {
@@ -1027,6 +1051,10 @@
 },
 
 {
+	"nearest", UNRESERVED_KEYWORD
+},
+
+{
 	"new", UNRESERVED_KEYWORD
 },
 
@@ -1347,6 +1375,10 @@
 },
 
 {
+	"register", UNRESERVED_KEYWORD
+},
+
+{
 	"reindex", UNRESERVED_KEYWORD
 },
 
@@ -1376,6 +1408,14 @@
 
 {
 	"reset", UNRESERVED_KEYWORD
+},
+
+{
+	"resource", UNRESERVED_KEYWORD
+},
+
+{
+	"resources", UNRESERVED_KEYWORD
 },
 
 {
@@ -1471,6 +1511,10 @@
 },
 
 {
+	"secure", UNRESERVED_KEYWORD
+},
+
+{
 	"security", UNRESERVED_KEYWORD
 },
 
@@ -1524,6 +1568,10 @@
 
 {
 	"similar", TYPE_FUNC_NAME_KEYWORD
+},
+
+{
+	"similarity", UNRESERVED_KEYWORD
 },
 
 {
@@ -1724,6 +1772,10 @@
 
 {
 	"try_cast", TYPE_FUNC_NAME_KEYWORD
+},
+
+{
+	"tuple", TYPE_FUNC_NAME_KEYWORD
 },
 
 {

@@ -38,9 +38,11 @@
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
 #include "duckdb/main/extension_helper.hpp"
 #include "duckdb/common/types/geometry_crs.hpp"
+#include "duckdb/common/vector/list_vector.hpp"
+#include "duckdb/common/vector/struct_vector.hpp"
 
-#include "httpfs.hpp"
-#include "s3fs.hpp"
+#include "http/httpfs.hpp"
+#include "s3/s3fs.hpp"
 #include "hffs.hpp"
 #include "azure_blob_filesystem.hpp"
 #include "azure_dfs_filesystem.hpp"
@@ -183,12 +185,11 @@ inline void UuidExtractVersionPG(DataChunk &args, ExpressionState &state, Vector
 {
 	auto &input_vector = args.data[0];
 
-	UnaryExecutor::ExecuteWithNulls<hugeint_t, int16_t>(
+	UnaryExecutor::Execute<hugeint_t, int16_t>(
 		input_vector, result, args.size(),
-		[&](hugeint_t value, ValidityMask &mask, idx_t idx) -> int16_t {
+		[&](hugeint_t value) -> optional<int16_t> {
 			if (!IsRfc9562Variant(value)) {
-				mask.SetInvalid(idx);
-				return 0;
+				return nullopt;
 			}
 
 			return static_cast<int16_t>((GetRawUuidUpper(value) >> 12) & 0x0F);
@@ -217,12 +218,11 @@ inline void UuidExtractTimestampPG(DataChunk &args, ExpressionState &state, Vect
 	/* microseconds between the Gregorian epoch (1582-10-15) and 1970-01-01 */
 	constexpr int64_t GREGORIAN_TO_UNIX_EPOCH_US = 12219292800000000LL;
 
-	BinaryExecutor::ExecuteWithNulls<hugeint_t, int32_t, timestamp_tz_t>(
+	BinaryExecutor::Execute<hugeint_t, int32_t, timestamp_tz_t>(
 		input_vector, pg_version_vector, result, args.size(),
-		[&](hugeint_t value, int32_t pg_version, ValidityMask &mask, idx_t idx) -> timestamp_tz_t {
+		[&](hugeint_t value, int32_t pg_version) -> optional<timestamp_tz_t> {
 			if (!IsRfc9562Variant(value)) {
-				mask.SetInvalid(idx);
-				return timestamp_tz_t(0);
+				return nullopt;
 			}
 
 			uint64_t upper = GetRawUuidUpper(value);
@@ -246,8 +246,7 @@ inline void UuidExtractTimestampPG(DataChunk &args, ExpressionState &state, Vect
 				return timestamp_tz_t(static_cast<int64_t>(tms) * 1000);
 			}
 
-			mask.SetInvalid(idx);
-			return timestamp_tz_t(0);
+			return nullopt;
 		});
 }
 
@@ -374,8 +373,8 @@ PgLakeGeometryToHexWKB(shared_ptr<DatabaseInstance> db, string_t input)
 				catalogEntry->Cast<ScalarFunctionCatalogEntry>();
 
 			ScalarFunctionSet scalarFunctionSet = scalarFunctionCatalogEntry.functions;
-			ScalarFunction scalarFunction = scalarFunctionSet.GetFunctionByOffset(0);
-			st_ashexwkb = scalarFunction.function;
+			auto scalarFunction = scalarFunctionSet.GetFunctionByOffset(0);
+			st_ashexwkb = scalarFunction->GetFunctionCallback();
 		}
 
 		/* create the input value */
@@ -424,10 +423,9 @@ PgLakeGeometryToHexWKB(shared_ptr<DatabaseInstance> db, string_t input)
  * (pass-through or NULL/error).
  */
 static unique_ptr<FunctionData>
-NestedListBind(ClientContext &context, ScalarFunction &bound_function,
-			   vector<unique_ptr<Expression>> &arguments)
+NestedListBind(BindScalarFunctionInput &input)
 {
-	bound_function.return_type = arguments[0]->return_type;
+	input.GetBoundFunction().SetReturnType(input.GetArguments()[0]->GetReturnType());
 	return nullptr;
 }
 
@@ -551,7 +549,7 @@ IcebergComputeByteSize(Vector &v, idx_t row, idx_t row_count)
 			int64_t total = 0;
 
 			for (auto &child : children)
-				total += IcebergComputeByteSize(*child, row, row_count);
+				total += IcebergComputeByteSize(child, row, row_count);
 
 			return total;
 		}
@@ -571,8 +569,8 @@ IcebergByteSizeFun(DataChunk &args, ExpressionState &state, Vector &result)
 	if (input.GetVectorType() != VectorType::FLAT_VECTOR)
 		input.Flatten(count);
 
-	auto out = FlatVector::GetData<int64_t>(result);
-	auto &out_validity = FlatVector::Validity(result);
+	auto out = FlatVector::GetDataMutable<int64_t>(result);
+	auto &out_validity = FlatVector::ValidityMutable(result);
 
 	for (idx_t i = 0; i < count; i++)
 	{
@@ -587,10 +585,9 @@ IcebergByteSizeFun(DataChunk &args, ExpressionState &state, Vector &result)
 
 
 static unique_ptr<FunctionData>
-IcebergByteSizeBind(ClientContext &context, ScalarFunction &bound_function,
-					vector<unique_ptr<Expression>> &arguments)
+IcebergByteSizeBind(BindScalarFunctionInput &input)
 {
-	bound_function.return_type = LogicalType::BIGINT;
+	input.GetBoundFunction().SetReturnType(LogicalType::BIGINT);
 	return nullptr;
 }
 
@@ -757,35 +754,43 @@ static void LoadInternal(ExtensionLoader &loader) {
 
     /* Register functions */
     auto to_date_function = ScalarFunction("to_date", {LogicalType::DOUBLE}, LogicalType::DATE, ToDateScalarFun);
+    to_date_function.SetFallible();
     loader.RegisterFunction(to_date_function);
 
     auto acosh_function = ScalarFunction("acosh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AcoshPG);
+    acosh_function.SetFallible();
     loader.RegisterFunction(acosh_function);
 
 	auto atanh_function = ScalarFunction("atanh_pg", {LogicalType::DOUBLE}, LogicalType::DOUBLE, AtanhPG);
+	atanh_function.SetFallible();
 	loader.RegisterFunction(atanh_function);
 
 	auto initcap_function = ScalarFunction("initcap_pg", {LogicalType::VARCHAR}, LogicalType::VARCHAR, InitcapPG);
 	loader.RegisterFunction(initcap_function);
 
 	auto uuid_extract_timestamp_function = ScalarFunction("uuid_extract_timestamp_pg", {LogicalType::UUID, LogicalType::INTEGER}, LogicalType::TIMESTAMP_TZ, UuidExtractTimestampPG);
+	uuid_extract_timestamp_function.SetFallible();
 	loader.RegisterFunction(uuid_extract_timestamp_function);
 
 	auto uuid_extract_version_function = ScalarFunction("uuid_extract_version_pg", {LogicalType::UUID}, LogicalType::SMALLINT, UuidExtractVersionPG);
+	uuid_extract_version_function.SetFallible();
 	loader.RegisterFunction(uuid_extract_version_function);
 
 	auto nullify_any_type = ScalarFunction("nullify_any_type", {LogicalType::ANY}, LogicalType::SQLNULL, NullifyAnyType);
 	loader.RegisterFunction(nullify_any_type);
 
 	auto throw_internal_error = ScalarFunction("pg_lake_throw_internal_error", {LogicalType::VARCHAR}, LogicalType::SQLNULL, ThrowInternalError);
+	throw_internal_error.SetFallible();
 	loader.RegisterFunction(throw_internal_error);
 
     auto lake_nth_suffix = ScalarFunction("lake_nth_suffix", {LogicalType::INTEGER}, LogicalType::VARCHAR, NthSuffixScalarFun);
+    lake_nth_suffix.SetFallible();
     loader.RegisterFunction(lake_nth_suffix);
 
 	ScalarFunctionSet substr("substring_pg");
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
 	substr.AddFunction(ScalarFunction({LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT}, LogicalType::VARCHAR, SubstringPG));
+	substr.SetFallible();
 	loader.RegisterFunction(substr);
 
 	{
@@ -801,6 +806,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 									   LogicalType::ANY,
 									   PgErrorNestedListFun,
 									   NestedListBind);
+		pg_error_nested.SetFallible();
 		loader.RegisterFunction(pg_error_nested);
 	}
 
@@ -847,6 +853,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			 LogicalType::VARCHAR},
 			LogicalType::LIST(LogicalType::ANY),
 			IcebergSizeClampContainerPassthroughFun, NestedListBind));
+		iceberg_size_check_text.SetFallible();
 		loader.RegisterFunction(iceberg_size_check_text);
 
 		ScalarFunctionSet iceberg_size_check_blob("iceberg_size_check_blob");
@@ -859,6 +866,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			 LogicalType::VARCHAR},
 			LogicalType::LIST(LogicalType::ANY),
 			IcebergSizeClampContainerPassthroughFun, NestedListBind));
+		iceberg_size_check_blob.SetFallible();
 		loader.RegisterFunction(iceberg_size_check_blob);
 
 		ScalarFunction iceberg_byte_size(
@@ -867,6 +875,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 			LogicalType::BIGINT,
 			IcebergByteSizeFun,
 			IcebergByteSizeBind);
+		iceberg_byte_size.SetFallible();
 		loader.RegisterFunction(iceberg_byte_size);
 	}
 
@@ -876,6 +885,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	/* Replace the S3 and HTTP file system with wrappers */
 	auto &instance = loader.GetDatabaseInstance();
 	auto &fs = instance.GetFileSystem();
+
+	/* managed storage encryption and region handling for every S3 request */
+	S3AuthResolver::config_callback = PgLakeS3AuthConfigCallback;
 
 	fs.UnregisterSubSystem("S3FileSystem");
 	fs.RegisterSubSystem(
@@ -1007,6 +1019,16 @@ DUCKDB_EXTENSION_API const char * duckdb_pglake_time_tz_to_string(duckdb_time_tz
 
 DUCKDB_EXTENSION_API const char * duckdb_pglake_date_to_string(duckdb_date input) {
 	return strdup(duckdb::Date::ToString(duckdb::date_t(input.days)).c_str());
+}
+
+/*
+ * duckdb_pglake_vector_value_to_string renders the value at row of a vector the
+ * way DuckDB prints it. It is for types the C API has no accessor for, such as
+ * VARIANT, which DuckDB 2.0 returns from COPY ... (RETURN_STATS).
+ */
+DUCKDB_EXTENSION_API const char * duckdb_pglake_vector_value_to_string(duckdb_vector vector, idx_t row) {
+	auto &input = *reinterpret_cast<duckdb::Vector *>(vector);
+	return strdup(input.GetValue(row).ToString().c_str());
 }
 
 DUCKDB_EXTENSION_API const char * duckdb_pglake_geometry_to_string(duckdb_database database, duckdb_string_t input) {

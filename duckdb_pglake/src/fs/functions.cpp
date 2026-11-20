@@ -55,7 +55,7 @@ struct CopyFileFunctionData : public TableFunctionData
  * CopyFileBind implements the bind phase for pg_lake_copy_file.
  */
 static unique_ptr<FunctionData>
-CopyFileBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<string> &names)
+CopyFileBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<Identifier> &names)
 {
 	/* Get the arguments */
 	auto functionData = make_uniq<CopyFileFunctionData>();
@@ -106,7 +106,7 @@ struct CacheFileFunctionData : public TableFunctionData
  * CacheFileBind implements the bind phase for pg_lake_cache_file.
  */
 static unique_ptr<FunctionData>
-CacheFileBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<string> &names)
+CacheFileBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<Identifier> &names)
 {
 	/* Get the arguments */
 	auto functionData = make_uniq<CacheFileFunctionData>();
@@ -199,7 +199,7 @@ struct UncacheFileFunctionData : public TableFunctionData
  * UncacheFileBind implements the bind phase for pg_lake_uncache_file.
  */
 static unique_ptr<FunctionData>
-UncacheFileBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<string> &names)
+UncacheFileBind(ClientContext &context, TableFunctionBindInput &input, vector<LogicalType> &return_types, vector<Identifier> &names)
 {
 	/* Get the arguments */
 	auto functionData = make_uniq<UncacheFileFunctionData>();
@@ -260,7 +260,7 @@ struct ManageCacheFunctionData : public TableFunctionData
 static unique_ptr<FunctionData> ManageCacheBind(ClientContext &context,
 											    TableFunctionBindInput &input,
 											    vector<LogicalType> &return_types,
-											    vector<string> &names) {
+											    vector<Identifier> &names) {
 
 	/* Get the arguments */
 	auto functionData = make_uniq<ManageCacheFunctionData>();
@@ -358,7 +358,7 @@ struct ListCacheFunctionData : public TableFunctionData
 static unique_ptr<FunctionData> ListCacheBind(ClientContext &context,
 											    TableFunctionBindInput &input,
 											    vector<LogicalType> &return_types,
-											    vector<string> &names) {
+											    vector<Identifier> &names) {
 
 	/* Get the arguments */
 	auto functionData = make_uniq<ListCacheFunctionData>();
@@ -434,7 +434,7 @@ struct ListFilesFunctionData : public TableFunctionData
 static unique_ptr<FunctionData> ListFilesBind(ClientContext &context,
 											  TableFunctionBindInput &input,
 											  vector<LogicalType> &return_types,
-											  vector<string> &names) {
+											  vector<Identifier> &names) {
 
 	/* Get the arguments */
 	auto functionData = make_uniq<ListFilesFunctionData>();
@@ -752,16 +752,16 @@ GetManagedStorageRegionScalarFun(DataChunk &args, ExpressionState &state, Vector
 
 	Value setting;
 
-	if (context.TryGetCurrentSetting(PG_LAKE_REGION_SETTING, setting))
+	if (context.TryGetCurrentSetting(Identifier(PG_LAKE_REGION_SETTING), setting))
 	{
 		/* return the value of the setting */
-		result.Reference(setting);
+		result.Reference(setting, count_t(args.size()));
 	}
 	else
 	{
 		/* return an empty string if not set */
 		Value emptyResult("");
-		result.Reference(emptyResult);
+		result.Reference(emptyResult, count_t(args.size()));
 	}
 }
 
@@ -776,7 +776,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
     ScalarFunction deleteAzureAppendBlob("pg_lake_delete_azure_append_blob",
                        {LogicalType::VARCHAR}, LogicalType::BOOLEAN,
                        DeleteAzureAppendBlobScalarFun);
-    deleteAzureAppendBlob.stability = FunctionStability::VOLATILE;
+    deleteAzureAppendBlob.SetStability(FunctionStability::VOLATILE);
     loader.RegisterFunction(deleteAzureAppendBlob);
   }
 
@@ -804,6 +804,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   {LogicalType::VARCHAR},
 						   LogicalType::VARCHAR,
 						   CacheFileLocalPathScalarFun);
+	    pg_lake_cache_file_local_path.SetFallible();
 	    loader.RegisterFunction(pg_lake_cache_file_local_path);
 	}
 
@@ -864,6 +865,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BIGINT,
 						   FileSizeScalarFun);
 
+        pg_lake_file_size.SetFallible();
         loader.RegisterFunction(pg_lake_file_size);
 	}
 
@@ -875,6 +877,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BOOLEAN,
 						   RemoveFileScalarFun);
 
+		pg_lake_remove_file.SetFallible();
 		loader.RegisterFunction(pg_lake_remove_file);
 	}
 
@@ -885,6 +888,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   {LogicalType::VARCHAR},
 						   LogicalType::VARCHAR,
 						   AddS3ExpressRegionEndpointScalarFun);
+	    pg_lake_test_add_s3_express.SetFallible();
 	    loader.RegisterFunction(pg_lake_test_add_s3_express);
 	}
 
@@ -908,6 +912,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BOOLEAN,
 						   FileExistsScalarFun);
 
+		pg_lake_file_exists.SetFallible();
 		loader.RegisterFunction(pg_lake_file_exists);
 	}
 
@@ -919,6 +924,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::VARCHAR,
 						   GetBucketRegionScalarFun);
 
+		pg_lake_get_bucket_region.SetFallible();
 		loader.RegisterFunction(pg_lake_get_bucket_region);
 	}
 
@@ -930,6 +936,7 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::BOOLEAN,
 						   ClearRegionCacheScalarFun);
 
+		pg_lake_clear_region_cache.SetFallible();
 		loader.RegisterFunction(pg_lake_clear_region_cache);
 	}
 
@@ -941,21 +948,22 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   LogicalType::VARCHAR,
 						   GetManagedStorageRegionScalarFun);
 
+		pg_lake_get_managed_storage_region.SetFallible();
 		loader.RegisterFunction(pg_lake_get_managed_storage_region);
 	}
 
 	/* Add settings */
 	auto &config = DBConfig::GetConfig(loader.GetDatabaseInstance());
-	config.AddExtensionOption(CACHE_DIR_SETTING, "PgLake Cache Directory", LogicalType::VARCHAR);
-	config.AddExtensionOption(CACHE_ON_WRITE_MAX_SIZE, "PgLake cache-on-write max size", LogicalType::BIGINT);
-	config.AddExtensionOption(MIN_FREE_CACHE_INODES_SETTING,
+	config.AddExtensionOption(Identifier(CACHE_DIR_SETTING), "PgLake Cache Directory", LogicalType::VARCHAR);
+	config.AddExtensionOption(Identifier(CACHE_ON_WRITE_MAX_SIZE), "PgLake cache-on-write max size", LogicalType::BIGINT);
+	config.AddExtensionOption(Identifier(MIN_FREE_CACHE_INODES_SETTING),
 							  "Inodes that cache management keeps available on the cache file system, "
 							  "or AUTO to derive the number from the file system",
 							  LogicalType::VARCHAR, Value(MIN_FREE_CACHE_INODES_AUTO),
 							  CheckMinFreeCacheInodes);
-	config.AddExtensionOption(PG_LAKE_REGION_SETTING, "The region of the server", LogicalType::VARCHAR);
-	config.AddExtensionOption(MANAGED_STORAGE_BUCKET_SETTING, "PgLake managed storage bucket location", LogicalType::VARCHAR);
-	config.AddExtensionOption(MANAGED_STORAGE_KEY_ID_SETTING, "PgLake managed storage customer key ID", LogicalType::VARCHAR);
+	config.AddExtensionOption(Identifier(PG_LAKE_REGION_SETTING), "The region of the server", LogicalType::VARCHAR);
+	config.AddExtensionOption(Identifier(MANAGED_STORAGE_BUCKET_SETTING), "PgLake managed storage bucket location", LogicalType::VARCHAR);
+	config.AddExtensionOption(Identifier(MANAGED_STORAGE_KEY_ID_SETTING), "PgLake managed storage customer key ID", LogicalType::VARCHAR);
 }
 
 } // namespace duckdb

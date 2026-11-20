@@ -23,9 +23,10 @@
 #include "duckdb/common/types/blob.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httpfs.hpp"
-#include "s3fs.hpp"
+#include "http/httpfs.hpp"
+#include "s3/s3fs.hpp"
 #include "httplib.hpp"
+#include "s3/s3_url.hpp"
 
 #include "pg_lake/fs/httpfs_extended.hpp"
 #include "pg_lake/fs/file_cache_manager.hpp"
@@ -414,15 +415,15 @@ ParseS3ExpressUrl(const string &url, string &shortRegion, string &az)
 string
 RegionAwareS3FileSystem::GetBucketUrl(const string &url, optional_ptr<FileOpener> opener)
 {
-	/* get the S3 configuration (not very useful, but the S3UrlParse API requires it) */
+	/* get the S3 configuration (not very useful, but the S3Url::Parse API requires it) */
 	FileOpenerInfo s3UrlInfo = {url};
-	S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
+	S3AuthParams authParams = S3AuthResolver::Resolve(opener, s3UrlInfo);
 
 	/* parse the S3 URL */
-	ParsedS3Url parsedUrl = s3fs.S3UrlParse(url, authParams);
+	ParsedS3Url parsedUrl = S3Url::Parse(url, authParams);
 
 	/* get the s3://<bucket name> */
-	return parsedUrl.prefix + parsedUrl.bucket;
+	return parsedUrl.GetPrefix() + parsedUrl.GetBucket();
 }
 
 
@@ -500,7 +501,7 @@ AddQueryArgumentToUrl(const string &url, const string &name, const string &value
 
 	regionUrl.append(name);
 	regionUrl.append("=");
-	regionUrl.append(S3FileSystem::UrlEncode(value));
+	regionUrl.append(S3Url::Encode(value, S3URLEncodeMode::QUERY_COMPONENT));
 
 	return regionUrl;
 }
@@ -637,18 +638,13 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 {
 	auto &httpUtil = HTTPFSUtil::GetHTTPUtil(opener);
 
-	/* Get the configuration */
+	/* Get the configuration, including query parameters that override the defaults (mainly s3_endpoint) */
 	FileOpenerInfo s3UrlInfo = {url};
-	S3AuthParams authParams = S3AuthParams::ReadFrom(opener, s3UrlInfo);
-
-	/* Scan the query string for any s3 authentication parameters */
-	ParsedS3Url parsedUrl = s3fs.S3UrlParse(url, authParams);
-
-	/* Look for query parameters that override the defaults (mainly s3_endpoint) */
-	s3fs.ReadQueryParams(parsedUrl.query_param, authParams);
+	S3AuthParams authParams = S3AuthResolver::Resolve(opener, s3UrlInfo);
 
 	/* Construct the https:// URL from the S3 URL */
-	string httpUrl = parsedUrl.GetHTTPUrl(authParams, string(""));
+	ParsedS3Url parsedUrl = S3Url::Parse(url, authParams);
+	string httpUrl = parsedUrl.GetHTTPUrl();
 
 	/* parse the https:// URL and obtain protocol/host/port (the base URL) */
 	string path, baseUrl;
@@ -672,6 +668,10 @@ RegionAwareS3FileSystem::GetBucketRegionFromS3(const string &url, optional_ptr<F
 	 * throwing, and the region header comes with them.
 	 */
 	unique_ptr<HTTPResponse> response = httpUtil.Request(headRequest, client);
+
+	/* a request that got no response at all reports why on the response */
+	if (response->HasRequestError())
+		throw IOException("%s", response->GetRequestError());
 
 	if (!response->headers.HasHeader("x-amz-bucket-region"))
 		return string();
@@ -717,62 +717,29 @@ RegionAwareS3FileSystem::TryGetBucketRegionFromS3(const string &url, optional_pt
 
 
 /*
- * S3DeleteBatch is a set of paths that one DeleteObjects request can carry:
- * they live in the same bucket and resolve to the same credentials.
- */
-struct S3DeleteBatch
-{
-	string bucketUrl;
-	S3AuthParams authParams;
-	vector<string> paths;
-};
-
-
-/*
- * SameS3Credentials determines whether two sets of auth parameters would sign a
- * request the same way and send it to the same endpoint, which is what lets the
- * paths they belong to share a request.
- */
-static bool
-SameS3Credentials(const S3AuthParams &left, const S3AuthParams &right)
-{
-	return left.access_key_id == right.access_key_id &&
-		   left.secret_access_key == right.secret_access_key &&
-		   left.session_token == right.session_token &&
-		   left.region == right.region &&
-		   left.endpoint == right.endpoint &&
-		   left.url_style == right.url_style &&
-		   left.use_ssl == right.use_ssl &&
-		   left.requester_pays == right.requester_pays;
-}
-
-
-/*
- * RemoveFiles deletes many files, using a batched DeleteObjects request per
- * bucket and credential instead of one request per file.
+ * RemoveFiles deletes many files, using batched DeleteObjects requests instead
+ * of one request per file.
+ *
+ * DeleteObjects targets one bucket at a time, and the region is a property of
+ * the bucket, so resolve the region once per bucket and pass every path of the
+ * bucket with it. S3FileSystem::RemoveFiles splits them further by the
+ * credentials each path resolves to, since a secret can be scoped to a prefix
+ * rather than to the whole bucket.
+ *
+ * WithResolvedRegion adds s3_region and s3_endpoint, so we skip it for URLs
+ * that set either one explicitly, and for anything that is not S3, and use
+ * the simpler single-file path.
  */
 void
 RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 									 optional_ptr<FileOpener> opener)
 {
 	/*
-	 * DeleteObjects targets one bucket at a time, and the region is a property
-	 * of the bucket, so the keys of one request all have to live in the same
-	 * bucket.
-	 *
-	 * One request also carries one signature, so they all have to be deletable
-	 * with the same credentials. DuckDB picks a secret by longest matching URL
-	 * prefix, which means a bucket can hold several prefixes with a secret of
-	 * their own, and that a secret scoped to s3://bucket/prefix is not the one
-	 * the bucket URL selects. So group by the credentials the path itself
-	 * resolves to, and let RemoveFilesFromS3 read them back from the first path
-	 * of the group rather than from the bucket URL.
-	 *
-	 * WithResolvedRegion adds s3_region and s3_endpoint, so we skip it for URLs
-	 * that set either one explicitly, and for anything that is not S3, and use
-	 * the simpler single-file path.
+	 * A linear scan: a set of paths to delete is one table's files or one
+	 * batch off the deletion queue, so the number of distinct buckets in it is
+	 * a handful at worst.
 	 */
-	vector<S3DeleteBatch> batches;
+	vector<pair<string, vector<string>>> buckets;
 
 	for (const string &path : paths)
 	{
@@ -784,52 +751,51 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 			continue;
 		}
 
-		FileOpenerInfo pathInfo = {path};
-		S3AuthParams pathAuthParams = S3AuthParams::ReadFrom(opener, pathInfo);
-		ParsedS3Url parsedPath = s3fs.S3UrlParse(path, pathAuthParams);
-		string bucketUrl = parsedPath.prefix + parsedPath.bucket;
+		string bucketUrl = GetBucketUrl(path, opener);
+		vector<string> *bucketPaths = nullptr;
 
-		S3DeleteBatch *batch = nullptr;
-
-		/*
-		 * A linear scan: a set of paths to delete is one table's files or one
-		 * batch off the deletion queue, so the number of distinct buckets and
-		 * credentials in it is a handful at worst.
-		 */
-		for (S3DeleteBatch &candidate : batches)
+		for (auto &bucket : buckets)
 		{
-			if (candidate.bucketUrl == bucketUrl &&
-				SameS3Credentials(candidate.authParams, pathAuthParams))
+			if (bucket.first == bucketUrl)
 			{
-				batch = &candidate;
+				bucketPaths = &bucket.second;
 				break;
 			}
 		}
 
-		if (batch == nullptr)
+		if (bucketPaths == nullptr)
 		{
-			batches.emplace_back();
-			batch = &batches.back();
-			batch->bucketUrl = bucketUrl;
-			batch->authParams = pathAuthParams;
+			buckets.emplace_back(bucketUrl, vector<string>());
+			bucketPaths = &buckets.back().second;
 		}
 
-		batch->paths.push_back(path);
+		bucketPaths->push_back(path);
 	}
 
 	/*
-	 * The keys travel in the body of the POST to <bucket>/?delete, so the bucket
-	 * URL is the only one we make a request to and the only one that needs a
-	 * region. Resolve it from the first path of the batch, the way every other
+	 * Resolve the region from the first path of the bucket, the way every other
 	 * entry point does: it gets the cached region, and a mismatch refreshes the
-	 * region and retries the batch.
+	 * region and retries the bucket. WithResolvedRegion hands us that path with
+	 * the query arguments it added, which we copy onto the other paths.
 	 */
-	for (S3DeleteBatch &batch : batches)
+	for (auto &bucket : buckets)
 	{
-		WithResolvedRegion(batch.paths[0], opener,
-						   [&](const string &resolvedFirstPath) {
-							   s3fs.RemoveFilesFromS3(resolvedFirstPath, batch.paths, opener);
-						   });
+		const vector<string> &bucketPaths = bucket.second;
+
+		WithResolvedRegion(bucketPaths[0], opener,
+							 [&](const string &resolvedFirstPath) {
+								 string querySuffix;
+								 auto queryPos = resolvedFirstPath.find('?');
+								 if (queryPos != string::npos)
+									 querySuffix = resolvedFirstPath.substr(queryPos);
+
+								 vector<string> resolvedPaths;
+								 resolvedPaths.reserve(bucketPaths.size());
+								 for (const string &path : bucketPaths)
+									 resolvedPaths.push_back(path + querySuffix);
+
+								 s3fs.RemoveFiles(resolvedPaths, opener);
+							 });
 	}
 }
 

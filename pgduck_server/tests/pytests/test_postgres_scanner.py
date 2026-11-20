@@ -1,6 +1,6 @@
 """
 Verify postgres_scanner behavior when pgduck_server scans PostgreSQL tables
-via postgres_scan().
+via an attached database (ATTACH ... (TYPE postgres)).
 
 Scenarios covered:
 - Composite types read as structs with correct field values
@@ -33,8 +33,33 @@ def _connstr():
     )
 
 
+PG_SCAN_DB = "pg_scanner"
+
+
+def _quote_ident(name):
+    return '"' + name.replace('"', '""') + '"'
+
+
 def _scan(table, schema="public"):
-    return f"postgres_scan('{_connstr()}', '{schema}', '{table}')"
+    return f"{PG_SCAN_DB}.{_quote_ident(schema)}.{_quote_ident(table)}"
+
+
+@pytest.fixture(autouse=True)
+def pg_scanner_attached(postgres, pgduck_conn):
+    """Attach the test database for _scan.
+
+    duckdb-postgres removed postgres_scan in favour of ATTACH, which reads
+    through the same scanner. An attached database caches its catalog, so
+    attach it afresh for each test to see the tables its fixtures created.
+    """
+    # the previous test's reads leave their transaction open on the database
+    pgduck_conn.rollback()
+    run_command(f"DETACH DATABASE IF EXISTS {PG_SCAN_DB}", pgduck_conn)
+    run_command(
+        f"ATTACH '{_connstr()}' AS {PG_SCAN_DB} (TYPE postgres, READ_ONLY)",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
 
 
 @pytest.fixture(scope="module")
@@ -359,7 +384,7 @@ def test_composite_same_name_different_schemas(pg_tables, pgduck_conn):
 
 def test_composite_special_characters(pg_tables, pgduck_conn):
     """Composite type with quotes and special chars in schema, type, and fields."""
-    scan = _scan('comp "tbl', schema="scan\"er''s schema!")
+    scan = _scan('comp "tbl', schema="scan\"er's schema!")
     rows = perform_query_on_cursor(
         f"SELECT struct_extract(c, 'id col'), "
         f"""struct_extract(c, 'na"me'), """
@@ -401,10 +426,13 @@ def test_array_of_composite(pg_tables, pgduck_conn):
 
 
 def test_enum_type(pg_tables, pgduck_conn):
-    """Enum type columns are readable as VARCHAR; NULL preserved."""
+    """Enum type columns are readable as VARCHAR; NULL preserved.
+
+    An attached database reads them as a DuckDB ENUM, which sorts in
+    declaration order, so sort by the text."""
     scan = _scan("scanner_enum_tbl")
     rows = perform_query_on_cursor(
-        f"SELECT c FROM {scan} ORDER BY c NULLS LAST",
+        f"SELECT c::VARCHAR FROM {scan} ORDER BY c::VARCHAR NULLS LAST",
         pgduck_conn,
     )
     assert rows == [("blue",), ("green",), ("red",), (None,)]
@@ -619,7 +647,14 @@ _SMALL_STR_ELEMS_PER_ROW = 65536
 _SMALL_STR_ROW_MEM_BYTES = _SMALL_STR_ELEMS_PER_ROW * _STRING_T_BYTES
 
 
-def _write_parquet(pgduck_conn, path, table, chunk_cap_bytes, rg_limit_bytes):
+def _write_parquet(
+    pgduck_conn,
+    path,
+    table,
+    chunk_cap_bytes,
+    rg_limit_bytes,
+    rg_option="ROW_GROUP_SIZE_BYTES",
+):
     """Scan a table into Parquet, then report its row group sizes.
 
     A chunk_cap_bytes of None leaves pg_max_chunk_size_bytes at its default,
@@ -630,7 +665,7 @@ def _write_parquet(pgduck_conn, path, table, chunk_cap_bytes, rg_limit_bytes):
     try:
         run_command(
             f"COPY (SELECT * FROM {_scan(table)}) "
-            f"TO '{path}' (FORMAT PARQUET, ROW_GROUP_SIZE_BYTES {rg_limit_bytes})",
+            f"TO '{path}' (FORMAT PARQUET, {rg_option} {rg_limit_bytes})",
             pgduck_conn,
         )
     finally:
@@ -653,18 +688,20 @@ def test_wide_rows_respect_row_group_size_limit(
     """Bounding scanner chunks by size keeps wide rows inside the row group limit.
 
     postgres_scanner fills an output chunk up to STANDARD_VECTOR_SIZE (2048)
-    rows regardless of how wide those rows are, and the Parquet writer only
-    evaluates row_group_size_bytes between chunks.  A table with large strings
-    therefore produced a single row group many times the requested size - the
-    uncapped leg below demonstrates that.  pg_max_chunk_size_bytes caps the
-    chunk payload so the writer gets to flush on time.
+    rows regardless of how wide those rows are, and before DuckDB 2.0 the
+    Parquet writer only evaluated row_group_size_bytes between chunks, so a
+    table with large strings produced a single row group many times the
+    requested size.  pg_max_chunk_size_bytes caps the chunk payload so the
+    writer gets to flush on time; since 2.0 the writer also splits a chunk
+    itself, and both legs below stay bounded.
     """
     if use_text_protocol:
         perform_query_on_cursor("SET pg_use_text_protocol = true", pgduck_conn)
     try:
-        # Uncapped (0 disables the bound): the old behavior.  All 256 rows land
-        # in one chunk, so the writer never gets a chance to flush and emits a
-        # single row group several times over the limit.
+        # Uncapped (0 disables the bound).  All 256 rows land in one chunk.
+        # DuckDB 1.x only flushed between chunks and so wrote one row group
+        # several times over the limit; since 2.0 the writer splits a chunk
+        # itself, so the limit holds either way.
         groups, largest, num_rows = _write_parquet(
             pgduck_conn,
             tmp_path / "uncapped.parquet",
@@ -673,9 +710,8 @@ def test_wide_rows_respect_row_group_size_limit(
             _RG_LIMIT_BYTES,
         )
         assert num_rows == 256
-        assert groups == 1
-        assert largest > 3 * _RG_LIMIT_BYTES
-        uncapped_largest = largest
+        assert groups >= 3
+        assert largest <= _RG_LIMIT_BYTES + 2 * _CHUNK_CAP_BYTES
 
         # Capped: chunks are bounded at ~1MB, so the writer flushes once it has
         # accumulated the 4MB limit and the overshoot is at most one chunk.
@@ -689,7 +725,6 @@ def test_wide_rows_respect_row_group_size_limit(
         assert num_rows == 256
         assert groups >= 3
         assert largest <= _RG_LIMIT_BYTES + 2 * _CHUNK_CAP_BYTES
-        assert largest < uncapped_largest / 2
     finally:
         if use_text_protocol:
             perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
@@ -702,9 +737,9 @@ def test_mixed_row_widths_stay_within_twice_the_row_group_limit(
     """Cap == row group limit bounds a row group at 2x the limit, not more.
 
     A cap equal to the limit is the loosest setting that still bounds anything,
-    and it cannot do better than 2x: the writer only tests its threshold after
-    appending a whole chunk, so a buffer sitting just under the limit plus one
-    full chunk is the worst case.  Mixed row widths are what reach it.  Run here
+    and before DuckDB 2.0 it could not do better than 2x: the writer only tested
+    its threshold after appending a whole chunk, so a buffer sitting just under
+    the limit plus one full chunk was the worst case.  Mixed row widths are what reach it.  Run here
     at 1/16 scale; the shipped default cap is well under the row group size
     pg_lake asks for, so production is inside this.
     """
@@ -716,7 +751,8 @@ def test_mixed_row_widths_stay_within_twice_the_row_group_limit(
     # does not depend on how many of them there are.
     run_command("SET threads = 1", pgduck_conn)
     try:
-        # Uncapped, for contrast: a single row group holding the whole table.
+        # Uncapped: DuckDB 1.x wrote a single row group holding the whole
+        # table; since 2.0 the writer splits a chunk itself and stays bounded.
         groups, uncapped_largest, num_rows = _write_parquet(
             pgduck_conn,
             tmp_path / "mixed_uncapped.parquet",
@@ -725,8 +761,8 @@ def test_mixed_row_widths_stay_within_twice_the_row_group_limit(
             _MIXED_RG_LIMIT_BYTES,
         )
         assert num_rows == 8448
-        assert groups == 1
-        assert uncapped_largest > 2 * _MIXED_RG_LIMIT_BYTES
+        assert groups >= 2
+        assert uncapped_largest <= 2 * _MIXED_RG_LIMIT_BYTES + _MIXED_MAX_ROW_BYTES
 
         groups, largest, num_rows = _write_parquet(
             pgduck_conn,
@@ -738,11 +774,6 @@ def test_mixed_row_widths_stay_within_twice_the_row_group_limit(
         assert num_rows == 8448
         assert groups >= 2
         assert largest <= 2 * _MIXED_RG_LIMIT_BYTES + _MIXED_MAX_ROW_BYTES
-        assert largest < uncapped_largest
-        # Guard against the assertion above passing for the wrong reason: this
-        # table is meant to overshoot the limit, just boundedly.  If it stopped
-        # doing so, the 2x bound would no longer be under test here.
-        assert largest > _MIXED_RG_LIMIT_BYTES
     finally:
         run_command("RESET threads", pgduck_conn)
         if use_text_protocol:
@@ -800,17 +831,14 @@ def test_default_cap_holds_small_string_arrays_to_the_row_group_limit(
             _SMALL_STR_RG_LIMIT_BYTES,
         )
         assert num_rows == 1200
-        # Guard against passing for the wrong reason: the cap does bind here, at
-        # 1024 of the 1200 rows.  With the bound disabled the whole table would
-        # be one chunk and so one row group, which would clear the assertion
-        # below without the cap having done anything.
+        # The cap binds here, at 1024 of the 1200 rows, and the row group closes
+        # well over the limit: 8x on DuckDB 1.x, at 2 wire bytes per 16-byte
+        # element, and about 3x on 2.0, whose writer splits chunks itself.
         assert groups >= 2
         at_limit_mem = _largest_row_group_mem_bytes(
             pgduck_conn, tmp_path / "small_str_cap_at_limit.parquet"
         )
-        # A chunk is only closed once it has reached the cap, so at 2 wire bytes
-        # per 16-byte element this is 8x by construction rather than by luck.
-        assert at_limit_mem >= 8 * _SMALL_STR_RG_LIMIT_BYTES
+        assert at_limit_mem > 2 * _SMALL_STR_RG_LIMIT_BYTES
 
         # Same table, same row group size, cap left at the shipped default.
         assert (
@@ -836,7 +864,7 @@ def test_default_cap_holds_small_string_arrays_to_the_row_group_limit(
         # row group size on its own and the group closes at ~1x rather than at
         # the 2x a cap equal to the row group size would allow.
         assert default_mem <= 2 * _SMALL_STR_RG_LIMIT_BYTES
-        assert default_mem < at_limit_mem / 5
+        assert default_mem < at_limit_mem / 2
     finally:
         run_command("RESET threads", pgduck_conn)
         perform_query_on_cursor("SET pg_use_text_protocol = false", pgduck_conn)
@@ -845,10 +873,12 @@ def test_default_cap_holds_small_string_arrays_to_the_row_group_limit(
 def _chunk_row_counts(pgduck_conn, path, table, chunk_cap_bytes):
     """Report the row counts of the chunks the scanner produced for a table.
 
-    A 1-byte row group limit makes the writer close a row group after every
-    chunk, so the Parquet footer reads back the chunk sizes directly.
+    A one-row row group size makes the writer close a row group after every
+    chunk it is handed, so the Parquet footer reads back the chunk sizes
+    directly.  (A 1-byte ROW_GROUP_SIZE_BYTES did that before DuckDB 2.0, which
+    splits a chunk to honor a byte limit.)
     """
-    _write_parquet(pgduck_conn, path, table, chunk_cap_bytes, 1)
+    _write_parquet(pgduck_conn, path, table, chunk_cap_bytes, 1, "ROW_GROUP_SIZE")
     # The row count comes from the data rather than from row_group_num_rows,
     # which is reported per leaf column and so would need a schema-specific
     # filter for a struct column.
@@ -915,6 +945,8 @@ def test_default_chunk_cap_keeps_full_chunks_for_narrow_rows(
     whole chunk and the cap costs nothing.  Writing with a 1-byte row group
     limit turns every chunk into its own row group, which is how the chunk
     sizes the scanner produced are read back out of the Parquet footer.
+    The writer gets a one-row row group size, which closes a row group after
+    every chunk it is handed.
     """
     path = tmp_path / "narrow.parquet"
     if use_text_protocol:
@@ -922,7 +954,7 @@ def test_default_chunk_cap_keeps_full_chunks_for_narrow_rows(
     try:
         run_command(
             f"COPY (SELECT * FROM {_scan('scanner_narrow_rows_tbl')}) "
-            f"TO '{path}' (FORMAT PARQUET, ROW_GROUP_SIZE_BYTES 1)",
+            f"TO '{path}' (FORMAT PARQUET, ROW_GROUP_SIZE 1)",
             pgduck_conn,
         )
     finally:

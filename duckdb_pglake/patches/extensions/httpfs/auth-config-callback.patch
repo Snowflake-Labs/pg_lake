@@ -1,0 +1,50 @@
+Add a hook to adjust the S3 configuration of a path before it is resolved.
+
+pg_lake sets the KMS key for writes to its managed storage bucket, and keeps
+the endpoint of an explicit AWS endpoint in line with the region it resolves.
+Both have to apply on credential refresh too, which re-resolves the auth
+parameters from scratch, so they cannot be set on the handle afterwards.
+
+diff --git a/src/include/s3/s3_auth.hpp b/src/include/s3/s3_auth.hpp
+index d72b779..9efacef 100644
+--- a/src/include/s3/s3_auth.hpp
++++ b/src/include/s3/s3_auth.hpp
+@@ -190,6 +190,11 @@ struct S3AuthResolveOptions {
+ };
+ 
+ struct S3AuthResolver {
++	//! Adjusts the configuration read from the settings and secrets for a path before it is resolved.
++	//! Runs on every resolution with a FileOpener, including the one a credential refresh does.
++	using ConfigCallback = void (*)(optional_ptr<FileOpener> opener, const string &file_path, S3AuthConfig &config);
++	static ConfigCallback config_callback;
++
+ 	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info);
+ 	static S3AuthParams Resolve(optional_ptr<FileOpener> opener, FileOpenerInfo &info,
+ 	                            const S3AuthResolveOptions &options);
+diff --git a/src/s3/s3_auth.cpp b/src/s3/s3_auth.cpp
+index 4dc2987..e85a104 100644
+--- a/src/s3/s3_auth.cpp
++++ b/src/s3/s3_auth.cpp
+@@ -11,6 +11,8 @@
+ 
+ namespace duckdb {
+ 
++S3AuthResolver::ConfigCallback S3AuthResolver::config_callback = nullptr;
++
+ S3SSECustomerKey::S3SSECustomerKey(string key_p, string key_md5_p)
+     : key(std::move(key_p)), key_md5(std::move(key_md5_p)) {
+ }
+@@ -119,7 +121,12 @@ S3AuthParams S3AuthResolver::Resolve(optional_ptr<FileOpener> opener, FileOpener
+ 
+ 	auto secret_types = S3SecretConfig::SecretTypes();
+ 	S3KeyValueReader secret_reader(*opener, info, secret_types.data(), secret_types.size());
+-	return Resolve(secret_reader, info.file_path, options);
++	auto config = ReadConfig(secret_reader, info.file_path);
++	options.ApplyTo(config);
++	if (config_callback) {
++		config_callback(opener, info.file_path, config);
++	}
++	return Resolve(std::move(config), info.file_path);
+ }
+ 
+ S3AuthParams S3AuthResolver::Resolve(S3KeyValueReader &secret_reader, const string &file_path,

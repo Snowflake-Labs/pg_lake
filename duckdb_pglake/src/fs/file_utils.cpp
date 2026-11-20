@@ -16,7 +16,7 @@
  */
 
 #include "duckdb.hpp"
-#include "s3fs.hpp"
+#include "s3/s3fs.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
 #include <sys/stat.h>
@@ -174,8 +174,11 @@ FileUtils::CopyFile(ClientContext &context,
 		/*
 		 * Use a specialized download function for S3 requests for
 		 * to avoid range requests and for faster cancellations.
+		 *
+		 * RegionAwareS3FileSystem opens files through the PgLakeS3FileSystem
+		 * it wraps, so that is the file system of the handle.
 		 */
-		RegionAwareS3FileSystem &s3fs = wrappedHandleRef.file_system.Cast<RegionAwareS3FileSystem>();
+		PgLakeS3FileSystem &s3fs = wrappedHandleRef.file_system.Cast<PgLakeS3FileSystem>();
 		totalBytesWritten = s3fs.Download(context, wrappedHandleRef, *destinationHandle);
 	}
 	else

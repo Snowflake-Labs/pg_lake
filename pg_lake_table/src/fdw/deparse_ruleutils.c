@@ -605,6 +605,42 @@ PreparePGDuckSQLTemplate(Query *query)
 
 
 /*
+ * InlineWindowNamesWalker clears the names of window clauses so that
+ * ruleutils.c writes every window function as OVER (...) instead of
+ * OVER name with a WINDOW clause.
+ *
+ * DuckDB 2.0 cannot resolve a named window from an ORDER BY or DISTINCT ON
+ * of the same SELECT, and an inlined window means the same. Parse analysis
+ * already copied what a window inherits from the one it refers to into its
+ * clause, so the reference can go too.
+ */
+static bool
+InlineWindowNamesWalker(Node *node, void *context)
+{
+	if (node == NULL)
+		return false;
+
+	if (IsA(node, Query))
+	{
+		Query	   *query = (Query *) node;
+		ListCell   *windowClauseCell = NULL;
+
+		foreach(windowClauseCell, query->windowClause)
+		{
+			WindowClause *windowClause = lfirst(windowClauseCell);
+
+			windowClause->name = NULL;
+			windowClause->refname = NULL;
+		}
+
+		return query_tree_walker(query, InlineWindowNamesWalker, context, 0);
+	}
+
+	return expression_tree_walker(node, InlineWindowNamesWalker, context);
+}
+
+
+/*
 * DeparseQualifiedQuery - deparse the query using the Postgres' ruleutils.c
 * with pg_catalog search_path.
 */
@@ -642,6 +678,10 @@ DeparseQualifiedQuery(Query *query)
 	(void) set_config_option("quote_all_identifiers", "on",
 							 PGC_USERSET, PGC_S_SESSION,
 							 GUC_ACTION_SAVE, true, 0, false);
+
+	/* write windows inline, on a copy since the caller keeps the query */
+	query = copyObject(query);
+	InlineWindowNamesWalker((Node *) query, NULL);
 
 	bool		pretty = false;
 	char	   *newQuery = pg_get_querydef(query, pretty);

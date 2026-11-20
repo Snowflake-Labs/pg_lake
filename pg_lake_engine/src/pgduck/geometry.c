@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/geometry.h"
 #include "utils/builtins.h"
 
@@ -63,7 +64,7 @@ GetGeomColumnsMetadataQuery(const char *url)
 					 "    colname, "
 					 "    coljson->colname->>'encoding' "
 					 "FROM columns_lookup, column_names",
-					 quote_literal_cstr(url)
+					 duckdb_quote_literal(url)
 		);
 
 	return command.data;
