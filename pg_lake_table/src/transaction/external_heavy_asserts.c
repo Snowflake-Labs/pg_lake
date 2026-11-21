@@ -480,7 +480,8 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 			}
 
 
-			if (strcmp(internalPartitionField->field_name,
+			/* manifests store partition field names escaped for Avro */
+			if (strcmp(MakeAvroCompatibleName(internalPartitionField->field_name),
 					   externalPartitionField->field_name) != 0)
 			{
 				ereport(ERROR,
