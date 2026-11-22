@@ -545,6 +545,21 @@ duckdb_global_init(char *databaseFilePath,
 	}
 
 	{
+		/*
+		 * Keep HTTP connections open across requests, so a request to a host
+		 * we already talked to skips the TCP and TLS handshake. Requests are
+		 * still signed one by one, so connections are not tied to a secret.
+		 */
+		if (snprintf(setCommand, 1024, "SET GLOBAL httpfs_connection_caching TO true") < 0)
+		{
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
+	{
 		if (snprintf(setCommand, 1024, "SET GLOBAL preserve_insertion_order TO false") < 0)
 		{
 			return DUCKDB_INITIALIZATION_ERROR;

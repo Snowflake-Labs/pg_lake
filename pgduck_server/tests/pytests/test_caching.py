@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from decimal import Decimal
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from utils_pytest import *
 
 CACHE_FILE_PREFIX = "pgl-cache."
@@ -144,7 +144,7 @@ def flaky_http_server():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
@@ -160,11 +160,13 @@ def httplib_http_client(pgduck_conn):
     """Run the test on the httplib client instead of the default curl one.
 
     The setting callback replaces the HTTPUtil on the DBConfig, so it applies to
-    the whole server and has to be put back afterwards.
+    the whole server and has to be put back afterwards. The new curl HTTPUtil
+    starts with connection caching off, so that is turned on again too.
     """
     run_command("SET httpfs_client_implementation='httplib';", pgduck_conn)
     yield
     run_command("SET httpfs_client_implementation='default';", pgduck_conn)
+    run_command("SET GLOBAL httpfs_connection_caching TO true;", pgduck_conn)
     pgduck_conn.rollback()
 
 
@@ -283,7 +285,7 @@ def status_http_server():
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
 
-    server = HTTPServer(("127.0.0.1", port), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 

@@ -2,7 +2,7 @@ import os
 import pytest
 import re
 import threading
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from moto.server import ThreadedMotoServer
 import boto3
 from utils_pytest import *
@@ -68,6 +68,41 @@ def test_s3_upload_part_size(s3, pgduck_conn):
         pgduck_conn,
     )
     assert results[0][0] == 250000
+
+    pgduck_conn.rollback()
+
+
+def test_s3_connection_caching(s3, pgduck_conn):
+    """
+    Later requests to the same host reuse a pooled connection rather than
+    doing a new TCP and TLS handshake.
+    """
+    results = perform_query_on_cursor(
+        "SELECT current_setting('httpfs_connection_caching')", pgduck_conn
+    )
+    assert results[0][0] == True
+
+    # upload directly, so reads are not served from the cache-on-write copy
+    key = "test_s3_connection_caching/data.csv"
+    s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=b"x\n1\n2\n3\n")
+
+    perform_query("CALL enable_logging('HTTPFSInfo')", pgduck_conn)
+    try:
+        for _ in range(3):
+            results = perform_query_on_cursor(
+                f"SELECT count(*) FROM read_csv('s3://{TEST_BUCKET}/{key}')",
+                pgduck_conn,
+            )
+            assert results[0][0] == 3
+
+        results = perform_query_on_cursor(
+            "SELECT count(*) FROM duckdb_logs WHERE message LIKE '%connection_cache_hit%'",
+            pgduck_conn,
+        )
+        assert results[0][0] > 0
+    finally:
+        perform_query("CALL disable_logging()", pgduck_conn)
+        perform_query("CALL truncate_duckdb_logs()", pgduck_conn)
 
     pgduck_conn.rollback()
 
@@ -583,7 +618,7 @@ def test_poisoned_bucket_region_header_is_rejected(pgduck_conn):
 
     # Bind port 0 and read back the assigned port, so nothing else can claim
     # it between choosing and listening.
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     port = server.server_port
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
