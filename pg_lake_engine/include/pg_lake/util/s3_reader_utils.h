@@ -38,3 +38,5 @@
 extern PGDLLEXPORT char *GetTextFromURI(const char *textFileUri);
 extern PGDLLEXPORT char *GetJsonFromURINoCache(const char *jsonFileUri);
 extern PGDLLEXPORT char *GetBlobFromURI(const char *blobFileUri, size_t *contentLength);
+extern PGDLLEXPORT char *GetBlobRangeFromURI(const char *blobFileUri, int64 offset,
+											 int64 length, size_t *contentLength);
