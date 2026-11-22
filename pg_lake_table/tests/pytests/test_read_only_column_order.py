@@ -59,6 +59,53 @@ def test_column_dropped_in_catalog(pg_conn, iceberg_table):
     pg_conn.rollback()
 
 
+def test_column_dropped_in_catalog_from_a_table_with_position_deletes(
+    pg_conn, s3, polaris_session, set_polaris_gucs, with_default_location, installcheck
+):
+    """With position deletes the scan also reads each file's row numbers, which
+    a column dropped in the catalog would otherwise be read from."""
+    if installcheck:
+        pytest.skip("requires the Polaris fixture")
+
+    schema = "column_dropped_with_deletes"
+    run_command(f"CREATE SCHEMA {schema}", pg_conn)
+    run_command(
+        f"CREATE TABLE {schema}.writer (k int, v text, note text) USING iceberg "
+        "WITH (catalog = 'rest')",
+        pg_conn,
+    )
+    run_command(
+        f"INSERT INTO {schema}.writer "
+        "SELECT i, 'v' || i, NULL::text FROM generate_series(1, 1000) i",
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command(f"DELETE FROM {schema}.writer WHERE k = 2", pg_conn)
+    pg_conn.commit()
+    run_command(
+        f"CREATE TABLE {schema}.reader () USING iceberg "
+        "WITH (catalog = 'rest', read_only = true, catalog_table_name = 'writer')",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        query = f"SELECT k, v, note FROM {schema}.reader WHERE k <= 3 ORDER BY k"
+        explain = run_query(f"EXPLAIN (verbose, format json) {query}", pg_conn)
+        assert int(fetch_delete_files_used(explain)) > 0
+        assert run_query(query, pg_conn) == [[1, "v1", None], [3, "v3", None]]
+
+        run_command(f"ALTER TABLE {schema}.writer DROP COLUMN note", pg_conn)
+        pg_conn.commit()
+
+        error = run_query(query, pg_conn, raise_error=False)
+        assert 'Postgres column "note" has no matching Iceberg field' in str(error)
+    finally:
+        pg_conn.rollback()
+        run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
+        pg_conn.commit()
+
+
 def test_filename_column(pg_conn, s3, extension, with_default_location):
     """The filename column is filled by the scan, not by an Iceberg field."""
     run_command("CREATE TABLE filename_source (a int, b text) USING iceberg", pg_conn)
