@@ -499,7 +499,7 @@ GetDataFileSchemaForExternalIcebergTable(Oid relationId, char *metadataPath,
 		LowercaseIcebergTableMetadataNames(metadata);
 	/* without a relation, as for COPY FROM, no column takes the names */
 	if (OidIsValid(relationId))
-		TruncateIcebergTableMetadataNames(metadata, false, false);
+		TruncateIcebergTableMetadataNames(metadata, false);
 
 	ApplyIcebergNameMapping(metadata);
 
