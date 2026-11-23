@@ -25,6 +25,8 @@
 #include "catalog/pg_type.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
+#include "common/string.h"
+#include "fmgr.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
@@ -44,6 +46,9 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/fdw/data_file_pruning.h"
+#include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/fdw/pg_lake_table.h"
+#include "pg_lake/iceberg/iceberg_field.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/fdw/schema_operations/field_id_mapping_catalog.h"
 #include "pg_lake/util/rel_utils.h"
@@ -67,8 +72,11 @@ static List *GetPositionDeleteTableDataFileForDataFiles(Oid relationId, List *da
 static List *GetBaseRestrictInfoForRelation(List *relationRestrictionsList,
 											int uniqueRelationIdentifier);
 static void ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
+											  List *identityPartitionFields,
 											  List **fileScans,
 											  List **positionDeleteFileScans);
+static List *IdentityPartitionFieldsForFileConstants(IcebergTableMetadata * metadata);
+static List *FileConstantsForDataFile(DataFile * dataFile, List *identityPartitionFields);
 static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
 static int	NullSafeStrcmp(const char *a, const char *b);
 static bool TypesAreCompatible(PGType pgType, PGType icebergType);
@@ -700,8 +708,10 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 	FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
 
 	List	   *retainedFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);
+	List	   *identityPartitionFields = IdentityPartitionFieldsForFileConstants(metadata);
 
-	ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, fileScans, positionDeleteScans);
+	ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, identityPartitionFields,
+									  fileScans, positionDeleteScans);
 	*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles, deleteFiles,
 														   *fileScans, equalityDeleteScans);
 }
@@ -713,6 +723,7 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 */
 static void
 ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
+								  List *identityPartitionFields,
 								  List **fileScans, List **positionDeleteFileScans)
 {
 	if (dataFiles == NIL)
@@ -731,6 +742,7 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 		fileScan->path = (char *) dataFile->file_path;
 		fileScan->rowCount = dataFile->record_count;
 		fileScan->deletedRowCount = 0;
+		fileScan->constants = FileConstantsForDataFile(dataFile, identityPartitionFields);
 
 		*fileScans = lappend(*fileScans, fileScan);
 	}
@@ -754,6 +766,143 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 		*positionDeleteFileScans = lappend(*positionDeleteFileScans, fileScan);
 	}
 
+}
+
+
+/*
+ * IdentityPartitionSource is an identity partition field of any of a table's
+ * partition specs, whose source is a column of the current schema.
+ */
+typedef struct IdentityPartitionSource
+{
+	int32_t		partitionFieldId;
+	int32_t		sourceFieldId;
+	PGType		pgType;
+}			IdentityPartitionSource;
+
+
+/*
+ * IdentityPartitionFieldsForFileConstants returns the IdentityPartitionSources
+ * whose values a scan takes from each data file's partition rather than from
+ * the file.
+ *
+ * The Iceberg spec reads a field a data file does not have from its identity
+ * partition value. Files written without field ids, such as those Spark's
+ * add_files, migrate and snapshot procedures take over from a Hive table,
+ * keep a partition column's value only in their path, and those tables have
+ * a name mapping. Files with field ids hold every column, so a table without
+ * a name mapping gets none.
+ *
+ * The value is the same in every row of a file either way, so it is taken
+ * whether or not the file has the column. Binary columns are left out: their
+ * text is not a DuckDB literal.
+ */
+static List *
+IdentityPartitionFieldsForFileConstants(IcebergTableMetadata * metadata)
+{
+	bool		hasNameMapping = false;
+
+	for (size_t propertyIdx = 0; propertyIdx < metadata->properties_length; propertyIdx++)
+	{
+		if (strcmp(metadata->properties[propertyIdx].key, "schema.name-mapping.default") == 0)
+			hasNameMapping = true;
+	}
+
+	if (!hasNameMapping)
+		return NIL;
+
+	IcebergTableSchema *schema = GetCurrentIcebergTableSchema(metadata);
+	List	   *identityFields = NIL;
+
+	for (size_t specIdx = 0; specIdx < metadata->partition_specs_length; specIdx++)
+	{
+		IcebergPartitionSpec *spec = &metadata->partition_specs[specIdx];
+
+		for (size_t fieldIdx = 0; fieldIdx < spec->fields_length; fieldIdx++)
+		{
+			IcebergPartitionSpecField *specField = &spec->fields[fieldIdx];
+
+			if (strcmp(specField->transform, "identity") != 0)
+				continue;
+
+			for (size_t schemaIdx = 0; schemaIdx < schema->fields_length; schemaIdx++)
+			{
+				DataFileSchemaField *column = &schema->fields[schemaIdx];
+
+				if (column->id != specField->source_id ||
+					column->type->type != FIELD_TYPE_SCALAR)
+					continue;
+
+				PGType		pgType = IcebergFieldToPostgresType(column->type);
+
+				if (pgType.postgresTypeOid == BYTEAOID)
+					break;
+
+				IdentityPartitionSource *source = palloc0(sizeof(IdentityPartitionSource));
+
+				source->partitionFieldId = specField->field_id;
+				source->sourceFieldId = column->id;
+				source->pgType = pgType;
+				identityFields = lappend(identityFields, source);
+				break;
+			}
+		}
+	}
+
+	return identityFields;
+}
+
+
+/*
+ * FileConstantsForDataFile returns PgLakeFileConstants for the values of the
+ * data file's identity partition fields.
+ */
+static List *
+FileConstantsForDataFile(DataFile * dataFile, List *identityPartitionFields)
+{
+	List	   *constants = NIL;
+
+	if (identityPartitionFields == NIL)
+		return NIL;
+
+	int			nestLevel = set_transmission_modes();
+
+	for (size_t fieldIdx = 0; fieldIdx < dataFile->partition.fields_length; fieldIdx++)
+	{
+		PartitionField *partitionField = &dataFile->partition.fields[fieldIdx];
+
+		foreach_ptr(IdentityPartitionSource, source, identityPartitionFields)
+		{
+			if (source->partitionFieldId != partitionField->field_id)
+				continue;
+
+			PgLakeFileConstant *constant = palloc0(sizeof(PgLakeFileConstant));
+			bool		isNull = false;
+			Datum		value = PartitionValueToDatum(PARTITION_TRANSFORM_IDENTITY,
+													  partitionField->value,
+													  partitionField->value_length,
+													  source->pgType, &isNull);
+
+			constant->fieldId = source->sourceFieldId;
+			if (!isNull)
+			{
+				Oid			typeOutput;
+				bool		typeIsVarlena;
+
+				getTypeOutputInfo(source->pgType.postgresTypeOid, &typeOutput, &typeIsVarlena);
+				constant->value = OidOutputFunctionCall(typeOutput, value);
+			}
+
+			/* DuckDB reads a BC date as AD */
+			if (constant->value == NULL || !pg_str_endswith(constant->value, " BC"))
+				constants = lappend(constants, constant);
+			break;
+		}
+	}
+
+	reset_transmission_modes(nestLevel);
+
+	return constants;
 }
 
 

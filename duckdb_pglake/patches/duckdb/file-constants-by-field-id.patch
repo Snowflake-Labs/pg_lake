@@ -1,0 +1,94 @@
+diff --git a/src/common/multi_file/multi_file_reader.cpp b/src/common/multi_file/multi_file_reader.cpp
+index bbeeec3096d..d554a063ec8 100644
+--- a/src/common/multi_file/multi_file_reader.cpp
++++ b/src/common/multi_file/multi_file_reader.cpp
+@@ -90,6 +90,7 @@ void MultiFileReader::AddParameters(TableFunction &table_function) {
+ 	table_function.named_parameters["union_by_name"] = LogicalType::BOOLEAN;
+ 	table_function.named_parameters["hive_types"] = LogicalType::ANY;
+ 	table_function.named_parameters["hive_types_autocast"] = LogicalType::BOOLEAN;
++	table_function.named_parameters["file_constants"] = LogicalType::ANY;
+ }
+ 
+ vector<string> MultiFileReader::ParsePaths(const Value &input) {
+@@ -189,6 +190,26 @@ bool MultiFileReader::ParseOption(const string &key, const Value &val, MultiFile
+ 			options.hive_types_schema[name] = transformed_type;
+ 		}
+ 		D_ASSERT(!options.hive_types_schema.empty());
++	} else if (loption == "file_constants") {
++		// MAP(VARCHAR, MAP(INTEGER, ANY)): file name -> field id -> value, kept in
++		// custom_options so that the layout of MultiFileOptions, which extensions
++		// built separately share, does not change
++		auto &type = val.type();
++		if (val.IsNull() || type.id() != LogicalTypeId::MAP || MapType::KeyType(type).id() != LogicalTypeId::VARCHAR ||
++		    MapType::ValueType(type).id() != LogicalTypeId::MAP ||
++		    MapType::KeyType(MapType::ValueType(type)).id() != LogicalTypeId::INTEGER) {
++			throw InvalidInputException("'file_constants' only accepts a MAP(VARCHAR, MAP(INTEGER, ANY)), but '%s' "
++			                            "was provided",
++			                            type.ToString());
++		}
++		auto &files = MapValue::GetChildren(val);
++		for (idx_t i = 1; i < files.size(); i++) {
++			if (!(StringValue::Get(StructValue::GetChildren(files[i - 1])[0]) <
++			      StringValue::Get(StructValue::GetChildren(files[i])[0]))) {
++				throw InvalidInputException("'file_constants' requires its file names in ascending order");
++			}
++		}
++		options.custom_options[loption] = val;
+ 	} else {
+ 		return false;
+ 	}
+@@ -291,6 +312,34 @@ void MultiFileReader::GetVirtualColumns(ClientContext &context, MultiFileReaderB
+ 	result.insert(make_pair(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN)));
+ }
+ 
++// Look the value of field_id in file up in a file_constants MAP, whose file
++// names ParseOption checked are in ascending order
++static bool FindFileConstant(const Value &file_constants, const string &file, int32_t field_id, Value &result) {
++	auto &files = MapValue::GetChildren(file_constants);
++	idx_t lower = 0;
++	idx_t upper = files.size();
++	while (lower < upper) {
++		idx_t middle = lower + (upper - lower) / 2;
++		auto &entry = StructValue::GetChildren(files[middle]);
++		auto &name = StringValue::Get(entry[0]);
++		if (name < file) {
++			lower = middle + 1;
++		} else if (file < name) {
++			upper = middle;
++		} else {
++			for (auto &field : MapValue::GetChildren(entry[1])) {
++				auto &pair = StructValue::GetChildren(field);
++				if (IntegerValue::Get(pair[0]) == field_id) {
++					result = pair[1];
++					return true;
++				}
++			}
++			return false;
++		}
++	}
++	return false;
++}
++
+ void MultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const MultiFileOptions &file_options,
+                                    const MultiFileReaderBindData &options,
+                                    const vector<MultiFileColumnDefinition> &global_columns,
+@@ -341,6 +390,19 @@ void MultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const Multi
+ 				continue;
+ 			}
+ 		}
++		auto file_constants = file_options.custom_options.find("file_constants");
++		if (file_constants != file_options.custom_options.end() &&
++		    global_columns[column_id].identifier.type().id() == LogicalTypeId::INTEGER) {
++			// a column the file has the same value for in every row, as the
++			// identity partition columns of an Iceberg data file, whether or
++			// not the file stores the column
++			auto &column = global_columns[column_id];
++			Value constant;
++			if (FindFileConstant(file_constants->second, filename, IntegerValue::Get(column.identifier), constant)) {
++				reader_data.constant_map.Add(global_idx, constant.DefaultCastAs(column.type));
++				continue;
++			}
++		}
+ 		if (file_options.union_by_name) {
+ 			auto &column = global_columns[column_id];
+ 			auto &name = column.name;

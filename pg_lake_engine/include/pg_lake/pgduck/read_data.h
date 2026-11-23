@@ -70,6 +70,7 @@ extern PGDLLEXPORT char *ReadDataSourceQuery(List *dataFilePaths,
 											 List *formatOptions,
 											 DataFileSchema * schema,
 											 DataFileSchema * columnNameSchema,
+											 const char *fileConstants,
 											 ReadDataStats * stats,
 											 int flags);
 extern PGDLLEXPORT char *TupleDescToProjectionList(TupleDesc tupleDesc,

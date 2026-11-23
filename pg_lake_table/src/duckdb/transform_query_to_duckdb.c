@@ -71,6 +71,7 @@ static void AppendEqualityReadGroups(StringInfo command, List *groups,
 									 int start, int count, List *positionDeletePaths,
 									 TupleDesc dataDesc, TupleDesc projection,
 									 List *options, DataFileSchema * schema);
+static char *FileConstantsArgument(List *fileScans);
 
 
 /*
@@ -262,7 +263,9 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 	else
 		readCall = ReadDataSourceQuery(dataFilePaths, positionDeletePaths,
 									   format, compression, readTupleDesc, options,
-									   schema, NULL, &stats, readFlags);
+									   schema, NULL,
+									   FileConstantsArgument(tableScan->fileScans),
+									   &stats, readFlags);
 
 	StringInfoData command;
 
@@ -349,7 +352,9 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 	/* Preserve Iceberg storage-to-surface conversions for non-key columns. */
 	char	   *dataQuery = ReadDataSourceQuery(paths, positionDeletePaths, DATA_FORMAT_ICEBERG,
 												DATA_COMPRESSION_INVALID, dataDesc, options,
-												schema, NULL, &stats, 0);
+												schema, NULL,
+												FileConstantsArgument(group->fileScans),
+												&stats, 0);
 
 	appendStringInfoString(command, "SELECT ");
 	bool		first = true;
@@ -373,7 +378,8 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 	{
 		char	   *deleteQuery = ReadDataSourceQuery(deletion->paths, NIL, DATA_FORMAT_PARQUET,
 													  DATA_COMPRESSION_INVALID, NULL, NIL,
-													  deletion->schema, NULL, NO_STATISTICS, 0);
+													  deletion->schema, NULL, NULL,
+													  NO_STATISTICS, 0);
 
 		appendStringInfo(command, "%s NOT EXISTS (SELECT 1 FROM (%s) AS e WHERE ",
 						 first ? " WHERE" : " AND", deleteQuery);
@@ -395,6 +401,68 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 		appendStringInfoChar(command, ')');
 		first = false;
 	}
+}
+
+
+/*
+ * CompareFileScanPaths orders PgLakeFileScans by path.
+ */
+static int
+CompareFileScanPaths(const ListCell *left, const ListCell *right)
+{
+	PgLakeFileScan *leftScan = lfirst(left);
+	PgLakeFileScan *rightScan = lfirst(right);
+
+	return strcmp(leftScan->path, rightScan->path);
+}
+
+
+/*
+ * FileConstantsArgument returns the file_constants argument of read_parquet
+ * for the constants of the given PgLakeFileScans, or NULL if they have none.
+ * read_parquet takes the files in ascending order of their paths.
+ */
+static char *
+FileConstantsArgument(List *fileScans)
+{
+	StringInfoData argument;
+	bool		anyFile = false;
+	List	   *sortedScans = list_copy(fileScans);
+
+	list_sort(sortedScans, CompareFileScanPaths);
+
+	initStringInfo(&argument);
+	appendStringInfoString(&argument, "map {");
+
+	foreach_ptr(PgLakeFileScan, fileScan, sortedScans)
+	{
+		if (fileScan->constants == NIL)
+			continue;
+
+		appendStringInfo(&argument, "%s%s: map {", anyFile ? ", " : "",
+						 quote_literal_cstr(fileScan->path));
+
+		bool		anyConstant = false;
+
+		foreach_ptr(PgLakeFileConstant, constant, fileScan->constants)
+		{
+			appendStringInfo(&argument, "%s%d: %s", anyConstant ? ", " : "",
+							 constant->fieldId,
+							 constant->value != NULL ?
+							 quote_literal_cstr(constant->value) : "NULL");
+			anyConstant = true;
+		}
+
+		appendStringInfoChar(&argument, '}');
+		anyFile = true;
+	}
+
+	if (!anyFile)
+		return NULL;
+
+	appendStringInfoString(&argument, "}::MAP(VARCHAR, MAP(INTEGER, VARCHAR))");
+
+	return argument.data;
 }
 
 

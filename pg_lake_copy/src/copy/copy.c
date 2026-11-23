@@ -895,6 +895,7 @@ GenerateReadDataSourceQuery(char *sourcePath, CopyDataFormat sourceFormat,
 							   options,
 							   schema,
 							   columnNameSchema,
+							   NULL,
 							   NO_STATISTICS,
 							   readFlags);
 
