@@ -575,9 +575,10 @@ class SparkTable:
         run_command(f"DROP TABLE {self.pg_name}", self.pg_conn)
         self.pg_conn.commit()
 
-    def assert_same_rows(self, where="true", columns=BASE_COLUMNS):
+    def assert_same_rows(self, where="true", columns=BASE_COLUMNS, pg_table=None):
         """Compare the rows Spark and pg_lake read. A column is either an
-        expression both accept, or a (Spark, Postgres) pair of expressions."""
+        expression both accept, or a (Spark, Postgres) pair of expressions.
+        pg_table, by default the attached table, is the one Postgres reads."""
         spark_columns, pg_columns = zip(
             *[(c, c) if isinstance(c, str) else c for c in columns]
         )
@@ -585,7 +586,8 @@ class SparkTable:
             f"SELECT {', '.join(spark_columns)} FROM {{table}} WHERE {where} ORDER BY id"
         )
         pg_rows = run_query(
-            f"SELECT {', '.join(pg_columns)} FROM {self.pg_name} WHERE {where} ORDER BY id",
+            f"SELECT {', '.join(pg_columns)} FROM {pg_table or self.pg_name} "
+            f"WHERE {where} ORDER BY id",
             self.pg_conn,
         )
         self.pg_conn.commit()
