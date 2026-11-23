@@ -17,9 +17,16 @@
 
 #include "postgres.h"
 #include "miscadmin.h"
+#include "access/genam.h"
+#include "access/htup_details.h"
+#include "access/table.h"
 #include "access/xact.h"
 #include "foreign/foreign.h"
+#include "catalog/pg_class.h"
+#include "catalog/pg_depend.h"
+#include "catalog/pg_foreign_server.h"
 #include "catalog/pg_foreign_table.h"
+#include "utils/fmgroids.h"
 
 
 #include "pg_lake/copy/copy_format.h"
@@ -28,7 +35,8 @@
 #include "pg_lake/util/rel_utils.h"
 
 
-static void WarnIfSnowflakeServerIsShadowed(void);
+static Oid	GetLegacySnowflakeServerId(void);
+static bool RelationDependsOnServer(Oid relationId, Oid serverId);
 
 
 /*
@@ -208,8 +216,9 @@ IsRestCatalog(const char *catalog)
  *
  * For the four reserved short names ('postgres', 'object_store', 'rest',
  * 'snowflake') the result is the corresponding pre-created built-in
- * server name.  'snowflake' is an alias for 'rest', and takes priority
- * over a user-created server with that name.
+ * server name.  'snowflake' is an alias for 'rest', and is ambiguous while
+ * an iceberg_catalog server created under that name before it became
+ * reserved still exists.
  * Any other input is returned unchanged (user-created server names match
  * their catalog= option value verbatim).
  *
@@ -224,7 +233,16 @@ ResolveCatalogServerName(const char *catalog)
 
 	if (pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
 	{
-		WarnIfSnowflakeServerIsShadowed();
+		if (OidIsValid(GetLegacySnowflakeServerId()))
+			ereport(ERROR,
+					(errcode(ERRCODE_AMBIGUOUS_PARAMETER),
+					 errmsg("catalog '%s' is ambiguous", SNOWFLAKE_CATALOG_NAME),
+					 errdetail("iceberg_catalog server \"%s\" was created before "
+							   "'%s' became an alias for the built-in REST catalog.",
+							   SNOWFLAKE_CATALOG_NAME, SNOWFLAKE_CATALOG_NAME),
+					 errhint("Use catalog '%s' for the built-in REST catalog.",
+							 REST_CATALOG_NAME)));
+
 		return PG_LAKE_REST_CATALOG_SERVER_NAME;
 	}
 	if (pg_strcasecmp(catalog, REST_CATALOG_NAME) == 0)
@@ -239,39 +257,94 @@ ResolveCatalogServerName(const char *catalog)
 
 
 /*
- * WarnIfSnowflakeServerIsShadowed warns once per session when an
- * iceberg_catalog server created before 'snowflake' became reserved is
- * now ignored in favour of the built-in REST catalog.
+ * ResolveRelationCatalogServerName is ResolveCatalogServerName for an
+ * existing table.  A table created with catalog='snowflake' before the name
+ * became reserved depends on the user's server of that name and keeps using
+ * it, while tables created through the alias depend on the built-in server.
  */
-static void
-WarnIfSnowflakeServerIsShadowed(void)
+const char *
+ResolveRelationCatalogServerName(Oid relationId, const char *catalog)
 {
-	static bool warned = false;
+	if (catalog != NULL && pg_strcasecmp(catalog, SNOWFLAKE_CATALOG_NAME) == 0)
+	{
+		Oid			legacyServerId = GetLegacySnowflakeServerId();
 
-	if (warned || !IsTransactionState())
-		return;
+		if (OidIsValid(legacyServerId))
+			return RelationDependsOnServer(relationId, legacyServerId) ?
+				SNOWFLAKE_CATALOG_NAME : PG_LAKE_REST_CATALOG_SERVER_NAME;
+	}
+
+	return ResolveCatalogServerName(catalog);
+}
+
+
+/*
+ * GetLegacySnowflakeServerId returns the OID of a user-created
+ * iceberg_catalog server named 'snowflake', or InvalidOid if there is none.
+ * CREATE SERVER rejects the name now, so such a server predates the alias.
+ */
+static Oid
+GetLegacySnowflakeServerId(void)
+{
+	if (!IsTransactionState())
+		return InvalidOid;
 
 	bool		missingOK = true;
 	ForeignServer *server = GetForeignServerByName(SNOWFLAKE_CATALOG_NAME,
 												   missingOK);
 
 	if (server == NULL)
-		return;
+		return InvalidOid;
 
 	ForeignDataWrapper *fdw = GetForeignDataWrapper(server->fdwid);
 
 	if (strcmp(fdw->fdwname, ICEBERG_CATALOG_FDW_NAME) != 0)
-		return;
+		return InvalidOid;
 
-	warned = true;
+	return server->serverid;
+}
 
-	ereport(WARNING,
-			(errmsg("iceberg_catalog server \"%s\" is ignored",
-					SNOWFLAKE_CATALOG_NAME),
-			 errdetail("catalog '%s' refers to the built-in REST catalog.",
-					   SNOWFLAKE_CATALOG_NAME),
-			 errhint("Create a server with a different name and recreate "
-					 "the tables that should use it.")));
+
+/*
+ * RelationDependsOnServer returns whether pg_depend records that the
+ * relation depends on the given foreign server.
+ */
+static bool
+RelationDependsOnServer(Oid relationId, Oid serverId)
+{
+	Relation	pgDependRel = table_open(DependRelationId, AccessShareLock);
+	ScanKeyData scanKey[2];
+
+	ScanKeyInit(&scanKey[0],
+				Anum_pg_depend_classid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(RelationRelationId));
+	ScanKeyInit(&scanKey[1],
+				Anum_pg_depend_objid,
+				BTEqualStrategyNumber, F_OIDEQ,
+				ObjectIdGetDatum(relationId));
+
+	SysScanDesc scanDesc = systable_beginscan(pgDependRel, DependDependerIndexId,
+											  true, NULL, 2, scanKey);
+	bool		dependsOnServer = false;
+	HeapTuple	tuple;
+
+	while (HeapTupleIsValid(tuple = systable_getnext(scanDesc)))
+	{
+		Form_pg_depend dependForm = (Form_pg_depend) GETSTRUCT(tuple);
+
+		if (dependForm->refclassid == ForeignServerRelationId &&
+			dependForm->refobjid == serverId)
+		{
+			dependsOnServer = true;
+			break;
+		}
+	}
+
+	systable_endscan(scanDesc);
+	table_close(pgDependRel, AccessShareLock);
+
+	return dependsOnServer;
 }
 
 
