@@ -1,6 +1,6 @@
-"""Interoperate with the repository's Spark 3.5 / Apache Iceberg 1.4.3 fixture.
+"""Interoperate with the repository's Spark 3.5 / Apache Iceberg fixture.
 
-Spark writes the original data. Apache Iceberg's GenericAppenderFactory writes
+Spark writes the original data. Apache Iceberg's GenericFileWriterFactory writes
 Parquet equality/position deletes and new data in one RowDelta commit. Spark's
 independent Iceberg reader validates the result before either pg_lake executor.
 All objects use the test S3 service and are regenerated for every run.
@@ -44,9 +44,7 @@ def test_spark_row_delta(installcheck, spark_session, s3, pg_conn, extension):
         keys = schema.select(names)
         ids = spark.sparkContext._gateway.new_array(jvm.int, 1)
         ids[0] = schema.findField("id").fieldId()
-        factory = iceberg.data.GenericAppenderFactory(
-            schema, table.spec(), ids, keys, None
-        )
+        factory = writer_factory(iceberg, table, ids, keys)
 
         def output(kind):
             path = f"{table.location()}/data/{uuid.uuid4()}-{kind}.parquet"
@@ -55,8 +53,8 @@ def test_spark_row_delta(installcheck, spark_session, s3, pg_conn, extension):
                 iceberg.encryption.EncryptionKeyMetadata.empty(),
             )
 
-        equality = factory.newEqDeleteWriter(
-            output("equality"), iceberg.FileFormat.PARQUET, None
+        equality = factory.newEqualityDeleteWriter(
+            output("equality"), table.spec(), None
         )
         try:
             for key in (2, 4, None, 2):
@@ -66,18 +64,18 @@ def test_spark_row_delta(installcheck, spark_session, s3, pg_conn, extension):
         finally:
             equality.close()
 
-        position = factory.newPosDeleteWriter(
-            output("position"), iceberg.FileFormat.PARQUET, None
+        position = factory.newPositionDeleteWriter(
+            output("position"), table.spec(), None
         )
         try:
             for path, pos in positions:
                 deletion = iceberg.deletes.PositionDelete.create()
-                deletion.set(path, pos, None)
+                deletion.set(path, pos)
                 position.write(deletion)
         finally:
             position.close()
 
-        data = factory.newDataWriter(output("data"), iceberg.FileFormat.PARQUET, None)
+        data = factory.newDataWriter(output("data"), table.spec(), None)
         try:
             record = iceberg.data.GenericRecord.create(schema)
             record.setField("id", 2)
@@ -131,9 +129,7 @@ def test_spark_partitioned_equality_delete(
         keys = schema.select(names)
         ids = spark.sparkContext._gateway.new_array(jvm.int, 1)
         ids[0] = schema.findField("id").fieldId()
-        factory = iceberg.data.GenericAppenderFactory(
-            schema, table.spec(), ids, keys, None
-        )
+        factory = writer_factory(iceberg, table, ids, keys)
 
         # Let Iceberg compute the bucket and identity partition values.
         row = iceberg.data.GenericRecord.create(schema)
@@ -147,9 +143,7 @@ def test_spark_partitioned_equality_delete(
             ),
             iceberg.encryption.EncryptionKeyMetadata.empty(),
         )
-        writer = factory.newEqDeleteWriter(
-            output, iceberg.FileFormat.PARQUET, partition
-        )
+        writer = factory.newEqualityDeleteWriter(output, table.spec(), partition)
         try:
             key = iceberg.data.GenericRecord.create(keys)
             key.setField("id", 1)
@@ -170,6 +164,16 @@ def test_spark_partitioned_equality_delete(
     finally:
         spark.sql(f"DROP TABLE IF EXISTS {name}")
         spark.sql(f"DROP NAMESPACE {namespace}")
+
+
+def writer_factory(iceberg, table, equality_ids, equality_schema):
+    # builderFor() is package-private; the Builder's constructor is public
+    builder = getattr(iceberg.data, "GenericFileWriterFactory$Builder")(table)
+    return (
+        builder.equalityFieldIds(equality_ids)
+        .equalityDeleteRowSchema(equality_schema)
+        .build()
+    )
 
 
 def assert_pg_lake_rows(pg_conn, metadata, expected):

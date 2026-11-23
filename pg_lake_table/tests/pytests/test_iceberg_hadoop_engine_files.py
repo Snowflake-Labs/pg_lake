@@ -1,7 +1,7 @@
 """Read Iceberg tables with files the way engines built on Hadoop write them.
 
 Spark writes the tables through the repository's Spark 3.5 / Apache Iceberg
-1.4.3 fixture. Its S3FileIO also takes the s3a:// scheme, so a table created at
+fixture. Its S3FileIO also takes the s3a:// scheme, so a table created at
 an s3a:// location carries s3a:// paths in its metadata, manifests and position
 delete files, like one written through Hadoop's S3A file system.
 """
