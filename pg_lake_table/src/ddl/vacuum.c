@@ -1332,28 +1332,44 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 		{
 			INJECTION_POINT_COMPAT("in-progress-files");
 
-			char	   *locationPrefix = GetMetadataLocationPrefixForRelationId(relationId);
-
 			/*
-			 * The paths live in the transaction this iteration commits below,
-			 * so they are counted here rather than carried out of the pass
-			 * that produced them.
+			 * Each pass commits, so the table can be dropped before the next
+			 * one, which then has no location to look up.  Locking it first
+			 * lets the check see a drop that has committed, and holds off one
+			 * for the rest of the pass.  What a dropped table left is for
+			 * VacuumDroppedPgLakeIcebergTables.
 			 */
-			List	   *removedFiles = NIL;
+			if (relationId != InvalidOid)
+				LockRelationOid(relationId, AccessShareLock);
 
-			hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull, isVerbose,
-													  &removedFiles);
+			if (relationId != InvalidOid && !IsPgLakeIcebergForeignTableById(relationId))
+				hasRemainingFiles = false;
+			else
+			{
+				char	   *locationPrefix = GetMetadataLocationPrefixForRelationId(relationId);
 
-			/*
-			 * Removals are what the budget is charged and what the summary
-			 * below reports: a path whose removal failed is handed to the
-			 * deletion queue, which is not a file this vacuum got rid of. A
-			 * pass that failed reports no remaining files, so the loop ends
-			 * there rather than carrying on through the paths behind the
-			 * failure, and a pass that threw reports nothing at all, its
-			 * removals having gone back with the subtransaction.
-			 */
-			totalFilesRemoved += list_length(removedFiles);
+				/*
+				 * The paths live in the transaction this iteration commits
+				 * below, so they are counted here rather than carried out of
+				 * the pass that produced them.
+				 */
+				List	   *removedFiles = NIL;
+
+				hasRemainingFiles = RemoveInProgressFiles(locationPrefix, isFull,
+														  isVerbose, &removedFiles);
+
+				/*
+				 * Removals are what the budget is charged and what the
+				 * summary below reports: a path whose removal failed is
+				 * handed to the deletion queue, which is not a file this
+				 * vacuum got rid of. A pass that failed reports no remaining
+				 * files, so the loop ends there rather than carrying on
+				 * through the paths behind the failure, and a pass that threw
+				 * reports nothing at all, its removals having gone back with
+				 * the subtransaction.
+				 */
+				totalFilesRemoved += list_length(removedFiles);
+			}
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -1396,7 +1412,8 @@ VacuumRemoveInProgressFiles(Oid relationId, bool isFull, bool isVerbose)
 
 	if (totalFilesRemoved > 0)
 	{
-		if (relationId != InvalidOid)
+		/* the table may have been dropped since the last pass */
+		if (relationId != InvalidOid && IsPgLakeIcebergForeignTableById(relationId))
 			ereport(LOG,
 					(errmsg("pg_lake: cleaned up %d orphaned files from iceberg table %s",
 							totalFilesRemoved, GetQualifiedRelationName(relationId))));
