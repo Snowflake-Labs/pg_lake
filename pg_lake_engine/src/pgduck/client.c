@@ -58,8 +58,11 @@ static bool WaitForLastResultWithTimeout(PGconn *conn, TimestampTz endtime,
 static void LogPGDuckErrorClass(const char *errorClass);
 static void SetPGDuckTimeZone(PGDuckConnection * pgDuckConnection);
 static bool TrySetPGDuckTimeZone(PGDuckConnection * pgDuckConnection,
-								 const char *timeZoneName);
+								 const char *timeZoneName, bool readBack);
 static const char *GetPGDuckTimeZoneName(void);
+static const char *FindRememberedPGDuckTimeZone(const char *sessionZoneName);
+static void RememberPGDuckTimeZone(const char *sessionZoneName,
+								   const char *engineZoneName);
 
 /* query engine settings */
 char	   *PgduckServerConninfo = DEFAULT_PGDUCK_SERVER_CONNINFO;
@@ -81,6 +84,15 @@ typedef struct PgDuckServerConnectionHashEntry
 	PGDuckConnection pgDuckConnection;
 
 }			PgDuckServerConnectionHashEntry;
+
+/* query engine zone to set for a session TimeZone this backend has used */
+typedef struct PGDuckTimeZoneEntry
+{
+	char	   *sessionZoneName;
+	char	   *engineZoneName;
+}			PGDuckTimeZoneEntry;
+
+static List *PGDuckTimeZoneEntries = NIL;
 
 /*
  * InitializePGDuckClient is called the first time we get a PGDuck connection
@@ -137,8 +149,7 @@ SetupPgDuckConnectionHash(void)
 
 
 /*
- * GetPGDuckConnection returns the main PGDuck connection, set to the
- * session's TimeZone.
+ * GetPGDuckConnection returns the main PGDuck connection.
  */
 PGDuckConnection *
 GetPGDuckConnection(void)
@@ -155,6 +166,24 @@ GetPGDuckConnection(void)
 		ereport(ERROR, (errmsg("could not start query engine")));
 #endif
 	}
+
+	return pgDuckConnection;
+}
+
+
+/*
+ * GetPGDuckConnectionWithSessionTimeZone is like GetPGDuckConnection, but
+ * also sets the connection to the session's TimeZone. It is meant for
+ * connections that evaluate user expressions; file and metadata work does
+ * not depend on the zone and can use GetPGDuckConnection.
+ *
+ * Connections are opened for each command, so reading the setting here also
+ * covers SET LOCAL and cached plans.
+ */
+PGDuckConnection *
+GetPGDuckConnectionWithSessionTimeZone(void)
+{
+	PGDuckConnection *pgDuckConnection = GetPGDuckConnection();
 
 	PG_TRY();
 	{
@@ -174,7 +203,6 @@ GetPGDuckConnection(void)
 /*
  * TryGetPGDuckConnection is like GetPGDuckConnection, but returns NULL and
  * sets *errorMessage to the libpq error when pgduck_server is not reachable.
- * It does not set the connection's TimeZone.
  */
 PGDuckConnection *
 TryGetPGDuckConnection(char **errorMessage)
@@ -211,51 +239,70 @@ TryGetPGDuckConnection(char **errorMessage)
 
 /*
  * SetPGDuckTimeZone makes the query engine evaluate time-zone-dependent
- * expressions in the session's TimeZone. Connections are opened for each
- * command, so reading the setting here also covers SET LOCAL and cached plans.
+ * expressions in the session's TimeZone. Zones it cannot represent fall back
+ * to UTC with a WARNING.
  *
- * The query engine ignores failed SET commands, so the result is verified.
- * Zones it cannot represent fall back to UTC.
+ * The query engine ignores failed SET commands, so the result is read back
+ * the first time a backend uses a zone. The outcome is then kept for the life
+ * of the backend and later connections only send the SET, without checking
+ * it again.
  */
 static void
 SetPGDuckTimeZone(PGDuckConnection * pgDuckConnection)
 {
-	const char *timeZoneName = GetPGDuckTimeZoneName();
+	const char *sessionZoneName = pg_get_timezone_name(session_timezone);
+	const char *engineZoneName = FindRememberedPGDuckTimeZone(sessionZoneName);
 
-	if (timeZoneName != NULL)
+	if (engineZoneName != NULL)
 	{
-		if (TrySetPGDuckTimeZone(pgDuckConnection, timeZoneName))
-			return;
-
-		elog(DEBUG1, "query engine does not support TimeZone \"%s\", using UTC",
-			 timeZoneName);
+		TrySetPGDuckTimeZone(pgDuckConnection, engineZoneName, false);
+		return;
 	}
 
-	if (!TrySetPGDuckTimeZone(pgDuckConnection, "UTC"))
+	engineZoneName = GetPGDuckTimeZoneName();
+
+	if (engineZoneName != NULL &&
+		TrySetPGDuckTimeZone(pgDuckConnection, engineZoneName, true))
+	{
+		RememberPGDuckTimeZone(sessionZoneName, engineZoneName);
+		return;
+	}
+
+	if (!TrySetPGDuckTimeZone(pgDuckConnection, "UTC", true))
 		ereport(ERROR,
 				(errmsg("could not set query engine TimeZone to UTC")));
+
+	ereport(WARNING,
+			(errmsg("query engine does not support TimeZone \"%s\", using UTC",
+					sessionZoneName),
+			 errdetail("Time-zone-dependent results on lake tables may differ "
+					   "from PostgreSQL.")));
+
+	RememberPGDuckTimeZone(sessionZoneName, "UTC");
 }
 
 
 /*
- * TrySetPGDuckTimeZone verifies both the requested zone and the UTC fallback,
- * since pgduck_server can acknowledge a SET that DuckDB rejected.
+ * TrySetPGDuckTimeZone sets the connection's TimeZone and returns whether the
+ * query engine applied it, which is only checked with readBack=true.
  */
 static bool
-TrySetPGDuckTimeZone(PGDuckConnection * pgDuckConnection, const char *timeZoneName)
+TrySetPGDuckTimeZone(PGDuckConnection * pgDuckConnection, const char *timeZoneName,
+					 bool readBack)
 {
-	char	   *command = psprintf("SET TimeZone = %s; "
-								   "SELECT current_setting('TimeZone')",
-								   quote_literal_cstr(timeZoneName));
+	char	   *command = psprintf("SET TimeZone = %s%s",
+								   quote_literal_cstr(timeZoneName),
+								   readBack ? "; SELECT current_setting('TimeZone')" : "");
 	PGresult   *result = ExecuteQueryOnPGDuckConnection(pgDuckConnection, command);
 
 	CheckPGDuckResult(pgDuckConnection, result);
 
-	bool		isSet = PQresultStatus(result) == PGRES_TUPLES_OK &&
-		PQntuples(result) == 1 &&
-		PQnfields(result) == 1 &&
-		!PQgetisnull(result, 0, 0) &&
-		pg_strcasecmp(PQgetvalue(result, 0, 0), timeZoneName) == 0;
+	bool		isSet = !readBack ||
+		(PQresultStatus(result) == PGRES_TUPLES_OK &&
+		 PQntuples(result) == 1 &&
+		 PQnfields(result) == 1 &&
+		 !PQgetisnull(result, 0, 0) &&
+		 pg_strcasecmp(PQgetvalue(result, 0, 0), timeZoneName) == 0);
 
 	PQclear(result);
 
@@ -288,6 +335,46 @@ GetPGDuckTimeZoneName(void)
 
 	/* Etc/GMT names use the POSIX sign, so Etc/GMT-9 is 9 hours east of UTC */
 	return psprintf("Etc/GMT%+ld", -utcOffset / SECS_PER_HOUR);
+}
+
+
+/*
+ * FindRememberedPGDuckTimeZone returns the query engine zone this backend
+ * uses for the given session TimeZone, or NULL if it has not set it yet.
+ */
+static const char *
+FindRememberedPGDuckTimeZone(const char *sessionZoneName)
+{
+	ListCell   *entryCell = NULL;
+
+	foreach(entryCell, PGDuckTimeZoneEntries)
+	{
+		PGDuckTimeZoneEntry *entry = lfirst(entryCell);
+
+		if (strcmp(entry->sessionZoneName, sessionZoneName) == 0)
+			return entry->engineZoneName;
+	}
+
+	return NULL;
+}
+
+
+/*
+ * RememberPGDuckTimeZone records the query engine zone to set for the given
+ * session TimeZone.
+ */
+static void
+RememberPGDuckTimeZone(const char *sessionZoneName, const char *engineZoneName)
+{
+	MemoryContext oldContext = MemoryContextSwitchTo(TopMemoryContext);
+	PGDuckTimeZoneEntry *entry = palloc0(sizeof(PGDuckTimeZoneEntry));
+
+	entry->sessionZoneName = pstrdup(sessionZoneName);
+	entry->engineZoneName = pstrdup(engineZoneName);
+
+	PGDuckTimeZoneEntries = lappend(PGDuckTimeZoneEntries, entry);
+
+	MemoryContextSwitchTo(oldContext);
 }
 
 

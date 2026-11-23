@@ -443,7 +443,9 @@ def test_timezone_without_query_engine_equivalent(
             ["Asia/Tokyo"]
         ]
         run_command(f"SET LOCAL TimeZone = '{timezone}';", conn)
-        assert run_query(query.format(table="timezone_ice"), conn) == utc_result
+        # The second run sets the remembered fallback without reading it back.
+        for _ in range(2):
+            assert run_query(query.format(table="timezone_ice"), conn) == utc_result
     finally:
         run_command(f"SET GLOBAL TimeZone = '{engine_timezone}'", pgduck_conn)
 
@@ -561,6 +563,276 @@ def test_timezone_rejected_fallback(s3):
         finally:
             stop_postgres(str(pgdata))
             server.cleanup()
+
+
+def test_timezone_insert_select_pushdown(timezone_tables):
+    """A pushed-down INSERT..SELECT evaluates its expressions in the session TimeZone."""
+    conn = timezone_tables
+    insert = (
+        "INSERT INTO {target} SELECT id, ts::date, to_char(ts, 'YYYYMM') FROM {source}"
+    )
+    insert_ice = insert.format(target="timezone_derived_ice", source="timezone_ice")
+    run_command(
+        """
+        SET LOCAL TimeZone = 'Asia/Seoul';
+        CREATE TABLE timezone_derived_heap (id int, day date, month text);
+        CREATE TABLE timezone_derived_ice (LIKE timezone_derived_heap) USING iceberg;
+        """,
+        conn,
+    )
+    assert_query_pushdownable(insert_ice, conn)
+    run_command(insert_ice, conn)
+    run_command(
+        insert.format(target="timezone_derived_heap", source="timezone_heap"), conn
+    )
+    query = "SELECT * FROM {table} ORDER BY id"
+    assert run_query(query.format(table="timezone_derived_ice"), conn) == run_query(
+        query.format(table="timezone_derived_heap"), conn
+    )
+
+
+@pytest.mark.parametrize(
+    "write_path",
+    ["insert", "insert_select_no_pushdown", "update"],
+)
+def test_timezone_nested_timetz_round_trip(
+    s3, extension, pg_conn, pgduck_conn, with_default_location, write_path
+):
+    """
+    A timetz in a composite is stored normalized to UTC, whatever the session
+    TimeZone and the TimeZone pgduck_server runs in.
+    """
+    try:
+        # The tables that are only read are written while the engine is in UTC.
+        run_command(
+            """
+            CREATE SCHEMA timezone_nested_timetz;
+            SET search_path TO timezone_nested_timetz;
+            SET TimeZone = 'Asia/Seoul';
+            CREATE TYPE slot AS (label text, at_time timetz);
+            CREATE TABLE heap (id int, note text, slot slot);
+            INSERT INTO heap VALUES (1, 'new', ROW('a', '03:30:00+09'));
+            CREATE TABLE source (LIKE heap) USING iceberg;
+            CREATE TABLE target (LIKE heap) USING iceberg;
+            INSERT INTO source SELECT * FROM heap;
+            """,
+            pg_conn,
+        )
+        if write_path == "update":
+            run_command("INSERT INTO target SELECT * FROM heap", pg_conn)
+        pg_conn.commit()
+
+        original = run_query("SELECT current_setting('TimeZone')", pgduck_conn)[0][0]
+        try:
+            run_command("SET GLOBAL TimeZone = 'America/Los_Angeles'", pgduck_conn)
+            if write_path == "insert":
+                run_command("INSERT INTO target SELECT * FROM heap", pg_conn)
+            elif write_path == "update":
+                run_command("UPDATE target SET note = 'once'", pg_conn)
+                pg_conn.commit()
+                run_command("UPDATE target SET note = 'twice'", pg_conn)
+            else:
+                insert_select = "INSERT INTO target SELECT * FROM source"
+                run_command(
+                    "SET pg_lake_table.enable_full_query_pushdown = off", pg_conn
+                )
+                assert_query_not_pushdownable(insert_select, pg_conn)
+                run_command(insert_select, pg_conn)
+            pg_conn.commit()
+        finally:
+            run_command(f"SET GLOBAL TimeZone = '{original}'", pgduck_conn)
+
+        metadata_location = run_query(
+            "SELECT metadata_location FROM lake_iceberg.tables "
+            "WHERE table_namespace = 'timezone_nested_timetz' AND table_name = 'target'",
+            pg_conn,
+        )[0][0]
+        assert run_query(
+            f"SELECT slot.at_time::varchar FROM iceberg_scan('{metadata_location}')",
+            pgduck_conn,
+        ) == [["18:30:00"]]
+
+        run_command("SET TimeZone = 'UTC'", pg_conn)
+        assert run_query("SELECT (slot).at_time::text FROM target", pg_conn) == [
+            ["18:30:00+00"]
+        ]
+    finally:
+        pgduck_conn.rollback()
+        pg_conn.rollback()
+        run_command(
+            "RESET search_path; RESET TimeZone;"
+            "RESET pg_lake_table.enable_full_query_pushdown;",
+            pg_conn,
+        )
+        pg_conn.commit()
+        run_command("DROP SCHEMA IF EXISTS timezone_nested_timetz CASCADE", pg_conn)
+        pg_conn.commit()
+
+
+def test_timezone_json_copy_to(s3, extension, superuser_conn, pgduck_conn):
+    """
+    COPY TO does not run in the session TimeZone, so JSON is written as before:
+    in the TimeZone of pgduck_server, which is UTC in the tests.
+    """
+    url = f"s3://{TEST_BUCKET}/test_timezone_json_copy_to/data.json"
+    map_typename = create_map_type("text", "timestamptz")
+    try:
+        # In 1900 the offset of Asia/Seoul had seconds, which the query engine
+        # leaves out when it writes an offset.
+        run_command(
+            f"""
+            SET LOCAL TimeZone = 'Asia/Seoul';
+            CREATE TYPE timezone_json_item AS (at timestamptz);
+            COPY (SELECT ts AS top, ARRAY[ts] AS items,
+                         ROW(ts)::timezone_json_item AS item,
+                         ARRAY[ROW('key', ts)]::{map_typename} AS by_key
+                  FROM (SELECT timestamptz '1900-01-01 00:00:00+00' AS ts) s)
+            TO '{url}' WITH (format 'json');
+            """,
+            superuser_conn,
+        )
+        same_instant = run_query(
+            f"""
+            SELECT top::timestamptz = ts, items[1]::timestamptz = ts,
+                   item.at::timestamptz = ts, by_key['key']::timestamptz = ts
+            FROM read_json('{url}', columns = {{'top': 'VARCHAR', 'items': 'VARCHAR[]',
+                                               'item': 'STRUCT("at" VARCHAR)',
+                                               'by_key': 'MAP(VARCHAR, VARCHAR)'}}),
+                 (SELECT TIMESTAMPTZ '1900-01-01 00:00:00+00' AS ts)
+            """,
+            pgduck_conn,
+        )
+        assert same_instant == [[True, True, True, True]]
+    finally:
+        pgduck_conn.rollback()
+        superuser_conn.rollback()
+
+
+def test_timezone_fallback_warns_once(committed_timezone_tables):
+    """Each time zone the query engine cannot represent warns once per backend."""
+    conn = open_pg_conn()
+
+    def fallback_warnings(timezone):
+        run_command(f"SET TimeZone = '{timezone}'", conn)
+        conn.notices.clear()
+        run_query("SELECT id, ts::date FROM timezone_ice ORDER BY id", conn)
+        return [
+            notice
+            for notice in conn.notices
+            if "query engine does not support TimeZone" in notice
+        ]
+
+    try:
+        for timezone in ("EST5EDT,M3.2.0,M11.1.0", "+05:45"):
+            assert len(fallback_warnings(timezone)) == 1
+            assert fallback_warnings(timezone) == []
+
+        assert len(fallback_warnings("+05:30")) == 1
+        assert fallback_warnings("+05:45") == []
+        assert fallback_warnings("Asia/Seoul") == []
+    finally:
+        conn.close()
+
+
+def test_timezone_not_set_for_file_work(s3, extension, with_default_location):
+    """
+    Only connections that run query text get the session TimeZone. The
+    fallback warning shows which ones do.
+    """
+    conn = open_pg_conn()
+    conn.autocommit = True
+    url = f"s3://{TEST_BUCKET}/test_timezone_not_set_for_file_work/data.parquet"
+
+    def warns(command):
+        conn.notices.clear()
+        run_command(command, conn)
+        return any("query engine does not support TimeZone" in n for n in conn.notices)
+
+    try:
+        run_command(
+            f"SET pg_lake_iceberg.default_location_prefix TO 's3://{TEST_BUCKET}';"
+            "SET TimeZone = '+05:45';"
+            "SET pg_lake_table.vacuum_compact_min_input_files = 2;"
+            "CREATE TABLE timezone_file_work (ts timestamptz) USING iceberg;",
+            conn,
+        )
+        assert not warns("INSERT INTO timezone_file_work VALUES (now())")
+        assert not warns("INSERT INTO timezone_file_work VALUES (now())")
+        assert not warns("VACUUM timezone_file_work")
+        # the VACUUM above compacted the two data files
+        assert data_file_count(conn, "timezone_file_work") == 1
+        assert not warns(f"COPY (SELECT now() AS ts) TO '{url}'")
+        assert warns("SELECT count(*) FROM timezone_file_work")
+    finally:
+        run_command("DROP TABLE IF EXISTS timezone_file_work", conn)
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "source, file_format, expected",
+    [
+        ("foreign_table", "csv", ["2024-01-01 00:00:00+09", "03:30:00+09"]),
+        # the JSON reader of the query engine takes the text as UTC
+        ("foreign_table", "json", ["2024-01-01 09:00:00+09", "03:30:00+00"]),
+        # Iceberg stores timetz normalized to UTC
+        ("copy", "csv", ["2024-01-01 00:00:00+09", "18:30:00+00"]),
+        ("copy", "json", ["2024-01-01 00:00:00+09", "18:30:00+00"]),
+    ],
+    ids=["foreign_table-csv", "foreign_table-json", "copy-csv", "copy-json"],
+)
+def test_timezone_text_input_without_offset(
+    s3,
+    extension,
+    superuser_conn,
+    with_default_location,
+    source,
+    file_format,
+    expected,
+):
+    """
+    timestamptz and timetz text without an offset is read in the session
+    TimeZone, except in JSON foreign tables, where the query engine reads it
+    as UTC.
+    """
+    conn = superuser_conn
+    key = f"test_timezone_text_input_without_offset/data.{file_format}"
+    url = f"s3://{TEST_BUCKET}/{key}"
+    if file_format == "csv":
+        body = "ts,t\n2024-01-01 00:00:00,03:30:00\n"
+        options = "format 'csv', header 'true'"
+    else:
+        body = '{"ts": "2024-01-01 00:00:00", "t": "03:30:00"}\n'
+        options = "format 'json'"
+    s3.put_object(Bucket=TEST_BUCKET, Key=key, Body=body)
+
+    try:
+        run_command("SET LOCAL TimeZone = 'Asia/Seoul'", conn)
+        if source == "foreign_table":
+            run_command(
+                "CREATE FOREIGN TABLE timezone_input (ts timestamptz, t timetz) "
+                f"SERVER pg_lake OPTIONS (path '{url}', {options})",
+                conn,
+            )
+        else:
+            run_command(
+                f"""
+                CREATE OR REPLACE FUNCTION pg_lake_last_copy_pushed_down_test()
+                  RETURNS bool LANGUAGE C
+                  AS 'pg_lake_copy', $$pg_lake_last_copy_pushed_down_test$$;
+                CREATE TABLE timezone_input (ts timestamptz, t timetz) USING iceberg;
+                COPY timezone_input FROM '{url}' WITH ({options});
+                """,
+                conn,
+            )
+            assert run_query("SELECT pg_lake_last_copy_pushed_down_test()", conn) == [
+                [True]
+            ]
+
+        assert run_query("SELECT ts::text, t::text FROM timezone_input", conn) == [
+            expected
+        ]
+    finally:
+        conn.rollback()
 
 
 def datetime_result_to_str(result):

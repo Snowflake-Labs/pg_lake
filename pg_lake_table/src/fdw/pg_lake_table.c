@@ -1687,7 +1687,7 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	 * Get connection to the foreign server.  Connection manager will
 	 * establish new connection if necessary.
 	 */
-	fsstate->conn = GetPGDuckConnection();
+	fsstate->conn = GetPGDuckConnectionWithSessionTimeZone();
 
 	/* Assign a unique ID for my cursor */
 	fsstate->prepared_statement_sent = false;

@@ -210,7 +210,8 @@ GetExplainJson(char *query, int numParams, const char **parameterValues)
 
 	char	   *value = NULL;
 
-	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	/* the plan can depend on the TimeZone, e.g. when a filter is folded */
+	PGDuckConnection *pgDuckConn = GetPGDuckConnectionWithSessionTimeZone();
 
 	SendQueryWithParams(pgDuckConn, explainCommand, numParams, parameterValues);
 

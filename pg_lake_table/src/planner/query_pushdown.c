@@ -1569,7 +1569,13 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	scanState->queryString = queryString;
-	scanState->connection = GetPGDuckConnection();
+
+	/* in the other cases no query is sent on this connection */
+	if (!explainRequested && scanState->insertIntoRelid == InvalidOid)
+		scanState->connection = GetPGDuckConnectionWithSessionTimeZone();
+	else
+		scanState->connection = GetPGDuckConnection();
+
 	scanState->tupleDesc = tupleDesc;
 	scanState->attributeInputMetadata = TupleDescGetAttInMetadata(tupleDesc);
 	scanState->estate = estate;

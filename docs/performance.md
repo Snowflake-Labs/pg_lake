@@ -129,6 +129,16 @@ tables in Iceberg, so the whole query runs in DuckDB.
 | `pg_lake_table.enable_full_query_pushdown` | Set to `off` to only use per-table scans, for example to compare plans. |
 | `pg_lake_table.enable_strict_pushdown` | When `on` (default), only functions and operators known to behave exactly as in PostgreSQL are pushed down. |
 
+### Time zones
+
+Pushed-down expressions use the session's `TimeZone`. If DuckDB does not support the zone, such
+as `+05:45` or a POSIX rule, pg_lake falls back to UTC with a warning, and results can differ
+from PostgreSQL.
+
+Pushed-down `INSERT ... SELECT` and `COPY ... FROM` into writable CSV or JSON tables write
+`timestamptz` values with the session's offset. DuckDB omits seconds from the offset, shifting
+historical values whose UTC offset had seconds.
+
 ## Skipping files
 
 Scans are fastest when they do not read most files at all. pg_lake skips Iceberg data files in

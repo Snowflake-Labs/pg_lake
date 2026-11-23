@@ -114,7 +114,8 @@ extern PGDLLEXPORT StatsCollector * ExecuteCopyToCommandOnPGDuckConnection(char 
 																		   List *leafFields,
 																		   DataFileSchema * schema,
 																		   char *destinationPath,
-																		   CopyDataFormat destinationFormat);
+																		   CopyDataFormat destinationFormat,
+																		   bool useSessionTimeZone);
 extern PGDLLEXPORT bool ShouldSkipStatistics(LeafField * leafField);
 extern PGDLLEXPORT DataFileStats * CreateDataFileStatsForDataFile(char *dataFilePath,
 																  int64 rowCount, int64 deletedRowCount);

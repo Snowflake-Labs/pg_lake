@@ -66,7 +66,8 @@ extern PGDLLEXPORT StatsCollector * WriteQueryResultTo(char *query,
 													   IcebergOutOfRangePolicy outOfRangePolicy,
 													   IcebergCompatibilityMode compatibilityMode,
 													   bool wrapNativeTypes,
-													   List *partitionByExprs);
+													   List *partitionByExprs,
+													   bool useSessionTimeZone);
 extern PGDLLEXPORT void AppendFields(StringInfo map, DataFileSchema * schema);
 extern PGDLLEXPORT char *TupleDescToColumnMapForWrite(TupleDesc tupleDesc,
 													  CopyDataFormat destinationFormat,
