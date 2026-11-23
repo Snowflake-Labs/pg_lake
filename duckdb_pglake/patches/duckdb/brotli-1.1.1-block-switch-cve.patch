@@ -1,15 +1,3 @@
-diff --git a/test/common/CMakeLists.txt b/test/common/CMakeLists.txt
-index a1a16318949..62252f08624 100644
---- a/test/common/CMakeLists.txt
-+++ b/test/common/CMakeLists.txt
-@@ -3,6 +3,7 @@ add_library_unity(
-   OBJECT
-   test_cast.cpp
-   test_checksum.cpp
-+  test_brotli_invalid_block_switch.cpp
-   test_file_system.cpp
-   test_caching_file_system_wrapper.cpp
-   test_external_file_cache.cpp
 diff --git a/test/common/test_brotli_invalid_block_switch.cpp b/test/common/test_brotli_invalid_block_switch.cpp
 new file mode 100644
 index 00000000000..08067b0fba3
