@@ -310,7 +310,8 @@ into it.
 pg_lake reads manifests and manifest lists that are uncompressed or compressed with deflate
 (Iceberg's default, `gzip`) or snappy. A table whose manifests are compressed with zstd or
 bzip2, as PyIceberg writes them when `write.avro.compression-codec` is set to one of those,
-cannot be read: queries fail with `File header contains an unknown codec`.
+and Spark and other Java writers when `write.manifest.compression-codec` is `zstd`, cannot be
+read: queries fail with `File header contains an unknown codec`.
 
 #### What read-only tables cannot read
 
@@ -322,13 +323,19 @@ incomplete results:
   `ALTER TABLE ... SET TBLPROPERTIES ('format-version' = '2')`. A table upgraded from version 1
   reads, including the files and manifests it wrote before the upgrade.
 - **Deletion vectors**, the row-level deletes of version 3 tables:
-  `pg_lake_iceberg: deletion vectors are not supported`. Version 3 tables without deletes read.
+  `pg_lake_iceberg: deletion vectors are not supported`. Version 3 tables without deletes read,
+  and a table reads again once its data files are rewritten with the deletes applied, for
+  example with Spark's `CALL <catalog>.system.rewrite_data_files(table => '<table>', options =>
+  map('delete-file-threshold', '1'))`, until the next row-level delete adds deletion vectors.
 - **Column defaults** in version 3 tables, on a column or a nested field (`initial-default`):
   `iceberg column default values are not supported`.
 - **Types** `geography`, `geometry`, `timestamp_ns`, `timestamptz_ns`, `unknown` and `variant`:
   `iceberg type <type> is not supported`.
 - **Data and delete files in ORC or Avro:** `pg_lake_iceberg: ORC files are not supported`
   (or `AVRO`). Rewrite the table's files as Parquet to read it.
+- **Parquet files compressed with `lz4`**, the deprecated Hadoop-framed codec that Spark and other
+  Java writers use when `write.parquet.compression-codec` is `lz4`:
+  `Unsupported compression codec "LZ4"`. Rewrite the table's files with another codec to read it.
 - **Equality-delete keys** other than top-level `int`, `long` and `string` fields; see
   [Reading external equality deletes](#reading-external-equality-deletes).
 - **Files outside the table's location**, with vended credentials: pg_lake uses a credential the

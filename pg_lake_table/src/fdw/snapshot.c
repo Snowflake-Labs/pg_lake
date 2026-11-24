@@ -544,9 +544,11 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 
 /*
 * For base types, compatibility means exact match. For composite types,
-* compatibility means all fields are compatible. For arrays, compatibility
-* means the element types are compatible. For maps, compatibility means the
-* key and value types are compatible.
+* compatibility means all fields have compatible types and the same names
+* but for case: DuckDB looks a struct field up by name regardless of case, so
+* a field renamed in the catalog cannot be read through its old name. For
+* arrays, compatibility means the element types are compatible. For maps,
+* compatibility means the key and value types are compatible.
 */
 static bool
 TypesAreCompatible(PGType pgType, PGType icebergType)
@@ -616,7 +618,8 @@ TypesAreCompatible(PGType pgType, PGType icebergType)
 			PGType		pgAttrType = MakePGType(pgAttr->atttypid, pgAttr->atttypmod);
 			PGType		icebergAttrType = MakePGType(icebergAttr->atttypid, icebergAttr->atttypmod);
 
-			if (!TypesAreCompatible(pgAttrType, icebergAttrType))
+			if (pg_strcasecmp(NameStr(pgAttr->attname), NameStr(icebergAttr->attname)) != 0 ||
+				!TypesAreCompatible(pgAttrType, icebergAttrType))
 				compatible = false;
 
 			pgIndex++;

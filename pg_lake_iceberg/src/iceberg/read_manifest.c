@@ -340,29 +340,6 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 
 	AvroGetStringField(record, "file_format", AVRO_FIELD_REQUIRED, &dataFile->file_format, &dataFile->file_format_length);
 
-	/*
-	 * Iceberg v3 replaces positional delete files with deletion vectors,
-	 * which appear here as position deletes carried in a Puffin blob rather
-	 * than a Parquet file.  We would hand that path to DuckDB as if it were
-	 * Parquet, so refuse it by name: reporting the deletes we cannot apply is
-	 * the difference between a clear failure and silently returning rows the
-	 * table considers deleted.
-	 */
-	if (dataFile->content == ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES &&
-		dataFile->file_format != NULL &&
-		pg_strcasecmp(dataFile->file_format, "PUFFIN") == 0)
-	{
-		LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_DELETION_VECTORS);
-
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("pg_lake_iceberg: deletion vectors are not supported"),
-				 errdetail("Table references the Puffin deletion vector \"%s\".",
-						   dataFile->file_path),
-				 errhint("Deletion vectors are an Iceberg v3 feature; rewrite "
-						 "the table with positional delete files to read it.")));
-	}
-
 	AvroGetRecordField(record, "partition", AVRO_FIELD_REQUIRED, (AvroParseFunction) ReadPartitionFromAvro, &dataFile->partition, context);
 	AvroGetInt64Field(record, "record_count", AVRO_FIELD_REQUIRED, &dataFile->record_count);
 	AvroGetInt64Field(record, "file_size_in_bytes", AVRO_FIELD_REQUIRED, &dataFile->file_size_in_bytes);
