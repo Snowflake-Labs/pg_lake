@@ -1677,8 +1677,8 @@ ProcessCreateExternalEngineTable(ProcessUtilityParams * params)
 	ForeignDataWrapper *foreignDataWrapper = GetForeignDataWrapper(server->fdwid);
 
 	/*
-	 * Before we connect to the engine, check what CREATE FOREIGN TABLE checks:
-	 * USAGE on the server, and the options of the table, which only
+	 * Before we connect to the engine, check what CREATE FOREIGN TABLE
+	 * checks: USAGE on the server, and the options of the table, which only
 	 * superusers can set, since they decide what the engine reads.
 	 */
 	AclResult	aclResult = object_aclcheck(ForeignServerRelationId, server->serverid,
