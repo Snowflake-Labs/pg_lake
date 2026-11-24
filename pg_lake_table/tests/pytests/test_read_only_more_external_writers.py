@@ -169,9 +169,10 @@ def test_migrated_hive_table_partition_types(spark_table, tmp_path):
 
 NAME_MAPPED_ROWS = """VALUES
     (1, 'Vancouver BC', X'00FF10', make_date(-43, 3, 15),
-     make_timestamp_ntz(-43, 3, 15, 10, 30, 0)),
-    (2, 'plain', X'', DATE'2024-02-29', TIMESTAMP_NTZ'2024-02-29 23:59:59.999999'),
-    (3, NULL, NULL, NULL, NULL)"""
+     make_timestamp_ntz(-43, 3, 15, 10, 30, 0), make_timestamp(-43, 3, 15, 10, 30, 0)),
+    (2, 'plain', X'', DATE'2024-02-29', TIMESTAMP_NTZ'2024-02-29 23:59:59.999999',
+     TIMESTAMP'2024-02-29 23:59:59.999999'),
+    (3, NULL, NULL, NULL, NULL, NULL)"""
 
 
 def test_name_mapped_partition_values(spark_table):
@@ -179,8 +180,9 @@ def test_name_mapped_partition_values(spark_table):
     from its manifest entry, for every type, including binary values and
     dates and timestamps before the common era."""
     spark_table.create(
-        "PARTITIONED BY (p_text, p_bin, p_date, p_ts)",
-        columns="id BIGINT, p_text STRING, p_bin BINARY, p_date DATE, p_ts TIMESTAMP_NTZ",
+        "PARTITIONED BY (p_text, p_bin, p_date, p_ts, p_tstz)",
+        columns="""id BIGINT, p_text STRING, p_bin BINARY, p_date DATE,
+                   p_ts TIMESTAMP_NTZ, p_tstz TIMESTAMP""",
     )
     spark_table.spark_sql(f"INSERT INTO {{table}} {NAME_MAPPED_ROWS}")
     table = iceberg_table(spark_table)
@@ -203,6 +205,7 @@ def test_name_mapped_partition_values(spark_table):
                 "unix_micros(CAST(p_ts AS TIMESTAMP))",
                 "(extract(epoch FROM p_ts AT TIME ZONE 'UTC') * 1000000)::bigint",
             ),
+            ("unix_micros(p_tstz)", "(extract(epoch FROM p_tstz) * 1000000)::bigint"),
         ]
     )
 
