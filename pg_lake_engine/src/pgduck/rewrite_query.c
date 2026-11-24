@@ -1844,7 +1844,8 @@ RewriteFuncExprJsonbArrayLength(Node *node, void *context)
 
 /*
  * RewriteFuncExprEncode rewrites encode(bytea, 'base64|hex') function calls into
- * to_base64(bytea) or to_hex(bytea) function calls.
+ * to_base64(bytea) or lower(to_hex(bytea)) function calls: DuckDB's to_hex()
+ * produces uppercase hex digits, where Postgres's encode() produces lowercase.
  */
 static Node *
 RewriteFuncExprEncode(Node *node, void *context)
@@ -1895,6 +1896,9 @@ RewriteFuncExprEncode(Node *node, void *context)
 
 	/* remove the second argument */
 	funcExpr->args = list_make1(linitial(funcExpr->args));
+
+	if (strcasecmp(formatText, "hex") == 0)
+		return MakeLowerCaseExpr((Node *) funcExpr);
 
 	return (Node *) funcExpr;
 }
