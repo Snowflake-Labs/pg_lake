@@ -49,30 +49,26 @@ def test_encode_decode_pushdown(
         pg_conn,
     )
 
+    table = "test_encode_decode_function_pushdown"
     for query, expression in [
-        (
-            f"SELECT encode(col_bytea, '{format}') FROM {{}} ORDER BY col_bytea",
-            encoded,
-        ),
+        (f"SELECT encode(col_bytea, '{format}') FROM {{}} ORDER BY col_bytea", encoded),
         (
             f"SELECT decode(encode(col_bytea, '{format}'), '{format}') FROM {{}} ORDER BY col_bytea",
             round_trip,
         ),
     ]:
-        fdw_query = query.format("test_encode_decode_function_pushdown")
         if expression is not None:
-            assert_remote_query_contains_expression(fdw_query, expression, pg_conn)
+            assert_remote_query_contains_expression(
+                query.format(table), expression, pg_conn
+            )
         else:
             assert_remote_query_not_contains_expression(
-                fdw_query, f'"to_{format}"', pg_conn
+                query.format(table), '"encode"', pg_conn
             )
 
-        heap_result = run_query(
-            query.format("test_encode_decode_function_pushdown_heap"), pg_conn
-        )
-        fdw_result = run_query(fdw_query, pg_conn)
+        heap_result = run_query(query.format(f"{table}_heap"), pg_conn)
 
         assert len(heap_result) > 0
-        assert heap_result == fdw_result
+        assert run_query(query.format(table), pg_conn) == heap_result
 
     pg_conn.rollback()
