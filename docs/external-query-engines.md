@@ -52,6 +52,18 @@ GRANT SELECT ON public.hits TO app_user;
 The user mapping options are added to the server's `conninfo`. Settings that are the same for
 every user, such as `sslmode` and `sslrootcert`, go in the `conninfo`.
 
+The column list can be left out. pg_lake then asks the engine for the columns of the table,
+connecting with the user mapping of the user that creates the foreign table, and declares
+them with the PostgreSQL types of their DuckDB types, as it does for files:
+
+```sql
+CREATE FOREIGN TABLE public.hits ()
+SERVER analytics
+OPTIONS (schema_name 'main', table_name 'hits');
+```
+
+Partitions and tables created with `INHERITS` take their columns from their parent instead.
+
 ## Privileges
 
 No role has `USAGE` on the `pg_lake_remote` wrapper, so only superusers create its servers. A
@@ -143,6 +155,8 @@ DuckDB does not have. The engine has to return these columns in the declared typ
   and `spatial` for geospatial queries.
 - `explain (format 'json') <query>`, which returns DuckDB's plan in the second column of one
   row, for `EXPLAIN`.
+- `DESCRIBE SELECT * FROM <table>`, which returns the name and the DuckDB type of each column
+  in its first two columns, for creating a foreign table without a column list.
 - Only the engine's own tables and views for a table name. An engine must not read a name that
   it does not know as a file or URL for the user of a user mapping, as DuckDB does.
 

@@ -33,6 +33,8 @@
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/gdal.h"
 #include "pg_lake/pgduck/geometry.h"
+#include "pg_lake/pgduck/keywords.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/sniff_csv.h"
 #include "pg_lake/pgduck/type.h"
@@ -217,6 +219,83 @@ DescribeColumnsFromIcebergMetadata(IcebergTableMetadata * metadata, bool emitFil
 
 	if (emitFilename)
 		columns = lappend(columns, makeColumnDef("_filename", TEXTOID, -1, InvalidOid));
+
+	return columns;
+}
+
+
+/*
+ * DescribeColumnsForExternalEngineTable retrieves the columns of a table on
+ * the external query engine of the given server, by doing a DESCRIBE on the
+ * engine as the current user. The column names have to match the engine's,
+ * so we do not change them.
+ */
+List *
+DescribeColumnsForExternalEngineTable(Oid serverId, List *tableOptions)
+{
+	char	   *schemaName = GetStringOption(tableOptions, "schema_name", false);
+	char	   *tableName = GetStringOption(tableOptions, "table_name", true);
+	StringInfoData describeQuery;
+
+	initStringInfo(&describeQuery);
+	appendStringInfoString(&describeQuery, "DESCRIBE SELECT * FROM ");
+
+	if (schemaName != NULL)
+		appendStringInfo(&describeQuery, "%s.", duckdb_quote_identifier(schemaName));
+
+	appendStringInfoString(&describeQuery, duckdb_quote_identifier(tableName));
+
+	List	   *volatile columns = NIL;
+
+	/* the table does not exist yet, so the current user reads it */
+	QueryEngine queryEngine = {.serverId = serverId,.userId = InvalidOid};
+	PGDuckConnection *connection = GetQueryEngineConnection(queryEngine, false);
+	PGresult   *result = ExecuteQueryOnPGDuckConnection(connection, describeQuery.data);
+
+	CheckPGDuckResult(connection, result);
+
+	/* make sure we PQclear the result */
+	PG_TRY();
+	{
+		if (PQnfields(result) < 2)
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_ERROR),
+					 errmsg("unexpected result of DESCRIBE from server \"%s\"",
+							GetQueryEngineName(queryEngine))));
+
+		for (int rowIndex = 0; rowIndex < PQntuples(result); rowIndex++)
+		{
+			char	   *columnName = PQgetvalue(result, rowIndex, 0);
+			char	   *columnType = PQgetvalue(result, rowIndex, 1);
+			int			typeMod = -1;
+
+			if (strlen(columnName) >= NAMEDATALEN)
+				ereport(ERROR,
+						(errcode(ERRCODE_NAME_TOO_LONG),
+						 errmsg("column name \"%s\" is too long", columnName),
+						 errdetail("Column names are limited to %d bytes.",
+								   NAMEDATALEN - 1)));
+
+			Oid			typeId = GetOrCreatePGTypeForDuckDBTypeName(columnType, &typeMod);
+
+			if (typeId == InvalidOid)
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("type %s of column \"%s\" is not supported",
+								columnType, columnName),
+						 errhint("Declare the columns of the foreign table.")));
+
+			columns = lappend(columns, makeColumnDef(pstrdup(columnName), typeId,
+													 typeMod, InvalidOid));
+		}
+	}
+	PG_FINALLY();
+	{
+		PQclear(result);
+	}
+	PG_END_TRY();
+
+	ReleasePGDuckConnection(connection);
 
 	return columns;
 }

@@ -27,6 +27,7 @@
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_class.h"
 #include "catalog/pg_foreign_server.h"
+#include "catalog/pg_foreign_table.h"
 #include "commands/dbcommands.h"
 #include "commands/defrem.h"
 #include "commands/extension.h"
@@ -73,6 +74,7 @@
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/pgduck/read_data.h"
 #include "pg_lake/pgduck/region.h"
 #include "pg_lake/pgduck/remote_storage.h"
@@ -90,6 +92,8 @@ PgLakeIsReservedColumnNameHookType PgLakeIsReservedColumnNameHook = NULL;
 
 
 static bool IsCreateLakeTable(CreateForeignTableStmt *createStmt);
+static bool IsExternalEngineServerName(const char *serverName);
+static bool ProcessCreateExternalEngineTable(ProcessUtilityParams * params);
 static void AddLakeTableColumnDefinitions(CreateForeignTableStmt *createStmt);
 static bool IsJsonOrCSVBackedTable(PgLakeTableType tableType, List *options);
 static void ErrorIfUnsupportedColumnTypeForJsonOrCSVTables(List *columnDefList);
@@ -638,8 +642,9 @@ IsConflictingColumnNameForReadParquet(const char *columnName)
  * statements for creating pg_lake tables.
  *
  * Currently this code implements:
- * 1. Adding columns definitions to lake tables:
+ * 1. Adding columns definitions to lake tables and external engine tables:
  *   - CREATE FOREIGN TABLE name () SERVER pg_lake OPTIONS (path 's3://...')
+ *   - CREATE FOREIGN TABLE name () SERVER <pg_lake_remote server> OPTIONS (...)
  *
  * 2. CREATE TABLE USING syntax for iceberg tables:
  *   - CREATE TABLE name (<col_defs>) USING pg_lake_iceberg WITH (location = <>)
@@ -661,6 +666,10 @@ ProcessCreatePgLakeTable(ProcessUtilityParams * params, void *arg)
 		else if (IsPgLakeServerName(createStmt->servername))
 		{
 			return ProcessCreateLakeTable(params);
+		}
+		else if (IsExternalEngineServerName(createStmt->servername))
+		{
+			return ProcessCreateExternalEngineTable(params);
 		}
 	}
 	else if (IsA(plannedStmt->utilityStmt, CreateStmt))
@@ -1637,6 +1646,86 @@ EnsureCreateIcebergTableSupported(CreateStmt *createStmt)
 	EnsureCreateIcebergTableColumnOptions(createStmt);
 
 	return;
+}
+
+
+/*
+ * ProcessCreateExternalEngineTable handles
+ * - CREATE FOREIGN TABLE name () SERVER <pg_lake_remote server> OPTIONS (...)
+ *
+ * by filling in the column definitions based on the columns of the table on
+ * the query engine.
+ */
+static bool
+ProcessCreateExternalEngineTable(ProcessUtilityParams * params)
+{
+	CreateForeignTableStmt *createStmt =
+		(CreateForeignTableStmt *) params->plannedStmt->utilityStmt;
+
+	/* partitions and inheritors get their columns from their parents */
+	if (createStmt->base.tableElts != NIL ||
+		createStmt->base.partbound != NULL ||
+		createStmt->base.inhRelations != NIL)
+		return false;
+
+	/* let PostgreSQL skip a table that already exists */
+	if (createStmt->base.if_not_exists &&
+		OidIsValid(RangeVarGetRelid(createStmt->base.relation, NoLock, true)))
+		return false;
+
+	ForeignServer *server = GetForeignServerByName(createStmt->servername, false);
+	ForeignDataWrapper *foreignDataWrapper = GetForeignDataWrapper(server->fdwid);
+
+	/*
+	 * Before we connect to the engine, check what CREATE FOREIGN TABLE checks:
+	 * USAGE on the server, and the options of the table, which only
+	 * superusers can set, since they decide what the engine reads.
+	 */
+	AclResult	aclResult = object_aclcheck(ForeignServerRelationId, server->serverid,
+											GetUserId(), ACL_USAGE);
+
+	if (aclResult != ACLCHECK_OK)
+		aclcheck_error(aclResult, OBJECT_FOREIGN_SERVER, server->servername);
+
+	transformGenericOptions(ForeignTableRelationId, PointerGetDatum(NULL),
+							createStmt->options, foreignDataWrapper->fdwvalidator);
+
+	/* get a writable copy of the parse tree */
+	if (params->readOnlyTree)
+		createStmt = (CreateForeignTableStmt *) CopyUtilityStmt(params);
+
+	createStmt->base.tableElts =
+		DescribeColumnsForExternalEngineTable(server->serverid, createStmt->options);
+
+	/*
+	 * Rerun all DDL handlers. We will not re-enter this path since the
+	 * tableElts is no longer NIL.
+	 */
+	PgLakeCommonProcessUtility(params);
+	return true;
+}
+
+
+/*
+ * IsExternalEngineServerName returns whether the given server is a server of
+ * the pg_lake_remote foreign data wrapper.
+ */
+static bool
+IsExternalEngineServerName(const char *serverName)
+{
+	bool		missingOK = true;
+	ForeignServer *foreignServer = GetForeignServerByName(serverName, missingOK);
+
+	if (foreignServer == NULL)
+	{
+		/* server does not exist, let postgres handle it */
+		return false;
+	}
+
+	ForeignDataWrapper *foreignDataWrapper =
+		GetForeignDataWrapper(foreignServer->fdwid);
+
+	return strcmp(foreignDataWrapper->fdwname, PG_LAKE_REMOTE_FDW_NAME) == 0;
 }
 
 
