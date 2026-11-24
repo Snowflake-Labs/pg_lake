@@ -59,6 +59,7 @@ static char *ReadDataSourceFunction(List *sourcePaths,
 									List *formatOptions,
 									DataFileSchema * schema,
 									DataFileSchema * scanNameSchema,
+									const char *fileConstants,
 									bool preferVarchar,
 									ReadRowLocationMode emitRowLocation,
 									bool emitRowId);
@@ -114,6 +115,11 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 /*
  * ReadDataSourceQuery constructs a query to read from an external data
  * source.
+ *
+ * fileConstants, if not NULL, is read_parquet's file_constants argument: a
+ * quoted string of the values columns, by field id, have in every row of a
+ * Parquet file, by the file's path, which the scan takes instead of reading
+ * the columns.
  */
 char *
 ReadDataSourceQuery(List *sourcePaths,
@@ -124,6 +130,7 @@ ReadDataSourceQuery(List *sourcePaths,
 					List *formatOptions,
 					DataFileSchema * schema,
 					DataFileSchema * columnNameSchema,
+					const char *fileConstants,
 					ReadDataStats * stats,
 					int flags)
 {
@@ -217,6 +224,7 @@ ReadDataSourceQuery(List *sourcePaths,
 														  formatOptions,
 														  schema,
 														  scanNameSchema,
+														  fileConstants,
 														  preferVarchar,
 														  readRowLocationMode,
 														  emitRowId);
@@ -360,6 +368,7 @@ ReadDataSourceFunction(List *sourcePaths,
 					   List *formatOptions,
 					   DataFileSchema * schema,
 					   DataFileSchema * scanNameSchema,
+					   const char *fileConstants,
 					   bool preferVarchar,
 					   ReadRowLocationMode readRowLocationMode,
 					   bool emitRowId)
@@ -396,6 +405,9 @@ ReadDataSourceFunction(List *sourcePaths,
 
 				if (sourceRowCount > 0)
 					appendStringInfo(&command, ", explicit_cardinality=" UINT64_FORMAT, sourceRowCount);
+
+				if (fileConstants != NULL)
+					appendStringInfo(&command, ", file_constants=%s", fileConstants);
 
 				if (readRowLocationMode != NO_ROW_LOCATION)
 					appendStringInfoString(&command,
