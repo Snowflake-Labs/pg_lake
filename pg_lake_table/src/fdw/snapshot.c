@@ -55,6 +55,7 @@
 #include "foreign/foreign.h"
 #include "nodes/execnodes.h"
 #include "nodes/pg_list.h"
+#include "utils/builtins.h"
 #include "utils/snapmgr.h"
 #include "utils/timestamp.h"
 #include "utils/lsyscache.h"
@@ -72,11 +73,13 @@ static List *GetPositionDeleteTableDataFileForDataFiles(Oid relationId, List *da
 static List *GetBaseRestrictInfoForRelation(List *relationRestrictionsList,
 											int uniqueRelationIdentifier);
 static void ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
-											  List *identityPartitionFields,
+											  List *fileConstants,
 											  List **fileScans,
 											  List **positionDeleteFileScans);
 static List *IdentityPartitionFieldsForFileConstants(IcebergTableMetadata * metadata);
 static List *FileConstantsForDataFile(DataFile * dataFile, List *identityPartitionFields);
+static char *FileConstantText(Datum value, PGType pgType);
+static void AppendEscapedFileConstant(StringInfo buffer, const char *text);
 static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
 static int	NullSafeStrcmp(const char *a, const char *b);
 static bool TypesAreCompatible(PGType pgType, PGType icebergType);
@@ -708,9 +711,9 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 	FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
 
 	List	   *retainedFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);
-	List	   *identityPartitionFields = IdentityPartitionFieldsForFileConstants(metadata);
+	List	   *fileConstants = FileConstantsForDataFiles(metadata, retainedFiles);
 
-	ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, identityPartitionFields,
+	ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, fileConstants,
 									  fileScans, positionDeleteScans);
 	*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles, deleteFiles,
 														   *fileScans, equalityDeleteScans);
@@ -723,7 +726,7 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 */
 static void
 ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
-								  List *identityPartitionFields,
+								  List *fileConstants,
 								  List **fileScans, List **positionDeleteFileScans)
 {
 	if (dataFiles == NIL)
@@ -742,7 +745,8 @@ ConvertIcebergDataFilesToFileScan(List *dataFiles, List *deleteFiles,
 		fileScan->path = (char *) dataFile->file_path;
 		fileScan->rowCount = dataFile->record_count;
 		fileScan->deletedRowCount = 0;
-		fileScan->constants = FileConstantsForDataFile(dataFile, identityPartitionFields);
+		if (fileConstants != NIL)
+			fileScan->constants = list_nth(fileConstants, foreach_current_index(dataFileCell));
 
 		*fileScans = lappend(*fileScans, fileScan);
 	}
@@ -794,8 +798,7 @@ typedef struct IdentityPartitionSource
  * a name mapping gets none.
  *
  * The value is the same in every row of a file either way, so it is taken
- * whether or not the file has the column. Binary columns are left out: their
- * text is not a DuckDB literal.
+ * whether or not the file has the column.
  */
 static List *
 IdentityPartitionFieldsForFileConstants(IcebergTableMetadata * metadata)
@@ -833,16 +836,11 @@ IdentityPartitionFieldsForFileConstants(IcebergTableMetadata * metadata)
 					column->type->type != FIELD_TYPE_SCALAR)
 					continue;
 
-				PGType		pgType = IcebergFieldToPostgresType(column->type);
-
-				if (pgType.postgresTypeOid == BYTEAOID)
-					break;
-
 				IdentityPartitionSource *source = palloc0(sizeof(IdentityPartitionSource));
 
 				source->partitionFieldId = specField->field_id;
 				source->sourceFieldId = column->id;
-				source->pgType = pgType;
+				source->pgType = IcebergFieldToPostgresType(column->type);
 				identityFields = lappend(identityFields, source);
 				break;
 			}
@@ -854,6 +852,33 @@ IdentityPartitionFieldsForFileConstants(IcebergTableMetadata * metadata)
 
 
 /*
+ * FileConstantsForDataFiles returns, for each of the given data files of the
+ * table, the PgLakeFileConstants a scan takes for its identity partition
+ * columns (see IdentityPartitionFieldsForFileConstants), or NIL if the table
+ * has none.
+ */
+List *
+FileConstantsForDataFiles(IcebergTableMetadata * metadata, List *dataFiles)
+{
+	List	   *identityPartitionFields = IdentityPartitionFieldsForFileConstants(metadata);
+	List	   *fileConstants = NIL;
+
+	if (identityPartitionFields == NIL)
+		return NIL;
+
+	int			nestLevel = set_transmission_modes();
+
+	foreach_ptr(DataFile, dataFile, dataFiles)
+		fileConstants = lappend(fileConstants,
+								FileConstantsForDataFile(dataFile, identityPartitionFields));
+
+	reset_transmission_modes(nestLevel);
+
+	return fileConstants;
+}
+
+
+/*
  * FileConstantsForDataFile returns PgLakeFileConstants for the values of the
  * data file's identity partition fields.
  */
@@ -861,11 +886,6 @@ static List *
 FileConstantsForDataFile(DataFile * dataFile, List *identityPartitionFields)
 {
 	List	   *constants = NIL;
-
-	if (identityPartitionFields == NIL)
-		return NIL;
-
-	int			nestLevel = set_transmission_modes();
 
 	for (size_t fieldIdx = 0; fieldIdx < dataFile->partition.fields_length; fieldIdx++)
 	{
@@ -885,24 +905,119 @@ FileConstantsForDataFile(DataFile * dataFile, List *identityPartitionFields)
 
 			constant->fieldId = source->sourceFieldId;
 			if (!isNull)
-			{
-				Oid			typeOutput;
-				bool		typeIsVarlena;
+				constant->value = FileConstantText(value, source->pgType);
 
-				getTypeOutputInfo(source->pgType.postgresTypeOid, &typeOutput, &typeIsVarlena);
-				constant->value = OidOutputFunctionCall(typeOutput, value);
-			}
-
-			/* DuckDB reads a BC date as AD */
-			if (constant->value == NULL || !pg_str_endswith(constant->value, " BC"))
-				constants = lappend(constants, constant);
+			constants = lappend(constants, constant);
 			break;
 		}
 	}
 
-	reset_transmission_modes(nestLevel);
-
 	return constants;
+}
+
+
+/*
+ * FileConstantText returns the text of a value that DuckDB casts back to the
+ * same value of the column's type.
+ */
+static char *
+FileConstantText(Datum value, PGType pgType)
+{
+	if (pgType.postgresTypeOid == BYTEAOID)
+	{
+		bytea	   *bytes = DatumGetByteaPP(value);
+		StringInfoData escaped;
+
+		initStringInfo(&escaped);
+		for (int i = 0; i < VARSIZE_ANY_EXHDR(bytes); i++)
+			appendStringInfo(&escaped, "\\x%02X", (unsigned char) VARDATA_ANY(bytes)[i]);
+
+		return escaped.data;
+	}
+
+	Oid			typeOutput;
+	bool		typeIsVarlena;
+
+	getTypeOutputInfo(pgType.postgresTypeOid, &typeOutput, &typeIsVarlena);
+
+	char	   *output = OidOutputFunctionCall(typeOutput, value);
+
+	/* DuckDB reads "<date> BC[ <time>]" as AD, but "<date> (BC)[ <time>]" */
+	if ((pgType.postgresTypeOid == DATEOID ||
+		 pgType.postgresTypeOid == TIMESTAMPOID ||
+		 pgType.postgresTypeOid == TIMESTAMPTZOID) &&
+		pg_str_endswith(output, " BC"))
+	{
+		output[strlen(output) - strlen(" BC")] = '\0';
+
+		char	   *time = strchr(output, ' ');
+
+		if (time == NULL)
+			return psprintf("%s (BC)", output);
+
+		*time = '\0';
+		return psprintf("%s (BC) %s", output, time + 1);
+	}
+
+	return output;
+}
+
+
+/*
+ * FileConstantsArgument returns the file_constants argument of read_parquet
+ * for the PgLakeFileConstants lists of the files at the given paths, or NULL
+ * if they have none: a line per file and field, "<path>\t<field id>\t<value>",
+ * with \N for NULL and backslash escapes, quoted as one string, which DuckDB
+ * parses much faster than a literal with an entry per file.
+ */
+char *
+FileConstantsArgument(List *paths, List *fileConstants)
+{
+	StringInfoData lines;
+	ListCell   *pathCell = NULL;
+	ListCell   *constantsCell = NULL;
+
+	initStringInfo(&lines);
+
+	forboth(pathCell, paths, constantsCell, fileConstants)
+	{
+		foreach_ptr(PgLakeFileConstant, constant, (List *) lfirst(constantsCell))
+		{
+			AppendEscapedFileConstant(&lines, lfirst(pathCell));
+			appendStringInfo(&lines, "\t%d\t", constant->fieldId);
+			if (constant->value == NULL)
+				appendStringInfoString(&lines, "\\N");
+			else
+				AppendEscapedFileConstant(&lines, constant->value);
+			appendStringInfoChar(&lines, '\n');
+		}
+	}
+
+	if (lines.len == 0)
+		return NULL;
+
+	return quote_literal_cstr(lines.data);
+}
+
+
+/*
+ * AppendEscapedFileConstant appends text with its backslashes, tabs and
+ * newlines escaped for FileConstantsArgument.
+ */
+static void
+AppendEscapedFileConstant(StringInfo buffer, const char *text)
+{
+	for (const char *c = text; *c != '\0'; c++)
+	{
+		if (*c == '\\')
+			appendStringInfoString(buffer, "\\\\");
+		else if (*c == '\t')
+			appendStringInfoString(buffer, "\\t");
+		else if (*c == '\n')
+			appendStringInfoString(buffer, "\\n");
+		else
+			appendStringInfoChar(buffer, *c);
+	}
 }
 
 

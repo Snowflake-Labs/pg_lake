@@ -116,9 +116,10 @@ static DuckDBTypeInfo VARCHAR_TYPE =
  * ReadDataSourceQuery constructs a query to read from an external data
  * source.
  *
- * fileConstants, if not NULL, is a DuckDB MAP(VARCHAR, MAP(INTEGER, VARCHAR))
- * of the values columns, by field id, have in every row of a Parquet file,
- * by the file's path; the scan takes them instead of reading the columns.
+ * fileConstants, if not NULL, is read_parquet's file_constants argument: a
+ * quoted string of the values columns, by field id, have in every row of a
+ * Parquet file, by the file's path, which the scan takes instead of reading
+ * the columns.
  */
 char *
 ReadDataSourceQuery(List *sourcePaths,

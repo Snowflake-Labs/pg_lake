@@ -49,13 +49,17 @@ typedef struct PgLakeFileScan
 
 /*
  * PgLakeFileConstant is the value a column, by its field id, has in every row
- * of a file, as text, or NULL.
+ * of a file, as text DuckDB casts to the column's type, or NULL.
  */
 typedef struct PgLakeFileConstant
 {
 	int			fieldId;
 	char	   *value;
 }			PgLakeFileConstant;
+
+extern PGDLLEXPORT List *FileConstantsForDataFiles(IcebergTableMetadata * metadata,
+												   List *dataFiles);
+extern PGDLLEXPORT char *FileConstantsArgument(List *paths, List *fileConstants);
 
 /*
  * PgLakeTableScan represents a single table to scan.

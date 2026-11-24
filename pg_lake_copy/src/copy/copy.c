@@ -47,6 +47,7 @@
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/fdw/partition_pushdown.h"
 #include "pg_lake/fdw/partition_transform.h"
+#include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_lake/partitioning/partition_by_parser.h"
@@ -873,14 +874,30 @@ GenerateReadDataSourceQuery(char *sourcePath, CopyDataFormat sourceFormat,
 
 	List	   *dataFileList = NIL;
 	List	   *positionDeleteList = NIL;
+	char	   *fileConstants = NULL;
 
 	if (sourceFormat == DATA_FORMAT_ICEBERG)
 	{
 		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(sourcePath);
+		List	   *dataFiles = NIL;
+		List	   *deleteFiles = NIL;
 
-		FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(metadata,
-														  &dataFileList,
-														  &positionDeleteList);
+		FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
+
+		foreach_ptr(DataFile, dataFile, dataFiles)
+		{
+			ErrorIfDataFileNotParquet(dataFile);
+			dataFileList = lappend(dataFileList, pstrdup(dataFile->file_path));
+		}
+
+		foreach_ptr(DataFile, deleteFile, deleteFiles)
+		{
+			ErrorIfDataFileNotParquet(deleteFile);
+			positionDeleteList = lappend(positionDeleteList, pstrdup(deleteFile->file_path));
+		}
+
+		fileConstants = FileConstantsArgument(dataFileList,
+											  FileConstantsForDataFiles(metadata, dataFiles));
 	}
 	else
 	{
@@ -895,7 +912,7 @@ GenerateReadDataSourceQuery(char *sourcePath, CopyDataFormat sourceFormat,
 							   options,
 							   schema,
 							   columnNameSchema,
-							   NULL,
+							   fileConstants,
 							   NO_STATISTICS,
 							   readFlags);
 

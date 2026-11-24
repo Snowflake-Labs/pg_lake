@@ -29,6 +29,7 @@ from helpers.spark import (
     spark_rest_catalog,
     spark_session,
 )
+from test_iceberg_equality_delete_interop import writer_factory
 from test_read_only_spark_written_tables import (
     DELETION_VECTORS_REFUSED,
     PARTITIONINGS,
@@ -118,7 +119,9 @@ HIVE_PARTITION_COLUMNS = """id BIGINT, name STRING, p_str STRING, p_int INT,
     p_date DATE, p_bool BOOLEAN, p_dec DECIMAL(10,2)"""
 
 HIVE_PARTITION_ROWS = """SELECT id, concat('name_', id) AS name,
-                                CASE WHEN id % 7 = 0 THEN NULL ELSE concat('s', id % 2) END AS p_str,
+                                CASE WHEN id % 7 = 0 THEN NULL
+                                     WHEN id % 3 = 0 THEN 'Vancouver BC'
+                                     ELSE concat('s', id % 2) END AS p_str,
                                 CASE WHEN id % 5 = 0 THEN NULL ELSE CAST(id % 2 AS INT) END AS p_int,
                                 DATE'2024-02-29' + CAST(id % 2 AS INT) AS p_date,
                                 id % 2 = 0 AS p_bool,
@@ -145,12 +148,118 @@ def test_migrated_hive_table_partition_types(spark_table, tmp_path):
     spark_table.assert_same_rows(columns=columns)
     for where in [
         "p_str IS NULL",
+        "p_str = 'Vancouver BC'",
         "p_int = 1",
         "p_date = '2024-03-01'",
         "p_bool",
         "p_dec > 2",
     ]:
         spark_table.assert_same_rows(where, columns=columns)
+
+    copied = f'"{spark_table.namespace}".copied'
+    run_command(
+        f"""CREATE TABLE {copied} (id bigint, name text, p_str text, p_int int,
+                                   p_date date, p_bool bool, p_dec numeric(10,2));
+            COPY {copied} FROM '{metadata_location(spark_table)}' WITH (format 'iceberg')""",
+        spark_table.pg_conn,
+    )
+    spark_table.pg_conn.commit()
+    spark_table.assert_same_rows(columns=columns, pg_table=copied)
+
+
+NAME_MAPPED_ROWS = """VALUES
+    (1, 'Vancouver BC', X'00FF10', make_date(-43, 3, 15),
+     make_timestamp_ntz(-43, 3, 15, 10, 30, 0)),
+    (2, 'plain', X'', DATE'2024-02-29', TIMESTAMP_NTZ'2024-02-29 23:59:59.999999'),
+    (3, NULL, NULL, NULL, NULL)"""
+
+
+def test_name_mapped_partition_values(spark_table):
+    """A table with a name mapping takes each file's identity partition values
+    from its manifest entry, for every type, including binary values and
+    dates and timestamps before the common era."""
+    spark_table.create(
+        "PARTITIONED BY (p_text, p_bin, p_date, p_ts)",
+        columns="id BIGINT, p_text STRING, p_bin BINARY, p_date DATE, p_ts TIMESTAMP_NTZ",
+    )
+    spark_table.spark_sql(f"INSERT INTO {{table}} {NAME_MAPPED_ROWS}")
+    table = iceberg_table(spark_table)
+    iceberg = spark_table.spark._jvm.org.apache.iceberg
+    table.updateProperties().set(
+        "schema.name-mapping.default",
+        iceberg.mapping.NameMappingParser.toJson(
+            iceberg.mapping.MappingUtil.create(table.schema())
+        ),
+    ).commit()
+    spark_table.attach()
+
+    spark_table.assert_same_rows(
+        columns=[
+            "id",
+            "p_text",
+            ("lower(hex(p_bin))", "lower(encode(p_bin, 'hex'))"),
+            ("datediff(p_date, DATE'1970-01-01')", "p_date - DATE '1970-01-01'"),
+            (
+                "unix_micros(CAST(p_ts AS TIMESTAMP))",
+                "(extract(epoch FROM p_ts AT TIME ZONE 'UTC') * 1000000)::bigint",
+            ),
+        ]
+    )
+
+
+def test_migrated_hive_table_with_equality_deletes(spark_table, tmp_path):
+    spark = spark_table.spark
+    spark_table.create(PARTITIONINGS["identity"], columns=HIVE_COLUMNS)
+    spark.sql(HIVE_ROWS).write.partitionBy("category").parquet(
+        f"file://{tmp_path}/hive"
+    )
+    table = iceberg_table(spark_table)
+    add_files(
+        spark_table,
+        table,
+        upload_hive_files(spark_table.s3, tmp_path / "hive", table.location()),
+    )
+
+    # delete category c1 by the partition column the Hive files leave out
+    iceberg = spark._jvm.org.apache.iceberg
+    table = iceberg_table(spark_table)
+    schema = table.schema()
+    names = spark._jvm.java.util.ArrayList()
+    names.add("category")
+    keys = schema.select(names)
+    ids = spark.sparkContext._gateway.new_array(spark._jvm.int, 1)
+    ids[0] = schema.findField("category").fieldId()
+    row = iceberg.data.GenericRecord.create(schema)
+    row.setField("category", "c1")
+    partition = iceberg.PartitionKey(table.spec(), schema)
+    partition.partition(row)
+    writer = writer_factory(iceberg, table, ids, keys).newEqualityDeleteWriter(
+        iceberg.encryption.EncryptedFiles.encryptedOutput(
+            table.io().newOutputFile(
+                f"{table.location()}/data/{uuid.uuid4()}-eq.parquet"
+            ),
+            iceberg.encryption.EncryptionKeyMetadata.empty(),
+        ),
+        table.spec(),
+        partition,
+    )
+    try:
+        key = iceberg.data.GenericRecord.create(keys)
+        key.setField("category", "c1")
+        writer.write(key)
+    finally:
+        writer.close()
+    table.newRowDelta().addDeletes(writer.toDeleteFile()).commit()
+    spark.sql(f"REFRESH TABLE {spark_table.spark_name}")
+    spark_table.attach()
+
+    spark_table.assert_same_rows(columns=HIVE_PROJECTION)
+    assert (
+        spark_table.spark_sql("SELECT count(*) FROM {table} WHERE category = 'c1'")[0][
+            0
+        ]
+        == 0
+    )
 
 
 @pytest.mark.parametrize("format_version", [2, 3])

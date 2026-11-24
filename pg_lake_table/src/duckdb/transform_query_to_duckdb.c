@@ -71,7 +71,7 @@ static void AppendEqualityReadGroups(StringInfo command, List *groups,
 									 int start, int count, List *positionDeletePaths,
 									 TupleDesc dataDesc, TupleDesc projection,
 									 List *options, DataFileSchema * schema);
-static char *FileConstantsArgument(List *fileScans);
+static char *FileScanConstantsArgument(List *fileScans);
 
 
 /*
@@ -264,7 +264,7 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 		readCall = ReadDataSourceQuery(dataFilePaths, positionDeletePaths,
 									   format, compression, readTupleDesc, options,
 									   schema, NULL,
-									   FileConstantsArgument(tableScan->fileScans),
+									   FileScanConstantsArgument(tableScan->fileScans),
 									   &stats, readFlags);
 
 	StringInfoData command;
@@ -353,7 +353,7 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 	char	   *dataQuery = ReadDataSourceQuery(paths, positionDeletePaths, DATA_FORMAT_ICEBERG,
 												DATA_COMPRESSION_INVALID, dataDesc, options,
 												schema, NULL,
-												FileConstantsArgument(group->fileScans),
+												FileScanConstantsArgument(group->fileScans),
 												&stats, 0);
 
 	appendStringInfoString(command, "SELECT ");
@@ -405,64 +405,23 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 
 
 /*
- * CompareFileScanPaths orders PgLakeFileScans by path.
- */
-static int
-CompareFileScanPaths(const ListCell *left, const ListCell *right)
-{
-	PgLakeFileScan *leftScan = lfirst(left);
-	PgLakeFileScan *rightScan = lfirst(right);
-
-	return strcmp(leftScan->path, rightScan->path);
-}
-
-
-/*
- * FileConstantsArgument returns the file_constants argument of read_parquet
- * for the constants of the given PgLakeFileScans, or NULL if they have none.
- * read_parquet takes the files in ascending order of their paths.
+ * FileScanConstantsArgument returns the file_constants argument of
+ * read_parquet for the constants of the given PgLakeFileScans, or NULL if
+ * they have none.
  */
 static char *
-FileConstantsArgument(List *fileScans)
+FileScanConstantsArgument(List *fileScans)
 {
-	StringInfoData argument;
-	bool		anyFile = false;
-	List	   *sortedScans = list_copy(fileScans);
+	List	   *paths = NIL;
+	List	   *fileConstants = NIL;
 
-	list_sort(sortedScans, CompareFileScanPaths);
-
-	initStringInfo(&argument);
-	appendStringInfoString(&argument, "map {");
-
-	foreach_ptr(PgLakeFileScan, fileScan, sortedScans)
+	foreach_ptr(PgLakeFileScan, fileScan, fileScans)
 	{
-		if (fileScan->constants == NIL)
-			continue;
-
-		appendStringInfo(&argument, "%s%s: map {", anyFile ? ", " : "",
-						 quote_literal_cstr(fileScan->path));
-
-		bool		anyConstant = false;
-
-		foreach_ptr(PgLakeFileConstant, constant, fileScan->constants)
-		{
-			appendStringInfo(&argument, "%s%d: %s", anyConstant ? ", " : "",
-							 constant->fieldId,
-							 constant->value != NULL ?
-							 quote_literal_cstr(constant->value) : "NULL");
-			anyConstant = true;
-		}
-
-		appendStringInfoChar(&argument, '}');
-		anyFile = true;
+		paths = lappend(paths, fileScan->path);
+		fileConstants = lappend(fileConstants, fileScan->constants);
 	}
 
-	if (!anyFile)
-		return NULL;
-
-	appendStringInfoString(&argument, "}::MAP(VARCHAR, MAP(INTEGER, VARCHAR))");
-
-	return argument.data;
+	return FileConstantsArgument(paths, fileConstants);
 }
 
 
