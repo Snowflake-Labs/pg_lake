@@ -10,11 +10,19 @@ from utils_pytest import *
 
 
 @pytest.mark.parametrize(
-    "format,pushdown",
+    "format,encoded,round_trip",
     [
-        ("base64", True),
-        ("hex", True),
-        ("escape", False),
+        (
+            "base64",
+            '"to_base64"("col_bytea")',
+            '"from_base64"("to_base64"("col_bytea"))',
+        ),
+        (
+            "hex",
+            '"lower"("to_hex"("col_bytea"))',
+            '"from_hex"("lower"("to_hex"("col_bytea")))',
+        ),
+        ("escape", None, None),
     ],
 )
 def test_encode_decode_pushdown(
@@ -23,7 +31,8 @@ def test_encode_decode_pushdown(
     extension,
     with_default_location,
     format,
-    pushdown,
+    encoded,
+    round_trip,
 ):
     run_command(
         f"""
@@ -40,21 +49,26 @@ def test_encode_decode_pushdown(
         pg_conn,
     )
 
-    query = f"SELECT decode(encode(col_bytea, '{format}'), '{format}') FROM test_encode_decode_function_pushdown ORDER BY col_bytea"
+    table = "test_encode_decode_function_pushdown"
+    for query, expression in [
+        (f"SELECT encode(col_bytea, '{format}') FROM {{}} ORDER BY col_bytea", encoded),
+        (
+            f"SELECT decode(encode(col_bytea, '{format}'), '{format}') FROM {{}} ORDER BY col_bytea",
+            round_trip,
+        ),
+    ]:
+        if expression is not None:
+            assert_remote_query_contains_expression(
+                query.format(table), expression, pg_conn
+            )
+        else:
+            assert_remote_query_not_contains_expression(
+                query.format(table), '"encode"', pg_conn
+            )
 
-    if pushdown:
-        assert_remote_query_contains_expression(
-            query, f'"from_{format}"("to_{format}"("col_bytea"))', pg_conn
-        )
-    else:
-        assert_remote_query_not_contains_expression(
-            query, f'"from_{format}"("to_{format}"("col_bytea"))', pg_conn
-        )
+        heap_result = run_query(query.format(f"{table}_heap"), pg_conn)
 
-    heap_result = run_query(query, pg_conn)
-    fdw_result = run_query(query, pg_conn)
-
-    assert len(heap_result) > 0
-    assert heap_result == fdw_result
+        assert len(heap_result) > 0
+        assert run_query(query.format(table), pg_conn) == heap_result
 
     pg_conn.rollback()
