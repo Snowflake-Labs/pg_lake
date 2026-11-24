@@ -74,9 +74,11 @@ def test_manifest_partition_summary_via_spark(
     insert_random_rows(spark_session, pg_conn, 10)
 
     # we do not set contains_null or contains_nan properly yet, we do not verify them;
-    # Iceberg renders a UTC timestamp bound with +00:00 where pg_lake uses Z
-    spark_query = f"""select regexp_replace(lower_bound, '[+]00:00$', 'Z') as lower_bound,
-                             regexp_replace(upper_bound, '[+]00:00$', 'Z') as upper_bound
+    # Iceberg renders a timestamp bound with +00:00 where pg_lake uses Z, and
+    # with :00 seconds where pg_lake leaves them out
+    normalized = "regexp_replace(regexp_replace({}, '[+]00:00$', 'Z'), '(T[0-9]{{2}}:[0-9]{{2}}):00(Z?)$', '$1$2')"
+    spark_query = f"""select {normalized.format('lower_bound')} as lower_bound,
+                             {normalized.format('upper_bound')} as upper_bound
                       from ( select inline(partition_summaries) from public.test_apply_partition_transform.all_manifests ) manifest_summaries
                       order by lower_bound desc nulls first, upper_bound desc nulls first;"""
 
