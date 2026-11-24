@@ -71,6 +71,7 @@ static void AppendEqualityReadGroups(StringInfo command, List *groups,
 									 int start, int count, List *positionDeletePaths,
 									 TupleDesc dataDesc, TupleDesc projection,
 									 List *options, DataFileSchema * schema);
+static char *FileScanConstantsArgument(List *fileScans);
 
 
 /*
@@ -262,7 +263,9 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 	else
 		readCall = ReadDataSourceQuery(dataFilePaths, positionDeletePaths,
 									   format, compression, readTupleDesc, options,
-									   schema, NULL, &stats, readFlags);
+									   schema, NULL,
+									   FileScanConstantsArgument(tableScan->fileScans),
+									   &stats, readFlags);
 
 	StringInfoData command;
 
@@ -349,7 +352,9 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 	/* Preserve Iceberg storage-to-surface conversions for non-key columns. */
 	char	   *dataQuery = ReadDataSourceQuery(paths, positionDeletePaths, DATA_FORMAT_ICEBERG,
 												DATA_COMPRESSION_INVALID, dataDesc, options,
-												schema, NULL, &stats, 0);
+												schema, NULL,
+												FileScanConstantsArgument(group->fileScans),
+												&stats, 0);
 
 	appendStringInfoString(command, "SELECT ");
 	bool		first = true;
@@ -373,7 +378,8 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 	{
 		char	   *deleteQuery = ReadDataSourceQuery(deletion->paths, NIL, DATA_FORMAT_PARQUET,
 													  DATA_COMPRESSION_INVALID, NULL, NIL,
-													  deletion->schema, NULL, NO_STATISTICS, 0);
+													  deletion->schema, NULL, NULL,
+													  NO_STATISTICS, 0);
 
 		appendStringInfo(command, "%s NOT EXISTS (SELECT 1 FROM (%s) AS e WHERE ",
 						 first ? " WHERE" : " AND", deleteQuery);
@@ -395,6 +401,27 @@ AppendEqualityReadGroups(StringInfo command, List *groups, int start, int count,
 		appendStringInfoChar(command, ')');
 		first = false;
 	}
+}
+
+
+/*
+ * FileScanConstantsArgument returns the file_constants argument of
+ * read_parquet for the constants of the given PgLakeFileScans, or NULL if
+ * they have none.
+ */
+static char *
+FileScanConstantsArgument(List *fileScans)
+{
+	List	   *paths = NIL;
+	List	   *fileConstants = NIL;
+
+	foreach_ptr(PgLakeFileScan, fileScan, fileScans)
+	{
+		paths = lappend(paths, fileScan->path);
+		fileConstants = lappend(fileConstants, fileScan->constants);
+	}
+
+	return FileConstantsArgument(paths, fileConstants);
 }
 
 

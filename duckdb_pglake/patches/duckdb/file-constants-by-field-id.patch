@@ -1,0 +1,156 @@
+diff --git a/src/common/multi_file/multi_file_reader.cpp b/src/common/multi_file/multi_file_reader.cpp
+index bbeeec3096d..1e3ba74a9f8 100644
+--- a/src/common/multi_file/multi_file_reader.cpp
++++ b/src/common/multi_file/multi_file_reader.cpp
+@@ -2,6 +2,7 @@
+ 
+ #include "duckdb/common/exception.hpp"
+ #include "duckdb/common/hive_partitioning.hpp"
++#include "duckdb/common/operator/cast_operators.hpp"
+ #include "duckdb/common/types.hpp"
+ #include "duckdb/common/types/value.hpp"
+ #include "duckdb/function/function_set.hpp"
+@@ -90,6 +91,7 @@ void MultiFileReader::AddParameters(TableFunction &table_function) {
+ 	table_function.named_parameters["union_by_name"] = LogicalType::BOOLEAN;
+ 	table_function.named_parameters["hive_types"] = LogicalType::ANY;
+ 	table_function.named_parameters["hive_types_autocast"] = LogicalType::BOOLEAN;
++	table_function.named_parameters["file_constants"] = LogicalType::ANY;
+ }
+ 
+ vector<string> MultiFileReader::ParsePaths(const Value &input) {
+@@ -131,6 +133,66 @@ shared_ptr<MultiFileList> MultiFileReader::CreateFileList(ClientContext &context
+ 	return CreateFileList(context, paths, glob_input);
+ }
+ 
++static string UnescapeFileConstant(const string &text) {
++	string result;
++	for (idx_t i = 0; i < text.size(); i++) {
++		if (text[i] != '\\' || i + 1 == text.size()) {
++			result += text[i];
++			continue;
++		}
++		i++;
++		result += text[i] == 't' ? '\t' : text[i] == 'n' ? '\n' : text[i];
++	}
++	return result;
++}
++
++// Parse a file_constants option: a line per file and field id that file has
++// a constant for, "<file>\t<field id>\t<value>", where a value of \N is NULL
++// and \\, \t and \n stand for a backslash, tab and newline. One string parses
++// much faster than a nested literal with an entry per file. Returns the
++// entries as a LIST of STRUCT(file, field_id, value), sorted by file.
++static Value ParseFileConstants(const string &text) {
++	struct FileConstant {
++		string file;
++		int32_t field_id;
++		Value value;
++	};
++	vector<FileConstant> constants;
++	idx_t start = 0;
++	while (start < text.size()) {
++		auto end = text.find('\n', start);
++		if (end == string::npos) {
++			end = text.size();
++		}
++		auto line = text.substr(start, end - start);
++		start = end + 1;
++		if (line.empty()) {
++			continue;
++		}
++		auto first_tab = line.find('\t');
++		auto second_tab = first_tab == string::npos ? string::npos : line.find('\t', first_tab + 1);
++		int32_t field_id;
++		if (second_tab == string::npos ||
++		    !TryCast::Operation(string_t(line.substr(first_tab + 1, second_tab - first_tab - 1)), field_id, true)) {
++			throw InvalidInputException("'file_constants' line \"%s\" is not a file, a field id and a value", line);
++		}
++		auto value = line.substr(second_tab + 1);
++		constants.push_back({UnescapeFileConstant(line.substr(0, first_tab)), field_id,
++		                     value == "\\N" ? Value(LogicalType::VARCHAR) : Value(UnescapeFileConstant(value))});
++	}
++	std::stable_sort(constants.begin(), constants.end(),
++	                 [](const FileConstant &a, const FileConstant &b) { return a.file < b.file; });
++
++	auto entry_type = LogicalType::STRUCT(
++	    {{"file", LogicalType::VARCHAR}, {"field_id", LogicalType::INTEGER}, {"value", LogicalType::VARCHAR}});
++	vector<Value> entries;
++	for (auto &constant : constants) {
++		entries.push_back(Value::STRUCT(
++		    {{"file", Value(constant.file)}, {"field_id", Value::INTEGER(constant.field_id)}, {"value", constant.value}}));
++	}
++	return Value::LIST(entry_type, std::move(entries));
++}
++
+ bool MultiFileReader::ParseOption(const string &key, const Value &val, MultiFileOptions &options,
+                                   ClientContext &context) {
+ 	auto loption = StringUtil::Lower(key);
+@@ -189,6 +251,14 @@ bool MultiFileReader::ParseOption(const string &key, const Value &val, MultiFile
+ 			options.hive_types_schema[name] = transformed_type;
+ 		}
+ 		D_ASSERT(!options.hive_types_schema.empty());
++	} else if (loption == "file_constants") {
++		if (val.IsNull() || val.type().id() != LogicalTypeId::VARCHAR) {
++			throw InvalidInputException("'file_constants' only accepts a VARCHAR, but '%s' was provided",
++			                            val.type().ToString());
++		}
++		// kept in custom_options so that the layout of MultiFileOptions, which
++		// extensions built separately share, does not change
++		options.custom_options[loption] = ParseFileConstants(StringValue::Get(val));
+ 	} else {
+ 		return false;
+ 	}
+@@ -291,6 +361,33 @@ void MultiFileReader::GetVirtualColumns(ClientContext &context, MultiFileReaderB
+ 	result.insert(make_pair(COLUMN_IDENTIFIER_EMPTY, TableColumn("", LogicalType::BOOLEAN)));
+ }
+ 
++// Look the value of field_id in file up in the entries ParseFileConstants
++// sorted by file
++static bool FindFileConstant(const Value &file_constants, const string &file, int32_t field_id, Value &result) {
++	auto &entries = ListValue::GetChildren(file_constants);
++	idx_t lower = 0;
++	idx_t upper = entries.size();
++	while (lower < upper) {
++		idx_t middle = lower + (upper - lower) / 2;
++		if (StringValue::Get(StructValue::GetChildren(entries[middle])[0]) < file) {
++			lower = middle + 1;
++		} else {
++			upper = middle;
++		}
++	}
++	for (idx_t i = lower; i < entries.size(); i++) {
++		auto &entry = StructValue::GetChildren(entries[i]);
++		if (StringValue::Get(entry[0]) != file) {
++			break;
++		}
++		if (IntegerValue::Get(entry[1]) == field_id) {
++			result = entry[2];
++			return true;
++		}
++	}
++	return false;
++}
++
+ void MultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const MultiFileOptions &file_options,
+                                    const MultiFileReaderBindData &options,
+                                    const vector<MultiFileColumnDefinition> &global_columns,
+@@ -341,6 +438,19 @@ void MultiFileReader::FinalizeBind(MultiFileReaderData &reader_data, const Multi
+ 				continue;
+ 			}
+ 		}
++		auto file_constants = file_options.custom_options.find("file_constants");
++		if (file_constants != file_options.custom_options.end() &&
++		    global_columns[column_id].identifier.type().id() == LogicalTypeId::INTEGER) {
++			// a column the file has the same value for in every row, as the
++			// identity partition columns of an Iceberg data file, whether or
++			// not the file stores the column
++			auto &column = global_columns[column_id];
++			Value constant;
++			if (FindFileConstant(file_constants->second, filename, IntegerValue::Get(column.identifier), constant)) {
++				reader_data.constant_map.Add(global_idx, constant.DefaultCastAs(column.type));
++				continue;
++			}
++		}
+ 		if (file_options.union_by_name) {
+ 			auto &column = global_columns[column_id];
+ 			auto &name = column.name;
