@@ -7,7 +7,9 @@ that don't need Spark don't pull in the pyspark package.
 
 import os
 import importlib.metadata
+import json
 import time
+from pathlib import Path
 
 import pytest
 from . import server_params
@@ -232,10 +234,8 @@ def spark_session(installcheck, create_spark_catalog_database):
 
     if not installcheck:
         spark_version = ".".join(importlib.metadata.version("pyspark").split(".")[:2])
-        # got these versions from pyiceberg tests
-        # (https://github.com/apache/iceberg-python/blob/ff3a24981c59c2d1935cde02b72ff4249e4d8525/tests/conftest.py#L2224)
         scala_version = "2.12"
-        iceberg_version = "1.4.3"
+        iceberg_version = "1.12.0"
 
         os.environ["PYSPARK_SUBMIT_ARGS"] = (
             f"--packages org.apache.iceberg:iceberg-spark-runtime-{spark_version}_{scala_version}:{iceberg_version},"
@@ -272,3 +272,34 @@ def spark_session(installcheck, create_spark_catalog_database):
 
     if not installcheck:
         spark_session.stop()
+
+
+@pytest.fixture(scope="module")
+def spark_rest_catalog(installcheck, spark_session):
+    """Spark session that also reaches the Polaris server as the
+    SPARK_REST_CATALOG catalog, so Spark writes through a REST catalog
+    the tables that pg_lake then reads."""
+    if installcheck:
+        yield None
+        return
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    uri = f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}/api/catalog"
+    settings = {
+        "": "org.apache.iceberg.spark.SparkCatalog",
+        ".type": "rest",
+        ".uri": uri,
+        ".oauth2-server-uri": f"{uri}/v1/oauth/tokens",
+        ".credential": f"{creds['credentials']['clientId']}:{creds['credentials']['clientSecret']}",
+        ".scope": "PRINCIPAL_ROLE:ALL",
+        ".warehouse": server_params.PG_DATABASE,
+        ".io-impl": "org.apache.iceberg.aws.s3.S3FileIO",
+        ".s3.endpoint": f"http://localhost:{MOTO_PORT}",
+        ".s3.path-style-access": "true",
+    }
+    for suffix, value in settings.items():
+        spark_session.conf.set(
+            f"spark.sql.catalog.{server_params.SPARK_REST_CATALOG}{suffix}", value
+        )
+
+    yield spark_session

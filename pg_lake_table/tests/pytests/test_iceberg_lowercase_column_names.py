@@ -156,7 +156,7 @@ def test_metadata_path_table(pg_conn, uppercase_source):
     assert run_query(lowered_rows(f"{SCHEMA}.lowered", 5), pg_conn) == expected
 
     # declared columns are matched against the lowercased names; the
-    # composite's own field names do not take part in the match
+    # composite's own field names match the fields regardless of case
     result = run_query(
         f"""
         SELECT id, name, (home)."CITY", (previous[1])."ZIP"

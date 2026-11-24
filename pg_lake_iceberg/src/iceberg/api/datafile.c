@@ -178,12 +178,16 @@ FetchAllDataAndDeleteFilePathsFromCurrentSnapshot(IcebergTableMetadata * metadat
 /*
  * ErrorIfDataFileNotParquet refuses a data or position delete file that is
  * not Parquet, which DuckDB would fail on as malformed Parquet.  Other
- * engines can also write these files in ORC or Avro.
+ * engines can also write these files in ORC or Avro, and Iceberg v3 writes
+ * position deletes as deletion vectors in Puffin files; refusing those is
+ * the difference between a clear failure and returning rows the table
+ * considers deleted.
  *
  * Only call it for a file a read is about to open: a table rewritten from
- * ORC to Parquet still lists the ORC files as deleted entries until its next
- * commit, and pruning can skip the files of another format altogether.  An
- * equality delete file is checked where it is applied.
+ * ORC to Parquet, or compacted to drop its deletion vectors, still lists the
+ * old files as deleted entries until its next commit, and pruning can skip
+ * the files of another format altogether.  An equality delete file is
+ * checked where it is applied.
  */
 void
 ErrorIfDataFileNotParquet(DataFile * dataFile)
@@ -192,6 +196,21 @@ ErrorIfDataFileNotParquet(DataFile * dataFile)
 		dataFile->file_format == NULL ||
 		pg_strcasecmp(dataFile->file_format, "PARQUET") == 0)
 		return;
+
+	if (dataFile->content == ICEBERG_DATA_FILE_CONTENT_POSITION_DELETES &&
+		pg_strcasecmp(dataFile->file_format, "PUFFIN") == 0)
+	{
+		LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_DELETION_VECTORS);
+
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("pg_lake_iceberg: deletion vectors are not supported"),
+				 errdetail("Table references the Puffin deletion vector \"%s\".",
+						   dataFile->file_path),
+				 errhint("Deletion vectors are an Iceberg v3 feature; rewrite "
+						 "the table's data files with their deletes applied "
+						 "to read it.")));
+	}
 
 	LogCatalogUnsupportedFeature(CATALOG_LOG_FEATURE_FILE_FORMAT);
 

@@ -12,12 +12,13 @@ is deletion vectors: they arrive as position deletes carried in a Puffin
 blob, and treating that path as Parquet would mean returning rows the
 table considers deleted.
 
-No tool available here writes v3 -- pyiceberg refuses outright and the
-Spark runtime the suite pins predates v3 -- so these fixtures take a
-real v2 table produced by pyiceberg and edit the metadata and manifests
-into the v3 shapes under test.  That covers the version gate, the
-manifest field the v3 writers drop, and the deletion-vector guard.  It
-does not cover v3-only column types or a genuine Puffin blob.
+pyiceberg refuses to write v3, so these fixtures take a real v2 table
+produced by pyiceberg and edit the metadata and manifests into the v3
+shapes under test.  That covers the version gate, the manifest field the
+v3 writers drop, and the deletion-vector guard, without Spark.  The v3
+tables and deletion vectors Spark writes are read in pg_lake_table's
+test_read_only_spark_written_tables.py.  Neither covers v3-only column
+types.
 """
 
 import io
@@ -218,15 +219,24 @@ def test_manifest_without_sort_order_id_is_readable(
 
 
 def test_deletion_vector_is_rejected(
-    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck
+    superuser_conn,
+    s3,
+    iceberg_catalog,
+    iceberg_extension,
+    create_reserialize_helper_functions,
+    installcheck,
 ):
     """A Puffin deletion vector fails loudly instead of being read as Parquet.
 
     Silently ignoring deletes it cannot apply would let the scan return
-    rows the table considers deleted, so this must be an error.
+    rows the table considers deleted, so this must be an error.  Listing the
+    table's files reads none of them, so it does not refuse.
     """
     if installcheck:
         return
+
+    # keep the helper functions past the rollbacks below
+    superuser_conn.commit()
 
     table = _make_table(iceberg_catalog, "v3_deletion_vector")
 
@@ -235,11 +245,27 @@ def test_deletion_vector_is_rejected(
         record["data_file"]["file_format"] = "PUFFIN"
         return record
 
+    def as_delete_manifest(record):
+        record["content"] = 1
+        return record
+
     for manifest in _manifest_paths(table):
         _rewrite_manifest(s3, manifest, record_fn=as_deletion_vector)
+    _rewrite_manifest(
+        s3, table.current_snapshot().manifest_list, record_fn=as_delete_manifest
+    )
+
+    _data_files(superuser_conn, table.metadata_location)
 
     offset = server_log_offset()
-    err = _data_files(superuser_conn, table.metadata_location, raise_error=False)
+    superuser_conn.rollback()
+    err = run_query(
+        f"""SELECT lake_iceberg.datafile_paths_from_table_metadata(
+                '{table.metadata_location}', true)""",
+        superuser_conn,
+        raise_error=False,
+    )
+    superuser_conn.rollback()
     assert "deletion vectors are not supported" in str(err)
     assert catalog_log_lines(offset) == [
         "a table uses Iceberg deletion vectors, which pg_lake does not support"
