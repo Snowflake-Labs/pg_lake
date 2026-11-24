@@ -56,3 +56,4 @@ MANAGED_STORAGE_CMK_ID = ""
 # spark catalog params
 SPARK_CATALOG_PG_DATABASE = "spark_catalog"
 SPARK_CATALOG = "pg_lake"
+SPARK_REST_CATALOG = "polaris"
