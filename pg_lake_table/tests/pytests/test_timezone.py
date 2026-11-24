@@ -428,25 +428,32 @@ def test_timezone_prepared_plan(timezone_tables, plan_cache_mode):
 
 @pytest.mark.parametrize("timezone", ["EST5EDT,M3.2.0,M11.1.0", "+05:45"])
 def test_timezone_without_query_engine_equivalent(
-    timezone_tables, pgduck_conn, timezone
+    committed_timezone_tables, pgduck_conn, timezone
 ):
     """Time zones that DuckDB cannot represent are evaluated in UTC."""
-    conn = timezone_tables
     query = "SELECT id, ts::date FROM {table} ORDER BY id"
-    run_command("SET LOCAL TimeZone = 'UTC';", conn)
-    utc_result = run_query(query.format(table="timezone_heap"), conn)
+    run_command("SET LOCAL TimeZone = 'UTC';", committed_timezone_tables)
+    utc_result = run_query(
+        query.format(table="timezone_heap"), committed_timezone_tables
+    )
     engine_timezone = run_query("SELECT current_setting('TimeZone')", pgduck_conn)[0][0]
+    conn = None
     try:
         # A UTC server would return the expected dates even without the fallback.
         run_command("SET GLOBAL TimeZone = 'Asia/Tokyo'", pgduck_conn)
         assert run_query("SELECT current_setting('TimeZone')", pgduck_conn) == [
             ["Asia/Tokyo"]
         ]
-        run_command(f"SET LOCAL TimeZone = '{timezone}';", conn)
+        # Use a fresh backend so its cached engine default is Asia/Tokyo.
+        conn = open_pg_conn()
+        run_command(f"SET TimeZone = '{timezone}';", conn)
         # The second run sets the remembered fallback without reading it back.
         for _ in range(2):
             assert run_query(query.format(table="timezone_ice"), conn) == utc_result
     finally:
+        if conn is not None:
+            conn.close()
+        committed_timezone_tables.rollback()
         run_command(f"SET GLOBAL TimeZone = '{engine_timezone}'", pgduck_conn)
 
 
@@ -765,6 +772,75 @@ def test_timezone_not_set_for_file_work(s3, extension, with_default_location):
         assert warns("SELECT count(*) FROM timezone_file_work")
     finally:
         run_command("DROP TABLE IF EXISTS timezone_file_work", conn)
+        conn.close()
+
+
+def test_timezone_not_set_when_matching_engine_default(
+    committed_timezone_tables, pgduck_conn
+):
+    """
+    Connections skip SET TimeZone when the session zone has the same meaning
+    as pgduck_server's default (Etc/UTC in the test harness vs session UTC).
+    """
+    assert run_query("SELECT current_setting('TimeZone')", pgduck_conn) == [["Etc/UTC"]]
+    conn = open_pg_conn()
+    conn.autocommit = True
+
+    def timezone_queries():
+        rows = run_query(
+            """
+            SELECT trim(message) FROM duckdb_logs
+            WHERE type = 'QueryLog'
+              AND (trim(message) LIKE 'SET TimeZone%'
+                   OR trim(message) = 'SELECT current_setting(''TimeZone'')')
+            """,
+            pgduck_conn,
+        )
+        run_command("CALL truncate_duckdb_logs()", pgduck_conn)
+        return [row[0] for row in rows]
+
+    try:
+        assert run_query("SHOW TimeZone", conn) == [["UTC"]]
+        run_command(
+            "CALL truncate_duckdb_logs(); CALL enable_logging('QueryLog');",
+            pgduck_conn,
+        )
+
+        # First query checks pgduck_server's default once and skips the SET.
+        run_query("SELECT id, ts::date FROM timezone_ice ORDER BY id", conn)
+        first_queries = timezone_queries()
+        assert [q for q in first_queries if q.startswith("SET")] == []
+        assert first_queries == ["SELECT current_setting('TimeZone')"]
+
+        # Subsequent queries in UTC or equivalent fixed-offset names add no
+        # timezone round trips at all.
+        run_query("SELECT id, ts::date FROM timezone_ice ORDER BY id", conn)
+        assert timezone_queries() == []
+
+        for zone in ("GMT", "+00:00"):
+            run_command(f"SET TimeZone = '{zone}'", conn)
+            run_query("SELECT id, ts::date FROM timezone_ice ORDER BY id", conn)
+            assert timezone_queries() == []
+
+        # A non-matching zone still sends SET TimeZone (with read-back once).
+        run_command("SET TimeZone = 'Asia/Seoul'", conn)
+        run_query("SELECT id, ts::date FROM timezone_ice ORDER BY id", conn)
+        assert [q for q in timezone_queries() if q.startswith("SET")] == [
+            "SET TimeZone = 'Asia/Seoul'"
+        ]
+        run_query("SELECT id, ts::date FROM timezone_ice ORDER BY id", conn)
+        assert timezone_queries() == ["SET TimeZone = 'Asia/Seoul'"]
+
+        # Switching back to UTC skips SET again.
+        run_command("SET TimeZone = 'UTC'", conn)
+        run_query("SELECT id, ts::date FROM timezone_ice ORDER BY id", conn)
+        assert timezone_queries() == []
+    finally:
+        run_command(
+            "CALL disable_logging(); CALL truncate_duckdb_logs();",
+            pgduck_conn,
+        )
+        pgduck_conn.rollback()
         conn.close()
 
 
