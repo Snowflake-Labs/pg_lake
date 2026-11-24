@@ -18,7 +18,7 @@
 #pragma once
 
 #include "duckdb/common/file_system.hpp"
-#include "httpfs.hpp"
+#include "http/httpfs.hpp"
 
 namespace duckdb {
 
@@ -30,7 +30,8 @@ class PgLakeHTTPFileSystem : public HTTPFileSystem {
 public:
 	int64_t Download(ClientContext &context, FileHandle &inputHandle, string sourceUrl, HTTPHeaders headerMap, FileHandle &outputHandle);
 
-	HTTPException GetHTTPError(FileHandle &handle, const HTTPResponse &response, const string &url) override;
+	HTTPException GetHTTPError(FileHandle &handle, const HTTPResponse &response, RequestType request_type,
+                           const string &url) override;
 };
 
 } // namespace duckdb

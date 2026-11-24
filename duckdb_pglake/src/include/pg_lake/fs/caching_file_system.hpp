@@ -20,7 +20,7 @@
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
-#include "httpfs.hpp"
+#include "http/httpfs.hpp"
 
 #include "pg_lake/fs/file_cache_manager.hpp"
 
@@ -46,6 +46,12 @@ public:
 	string cacheOnWritePath;
 	unique_lock<mutex> cacheOnWriteFileLock;
 	int64_t cacheOnWriteWrittenBytes = 0;
+
+	/*
+	 * Set by AbortFileWrite. The write is not finalized after that, neither
+	 * remotely nor in the cache, and the destructor removes the staged file.
+	 */
+	bool writeAborted = false;
 
 	/* client context to which this file handle belongs */
 	optional_ptr<ClientContext> context;
@@ -120,6 +126,10 @@ public:
 
 	void Close()
 	{
+		/* an aborted write must not be published, nor its upload completed */
+		if (writeAborted)
+			return;
+
 		wrappedHandle->Close();
 
 		CachingFSFileHandle &pg_lakeHandle = (CachingFSFileHandle &) *this;
@@ -195,7 +205,7 @@ public:
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 
 		/* add an additional cancellation check */
-		if (pg_lakeHandle.context->interrupted)
+		if (pg_lakeHandle.context->IsInterrupted())
 			throw InterruptException();
 
 		wrappedHandle.file_system.Read(wrappedHandle, buffer, byteCount, location);
@@ -206,7 +216,7 @@ public:
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 
 		/* add an additional cancellation check */
-		if (pg_lakeHandle.context->interrupted)
+		if (pg_lakeHandle.context->IsInterrupted())
 			throw InterruptException();
 
 		return wrappedHandle.file_system.Read(wrappedHandle, buffer, byteCount);
@@ -217,7 +227,7 @@ public:
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 
 		/* add an additional cancellation check */
-		if (pg_lakeHandle.context->interrupted)
+		if (pg_lakeHandle.context->IsInterrupted())
 			throw InterruptException();
 
 		try
@@ -238,7 +248,7 @@ public:
 		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
 
 		/* add an additional cancellation check */
-		if (pg_lakeHandle.context->interrupted)
+		if (pg_lakeHandle.context->IsInterrupted())
 			throw InterruptException();
 
 		bool cleanupCacheOnWriteFile = false;
@@ -297,6 +307,20 @@ public:
 			return remoteFs->CanHandleFile(fpath.substr(NO_CACHE_PREFIX.length()));
 		else
 			return remoteFs->CanHandleFile(fpath);
+	}
+
+	/*
+	 * AbortFileWrite is what DuckDB calls on a write that failed, e.g. a COPY
+	 * whose query errored. The default closes the handle, which for us would
+	 * complete the remote upload and publish the staged cache file. Abort the
+	 * remote write instead; the destructor removes the staged file.
+	 */
+	void AbortFileWrite(FileHandle &handle) override {
+		CachingFSFileHandle &pg_lakeHandle = (CachingFSFileHandle &) handle;
+		FileHandle &wrappedHandle = *pg_lakeHandle.wrappedHandle;
+
+		pg_lakeHandle.writeAborted = true;
+		wrappedHandle.file_system.AbortFileWrite(wrappedHandle);
 	}
 
 	void FileSync(FileHandle &handle) override {

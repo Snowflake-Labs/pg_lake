@@ -82,6 +82,8 @@ def test_r2_copy_from_parquet_invalid(pg_conn, r2):
         or "Unable to connect to URL" in error
         or "Could not establish connection" in error
         or "Could not resolve hostname" in error
+        # since DuckDB 2.0, no secret covering the bucket fails before connecting
+        or "R2 requires an endpoint" in error
     )
 
     pg_conn.rollback()

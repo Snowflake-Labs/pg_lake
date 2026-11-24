@@ -17,6 +17,7 @@
 
 #include "postgres.h"
 
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/region.h"
 #include "utils/builtins.h"
@@ -29,7 +30,7 @@ char *
 GetBucketRegion(char *path)
 {
 	char	   *query = psprintf("SELECT pg_lake_get_bucket_region(%s)",
-								 quote_literal_cstr(path));
+								 duckdb_quote_literal(path));
 
 	char	   *bucketRegion = GetSingleValueFromPGDuck(query);
 

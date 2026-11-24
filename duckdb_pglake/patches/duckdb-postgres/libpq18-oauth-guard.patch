@@ -1,8 +1,8 @@
 diff --git a/src/postgres_oauth.cpp b/src/postgres_oauth.cpp
-index 619532a..757de6a 100644
+index a9cc073..771604a 100644
 --- a/src/postgres_oauth.cpp
 +++ b/src/postgres_oauth.cpp
-@@ -9,14 +9,23 @@ extern "C" {
+@@ -10,14 +10,23 @@ extern "C" {
  #include "libpq-fe.h"
  }
  
@@ -26,7 +26,7 @@ index 619532a..757de6a 100644
  
  //! Managed by SetThreadLocalOAuthTokenFromSessionOption
  static thread_local std::string oauth_token;
-@@ -35,6 +44,8 @@ OAuthTokenHolder::~OAuthTokenHolder() {
+@@ -36,6 +45,8 @@ OAuthTokenHolder::~OAuthTokenHolder() {
  	}
  }
  
@@ -35,7 +35,7 @@ index 619532a..757de6a 100644
  static void OAuthTokenCleanup(PGconn *conn, PGoauthBearerRequest *request) {
  	auto *ts = static_cast<OAuthTokenState *>(request->user);
  	if (ts) {
-@@ -97,6 +108,14 @@ void PostgresInitOAuthHook() {
+@@ -98,6 +109,14 @@ void PostgresInitOAuthHook() {
  	PQsetAuthDataHook(OAuthBearerTokenHook);
  }
  

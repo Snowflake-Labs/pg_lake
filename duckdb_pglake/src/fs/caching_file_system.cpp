@@ -26,7 +26,7 @@
 #include "duckdb/common/types/blob.hpp"
 
 #define CPPHTTPLIB_OPENSSL_SUPPORT
-#include "httpfs.hpp"
+#include "http/httpfs.hpp"
 #include "httplib.hpp"
 
 #include "pg_lake/fs/caching_file_system.hpp"
@@ -279,7 +279,7 @@ PGLakeCachingFileSystem::ShouldCacheOnWrite(CachingFSFileHandle &pg_lakeHandle, 
 	ClientContext &context = *pg_lakeHandle.context;
 	FileOpener *opener = context.client_data->file_opener.get();
 
-	if (!opener->TryGetCurrentSetting(CACHE_ON_WRITE_MAX_SIZE, setting))
+	if (!opener->TryGetCurrentSetting(Identifier(CACHE_ON_WRITE_MAX_SIZE), setting))
 		return false;
 
 	int64_t cacheOnWriteMaxAllowedSize = setting.GetValue<uint64_t>();

@@ -20,8 +20,8 @@
 #include "duckdb.hpp"
 #include "duckdb/common/local_file_system.hpp"
 
-#include "httpfs.hpp"
-#include "s3fs.hpp"
+#include "http/httpfs.hpp"
+#include "s3/s3fs.hpp"
 
 #include "pg_lake/fs/pg_lake_s3fs.hpp"
 
@@ -86,14 +86,6 @@ public:
 	void WithResolvedRegion(const string &url, optional_ptr<FileOpener> opener,
 							std::function<void(const string &)> s3Operation);
 
-	/*
-	 * Download performs similar logic to GetRequest, except writing the output
-	 * to a destination file rather than an in-memory buffer.
-	 */
-	int64_t Download(ClientContext &context, FileHandle &inputHandle, FileHandle &outputHandle) {
-		return s3fs.Download(context, inputHandle, outputHandle);
-	}
-
 	/* Custom overrides */
 	duckdb::unique_ptr<FileHandle> OpenFile(const string &path, FileOpenFlags openFlags,
 	                                        optional_ptr<FileOpener> opener = nullptr) override;
@@ -122,6 +114,10 @@ public:
 
 	void FileSync(FileHandle &handle) override {
 		s3fs.FileSync(handle);
+	}
+
+	void AbortFileWrite(FileHandle &handle) override {
+		s3fs.AbortFileWrite(handle);
 	}
 
 	bool FileExists(const string &filename, optional_ptr<FileOpener> opener = nullptr) override {

@@ -248,7 +248,7 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 		{
 			char	   *lambdaVar = psprintf("_x%d", depth);
 
-			appendStringInfo(buf, "list_transform(%s(%s), %s -> ",
+			appendStringInfo(buf, "list_transform(%s(%s), lambda %s: ",
 							 nestedListFn, expr, lambdaVar);
 			AppendIcebergValidationExpression(buf, lambdaVar, elemType, -1,
 											  policy, depth + 1);
@@ -278,7 +278,7 @@ AppendIcebergValidationExpression(StringInfo buf, const char *expr,
 		char	   *lambdaVar = psprintf("_x%d", depth);
 
 		appendStringInfo(buf,
-						 "map_from_entries(list_transform(map_entries(%s), %s -> struct_pack(key := ",
+						 "map_from_entries(list_transform(map_entries(%s), lambda %s: struct_pack(key := ",
 						 expr, lambdaVar);
 
 		char	   *keyExpr = psprintf("%s.key", lambdaVar);
@@ -750,7 +750,7 @@ AppendSizeClampContainerRewrite(StringInfo buf, const char *expr,
 
 		char	   *lambdaVar = psprintf("_x%d", depth);
 
-		appendStringInfo(buf, "list_transform(%s, %s -> ", expr, lambdaVar);
+		appendStringInfo(buf, "list_transform(%s, lambda %s: ", expr, lambdaVar);
 		if (!AppendSizeClampContainerRewrite(buf, lambdaVar, columnName, policy,
 											 elemType, typmod, depth + 1))
 			appendStringInfoString(buf, lambdaVar);
@@ -772,7 +772,7 @@ AppendSizeClampContainerRewrite(StringInfo buf, const char *expr,
 		char	   *lambdaVar = psprintf("_x%d", depth);
 
 		appendStringInfo(buf,
-						 "map_from_entries(list_transform(map_entries(%s), %s -> struct_pack(key := ",
+						 "map_from_entries(list_transform(map_entries(%s), lambda %s: struct_pack(key := ",
 						 expr, lambdaVar);
 
 		char	   *keyExpr = psprintf("%s.key", lambdaVar);
@@ -1303,7 +1303,7 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 
 		char	   *lambdaVar = psprintf("_x%d", depth);
 
-		appendStringInfo(buf, "list_transform(%s, %s -> ", expr, lambdaVar);
+		appendStringInfo(buf, "list_transform(%s, lambda %s: ", expr, lambdaVar);
 		AppendRewriteExpression(buf, lambdaVar, elemType, typmod, depth + 1,
 								rewriteKinds, elemStorage);
 		appendStringInfoChar(buf, ')');
@@ -1337,7 +1337,7 @@ AppendRewriteExpression(StringInfo buf, const char *expr,
 		char	   *lambdaVar = psprintf("_x%d", depth);
 
 		appendStringInfo(buf,
-						 "map_from_entries(list_transform(map_entries(%s), %s -> struct_pack(key := ",
+						 "map_from_entries(list_transform(map_entries(%s), lambda %s: struct_pack(key := ",
 						 expr, lambdaVar);
 
 		char	   *keyExpr = psprintf("%s.key", lambdaVar);

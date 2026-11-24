@@ -316,10 +316,6 @@ interval_const_deparse_errors = [
         "SELECT id FROM interval_um.tbl WHERE col_interval = '-1 years +2 days -03:04:05'::interval",
     ),
     (
-        "eq_wide_hour",
-        "SELECT id FROM interval_um.tbl WHERE col_interval = '2562047788:00:54.775807'::interval",
-    ),
-    (
         "pl_mixed_sign",
         "SELECT id FROM interval_um.tbl WHERE col_interval + '-1 mons +2 days'::interval = INTERVAL '1 day'",
     ),
@@ -331,11 +327,35 @@ interval_const_deparse_errors = [
         "um_mixed_sign",
         "SELECT id FROM interval_um.tbl WHERE - col_interval = '-1 mons +2 days'::interval",
     ),
+]
+
+
+# DuckDB 1.x could not parse an hour count this wide; 2.0 can, so these push
+# down and have to return what Postgres returns.
+interval_const_wide_hour = [
+    (
+        "eq_wide_hour",
+        "SELECT id FROM interval_um.tbl WHERE col_interval = '2562047788:00:54.775807'::interval",
+    ),
     (
         "um_wide_hour",
         "SELECT id FROM interval_um.tbl WHERE - col_interval = '2562047788:00:54.775807'::interval",
     ),
 ]
+
+
+@pytest.mark.parametrize(
+    "test_id, query",
+    interval_const_wide_hour,
+    ids=[c[0] for c in interval_const_wide_hour],
+)
+def test_interval_const_wide_hour_on_fdw(
+    create_interval_um_table, pg_conn, test_id, query
+):
+    # no row matches, so compare directly rather than requiring a row
+    heap_query = query.replace("interval_um.tbl", "interval_um.heap_tbl")
+    assert run_query(query, pg_conn) == run_query(heap_query, pg_conn)
+    pg_conn.rollback()
 
 
 @pytest.mark.parametrize(

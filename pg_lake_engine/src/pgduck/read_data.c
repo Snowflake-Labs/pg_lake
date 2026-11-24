@@ -336,7 +336,7 @@ AppendJsonKeyProjection(StringInfo command, TupleDesc expectedDesc,
 
 		appendStringInfo(command, "CAST(%s(json, %s) AS %s) AS %s",
 						 isNested ? "json_extract" : "json_extract_string",
-						 quote_literal_cstr(JsonKeyPath(realName)),
+						 duckdb_quote_literal(JsonKeyPath(realName)),
 						 storageType.typeName,
 						 duckdb_quote_identifier(DuckDBNameForColumn(scanNameSchema,
 																	 realName,
@@ -456,7 +456,7 @@ ReadDataSourceFunction(List *sourcePaths,
 
 					appendStringInfo(&command,
 									 ", compression=%s",
-									 quote_literal_cstr(compressionName));
+									 duckdb_quote_literal(compressionName));
 				}
 
 				if (!pickKeysByName && expectedDesc != NULL && expectedDesc->natts > 0)
@@ -537,7 +537,7 @@ ReadDataSourceFunction(List *sourcePaths,
 
 					appendStringInfo(&command,
 									 ", compression=%s",
-									 quote_literal_cstr(compressionName));
+									 duckdb_quote_literal(compressionName));
 				}
 
 				/*
@@ -651,7 +651,7 @@ ReadDataSourceFunction(List *sourcePaths,
 				/* open regex query */
 				appendStringInfo(&command,
 								 " FROM (SELECT regexp_extract(log_line, %s, %s) AS log_struct",
-								 quote_literal_cstr(regex),
+								 duckdb_quote_literal(regex),
 								 TupleDescToDuckDBColumnsArray(expectedDesc, skipFilename));
 
 				if (emitFilename)
@@ -668,7 +668,7 @@ ReadDataSourceFunction(List *sourcePaths,
 
 				appendStringInfo(&command,
 								 ", compression=%s",
-								 quote_literal_cstr(compressionName));
+								 duckdb_quote_literal(compressionName));
 
 				appendStringInfo(&command, ", columns={'log_line':'TEXT'}");
 				appendStringInfo(&command, ", delim=E'\\n'");
@@ -743,7 +743,7 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 
 		if (field->initialDefault != NULL)
 		{
-			defaultValue = quote_literal_cstr(field->duckSerializedInitialDefault);
+			defaultValue = duckdb_quote_literal(field->duckSerializedInitialDefault);
 		}
 
 		/*
@@ -752,9 +752,9 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 		 */
 		appendStringInfo(&schemaString, "%d: {name: %s, type: %s, default_value: %s",
 						 field->id,
-						 quote_literal_cstr(DuckDBNameForFieldId(field->name, field->id,
-																 hasCollision)),
-						 quote_literal_cstr(GetSchemaType(field->type)),
+						 duckdb_quote_literal(DuckDBNameForFieldId(field->name, field->id,
+																   hasCollision)),
+						 duckdb_quote_literal(GetSchemaType(field->type)),
 						 defaultValue);
 
 		/* every map value needs the same struct type */
@@ -1218,8 +1218,8 @@ TupleDescToDuckDBColumnsMap(TupleDesc tupleDesc, CopyDataFormat sourceFormat, bo
 		/* use the storage type name to read CSV/JSON */
 		appendStringInfo(&map, "%s%s:%s",
 						 addComma ? "," : "",
-						 quote_literal_cstr(columnName),
-						 quote_literal_cstr(readTypeName));
+						 duckdb_quote_literal(columnName),
+						 duckdb_quote_literal(readTypeName));
 
 		addComma = true;
 	}
@@ -1259,7 +1259,7 @@ TupleDescToDuckDBColumnsArray(TupleDesc tupleDesc, bool skipFilename)
 
 		appendStringInfo(&array, "%s%s",
 						 addComma ? "," : "",
-						 quote_literal_cstr(columnName));
+						 duckdb_quote_literal(columnName));
 
 		addComma = true;
 	}
@@ -1421,7 +1421,7 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 	{
 		char	   *lambdaVariable = psprintf("_x%d", depth);
 
-		appendStringInfo(buf, "list_transform(%s, %s -> ",
+		appendStringInfo(buf, "list_transform(%s, lambda %s: ",
 						 expression, lambdaVariable);
 
 		/*
@@ -1458,7 +1458,7 @@ AppendIcebergReadConversion(StringInfo buf, const char *expression,
 
 		appendStringInfo(buf,
 						 "map_from_entries(list_transform(map_entries(%s), "
-						 "%s -> struct_pack(key := ",
+						 "lambda %s: struct_pack(key := ",
 						 expression, lambdaVariable);
 
 		/*
@@ -2082,7 +2082,7 @@ BuildColumnProjection(char *sourceName,
 			if (timestampFormat != NULL)
 				return psprintf("strptime(%s, %s)%s",
 								duckdb_quote_identifier(sourceName),
-								quote_literal_cstr(timestampFormat),
+								duckdb_quote_literal(timestampFormat),
 								columnAliasString);
 		}
 
@@ -2127,7 +2127,7 @@ char *
 PathListToString(List *paths)
 {
 	if (list_length(paths) == 1)
-		return quote_literal_cstr(linitial(paths));
+		return duckdb_quote_literal(linitial(paths));
 
 	StringInfoData result;
 
@@ -2145,7 +2145,7 @@ PathListToString(List *paths)
 
 		appendStringInfo(&result, "%s %s",
 						 addComma ? "," : "",
-						 quote_literal_cstr(path));
+						 duckdb_quote_literal(path));
 
 		addComma = true;
 	}
@@ -2186,35 +2186,35 @@ CopyOptionsToReadCSVParams(List *copyOptions)
 			char	   *delimiter = defGetString(option);
 
 			appendStringInfo(&command, ", delim=%s",
-							 quote_literal_cstr(delimiter));
+							 duckdb_quote_literal(delimiter));
 		}
 		else if (strcmp(option->defname, "quote") == 0)
 		{
 			char	   *quote = defGetString(option);
 
 			appendStringInfo(&command, ", quote=%s",
-							 quote_literal_cstr(quote));
+							 duckdb_quote_literal(quote));
 		}
 		else if (strcmp(option->defname, "escape") == 0)
 		{
 			char	   *escape = defGetString(option);
 
 			appendStringInfo(&command, ", escape=%s",
-							 quote_literal_cstr(escape));
+							 duckdb_quote_literal(escape));
 		}
 		else if (strcmp(option->defname, "null") == 0)
 		{
 			char	   *null = defGetString(option);
 
 			appendStringInfo(&command, ", nullstr=%s",
-							 quote_literal_cstr(null));
+							 duckdb_quote_literal(null));
 		}
 		else if (strcmp(option->defname, "new_line") == 0)
 		{
 			char	   *new_line = defGetString(option);
 
 			appendStringInfo(&command, ", new_line=%s",
-							 quote_literal_cstr(new_line));
+							 duckdb_quote_literal(new_line));
 		}
 		else if (strcmp(option->defname, "skip") == 0)
 		{
@@ -2361,7 +2361,7 @@ AppendReadCSVClause(StringInfo buf, const char *filePath,
 					int maxLineSize, const char *columnsMap,
 					List *csvOptions)
 {
-	appendStringInfo(buf, "read_csv(%s", quote_literal_cstr(filePath));
+	appendStringInfo(buf, "read_csv(%s", duckdb_quote_literal(filePath));
 	AppendReadCSVTail(buf, maxLineSize, columnsMap, csvOptions);
 }
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
 Generate pg_lake_engine/src/pgduck/duckdb_kwlist.h from the vendored DuckDB
-keyword list.
+keyword lists (src/parser/peg/grammar/keywords/*.list).
 
-The DuckDB parser uses a fork of the PostgreSQL keyword list, extended with
+The DuckDB keyword set derives from the PostgreSQL keyword list, extended with
 DuckDB-specific reserved words (PIVOT, LAMBDA, QUALIFY, etc.) that PostgreSQL
 does not know about.  Without this list, quote_identifier() misses those words
 and pushdown queries referencing columns with those names silently fail.
@@ -31,17 +31,32 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 DUCKDB_SUBMODULE_PATH = "duckdb_pglake/duckdb"
-KWLIST_RELPATH = "third_party/libpg_query/include/parser/kwlist.hpp"
+KEYWORDS_RELDIR = "src/parser/peg/grammar/keywords"
 
-SOURCE_HPP = REPO_ROOT / DUCKDB_SUBMODULE_PATH / KWLIST_RELPATH
+SOURCE_DIR = REPO_ROOT / DUCKDB_SUBMODULE_PATH / KEYWORDS_RELDIR
+
+# DuckDB's PEG parser keeps one keyword list per category.  Map each onto the
+# PostgreSQL-style category constants defined in keywords.c.  A keyword can
+# appear in more than one list (e.g. func_name and type_name); the strictest
+# category wins.  bare_label_keyword.list is an orthogonal attribute (whether a
+# keyword may be used as a column alias without AS) and is not read.
+KEYWORD_LISTS = {
+    "unreserved_keyword.list": "UNRESERVED_KEYWORD",
+    "column_name_keyword.list": "COL_NAME_KEYWORD",
+    "func_name_keyword.list": "TYPE_FUNC_NAME_KEYWORD",
+    "type_name_keyword.list": "TYPE_FUNC_NAME_KEYWORD",
+    "reserved_keyword.list": "RESERVED_KEYWORD",
+}
+
+CATEGORY_RANK = {
+    "UNRESERVED_KEYWORD": 0,
+    "COL_NAME_KEYWORD": 1,
+    "TYPE_FUNC_NAME_KEYWORD": 2,
+    "RESERVED_KEYWORD": 3,
+}
 
 
-def fetch_kwlist_from_github() -> bytes:
-    """Fetch kwlist.hpp from github at the SHA the submodule is pinned to.
-
-    Used in CI environments where the submodule isn't checked out — avoids
-    cloning all of DuckDB just to read one header.
-    """
+def submodule_sha() -> str:
     result = subprocess.run(
         ["git", "ls-tree", "HEAD", DUCKDB_SUBMODULE_PATH],
         cwd=REPO_ROOT,
@@ -56,45 +71,54 @@ def fetch_kwlist_from_github() -> bytes:
             f"unexpected git ls-tree output for {DUCKDB_SUBMODULE_PATH}: "
             f"{result.stdout!r}"
         )
-    sha = parts[2]
-    url = f"https://raw.githubusercontent.com/duckdb/duckdb/{sha}/{KWLIST_RELPATH}"
-    print(f"Fetching {url}", file=sys.stderr)
-    with urllib.request.urlopen(url) as resp:
-        return resp.read()
+    return parts[2]
+
+
+def read_keyword_lists() -> dict[str, bytes]:
+    """Return {list file name: contents} for every file in KEYWORD_LISTS.
+
+    Reads from the submodule when it is checked out, and otherwise fetches
+    from github at the SHA the submodule is pinned to, which avoids cloning
+    all of DuckDB in CI just to read a few small files.
+    """
+    if SOURCE_DIR.is_dir():
+        return {name: (SOURCE_DIR / name).read_bytes() for name in KEYWORD_LISTS}
+
+    sha = submodule_sha()
+    contents = {}
+    for name in KEYWORD_LISTS:
+        url = (
+            f"https://raw.githubusercontent.com/duckdb/duckdb/{sha}/"
+            f"{KEYWORDS_RELDIR}/{name}"
+        )
+        print(f"Fetching {url}", file=sys.stderr)
+        with urllib.request.urlopen(url) as resp:
+            contents[name] = resp.read()
+    return contents
 
 
 OUTPUT_H = REPO_ROOT / "pg_lake_engine" / "src" / "pgduck" / "duckdb_kwlist.h"
 
-# Map category strings found in the .hpp to the integer constants defined in
-# keywords.c.  These must match the #defines there.
-CATEGORY_MAP = {
-    "UNRESERVED_KEYWORD": "UNRESERVED_KEYWORD",
-    "COL_NAME_KEYWORD": "COL_NAME_KEYWORD",
-    "TYPE_FUNC_NAME_KEYWORD": "TYPE_FUNC_NAME_KEYWORD",
-    "RESERVED_KEYWORD": "RESERVED_KEYWORD",
-}
 
-KW_RE = re.compile(r'PG_KEYWORD\(\s*"([^"]+)"\s*,\s*\w+\s*,\s*(\w+)\s*\)')
-
-
-def parse_keywords(hpp_text: str) -> list[tuple[str, str]]:
+def parse_keywords(lists: dict[str, bytes]) -> list[tuple[str, str]]:
     """Return [(name, category), ...] sorted by name (required for bsearch)."""
-    entries = []
-    for m in KW_RE.finditer(hpp_text):
-        name, cat = m.group(1), m.group(2)
-        if cat not in CATEGORY_MAP:
-            print(
-                f"WARNING: unknown category {cat!r} for keyword {name!r}",
-                file=sys.stderr,
-            )
-            continue
-        entries.append((name, CATEGORY_MAP[cat]))
-    entries.sort(key=lambda e: e[0])
-    return entries
+    categories: dict[str, str] = {}
+    for name, cat in KEYWORD_LISTS.items():
+        for line in lists[name].decode("utf-8").splitlines():
+            kw = line.strip().lower()
+            if not kw:
+                continue
+            prev = categories.get(kw)
+            if prev is None or CATEGORY_RANK[cat] > CATEGORY_RANK[prev]:
+                categories[kw] = cat
+    return sorted(categories.items())
 
 
-def sha256_of_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def sha256_of_lists(lists: dict[str, bytes]) -> str:
+    h = hashlib.sha256()
+    for name in sorted(lists):
+        h.update(name.encode("utf-8") + b"\0" + lists[name])
+    return h.hexdigest()
 
 
 def render(entries: list[tuple[str, str]], source_sha256: str) -> str:
@@ -108,7 +132,7 @@ def render(entries: list[tuple[str, str]], source_sha256: str) -> str:
          * AUTO-GENERATED — do not edit by hand.
          * Run:  python3 tools/generate_duckdb_kwlist.py
          *
-         * Source: duckdb_pglake/duckdb/third_party/libpg_query/include/parser/kwlist.hpp
+         * Source: duckdb_pglake/duckdb/src/parser/peg/grammar/keywords/ (*_keyword.list)
          * Source SHA-256: {source_sha256}
          *
          * This file is included by pg_lake_engine/src/pgduck/keywords.c to
@@ -137,25 +161,21 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if SOURCE_HPP.exists():
-        hpp_bytes = SOURCE_HPP.read_bytes()
-    else:
-        try:
-            hpp_bytes = fetch_kwlist_from_github()
-        except Exception as e:
-            print(
-                f"ERROR: submodule {DUCKDB_SUBMODULE_PATH} not checked out "
-                f"and remote fetch failed: {e}",
-                file=sys.stderr,
-            )
-            return 1
+    try:
+        lists = read_keyword_lists()
+    except Exception as e:
+        print(
+            f"ERROR: submodule {DUCKDB_SUBMODULE_PATH} not checked out "
+            f"and remote fetch failed: {e}",
+            file=sys.stderr,
+        )
+        return 1
 
-    hpp_text = hpp_bytes.decode("utf-8")
-    source_sha = sha256_of_bytes(hpp_bytes)
-    entries = parse_keywords(hpp_text)
+    source_sha = sha256_of_lists(lists)
+    entries = parse_keywords(lists)
 
     if not entries:
-        print("ERROR: no PG_KEYWORD entries found — check the regex.", file=sys.stderr)
+        print("ERROR: no keywords found in the DuckDB keyword lists.", file=sys.stderr)
         return 1
 
     generated = render(entries, source_sha)
@@ -174,7 +194,7 @@ def main() -> int:
         else:
             print(
                 f"STALE: {OUTPUT_H.relative_to(REPO_ROOT)} does not match "
-                f"the current {SOURCE_HPP.relative_to(REPO_ROOT)}.\n"
+                f"the current {SOURCE_DIR.relative_to(REPO_ROOT)}.\n"
                 f"Run:  python3 tools/generate_duckdb_kwlist.py",
                 file=sys.stderr,
             )

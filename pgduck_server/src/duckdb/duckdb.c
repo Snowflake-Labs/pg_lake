@@ -556,6 +556,22 @@ duckdb_global_init(char *databaseFilePath,
 
 	{
 		/*
+		 * Since DuckDB 2.0, httpfs treats "?..." in an S3 URL as part of the
+		 * object key unless this is enabled. pg_lake resolves bucket regions
+		 * and S3 Express endpoints by adding ?s3_region and ?s3_endpoint to
+		 * the URL, and users pass them in URLs too.
+		 */
+		if (snprintf(setCommand, 1024, "SET GLOBAL s3_enable_deprecated_url_parameters TO true") < 0)
+		{
+			return DUCKDB_INITIALIZATION_ERROR;
+		}
+
+		if (run_command_on_duckdb(setCommand) == DuckDBError)
+			return DUCKDB_INITIALIZATION_ERROR;
+	}
+
+	{
+		/*
 		 * The S3 uploader sizes each multipart part as max_filesize /
 		 * max_parts_per_file, and every file being written holds at least one
 		 * part buffer.  The 800GB default makes that 76.5MiB per file, even

@@ -278,9 +278,13 @@ def test_s3_express(pgduck_conn):
 
 def test_s3_get_region_invalid(pgduck_conn):
     """A bucket whose host does not resolve reports the connection failure, with
-    the URL it failed on."""
+    the URL it failed on.
+
+    The endpoint is what does not resolve here: httpfs sends a bucket name that
+    cannot be a host label in the path, so no bucket name alone makes the
+    default endpoint unresolvable."""
     error = run_command(
-        "select pg_lake_get_bucket_region('s3://.../abc/') test",
+        "select pg_lake_get_bucket_region('s3://abc/def/?s3_endpoint=no-such-host.invalid') test",
         pgduck_conn,
         raise_error=False,
     )
@@ -347,8 +351,13 @@ def test_denied_key_containing_301_keeps_its_own_error(
             assert error is not None, f"the read of {key} was not denied"
             assert "403" in error, f"expected a denial for {key}, got: {error}"
             # a read that lost the secret leaves for the real S3, which can deny
-            # it too -- for having no credentials, which proves nothing here
-            assert server.endpoint in error, f"{key} missed moto: {error}"
+            # it too -- for having no credentials, which proves nothing here.
+            # The error names the s3:// URL rather than the endpoint, but httpfs
+            # only says the credentials did not work when it signed the request,
+            # i.e. when the secret, and with it the moto endpoint, applied.
+            assert (
+                "Credentials are provided, but they did not work" in error
+            ), f"{key} missed moto: {error}"
             assert key in error, f"{key}: the error is about another request: {error}"
     finally:
         server.relax()

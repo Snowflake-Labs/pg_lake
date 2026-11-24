@@ -63,7 +63,7 @@ FileCacheManager::TryGetCacheDir(optional_ptr<FileOpener> opener, string &cacheD
 {
 	Value setting;
 
-	if (!opener->TryGetCurrentSetting(CACHE_DIR_SETTING, setting))
+	if (!opener->TryGetCurrentSetting(Identifier(CACHE_DIR_SETTING), setting))
 		return false;
 
 	cacheDir = setting.ToString();

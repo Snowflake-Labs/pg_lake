@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "libpq-fe.h"
 
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/read_data.h"
@@ -50,12 +51,12 @@ SniffCSV(char *url, CopyDataCompression compression, List *options,
 
 	appendStringInfo(&command,
 					 "SELECT Delimiter, Quote, Escape, HasHeader FROM sniff_csv(%s",
-					 quote_literal_cstr((char *) linitial(outputFiles)));
+					 duckdb_quote_literal((char *) linitial(outputFiles)));
 
 	if (compression != DATA_COMPRESSION_INVALID)
 	{
 		appendStringInfo(&command, ", compression=%s",
-						 quote_literal_cstr(CopyDataCompressionToName(compression)));
+						 duckdb_quote_literal(CopyDataCompressionToName(compression)));
 	}
 
 	if (options != NIL)

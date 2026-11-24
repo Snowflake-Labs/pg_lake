@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "miscadmin.h"
 
+#include "pg_lake/pgduck/keywords.h"
 #include "pg_lake/copy/copy_format.h"
 #include "pg_lake/data_file/data_file_stats.h"
 #include "pg_lake/parquet/leaf_field.h"
@@ -36,7 +37,7 @@ int64
 GetRemoteFileSize(char *path)
 {
 	char	   *query = psprintf("SELECT pg_lake_file_size(%s)",
-								 quote_literal_cstr(path));
+								 duckdb_quote_literal(path));
 
 	char	   *fileSizeStr = GetSingleValueFromPGDuck(query);
 	int64		fileSize = pg_strtoint64(fileSizeStr);
@@ -52,7 +53,7 @@ int64
 GetRemoteParquetFileRowCount(char *path)
 {
 	char	   *query = psprintf("SELECT count(*) FROM read_parquet(%s)",
-								 quote_literal_cstr(path));
+								 duckdb_quote_literal(path));
 
 	char	   *rowCountStr = GetSingleValueFromPGDuck(query);
 	int64		rowCount = pg_strtoint64(rowCountStr);
@@ -71,7 +72,7 @@ ListRemoteFileDescriptions(char *pattern)
 
 	char	   *query = psprintf("SELECT url, file_size, last_modified_time, etag "
 								 "FROM pg_lake_list_files(%s)",
-								 quote_literal_cstr(pattern));
+								 duckdb_quote_literal(pattern));
 
 	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
 	PGresult   *result = ExecuteQueryOnPGDuckConnection(pgDuckConn, query);
@@ -160,7 +161,7 @@ bool
 RemoteFileExists(char *path)
 {
 	char	   *query = psprintf("SELECT pg_lake_file_exists(%s)",
-								 quote_literal_cstr(path));
+								 duckdb_quote_literal(path));
 
 	char	   *fileExistsStr = GetSingleValueFromPGDuck(query);
 
@@ -217,7 +218,7 @@ DeleteRemotePrefix(char *path)
 
 	appendStringInfo(query,
 					 "SELECT pg_lake_remove_file(file) FROM glob(%s)",
-					 quote_literal_cstr(recursivePath->data));
+					 duckdb_quote_literal(recursivePath->data));
 
 	return ExecuteOptionalCommandInPGDuck(query->data);
 }
@@ -232,7 +233,7 @@ DeleteRemoteFile(char *path)
 		return false;
 
 	char	   *query = psprintf("SELECT pg_lake_remove_file(%s)",
-								 quote_literal_cstr(path));
+								 duckdb_quote_literal(path));
 
 	return ExecuteOptionalCommandInPGDuck(query);
 }
@@ -284,7 +285,7 @@ DeleteRemoteFiles(List *paths)
 		if (pathCell != list_head(paths))
 			appendStringInfoChar(query, ',');
 
-		appendStringInfo(query, "(%s)", quote_literal_cstr(path));
+		appendStringInfo(query, "(%s)", duckdb_quote_literal(path));
 	}
 
 	appendStringInfoString(query, ") AS batch(file)");
