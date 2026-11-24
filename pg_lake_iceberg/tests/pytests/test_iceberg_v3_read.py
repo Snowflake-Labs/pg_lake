@@ -12,12 +12,13 @@ is deletion vectors: they arrive as position deletes carried in a Puffin
 blob, and treating that path as Parquet would mean returning rows the
 table considers deleted.
 
-No tool available here writes v3 -- pyiceberg refuses outright and the
-Spark runtime the suite pins predates v3 -- so these fixtures take a
-real v2 table produced by pyiceberg and edit the metadata and manifests
-into the v3 shapes under test.  That covers the version gate, the
-manifest field the v3 writers drop, and the deletion-vector guard.  It
-does not cover v3-only column types or a genuine Puffin blob.
+pyiceberg refuses to write v3, so these fixtures take a real v2 table
+produced by pyiceberg and edit the metadata and manifests into the v3
+shapes under test.  That covers the version gate, the manifest field the
+v3 writers drop, and the deletion-vector guard, without Spark.  The v3
+tables and deletion vectors Spark writes are read in pg_lake_table's
+test_read_only_spark_written_tables.py.  Neither covers v3-only column
+types.
 """
 
 import io
