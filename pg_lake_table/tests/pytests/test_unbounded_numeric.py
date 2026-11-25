@@ -342,33 +342,51 @@ def test_unbounded_numeric_params_casts_and_constants(s3, pg_conn, extension):
 
     run_command(
         f"""
-        create table unbounded_numeric_heap (id int, n numeric(38,20), i8 bigint);
+        create table unbounded_numeric_heap (id int, n numeric(38,20), i8 bigint, p numeric(10,2));
         insert into unbounded_numeric_heap values
-            (1, 1.5, 100000000000000000),
-            (2, 7.07, 200000000000000000),
-            (3, 0.00000000000000000001, 3),
-            (4, 123456789012345678.5, 4);
+            (1, 1.5, 100000000000000000, 1.50),
+            (2, 7.07, 200000000000000000, 7.07),
+            (3, 0.00000000000000000001, 3, 0.00),
+            (4, 123456789012345678.5, 4, 1.51);
         copy unbounded_numeric_heap to '{uri}';
-        create foreign table unbounded_numeric_lake (id int, n numeric(38,20), i8 bigint)
+        create foreign table unbounded_numeric_lake (id int, n numeric(38,20), i8 bigint, p numeric(10,2))
             server pg_lake options (path '{uri}');
     """,
         pg_conn,
     )
 
     # DuckDB reads a bare NUMERIC as DECIMAL(18,3): 1.4999 would become 1.500
-    # and drop the 1.5 row, and 123456789012345678.5 would not fit.
+    # and drop the 1.5 row, and 123456789012345678.5 would not fit. Next to n,
+    # numeric(38,9) would round n's 1e-20 to 0, and next to p, numeric(10,2)
+    # would round 1.505 to a value of p.
     statements = {
         "greater": "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n > $1",
         "equal": "SELECT id FROM {t} WHERE n = $1",
+        "in": "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n IN ($1, 7.07)",
+        "equal_low_scale": "SELECT array_agg(id ORDER BY id) FROM {t} WHERE p = $1",
         "param": "SELECT $1 FROM {t} WHERE id = 1",
+        "coalesce": "SELECT coalesce(n, $1) FROM {t} WHERE id = 3",
+        "case": "SELECT CASE WHEN id = 3 THEN n ELSE $1 END FROM {t} WHERE id = 3",
+        "greatest": "SELECT greatest(n, $1) FROM {t} WHERE id = 3",
+        "least": "SELECT least(n, $1) FROM {t} WHERE id = 3",
+        "nullif": "SELECT nullif(n, $1) FROM {t} WHERE id = 3",
     }
     values = {
         "greater": ["1.4999", "7.0699"],
-        "equal": ["123456789012345678.5"],
+        "equal": ["123456789012345678.5", "0.00000000000000000001"],
+        "in": ["0.00000000000000000001", "1.5"],
+        "equal_low_scale": ["1.505", "1.51"],
         "param": ["1.4999", "123456789012345678.5"],
+        "coalesce": ["1"],
+        "case": ["1"],
+        "greatest": ["0"],
+        "least": ["1"],
+        "nullif": ["1"],
     }
     queries = [
         "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n > ('1.4999'::text)::numeric",
+        "SELECT n::numeric FROM {t} WHERE id = 3",
+        "SELECT coalesce(n, ('1'::text)::numeric) FROM {t} WHERE id = 3",
         "SELECT sum(i8::numeric) FROM {t}",
         "SELECT round(i8::numeric, 2) FROM {t} WHERE id = 2",
         "SELECT count(*) FROM {t} WHERE n < 100000000000000000",
@@ -391,6 +409,15 @@ def test_unbounded_numeric_params_casts_and_constants(s3, pg_conn, extension):
             run_command(f"SET plan_cache_mode TO {plan_cache_mode}", pg_conn)
 
             for name, query in statements.items():
+                # a custom plan folds the IN list into a numeric[] constant,
+                # which DuckDB still reads as DECIMAL(18,3)[] without pushdown
+                if (
+                    name == "in"
+                    and pushdown == "false"
+                    and plan_cache_mode == "force_custom_plan"
+                ):
+                    continue
+
                 for table in ["heap", "lake"]:
                     run_command(
                         f"PREPARE {name}_{table}(numeric) AS "
@@ -406,8 +433,15 @@ def test_unbounded_numeric_params_casts_and_constants(s3, pg_conn, extension):
                 run_command(f"DEALLOCATE {name}_heap; DEALLOCATE {name}_lake", pg_conn)
 
         if pushdown == "true":
+            # next to n, the cast takes n's scale; elsewhere that of unbounded columns
             explain = run_query(
                 "EXPLAIN (VERBOSE) SELECT id FROM unbounded_numeric_lake WHERE n > ('1.5'::text)::numeric",
+                pg_conn,
+            )
+            assert "numeric(38,20)" in str(explain)
+
+            explain = run_query(
+                "EXPLAIN (VERBOSE) SELECT id FROM unbounded_numeric_lake WHERE p > ('1.5'::text)::numeric",
                 pg_conn,
             )
             assert "numeric(38,9)" in str(explain)

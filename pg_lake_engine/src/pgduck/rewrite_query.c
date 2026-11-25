@@ -150,6 +150,10 @@ static Node *RewriteParam(Param *paramExpr);
 static int32 NumericTypmodForDuckDB(Oid typeId, int32 typmod);
 static Node *RewriteUnboundedNumericCast(Node *node);
 static Const *RewriteIntegralNumericConst(Const *constExpr);
+static void RaiseUnboundedNumericScaleToSiblings(Node *node);
+static void RaiseUnboundedNumericScale(List *expressions);
+static bool IsUnboundedNumericDefaultCast(Node *node);
+static bool IsNumericComparison(Oid operatorId);
 
 static RewriteRule *GetRewriteRuleForFunctionId(Oid functionId);
 static ExpressionRewriter GetFunctionCallRewriter(Oid functionId, int *intArg);
@@ -615,6 +619,8 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 	 * result. It also lets us see rewritten arguments.
 	 */
 	node = expression_tree_mutator(node, RewriteQueryTreeForPGDuckMutator, context);
+
+	RaiseUnboundedNumericScaleToSiblings(node);
 
 	/*
 	 * DuckDB does not support JSONB, so we need to rewrite it to JSON.
@@ -1141,8 +1147,17 @@ RewriteUnboundedNumericCast(Node *node)
 	if (IsA(node, RelabelType))
 	{
 		RelabelType *relabelExpr = (RelabelType *) node;
+		int32		argTypmod = exprTypmod((Node *) relabelExpr->arg);
 
-		if (relabelExpr->relabelformat != COERCE_EXPLICIT_CALL)
+		if (relabelExpr->relabelformat == COERCE_EXPLICIT_CALL)
+			return node;
+
+		/* a numeric(p,s) relabeled as numeric keeps its values, so its typmod */
+		if (IsUnboundedNumeric(relabelExpr->resulttype, relabelExpr->resulttypmod) &&
+			exprType((Node *) relabelExpr->arg) == NUMERICOID && argTypmod >= 0 &&
+			numeric_typmod_precision(argTypmod) <= DUCKDB_MAX_NUMERIC_PRECISION)
+			relabelExpr->resulttypmod = argTypmod;
+		else
 			relabelExpr->resulttypmod =
 				NumericTypmodForDuckDB(relabelExpr->resulttype,
 									   relabelExpr->resulttypmod);
@@ -1243,6 +1258,152 @@ RewriteIntegralNumericConst(Const *constExpr)
 		make_numeric_typmod(Min(digits, DUCKDB_MAX_NUMERIC_PRECISION), 0);
 
 	return integralConst;
+}
+
+
+/*
+ * RaiseUnboundedNumericScaleToSiblings gives an unconstrained numeric that is
+ * compared or combined with numerics of a larger scale, such as $1 in n = $1
+ * or coalesce(n, $1) for a numeric(38,20) column n, the larger scale.
+ *
+ * DuckDB brings decimals to one type of at most 38 digits by keeping the
+ * digits before the point, so numeric(38,9) next to numeric(38,20) would round
+ * the column to 9 decimal places, and the value before a comparison. With the
+ * larger scale, neither loses decimal places, and the value has at least as
+ * many digits before the point as the column. A smaller scale is never taken,
+ * since the value would then be rounded more than with numeric(38,9).
+ *
+ * Arithmetic is left as it is, since DuckDB adds the scales of a product.
+ */
+static void
+RaiseUnboundedNumericScaleToSiblings(Node *node)
+{
+	if (IsA(node, OpExpr) || IsA(node, NullIfExpr))
+	{
+		OpExpr	   *opExpr = (OpExpr *) node;
+
+		if (IsNumericComparison(opExpr->opno))
+			RaiseUnboundedNumericScale(opExpr->args);
+	}
+	else if (IsA(node, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr *arrayOpExpr = (ScalarArrayOpExpr *) node;
+		Node	   *arrayArg = lsecond(arrayOpExpr->args);
+
+		if (IsNumericComparison(arrayOpExpr->opno) && IsA(arrayArg, ArrayExpr))
+			RaiseUnboundedNumericScale(lcons(linitial(arrayOpExpr->args),
+											 list_copy(((ArrayExpr *) arrayArg)->elements)));
+	}
+	else if (IsA(node, CoalesceExpr))
+	{
+		RaiseUnboundedNumericScale(((CoalesceExpr *) node)->args);
+	}
+	else if (IsA(node, MinMaxExpr))
+	{
+		RaiseUnboundedNumericScale(((MinMaxExpr *) node)->args);
+	}
+	else if (IsA(node, CaseExpr))
+	{
+		CaseExpr   *caseExpr = (CaseExpr *) node;
+		List	   *results = NIL;
+		ListCell   *whenCell = NULL;
+
+		foreach(whenCell, caseExpr->args)
+			results = lappend(results, ((CaseWhen *) lfirst(whenCell))->result);
+
+		if (caseExpr->defresult != NULL)
+			results = lappend(results, caseExpr->defresult);
+
+		RaiseUnboundedNumericScale(results);
+	}
+}
+
+
+/*
+ * RaiseUnboundedNumericScale gives the unconstrained numerics among the given
+ * expressions the largest scale of the others, if it is larger than the scale
+ * of unbounded numeric columns.
+ */
+static void
+RaiseUnboundedNumericScale(List *expressions)
+{
+	int			largestScale = UnboundedNumericDefaultScale;
+	ListCell   *expressionCell = NULL;
+
+	foreach(expressionCell, expressions)
+	{
+		Node	   *expression = lfirst(expressionCell);
+		int32		typmod = exprTypmod(expression);
+
+		if (exprType(expression) != NUMERICOID || typmod < 0 ||
+			IsUnboundedNumericDefaultCast(expression) ||
+			numeric_typmod_precision(typmod) > DUCKDB_MAX_NUMERIC_PRECISION)
+			continue;
+
+		largestScale = Max(largestScale, numeric_typmod_scale(typmod));
+	}
+
+	if (largestScale <= UnboundedNumericDefaultScale ||
+		largestScale > DUCKDB_MAX_NUMERIC_PRECISION)
+		return;
+
+	foreach(expressionCell, expressions)
+	{
+		Node	   *expression = lfirst(expressionCell);
+
+		if (IsUnboundedNumericDefaultCast(expression))
+			((RelabelType *) expression)->resulttypmod =
+				make_numeric_typmod(DUCKDB_MAX_NUMERIC_PRECISION, largestScale);
+	}
+}
+
+
+/*
+ * IsUnboundedNumericDefaultCast returns whether the node is the cast that
+ * RewriteParam or RewriteUnboundedNumericCast gave an unconstrained numeric,
+ * with the precision and scale of unbounded numeric columns.
+ */
+static bool
+IsUnboundedNumericDefaultCast(Node *node)
+{
+	if (!IsA(node, RelabelType))
+		return false;
+
+	RelabelType *relabelExpr = (RelabelType *) node;
+	Node	   *arg = (Node *) relabelExpr->arg;
+
+	if (relabelExpr->resulttype != NUMERICOID ||
+		relabelExpr->relabelformat != COERCE_EXPLICIT_CAST ||
+		relabelExpr->resulttypmod != NumericTypmodForDuckDB(NUMERICOID, -1))
+		return false;
+
+	return IsA(arg, Param) ||
+		(IsA(arg, FuncExpr) && ((FuncExpr *) arg)->funcformat == COERCE_IMPLICIT_CAST) ||
+		(IsA(arg, CoerceViaIO) &&
+		 ((CoerceViaIO *) arg)->coerceformat == COERCE_IMPLICIT_CAST);
+}
+
+
+/*
+ * IsNumericComparison returns whether the operator compares two numerics.
+ */
+static bool
+IsNumericComparison(Oid operatorId)
+{
+	Oid			leftType = InvalidOid;
+	Oid			rightType = InvalidOid;
+
+	op_input_types(operatorId, &leftType, &rightType);
+
+	if (leftType != NUMERICOID || rightType != NUMERICOID)
+		return false;
+
+	char	   *operatorName = get_opname(operatorId);
+
+	return operatorName != NULL &&
+		(strcmp(operatorName, "=") == 0 || strcmp(operatorName, "<>") == 0 ||
+		 strcmp(operatorName, "<") == 0 || strcmp(operatorName, "<=") == 0 ||
+		 strcmp(operatorName, ">") == 0 || strcmp(operatorName, ">=") == 0);
 }
 
 
