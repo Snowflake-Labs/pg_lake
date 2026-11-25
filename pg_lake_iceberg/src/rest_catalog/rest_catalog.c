@@ -456,7 +456,9 @@ GetRestCatalogOptionsForRelation(Oid relationId)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("catalog option is not set for relation %u", relationId)));
 
-	return ResolveRestCatalogOptions(catalog);
+	const char *serverName = ResolveRelationCatalogServerName(relationId, catalog);
+
+	return BuildRestCatalogOptionsFromServer(serverName, catalog);
 }
 
 
@@ -476,7 +478,10 @@ GetRestCatalogServerIdForRelation(Oid relationId)
 				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
 				 errmsg("catalog option is not set for relation %u", relationId)));
 
-	return ResolveRestCatalogServerId(catalog);
+	const char *serverName = ResolveRelationCatalogServerName(relationId, catalog);
+	ForeignServer *server = GetForeignServerByName(serverName, false);
+
+	return server->serverid;
 }
 
 
