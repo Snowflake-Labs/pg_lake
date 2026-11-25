@@ -21,8 +21,9 @@
 #if PG_VERSION_NUM >= 180000
 #include "commands/explain_state.h"
 #endif
+#include "pg_lake/pgduck/query_engine.h"
 
-extern PGDLLEXPORT void ExplainPGDuckQuery(Oid queryEngine,
+extern PGDLLEXPORT void ExplainPGDuckQuery(QueryEngine queryEngine,
 										   char *query,
 										   int numParams,
 										   const char **paramValues,

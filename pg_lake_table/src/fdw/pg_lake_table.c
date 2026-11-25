@@ -161,7 +161,7 @@ typedef struct PgLakeScanState
 	List	   *retrieved_attrs;	/* list of retrieved attribute numbers */
 
 	/* for remote query execution */
-	Oid			queryEngine;	/* query engine of the scanned relations */
+	QueryEngine queryEngine;	/* query engine of the scanned relations */
 	PGDuckConnection *conn;		/* connection for the scan */
 	bool		prepared_statement_sent;	/* have we executed the prepared
 											 * statement? */
@@ -1691,7 +1691,7 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	/*
 	 * Get connection to the query engine that serves the scanned relations.
 	 */
-	fsstate->queryEngine = GetQueryEngineForRteList(rteList);
+	fsstate->queryEngine = GetQueryEngineForRteList(rteList, fsplan->checkAsUser);
 	fsstate->conn = GetQueryEngineConnection(fsstate->queryEngine, true);
 
 	/* Assign a unique ID for my cursor */

@@ -56,7 +56,7 @@ typedef struct PhysicalOperator
 }			PhysicalOperator;
 
 
-static char *GetExplainJson(Oid queryEngine, char *query, int numParams,
+static char *GetExplainJson(QueryEngine queryEngine, char *query, int numParams,
 							const char **parameterValues);
 static void ExplainPhysicalOperator(PhysicalOperator * operator, ExplainState *es);
 static void ReadPhysicalOperator(JsonbContainer *json, PhysicalOperator * operator);
@@ -68,7 +68,7 @@ static void ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * pr
  * explain output using the PostgreSQL API.
  */
 void
-ExplainPGDuckQuery(Oid queryEngine, char *query, int numParams,
+ExplainPGDuckQuery(QueryEngine queryEngine, char *query, int numParams,
 				   const char **parameterValues, ExplainState *es)
 {
 	char	   *explainOutput = GetExplainJson(queryEngine, query, numParams,
@@ -207,7 +207,7 @@ ReadExtraInfo(const char *key, JsonbValue *jsonValue, ExtraInfo * property)
  * GetExplainJson gets the explain output for a query as JSON.
  */
 static char *
-GetExplainJson(Oid queryEngine, char *query, int numParams,
+GetExplainJson(QueryEngine queryEngine, char *query, int numParams,
 			   const char **parameterValues)
 {
 	char	   *explainCommand = psprintf("explain (format 'json') %s", query);

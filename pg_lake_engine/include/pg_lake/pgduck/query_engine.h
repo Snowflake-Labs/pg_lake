@@ -17,16 +17,36 @@
 
 #pragma once
 
+#include "nodes/parsenodes.h"
 #include "nodes/pg_list.h"
 #include "pg_lake/pgduck/client.h"
 
 /*
- * A query engine runs the DuckDB SQL that we generate for a scan, and is
- * identified by an Oid. All pg_lake tables are served by pgduck_server.
+ * A query engine runs the DuckDB SQL that we generate for a scan. All pg_lake
+ * tables are served by pgduck_server.
+ *
+ * An engine is reached as the user that its tables are read as, so a query
+ * is only sent to one engine when all its tables have the same server and
+ * user. pgduck_server is the same for every user.
  */
-#define PGDUCK_QUERY_ENGINE InvalidOid
+typedef struct QueryEngine
+{
+	/* foreign server of the engine, or InvalidOid for pgduck_server */
+	Oid			serverId;
 
-extern PGDLLEXPORT Oid GetRelationQueryEngine(Oid relationId);
-extern PGDLLEXPORT Oid GetQueryEngineForRteList(List *rteList);
-extern PGDLLEXPORT PGDuckConnection * GetQueryEngineConnection(Oid queryEngine,
+	/*
+	 * user that the tables are read as: the owner of a view that reads them,
+	 * or InvalidOid for the current user
+	 */
+	Oid			userId;
+}			QueryEngine;
+
+#define PGDUCK_QUERY_ENGINE ((QueryEngine) {InvalidOid, InvalidOid})
+
+extern PGDLLEXPORT bool QueryEnginesEqual(QueryEngine left, QueryEngine right);
+extern PGDLLEXPORT QueryEngine GetRelationQueryEngine(Oid relationId, Oid checkAsUser);
+extern PGDLLEXPORT QueryEngine GetRteQueryEngine(RangeTblEntry *rte, List *rteperminfos);
+extern PGDLLEXPORT QueryEngine GetQueryEngineForRteList(List *rteList, Oid checkAsUser);
+extern PGDLLEXPORT QueryEngine GetQueryEngineForQuery(Query *query);
+extern PGDLLEXPORT PGDuckConnection * GetQueryEngineConnection(QueryEngine queryEngine,
 															   bool setSessionTimeZone);
