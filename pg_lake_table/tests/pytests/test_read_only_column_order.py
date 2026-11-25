@@ -100,6 +100,15 @@ def test_column_dropped_in_catalog_from_a_table_with_position_deletes(
 
         error = run_query(query, pg_conn, raise_error=False)
         assert 'Postgres column "note" has no matching Iceberg field' in str(error)
+        pg_conn.rollback()
+
+        # added back, note is a new field the data files do not have
+        run_command(f"ALTER TABLE {schema}.writer ADD COLUMN note text", pg_conn)
+        pg_conn.commit()
+
+        explain = run_query(f"EXPLAIN (verbose, format json) {query}", pg_conn)
+        assert int(fetch_delete_files_used(explain)) > 0
+        assert run_query(query, pg_conn) == [[1, "v1", None], [3, "v3", None]]
     finally:
         pg_conn.rollback()
         run_command(f"DROP SCHEMA {schema} CASCADE", pg_conn)
