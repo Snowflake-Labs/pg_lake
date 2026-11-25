@@ -19,6 +19,7 @@
 #include "utils/hsearch.h"
 #include "fmgr.h"
 #include "access/xact.h"
+#include "commands/defrem.h"
 #include "common/hashfn.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
@@ -104,6 +105,9 @@ typedef struct IcebergSnapshotBuilder
 
 	/* snapshot operation */
 	SnapshotOperation operation;
+
+	/* caller-supplied snapshot summary properties, list of DefElem */
+	List	   *snapshotProperties;
 }			IcebergSnapshotBuilder;
 
 
@@ -118,7 +122,8 @@ typedef struct PartitionSpecManifestsEntries
 }			PartitionSpecManifestsEntries;
 
 static IcebergSnapshotBuilder * CreateIcebergSnapshotBuilder(IcebergTableMetadata * metadata, List *metadataOperations);
-static void SetSnapshotOperation(IcebergSnapshot * snapshot, SnapshotOperation operation);
+static void SetSnapshotSummary(IcebergSnapshot * snapshot, SnapshotOperation operation,
+							   List *snapshotProperties);
 static SnapshotOperation SnapshotOperationSummary(List *metadataOperations);
 static void ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
 											 IcebergSnapshotBuilder * builder);
@@ -532,12 +537,14 @@ AddManifestEntryToHash(HTAB *hash, int32 partitionSpecId, IcebergManifestEntry *
 
 
 /*
-* SetSnapshotOperation sets the operation of the snapshot.
+* SetSnapshotSummary sets the summary of the snapshot to the operation
+* followed by the caller-supplied properties.
 */
 static void
-SetSnapshotOperation(IcebergSnapshot * snapshot, SnapshotOperation operation)
+SetSnapshotSummary(IcebergSnapshot * snapshot, SnapshotOperation operation,
+				   List *snapshotProperties)
 {
-	Property   *summary = palloc0(sizeof(Property));
+	Property   *summary = palloc0(sizeof(Property) * (1 + list_length(snapshotProperties)));
 
 	summary->key = "operation";
 
@@ -559,8 +566,20 @@ SetSnapshotOperation(IcebergSnapshot * snapshot, SnapshotOperation operation)
 			ereport(ERROR, (errmsg("Unsupported snapshot operation: %d", operation)));
 	}
 
+	int			propertyIndex = 1;
+	ListCell   *propertyCell = NULL;
+
+	foreach(propertyCell, snapshotProperties)
+	{
+		DefElem    *property = lfirst(propertyCell);
+
+		summary[propertyIndex].key = property->defname;
+		summary[propertyIndex].value = defGetString(property);
+		propertyIndex++;
+	}
+
 	snapshot->summary = summary;
-	snapshot->summary_length = 1;
+	snapshot->summary_length = propertyIndex;
 }
 
 /*
@@ -665,6 +684,7 @@ SnapshotOperationSummary(List *metadataOperations)
 			case DATA_FILE_ADD_ROW_ID_MAPPING:
 			case DATA_FILE_DROP_TABLE:
 			case TABLE_CREATE:
+			case SNAPSHOT_PROPERTIES:
 				{
 					break;
 				}
@@ -877,6 +897,14 @@ ProcessIcebergMetadataOperations(Oid relationId, List *metadataOperations,
 					break;
 				}
 
+			case SNAPSHOT_PROPERTIES:
+				{
+					builder->snapshotProperties =
+						list_concat(builder->snapshotProperties,
+									operation->snapshotProperties);
+					break;
+				}
+
 			default:
 				ereport(ERROR, (errmsg("Unsupported operation type: %d", operation->type)));
 		}
@@ -971,9 +999,14 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 	int			manifestIndex = 0;
 	int			manifestListIndex = 1;
 
-	/* regenerate schema or partition spec should always create new snapshot */
+	/*
+	 * Regenerate schema or partition spec should always create new snapshot,
+	 * and so should snapshot properties, such that a caller can record
+	 * progress in a transaction that did not change any data.
+	 */
 	bool		createNewSnapshot =
-		builder->regenerateSchema || builder->regeneratePartitionSpec;
+		builder->regenerateSchema || builder->regeneratePartitionSpec ||
+		builder->snapshotProperties != NIL;
 
 	/*
 	 * Always create a new manifest file for the new data and positional
@@ -1160,7 +1193,13 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 
 	DeleteInProgressManifests(relationId, newPersistedManifestList);
 
-	SetSnapshotOperation(newSnapshot, builder->operation);
+	/* a snapshot that only carries properties is an append of zero files */
+	SnapshotOperation operation = builder->operation;
+
+	if (operation == SNAPSHOT_OPERATION_INVALID && builder->snapshotProperties != NIL)
+		operation = SNAPSHOT_OPERATION_APPEND;
+
+	SetSnapshotSummary(newSnapshot, operation, builder->snapshotProperties);
 
 	/*
 	 * Write the manifest list file that contains the list of manifest files.
@@ -1399,6 +1438,7 @@ ShouldSkipMetadataChangeToIceberg(List *metadataOperationTypes)
 			case TABLE_CREATE:
 			case TABLE_DDL:
 			case TABLE_PARTITION_BY:
+			case SNAPSHOT_PROPERTIES:
 				{
 					return false;
 				}

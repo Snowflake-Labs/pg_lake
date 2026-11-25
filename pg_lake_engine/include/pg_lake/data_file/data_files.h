@@ -97,6 +97,7 @@ typedef enum TableMetadataOperationType
 	DATA_FILE_ADD_ROW_ID_MAPPING = 9,
 	TABLE_PARTITION_BY = 10,
 	TABLE_CREATE = 11,
+	SNAPSHOT_PROPERTIES = 12,
 }			TableMetadataOperationType;
 
 struct IcebergPartitionSpec;
@@ -160,6 +161,9 @@ typedef struct TableMetadataOperation
 	/* for partition specs */
 	List	   *partitionSpecs;
 	int			defaultSpecId;
+
+	/* for snapshot properties, list of DefElem with String values */
+	List	   *snapshotProperties;
 }			TableMetadataOperation;
 
 

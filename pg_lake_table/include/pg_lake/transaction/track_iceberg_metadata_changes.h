@@ -58,6 +58,13 @@ typedef struct TableMetadataOperationTracker
 	 * commit-time ANALYZE regardless of dataFileChangeCount.
 	 */
 	bool		forceCommitTimeAnalyze;
+
+	/*
+	 * Properties to add to the summary of the snapshot this transaction
+	 * creates, as a list of DefElem with String values. The list is shared
+	 * with the copies kept for savepoints, so it is replaced, never modified.
+	 */
+	List	   *snapshotProperties;
 }			TableMetadataOperationTracker;
 
 extern PGDLLEXPORT int CommitTimeCatalogAnalyzeThreshold;
@@ -79,3 +86,5 @@ extern PGDLLEXPORT void IcebergMetadataSubXactCallback(SubXactEvent event,
 													   SubTransactionId mySubid,
 													   SubTransactionId parentSubid, void *arg);
 extern PGDLLEXPORT void RecordRestCatalogStagedTable(Oid relationId, const char *uuid);
+extern PGDLLEXPORT void SetIcebergSnapshotProperty(Oid relationId, const char *key,
+												   const char *value);

@@ -42,12 +42,14 @@
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
+#include "pg_lake/util/table_type.h"
 #include "pg_lake/json/json_utils.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/url_encode.h"
 #include "pg_lake/parsetree/options.h"
 #include "pg_extension_base/spi_helpers.h"
 #include "executor/spi.h"
+#include "nodes/makefuncs.h"
 #include "commands/defrem.h"
 #include "foreign/foreign.h"
 #include "utils/builtins.h"
@@ -360,6 +362,63 @@ TrackIcebergMetadataChangesInTx(Oid relationId, List *metadataOperationTypes)
 
 		RecordIcebergMetadataOperation(relationId, opType);
 	}
+}
+
+
+/*
+ * SetIcebergSnapshotProperty adds a property to the summary of the snapshot
+ * the current transaction creates for an Iceberg table. Setting the same key
+ * again replaces the value, and the property follows savepoint rollback like
+ * any other change. A transaction that only sets properties still creates a
+ * snapshot.
+ */
+void
+SetIcebergSnapshotProperty(Oid relationId, const char *key, const char *value)
+{
+	if (key == NULL || key[0] == '\0')
+		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						errmsg("snapshot property key must not be empty")));
+
+	if (value == NULL)
+		ereport(ERROR, (errcode(ERRCODE_NULL_VALUE_NOT_ALLOWED),
+						errmsg("snapshot property value must not be NULL")));
+
+	if (strcmp(key, "operation") == 0)
+		ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+						errmsg("snapshot property \"%s\" is reserved", key)));
+
+	if (!IsIcebergTable(relationId))
+		ereport(ERROR, (errcode(ERRCODE_WRONG_OBJECT_TYPE),
+						errmsg("\"%s\" is not an Iceberg table",
+							   get_rel_name(relationId))));
+
+	ErrorIfReadOnlyIcebergTable(relationId);
+
+	TrackIcebergMetadataChangesInTx(relationId, list_make1_int(SNAPSHOT_PROPERTIES));
+
+	TableMetadataOperationTracker *opTracker =
+		hash_search(TrackedIcebergMetadataOperationsHash, &relationId, HASH_FIND, NULL);
+
+	Assert(opTracker != NULL);
+
+	/* build a new list, the current one may belong to a savepoint's copy */
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+	List	   *newProperties = NIL;
+	ListCell   *propertyCell = NULL;
+
+	foreach(propertyCell, opTracker->snapshotProperties)
+	{
+		DefElem    *property = lfirst(propertyCell);
+
+		if (strcmp(property->defname, key) != 0)
+			newProperties = lappend(newProperties, property);
+	}
+
+	newProperties = lappend(newProperties,
+							makeDefElem(pstrdup(key), (Node *) makeString(pstrdup(value)), -1));
+	opTracker->snapshotProperties = newProperties;
+
+	MemoryContextSwitchTo(oldContext);
 }
 
 
@@ -1261,6 +1320,16 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 
 			if (effectiveAgeInSecs == 0)
 				opTracker->relationSnapshotExpirationRequested = true;
+		}
+
+		if (opTracker->snapshotProperties != NIL)
+		{
+			TableMetadataOperation *propertiesOp = palloc0(sizeof(TableMetadataOperation));
+
+			propertiesOp->type = SNAPSHOT_PROPERTIES;
+			propertiesOp->snapshotProperties = opTracker->snapshotProperties;
+
+			metadataOperations = lappend(metadataOperations, propertiesOp);
 		}
 
 		/* explicit manifest merge operation */
