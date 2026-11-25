@@ -2502,8 +2502,15 @@ StoreDeleteReturningSlot(TupleTableSlot *planSlot,
 	HeapTuple	returningTuple =
 		heap_form_tuple(returningSlot->tts_tupleDescriptor, values, nulls);
 
+	/*
+	 * Only set t_self, not t_data->t_ctid. heap_form_tuple stamps a composite
+	 * datum version into t_ctid, and our synthetic ctid can have offset
+	 * 0xfffc (VersionedDatumOffsetNumber in 18.7+), in which case its block
+	 * number would be read back as a bogus version and the slot would refuse
+	 * to deform the tuple.
+	 */
 	if (ctid)
-		returningTuple->t_self = returningTuple->t_data->t_ctid = *ctid;
+		returningTuple->t_self = *ctid;
 
 	bool		shouldFree = true;
 

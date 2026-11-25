@@ -439,6 +439,75 @@ def test_delete_join_repeated_rows(pg_conn, s3, extension, with_default_location
     pg_conn.commit()
 
 
+def test_delete_row_number_versioned_datum_offset(
+    pg_conn, s3, extension, with_default_location
+):
+    """
+    A row ID is stored in a ctid whose offset is the low 16 bits of the file
+    row number, so file row number 0x1fffc gets offset 0xfffc. On PostgreSQL
+    versions that version composite datums, that offset marks a tuple as a
+    versioned datum, and storing it with the row ID in t_data->t_ctid made the
+    slot read the block number as the version and fail with "using outdated
+    tuple descriptor when deforming row type".
+    """
+    run_command(
+        """
+        CREATE TABLE test_delete_versioned_offset (id bigint, val text) USING iceberg;
+        INSERT INTO test_delete_versioned_offset
+        SELECT s, 'x' FROM generate_series(0, 196605) s;
+    """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # file row numbers 0x1fffc and 0x2fffc, so the block numbers 1 and 2 cannot
+    # both match the version of the table's row type
+    for row_number in [0x1FFFC, 0x2FFFC]:
+        result = run_query(
+            f"""
+            DELETE FROM test_delete_versioned_offset
+            WHERE id BETWEEN {row_number - 1} AND {row_number + 1}
+            RETURNING id, val
+        """,
+            pg_conn,
+        )
+        assert [tuple(row) for row in result] == [
+            (row_number - 1, "x"),
+            (row_number, "x"),
+            (row_number + 1, "x"),
+        ]
+
+        result = run_query(
+            f"""
+            UPDATE test_delete_versioned_offset SET val = 'y'
+            WHERE id BETWEEN {row_number - 1} AND {row_number + 1}
+            RETURNING id, val
+        """,
+            pg_conn,
+        )
+        assert result == []
+
+    pg_conn.rollback()
+
+    # the same rows through a parameterized DELETE, without RETURNING
+    run_command(
+        """
+        PREPARE delete_versioned_offset(bigint) AS
+        DELETE FROM test_delete_versioned_offset WHERE id < $1;
+        EXECUTE delete_versioned_offset(196000);
+    """,
+        pg_conn,
+    )
+
+    result = run_query("SELECT count(*) FROM test_delete_versioned_offset", pg_conn)
+    assert result[0][0] == 606
+
+    pg_conn.rollback()
+
+    run_command("DROP TABLE test_delete_versioned_offset", pg_conn)
+    pg_conn.commit()
+
+
 def test_merge_on_read(pg_conn, extension):
     location = f"s3://{TEST_BUCKET}/test_merge_on_read/"
 
