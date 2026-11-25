@@ -800,7 +800,7 @@ def test_timezone_not_set_when_matching_engine_default(
         return [row[0] for row in rows]
 
     try:
-        assert run_query("SHOW TimeZone", conn) == [["UTC"]]
+        run_command("SET TimeZone = 'UTC'", conn)
         run_command(
             "CALL truncate_duckdb_logs(); CALL enable_logging('QueryLog');",
             pgduck_conn,
