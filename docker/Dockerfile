@@ -122,14 +122,14 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
         && apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
 
-# Install jdk21 for debian
+# Install jdk21 for debian (Temurin; Oracle no longer serves a "latest" JDK 21)
 RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
         if [ "$(dpkg --print-architecture)" = "arm64" ]; then \
             ARCH=aarch64; \
         else \
             ARCH=x64; \
         fi && \
-        wget https://download.oracle.com/java/21/latest/jdk-21_linux-${ARCH}_bin.tar.gz && \
+        wget -O jdk-21_linux-${ARCH}_bin.tar.gz https://api.adoptium.net/v3/binary/latest/21/ga/linux/${ARCH}/jdk/hotspot/normal/eclipse && \
         mkdir -p /usr/lib/jvm && \
         tar -xzf jdk-21_linux-${ARCH}_bin.tar.gz -C /usr/lib/jvm/ && \
         mv /usr/lib/jvm/jdk-21.* /usr/lib/jvm/java-21-openjdk && \
