@@ -363,7 +363,8 @@ RelationCatalogKind(Oid relationId)
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	char	   *catalog = GetStringOption(foreignTable->options, "catalog", false);
 
-	if (!IsBuiltinCatalogServerName(ResolveCatalogServerName(catalog)))
+	if (!IsBuiltinCatalogServerName(ResolveRelationCatalogServerName(relationId,
+																	 catalog)))
 		return CATALOG_STATS_USER;
 
 	return RestCatalogAuthType == REST_CATALOG_AUTH_TYPE_HORIZON ?

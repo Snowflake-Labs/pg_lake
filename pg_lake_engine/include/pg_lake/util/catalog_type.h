@@ -96,4 +96,6 @@ extern PGDLLEXPORT bool LowercasesColumnNames(Oid relationId);
 extern PGDLLEXPORT bool IsCatalogOwnedByExtension(const char *catalog);
 extern PGDLLEXPORT bool IsRestCatalog(const char *catalog);
 extern PGDLLEXPORT const char *ResolveCatalogServerName(const char *catalog);
+extern PGDLLEXPORT const char *ResolveRelationCatalogServerName(Oid relationId,
+																const char *catalog);
 extern PGDLLEXPORT bool IsBuiltinCatalogServerName(const char *serverName);
