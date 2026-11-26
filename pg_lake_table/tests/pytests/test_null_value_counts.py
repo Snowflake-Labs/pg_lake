@@ -15,6 +15,7 @@ import pyarrow.parquet as pq
 import pytest
 from utils_pytest import (
     TEST_BUCKET,
+    create_map_type,
     read_s3_operations,
     run_command,
     run_query,
@@ -272,4 +273,239 @@ def test_no_null_counts_without_column_stats(
     finally:
         pg_conn.rollback()
         run_command("DROP SCHEMA null_counts_none CASCADE", pg_conn)
+        pg_conn.commit()
+
+
+# column type, a non-NULL value, whether the column gets min/max stats (and
+# with them a null count)
+TYPED_COLUMNS = [
+    ("int2", "1", True),
+    ("int4", "1", True),
+    ("int8", "1", True),
+    ("numeric", "1.5", True),
+    ("numeric(20,4)", "1.5", True),
+    ("float4", "1.5", True),
+    ("float8", "1.5", True),
+    ("bool", "true", True),
+    ("text", "'x'", True),
+    ('text COLLATE "C"', "'x'", True),
+    ("varchar(10)", "'x'", True),
+    ("char(3)", "'x'", True),
+    ("date", "'2026-01-01'", True),
+    ("time", "'10:00'", True),
+    ("timetz", "'10:00+02'", True),
+    ("timestamp", "'2026-01-01 10:00'", True),
+    ("timestamptz", "'2026-01-01 10:00+00'", True),
+    ("uuid", "'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'", False),
+    ("bytea", "'\\x01'", False),
+    ("jsonb", "'{\"a\": 1}'", False),
+    ("json", "'{\"a\": 1}'", False),
+    ("int[]", "ARRAY[1, NULL]", False),
+    ("text[]", "ARRAY['a']", False),
+    ("null_counts_types.pt", "ROW(1, 'a')", False),
+    ("null_counts_types.pt[]", "ARRAY[ROW(1, 'a')]::null_counts_types.pt[]", False),
+    ("map_type.key_text_val_int", "ARRAY[('a', 1)]::map_type.key_text_val_int", False),
+]
+
+
+@pytest.mark.parametrize("pushdown", ["on", "off"])
+def test_null_counts_per_type(
+    pg_conn, superuser_conn, s3, extension, with_default_location, pushdown
+):
+    """
+    Every type with min/max stats gets a null count that matches the file, with
+    the insert pushed down to DuckDB or not. Nested and other types without
+    stats get neither, so they never claim to have no NULLs.
+    """
+    create_map_type("text", "int")
+    columns = [f"c{i}" for i in range(len(TYPED_COLUMNS))]
+    column_defs = ", ".join(
+        f"{name} {type_}" for name, (type_, _, _) in zip(columns, TYPED_COLUMNS)
+    )
+
+    def row(i, null_columns):
+        values = [
+            f"NULL::{type_}" if name in null_columns else f"{value}::{type_}"
+            for name, (type_, value, _) in zip(columns, TYPED_COLUMNS)
+        ]
+        return f"SELECT {i}, {', '.join(values)}"
+
+    run_command(
+        f"""
+        CREATE SCHEMA null_counts_types;
+        SET search_path TO null_counts_types;
+        CREATE TYPE pt AS (x int, y text);
+        CREATE TABLE t (id int, {column_defs}) USING iceberg;
+        SET pg_lake_table.enable_insert_select_pushdown TO {pushdown};
+        """,
+        pg_conn,
+    )
+
+    try:
+        # one file: every column has a NULL in some row, and the even columns
+        # are NULL in two rows
+        rows = [row(0, set())]
+        rows += [row(i + 1, {name}) for i, name in enumerate(columns)]
+        rows += [row(100 + i, {name}) for i, name in enumerate(columns[::2])]
+        run_command(f"INSERT INTO t {' UNION ALL '.join(rows)}", pg_conn)
+
+        # one file without NULLs, one where everything but id is NULL
+        run_command(f"INSERT INTO t {row(200, set())}", pg_conn)
+        run_command(f"INSERT INTO t {row(300, set(columns))}", pg_conn)
+        pg_conn.commit()
+
+        catalog = assert_null_counts_match_files(
+            pg_conn, superuser_conn, s3, "null_counts_types", "t"
+        )
+        assert len(catalog) == 3
+
+        # field ids follow the column order, after id; nested types take more
+        # field ids, so map names through the catalog instead
+        names = dict(
+            run_query(
+                """
+                SELECT m.field_id, a.attname
+                FROM lake_table.field_id_mappings m
+                JOIN pg_attribute a ON a.attrelid = m.table_name AND a.attnum = m.pg_attnum
+                WHERE m.table_name = 'null_counts_types.t'::regclass
+                  AND m.parent_field_id IS NULL
+                """,
+                superuser_conn,
+            )
+        )
+
+        expected_with_stats = {"id"} | {
+            name for name, (_, _, has_stats) in zip(columns, TYPED_COLUMNS) if has_stats
+        }
+        # the all-NULL file only has stats for id
+        all_null = [
+            {names.get(f, f): c for f, c in counts.items()}
+            for counts in catalog.values()
+            if set(counts) == {1}
+        ]
+        assert all_null == [{"id": 0}]
+
+        for counts in catalog.values():
+            named = {names.get(f, f): c for f, c in counts.items()}
+            if set(named) == {"id"}:
+                continue
+            assert set(named) == expected_with_stats
+            if named["id"] == 0 and max(named.values()) == 0:
+                continue  # the file without NULLs
+            for index, name in enumerate(columns):
+                if name in named:
+                    assert named[name] == (2 if index % 2 == 0 else 1), name
+    finally:
+        pg_conn.rollback()
+        run_command(
+            "RESET pg_lake_table.enable_insert_select_pushdown; RESET search_path; "
+            "DROP SCHEMA null_counts_types CASCADE",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "setting",
+    [
+        "pg_lake_table.enable_insert_select_pushdown",
+        "pg_lake_table.enable_partitioned_write_pushdown",
+    ],
+)
+def test_null_counts_partitioned_pushdown(
+    pg_conn, superuser_conn, s3, extension, with_default_location, setting
+):
+    """
+    Partitioned writes split rows into a file per partition, pushed down or
+    not, and each file gets the null counts of its own rows, including the
+    file of the NULL partition.
+    """
+    for value in ["on", "off"]:
+        run_command(
+            f"""
+            CREATE SCHEMA null_counts_part;
+            SET {setting} TO {value};
+            CREATE TABLE null_counts_part.t (id int, p text, v int, w text)
+            USING iceberg WITH (partition_by = 'p');
+            INSERT INTO null_counts_part.t
+            SELECT i,
+                   CASE i % 3 WHEN 0 THEN 'x'::text WHEN 1 THEN 'y'::text END,
+                   CASE WHEN i % 4 = 0 THEN NULL ELSE i END,
+                   CASE WHEN i % 5 = 0 THEN NULL ELSE 'w'::text END
+            FROM generate_series(1, 300) i;
+            """,
+            pg_conn,
+        )
+        pg_conn.commit()
+        try:
+            catalog = assert_null_counts_match_files(
+                pg_conn, superuser_conn, s3, "null_counts_part", "t"
+            )
+            assert len(catalog) == 3
+            # v: field 3, w: field 4
+            assert sum(c[3] for c in catalog.values()) == 75
+            assert sum(c[4] for c in catalog.values()) == 60
+            # the NULL partition has no bounds for p, the others no NULLs in it
+            assert sorted(c.get(2, -1) for c in catalog.values()) == [-1, 0, 0]
+        finally:
+            pg_conn.rollback()
+            run_command(
+                f"RESET {setting}; DROP SCHEMA null_counts_part CASCADE", pg_conn
+            )
+            pg_conn.commit()
+
+
+def test_null_counts_edge_values(
+    pg_conn, superuser_conn, s3, extension, with_default_location
+):
+    """
+    Values that look empty are not NULL: empty strings, zero, false, empty
+    arrays, and the floats DuckDB keeps out of min/max. Also long text whose
+    bounds get truncated, and a CSV COPY.
+    """
+    location = f"s3://{TEST_BUCKET}/test_null_counts_edge_values"
+    run_command(
+        f"""
+        CREATE SCHEMA null_counts_edge;
+        SET search_path TO null_counts_edge;
+        CREATE TABLE t (id int, s text, z int, bo bool, f float8, lt text)
+        USING iceberg;
+
+        INSERT INTO t VALUES
+            (1, '', 0, false, -0.0, repeat('a', 1000)),
+            (2, ' ', 0, false, 'Infinity', repeat('a', 999) || 'b'),
+            (3, 'NULL', 0, false, '-Infinity', NULL);
+
+        -- a NaN keeps f out of the stats, and with it its null count
+        INSERT INTO t VALUES (4, NULL, NULL, NULL, 'NaN', ''), (5, 'x', 1, true, NULL, 'x');
+
+        COPY (SELECT i AS id,
+                     CASE WHEN i % 2 = 0 THEN NULL ELSE ''::text END AS s,
+                     NULL::int AS z, true AS bo, 1.0::float8 AS f,
+                     CASE WHEN i % 3 = 0 THEN NULL ELSE 'c'::text END AS lt
+              FROM generate_series(10, 39) i)
+        TO '{location}/src.csv' WITH (format 'csv', header);
+        COPY t FROM '{location}/src.csv' WITH (format 'csv', header);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    try:
+        catalog = assert_null_counts_match_files(
+            pg_conn, superuser_conn, s3, "null_counts_edge", "t"
+        )
+        # field ids: id 1, s 2, z 3, bo 4, f 5, lt 6
+        assert sorted(catalog.values(), key=lambda c: sorted(c.items())) == sorted(
+            [
+                {1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 1},
+                {1: 0, 2: 1, 3: 1, 4: 1, 6: 0},
+                # z is all NULL in the CSV file
+                {1: 0, 2: 15, 4: 0, 5: 0, 6: 10},
+            ],
+            key=lambda c: sorted(c.items()),
+        )
+    finally:
+        pg_conn.rollback()
+        run_command("RESET search_path; DROP SCHEMA null_counts_edge CASCADE", pg_conn)
         pg_conn.commit()
