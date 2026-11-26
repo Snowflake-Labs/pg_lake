@@ -109,6 +109,7 @@ static void VacuumLakeTables(ProcessUtilityParams * utilityParams);
 static List *GetPgLakePartitionIds(Oid relationId);
 static bool ProcessVacuumPgLakeIcebergFlag(VacuumStmt *vacuumStmt);
 static void VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose);
+static void AddCompactionStats(CompactionStats * total, CompactionStats * round);
 static void VacuumCompactMetadata(Oid relationId, bool isVerbose);
 static bool VacuumRemoveDeletionQueueRecords(List *relationIdList, bool isFull,
 											 bool isVerbose);
@@ -893,6 +894,14 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 		MemoryContext savedContext = CurrentMemoryContext;
 
 		/*
+		 * The round counts the files it is about to rewrite before reading
+		 * them, so the counts join the summary only once the round's changes
+		 * are kept.
+		 */
+		CompactionStats roundStats = {0};
+		volatile bool roundSucceeded = false;
+
+		/*
 		 * We may need to rollback the initial state of the database in case
 		 * of rollback.
 		 */
@@ -906,13 +915,14 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			/* do compaction */
 			continueCompaction = CompactDataFiles(relationId, compactionStartTime,
-												  isFull, isVerbose, &runStats);
+												  isFull, isVerbose, &roundStats);
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
 			INJECTION_POINT_COMPAT("compact-files-after-compact");
 
 			ReleaseCurrentSubTransaction();
+			roundSucceeded = true;
 
 			INJECTION_POINT_COMPAT("compact-files-after-tx");
 		}
@@ -928,6 +938,25 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 			ResetTrackedIcebergMetadataOperation();
 			ResetRestCatalogRequests();
 
+			/*
+			 * Name the table in the demoted error, unless it was dropped
+			 * meanwhile. GetQualifiedRelationName would raise an error of its
+			 * own in that case.
+			 */
+			char	   *relationName = get_rel_name(relationId);
+			char	   *schemaName = get_namespace_name(get_rel_namespace(relationId));
+
+			if (relationName != NULL && schemaName != NULL)
+			{
+				char	   *compactionContext =
+					psprintf("compacting iceberg table %s",
+							 quote_qualified_identifier(schemaName, relationName));
+
+				edata->context = edata->context != NULL
+					? psprintf("%s\n%s", edata->context, compactionContext)
+					: compactionContext;
+			}
+
 			/* continue unless it was a cancellation */
 			if (edata->sqlerrcode != ERRCODE_QUERY_CANCELED)
 				edata->elevel = WARNING;
@@ -937,6 +966,9 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 			continueCompaction = false;
 		}
 		PG_END_TRY();
+
+		if (roundSucceeded)
+			AddCompactionStats(&runStats, &roundStats);
 
 		/* rotate into a new transaction to release locks and save progress */
 		PopActiveSnapshot();
@@ -988,6 +1020,22 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 						positionDeleteSuffix,
 						tableSize, fileCount, liveRowCount)));
 	}
+}
+
+
+/*
+ * AddCompactionStats adds the counts of one compaction round to the totals.
+ */
+static void
+AddCompactionStats(CompactionStats * total, CompactionStats * round)
+{
+	total->filesRemoved += round->filesRemoved;
+	total->bytesRemoved += round->bytesRemoved;
+	total->rowsRemoved += round->rowsRemoved;
+	total->filesAdded += round->filesAdded;
+	total->bytesAdded += round->bytesAdded;
+	total->rowsAdded += round->rowsAdded;
+	total->positionDeletedRowsResolved += round->positionDeletedRowsResolved;
 }
 
 
