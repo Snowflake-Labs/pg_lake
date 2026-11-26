@@ -253,7 +253,7 @@
  	}
 --- a/src/common/multi_file/multi_file_column_mapper.cpp
 +++ b/src/common/multi_file/multi_file_column_mapper.cpp
-@@ -537,6 +537,53 @@
+@@ -537,6 +537,54 @@
  	return result;
  }
  
@@ -278,7 +278,8 @@
 +	auto compare_child = [&result](const MultiFileColumnDefinition &global_child,
 +	                               const vector<MultiFileColumnDefinition> &local_children) {
 +		for (auto &local_child : local_children) {
-+			if (!local_child.identifier.IsNull() && local_child.identifier == global_child.identifier) {
++			if (!local_child.identifier.IsNull() && !global_child.identifier.IsNull() &&
++			    local_child.identifier == global_child.identifier) {
 +				result = MaxValue(result, CompareNesting(global_child, local_child));
 +				return;
 +			}
@@ -307,7 +308,7 @@
  static ColumnMapResult MapColumn(ClientContext &context, const MultiFileColumnDefinition &global_column,
                                   const ColumnIndex &global_index,
                                   const vector<MultiFileColumnDefinition> &local_columns, const ColumnMapper &mapper,
-@@ -563,7 +610,7 @@
+@@ -563,7 +611,7 @@
  	}
  
  	mapping = make_uniq<MultiFileIndexMapping>(mapping_idx);
@@ -316,7 +317,7 @@
  		// not a struct - map the column directly
  		result.column_map = Value(local_column.name);
  		result.column_index = make_uniq<ColumnIndex>(local_id.GetId());
-@@ -745,6 +792,15 @@
+@@ -745,6 +793,15 @@
  			continue;
  		}
  
