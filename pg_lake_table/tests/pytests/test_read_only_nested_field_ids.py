@@ -262,6 +262,23 @@ def test_file_that_nests_a_field_differently_is_refused(pgduck_conn, s3):
     pgduck_conn.rollback()
 
 
+def test_struct_with_field_ids_read_without_a_schema(pgduck_conn, s3):
+    """A file whose struct fields have field ids, read without a schema, has no
+    field ids in the scan's columns to compare the file's against."""
+    path = f"s3://{TEST_BUCKET}/nested_ids_{uuid.uuid4().hex[:8]}/f.parquet"
+    run_command(
+        f"""COPY (SELECT 1 AS id, {{'a': 2, 'b': 'x'}} AS s) TO '{path}'
+            (FORMAT PARQUET, FIELD_IDS {{id: 1, s: {{__duckdb_field_id: 2, a: 3, b: 4}}}})""",
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
+
+    assert run_query(
+        f"SELECT id, s::VARCHAR FROM read_parquet(['{path}'])", pgduck_conn
+    ) == [[1, "{'a': 2, 'b': x}"]]
+    pgduck_conn.commit()
+
+
 def test_promoted_struct_field(rest_namespace):
     namespace, catalog, pg_conn = rest_namespace
     table = catalog.create_table(
