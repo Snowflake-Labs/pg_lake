@@ -102,18 +102,16 @@ static List *CollectAdjacentOpsOfType(List *operations, ListCell **cursor,
  * in the table. If dataOnly is true, only data files are returned. The optional snapshot
  * can be used to get a consistent view of the catalog.
  * It returns the data files that were updated before the given timestamp.
- * The list goes through a hash keyed by file id, so it does not keep the
- * order orderBy asks for.
  */
 List *
 GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-							 bool forUpdate, char *orderBy, Snapshot snapshot)
+							 bool forUpdate, Snapshot snapshot)
 {
 	List	   *partitionTransforms = AllPartitionTransformList(relationId);
 
 	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly,
 																 newFilesOnly, forUpdate,
-																 orderBy, snapshot,
+																 snapshot,
 																 partitionTransforms,
 																 false /* skipColumnStats */ );
 
@@ -130,7 +128,6 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  * If dataOnly is true, position deletes are excluded.
  * If forUpdate is true, files are locked with FOR UPDATE.
  * If newFilesOnly is true, only data files that are added in the current transaction are returned.
- * If orderBy is not null, it is used to sort results.
  * If snapshot is set, it is used for the query.
  * If skipColumnStats is true, the per-column min/max stats are not loaded.
  * Callers that only need file-level info (path, id, row count, partition) can
@@ -139,7 +136,7 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  */
 HTAB *
 GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-								 bool forUpdate, char *orderBy, Snapshot snapshot,
+								 bool forUpdate, Snapshot snapshot,
 								 List *partitionTransforms, bool skipColumnStats)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
@@ -219,11 +216,6 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 							   "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
 							   "                       AND NOT a.attisdropped)"
 							   ") sma USING (table_name, path)");
-
-
-	if (orderBy != NULL)
-		appendStringInfo(&metadataQuery, " order by %s",
-						 quote_identifier(orderBy));
 
 
 	/*
@@ -389,11 +381,11 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
  */
 HTAB *
 GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-									   bool forUpdate, char *orderBy, Snapshot snapshot,
+									   bool forUpdate, Snapshot snapshot,
 									   List *partitionTransforms, bool skipColumnStats)
 {
 	HTAB	   *filesById = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
-															 forUpdate, orderBy, snapshot,
+															 forUpdate, snapshot,
 															 partitionTransforms, skipColumnStats);
 
 	HTAB	   *filesByPath = CreateDataFilesByPathHash();

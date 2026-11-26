@@ -1327,7 +1327,6 @@ GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTim
 	/* we're going to rewrite files, so lock them */
 	bool		forUpdate = true;
 
-	char	   *orderBy = NULL;
 	Snapshot	snapshot = NULL;
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
@@ -1340,7 +1339,7 @@ GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTim
 	bool		skipColumnStats = true;
 
 	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
-																 forUpdate, orderBy, snapshot,
+																 forUpdate, snapshot,
 																 partitionTransforms,
 																 skipColumnStats);
 	List	   *dataFiles = TableDataFileHashToList(dataFilesHash);

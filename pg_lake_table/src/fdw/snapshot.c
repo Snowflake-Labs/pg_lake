@@ -218,7 +218,7 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		bool		newFilesOnly = false;
 		List	   *dataFiles =
 			GetTableDataFilesFromCatalog(relationId, dataOnly, newFilesOnly,
-										 isResultRelation, NULL, snapshot);
+										 isResultRelation, snapshot);
 
 		/* prune the data files based on the filters in the query execution */
 		List	   *prunedDataFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);
