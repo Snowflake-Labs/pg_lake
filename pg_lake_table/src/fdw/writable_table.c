@@ -116,6 +116,7 @@ static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
 static bool ShouldRewriteAfterDeletions(int64 sourceRowCount, uint64 totalDeletedRowCount);
 static CompactionDataFileHashEntry * GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime,
 																	   bool forceMerge, bool forceCompactDeletions);
+static int	CompareDataFilesByCreationTime(const ListCell *a, const ListCell *b);
 static HTAB *CreateCompactionDataFileHash(void);
 static HTAB *GroupDataFilesByPartition(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge);
 static List *FilterCompactionCandidates(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge,
@@ -1326,16 +1327,26 @@ GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTim
 	/* we're going to rewrite files, so lock them */
 	bool		forUpdate = true;
 
-	/* compact oldest files first */
-	char	   *orderBy = "updated_time";
-
+	char	   *orderBy = NULL;
 	Snapshot	snapshot = NULL;
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
+	List	   *partitionTransforms = AllPartitionTransformList(relationId);
 
-	/* fetch all data files from catalog */
-	List	   *dataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly, newFilesOnly,
-														 forUpdate, orderBy, snapshot);
+	/*
+	 * Candidates are picked by file-level counts alone; the column stats
+	 * would add a row per file per column, all held in memory at once.
+	 */
+	bool		skipColumnStats = true;
+
+	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
+																 forUpdate, orderBy, snapshot,
+																 partitionTransforms,
+																 skipColumnStats);
+	List	   *dataFiles = TableDataFileHashToList(dataFilesHash);
+
+	/* compact oldest files first; the hash does not keep any order */
+	list_sort(dataFiles, CompareDataFilesByCreationTime);
 
 	/* group data files by partition spec and partition tuple */
 	HTAB	   *dataFilesPerPartition = GroupDataFilesByPartition(dataFiles, compactionStartTime, forceMerge);
@@ -1542,6 +1553,26 @@ RecordAddedFile(CompactionStats * runStats, int64 fileSize, int64 rowCount)
 	runStats->filesAdded++;
 	runStats->bytesAdded += fileSize;
 	runStats->rowsAdded += rowCount;
+}
+
+
+/*
+ * CompareDataFilesByCreationTime orders data files oldest first, and files
+ * created at the same time by id.
+ */
+static int
+CompareDataFilesByCreationTime(const ListCell *a, const ListCell *b)
+{
+	TableDataFile *dataFileA = lfirst(a);
+	TableDataFile *dataFileB = lfirst(b);
+
+	if (dataFileA->stats.creationTime != dataFileB->stats.creationTime)
+		return dataFileA->stats.creationTime < dataFileB->stats.creationTime ? -1 : 1;
+
+	if (dataFileA->fileId != dataFileB->fileId)
+		return dataFileA->fileId < dataFileB->fileId ? -1 : 1;
+
+	return 0;
 }
 
 

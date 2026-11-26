@@ -88,7 +88,6 @@ static void RemoveDataFileFromTable(Oid relationId, const char *path);
 static void RemoveAllDataFilesFromCatalog(Oid relationId);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
-static List *TableDataFileHashToList(HTAB *dataFiles);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
 static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
@@ -103,6 +102,8 @@ static List *CollectAdjacentOpsOfType(List *operations, ListCell **cursor,
  * in the table. If dataOnly is true, only data files are returned. The optional snapshot
  * can be used to get a consistent view of the catalog.
  * It returns the data files that were updated before the given timestamp.
+ * The list goes through a hash keyed by file id, so it does not keep the
+ * order orderBy asks for.
  */
 List *
 GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
@@ -732,9 +733,10 @@ CreateDataFilesByPathHash(void)
 
 
 /*
- * TableDataFileHashToList converts a hash table of data files to a list.
+ * TableDataFileHashToList converts a hash table of data files to a list, in
+ * hash order.
  */
-static List *
+List *
 TableDataFileHashToList(HTAB *dataFiles)
 {
 	List	   *result = NIL;
