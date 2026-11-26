@@ -370,9 +370,9 @@ MergeOverlappingRelids(List *joinedRelids)
 /*
  * IsAlreadyJoined returns whether the relations of the given clause are all
  * joined, directly or through other relations, by the equalities in
- * joinedRelids. DuckDB then already uses
- * a hash join and evaluates the clause as a filter, so splitting it would
- * only run the join once more per arm.
+ * joinedRelids. DuckDB then already uses a hash join and evaluates the
+ * clause as a filter, so splitting it would only run the join once more per
+ * arm.
  */
 static bool
 IsAlreadyJoined(Node *clause, List *joinedRelids)
