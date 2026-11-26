@@ -110,6 +110,7 @@ typedef struct ColumnToFieldIdMapping
 	int16		typLen;
 }			ColumnToFieldIdMapping;
 
+static HTAB *FieldIdsUsedInFilters(Oid relationId, List *baseRestrictInfoList);
 static HTAB *CreateFieldIdMappingHash(void);
 static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
 								   PgLakeTableProperties tableProperties,
@@ -199,8 +200,6 @@ List *
 PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, PruneType pruneType)
 {
 	List	   *retainedDataFiles = NIL;
-	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
-	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
 
 	if ((!EnableDataFilePruning && !EnablePartitionPruning) ||
 		!IsIcebergTable(relationId))
@@ -220,11 +219,17 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 		return dataFiles;
 
 	/*
+	 * Map the filtered columns to field ids once here, rather than for each
+	 * data file.
+	 */
+	HTAB	   *fieldIdsUsedInQuery = FieldIdsUsedInFilters(relationId, baseRestrictInfoList);
+
+	/*
 	 * If there are no filters on columns, there is no meaningful pruning we
 	 * can do. We check this after the special case of no clauses + full
 	 * match, since that also has no column filters but we still want pruning.
 	 */
-	if (columnsUsedInFilters == NIL)
+	if (fieldIdsUsedInQuery == NULL)
 		return pruneType == FULL_MATCH ? NIL : dataFiles;
 
 	/*
@@ -237,15 +242,6 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	 * predicated_implied_by requires a simple clause list.
 	 */
 	List	   *clauses = ExtractClausesFromBaseRestrictInfos(baseRestrictInfoList);
-
-	/*
-	 * Create a hash table to store the mapping of attrNo->fieldId, column for
-	 * the columns used in the filters. We do this here to avoid doing this
-	 * for each data file.
-	 */
-	HTAB	   *fieldIdsUsedInQuery = CreateFieldIdMappingHash();
-
-	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId, tableProperties, columnsUsedInFilters);
 
 	/* get partition transforms for the fields used in the query */
 	List	   *partitionFieldsUsedInQuery = GetPartitionSpecFieldsUsedInQuery(relationId, fieldIdsUsedInQuery);
@@ -324,15 +320,10 @@ ColumnStatsFieldIdsForPruning(Oid relationId, List *baseRestrictInfoList)
 	if (!EnableDataFilePruning || !IsIcebergTable(relationId))
 		return NIL;
 
-	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
+	HTAB	   *fieldIdsUsedInQuery = FieldIdsUsedInFilters(relationId, baseRestrictInfoList);
 
-	if (columnsUsedInFilters == NIL)
+	if (fieldIdsUsedInQuery == NULL)
 		return NIL;
-
-	HTAB	   *fieldIdsUsedInQuery = CreateFieldIdMappingHash();
-
-	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId,
-						   GetPgLakeTableProperties(relationId), columnsUsedInFilters);
 
 	List	   *fieldIds = NIL;
 	HASH_SEQ_STATUS status;
@@ -345,6 +336,29 @@ ColumnStatsFieldIdsForPruning(Oid relationId, List *baseRestrictInfoList)
 	hash_destroy(fieldIdsUsedInQuery);
 
 	return fieldIds;
+}
+
+
+/*
+ * FieldIdsUsedInFilters returns the attrNo => field id mapping of the filtered
+ * columns that pruning can use, or NULL if the filters use no columns.
+ * PruneDataFiles and ColumnStatsFieldIdsForPruning must agree on these fields,
+ * or the scan would leave out stats that pruning reads.
+ */
+static HTAB *
+FieldIdsUsedInFilters(Oid relationId, List *baseRestrictInfoList)
+{
+	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
+
+	if (columnsUsedInFilters == NIL)
+		return NULL;
+
+	HTAB	   *fieldIdsUsedInQuery = CreateFieldIdMappingHash();
+
+	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId,
+						   GetPgLakeTableProperties(relationId), columnsUsedInFilters);
+
+	return fieldIdsUsedInQuery;
 }
 
 
