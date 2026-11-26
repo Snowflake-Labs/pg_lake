@@ -406,13 +406,14 @@ def test_simple_data_pruning_for_data_types(
         )
         assert fetch_data_files_used(results) == "2"
 
-    # we don't prune based on NULL values
+    # An identity partition on either column rules out these non-null files.
+    expected_files = "0" if "identity" in partition_type else "4"
     for tbl_name in table_list:
         results = run_query(
-            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 IS NULL and col2 IS NULL",
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{tbl_name} WHERE col1 IS NULL and col2 IS NULL",
             pg_conn,
         )
-        assert fetch_data_files_used(results) == "4"
+        assert fetch_data_files_used(results) == expected_files
 
     # we don't prune based on NULL values
     for tbl_name in table_list:
@@ -950,12 +951,11 @@ def test_pruning_for_null_values(
     )
     assert fetch_data_files_used(results) == "2"
 
-    # IS NULL does not have impact on the pruning
-    results = run_query(
-        f"{explain_prefix} SELECT * FROM test_pruning_for_null_values.nulls WHERE col1 IS NULL",
-        pg_conn,
-    )
-    assert fetch_data_files_used(results) == "4"
+    # IS NULL scans only the two null partition files.
+    query = "SELECT col1 FROM test_pruning_for_null_values.nulls WHERE col1 IS NULL"
+    results = run_query(explain_prefix + query, pg_conn)
+    assert fetch_data_files_used(results) == "2"
+    assert [row[0] for row in run_query(query, pg_conn)] == [None, None]
 
     # IS [NOT] NULL does have impact on the pruning
     results = run_query(
