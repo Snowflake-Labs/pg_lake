@@ -1844,8 +1844,10 @@ RewriteFuncExprJsonbArrayLength(Node *node, void *context)
 
 /*
  * RewriteFuncExprEncode rewrites encode(bytea, 'base64|hex') function calls into
- * to_base64(bytea) or lower(to_hex(bytea)) function calls: DuckDB's to_hex()
- * produces uppercase hex digits, where Postgres's encode() produces lowercase.
+ * base64_encode_pg(bytea) or lower(to_hex(bytea)) function calls: DuckDB's
+ * to_base64() writes one line, where encode() breaks it every 76 characters,
+ * and DuckDB's to_hex() produces uppercase hex digits, where encode()
+ * produces lowercase.
  */
 static Node *
 RewriteFuncExprEncode(Node *node, void *context)
@@ -1875,13 +1877,12 @@ RewriteFuncExprEncode(Node *node, void *context)
 	if (strcasecmp(formatText, "base64") != 0 && strcasecmp(formatText, "hex") != 0)
 		return node;
 
-	/* rewrite to to_base64(bytea) */
 	List	   *funcName;
 
 	if (strcasecmp(formatText, "base64") == 0)
 	{
 		funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
-							  makeString("to_base64"));
+							  makeString("base64_encode_pg"));
 	}
 	else
 	{
@@ -1906,7 +1907,9 @@ RewriteFuncExprEncode(Node *node, void *context)
 
 /*
  * RewriteFuncExprDecode rewrites decode(text, 'base64|hex') function calls into
- * from_base64(text) or from_hex(text) function calls.
+ * base64_decode_pg(text) or hex_decode_pg(text) function calls: DuckDB's
+ * from_base64() and from_hex() reject the spaces, tabs and line breaks
+ * Postgres's decode() skips.
  */
 static Node *
 RewriteFuncExprDecode(Node *node, void *context)
@@ -1936,18 +1939,17 @@ RewriteFuncExprDecode(Node *node, void *context)
 	if (strcasecmp(formatText, "base64") != 0 && strcasecmp(formatText, "hex") != 0)
 		return node;
 
-	/* rewrite to from_base64(text) */
 	List	   *funcName;
 
 	if (strcasecmp(formatText, "base64") == 0)
 	{
 		funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
-							  makeString("from_base64"));
+							  makeString("base64_decode_pg"));
 	}
 	else
 	{
 		funcName = list_make2(makeString(PG_LAKE_INTERNAL_NSP),
-							  makeString("from_hex"));
+							  makeString("hex_decode_pg"));
 	}
 
 	Oid			argTypes[] = {TEXTOID};

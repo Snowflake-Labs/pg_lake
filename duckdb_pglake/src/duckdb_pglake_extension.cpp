@@ -151,6 +151,254 @@ inline void InitcapPG(DataChunk &args, ExpressionState &state, Vector &result)
 }
 
 
+static const char PgBase64Chars[] =
+	"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static const int8_t PgBase64Lookup[128] = {
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 62, -1, -1, -1, 63,
+	52, 53, 54, 55, 56, 57, 58, 59, 60, 61, -1, -1, -1, -1, -1, -1,
+	-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
+	15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, -1, -1, -1, -1, -1,
+	-1, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40,
+	41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, -1, -1, -1, -1, -1,
+};
+
+static const int8_t PgHexLookup[128] = {
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	0, 1, 2, 3, 4, 5, 6, 7, 8, 9, -1, -1, -1, -1, -1, -1,
+	-1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, 10, 11, 12, 13, 14, 15, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+	-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1,
+};
+
+static inline bool IsPgDecodeWhitespace(char c)
+{
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+/* PgBase64Value returns the 6 bits c stands for, or -1 if it is no base64 character */
+static inline int PgBase64Value(char c)
+{
+	unsigned char u = (unsigned char) c;
+
+	return u < 128 ? PgBase64Lookup[u] : -1;
+}
+
+/*
+ * PgCharLength returns the length of the UTF-8 character at s, which error
+ * messages quote whole, as Postgres's pg_mblen() does.
+ */
+static inline idx_t PgCharLength(const char *s, const char *end)
+{
+	unsigned char c = (unsigned char) *s;
+	idx_t len = 1;
+
+	if ((c & 0xE0) == 0xC0)
+		len = 2;
+	else if ((c & 0xF0) == 0xE0)
+		len = 3;
+	else if ((c & 0xF8) == 0xF0)
+		len = 4;
+
+	return MinValue<idx_t>(len, end - s);
+}
+
+/*
+ * Base64EncodePG implements Postgres's encode(bytea, 'base64'), a port of
+ * pg_base64_encode(): a line break follows every 76 characters of full
+ * groups, the last full group included, but not the padded group that ends
+ * the text when the input length is not a multiple of 3.
+ */
+inline void Base64EncodePG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	UnaryExecutor::Execute<string_t, string_t>(
+		args.data[0], result, args.size(),
+		[&](string_t input) {
+			auto src = reinterpret_cast<const unsigned char *>(input.GetData());
+			idx_t len = input.GetSize();
+			idx_t full_groups = len / 3;
+			idx_t encoded_len = (len + 2) / 3 * 4 + full_groups / 19;
+
+			auto encoded = StringVector::EmptyString(result, encoded_len);
+			char *dst = encoded.GetDataWriteable();
+			char *p = dst;
+
+			for (idx_t group_index = 0; group_index < full_groups; group_index++) {
+				const unsigned char *g = src + group_index * 3;
+				uint32_t group = ((uint32_t) g[0] << 16) | ((uint32_t) g[1] << 8) | g[2];
+
+				*p++ = PgBase64Chars[(group >> 18) & 0x3f];
+				*p++ = PgBase64Chars[(group >> 12) & 0x3f];
+				*p++ = PgBase64Chars[(group >> 6) & 0x3f];
+				*p++ = PgBase64Chars[group & 0x3f];
+
+				/* 19 groups make a line of 76 characters */
+				if (group_index % 19 == 18)
+					*p++ = '\n';
+			}
+
+			idx_t rest = len - full_groups * 3;
+
+			if (rest > 0) {
+				const unsigned char *g = src + full_groups * 3;
+				uint32_t group = ((uint32_t) g[0] << 16) | (rest == 2 ? (uint32_t) g[1] << 8 : 0);
+
+				*p++ = PgBase64Chars[(group >> 18) & 0x3f];
+				*p++ = PgBase64Chars[(group >> 12) & 0x3f];
+				*p++ = (rest == 2) ? PgBase64Chars[(group >> 6) & 0x3f] : '=';
+				*p++ = '=';
+			}
+
+			D_ASSERT(idx_t(p - dst) == encoded_len);
+			encoded.Finalize();
+			return encoded;
+		});
+}
+
+/*
+ * Base64DecodePG implements Postgres's decode(text, 'base64'), a port of
+ * pg_base64_decode(): spaces, tabs and line breaks are skipped, and invalid
+ * input fails with Postgres's messages.
+ */
+inline void Base64DecodePG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	std::vector<char> decoded;
+
+	UnaryExecutor::Execute<string_t, string_t>(
+		args.data[0], result, args.size(),
+		[&](string_t input) {
+			const char *s = input.GetData();
+			const char *srcend = s + input.GetSize();
+			int pos = 0;
+			int end = 0;
+			uint32_t buf = 0;
+
+			if (decoded.size() < input.GetSize() / 4 * 3 + 3)
+				decoded.resize(input.GetSize() / 4 * 3 + 3);
+
+			char *dst = decoded.data();
+			char *p = dst;
+
+			while (s < srcend) {
+				/* whole groups of base64 characters, until whitespace or padding */
+				if (pos == 0 && end == 0 && srcend - s >= 4) {
+					int b0 = PgBase64Value(s[0]);
+					int b1 = PgBase64Value(s[1]);
+					int b2 = PgBase64Value(s[2]);
+					int b3 = PgBase64Value(s[3]);
+
+					if ((b0 | b1 | b2 | b3) >= 0) {
+						uint32_t group = (b0 << 18) | (b1 << 12) | (b2 << 6) | b3;
+
+						*p++ = (char) ((group >> 16) & 255);
+						*p++ = (char) ((group >> 8) & 255);
+						*p++ = (char) (group & 255);
+						s += 4;
+						continue;
+					}
+				}
+
+				char c = *s++;
+				int b;
+
+				if (IsPgDecodeWhitespace(c))
+					continue;
+
+				if (c == '=') {
+					if (!end) {
+						if (pos == 2)
+							end = 1;
+						else if (pos == 3)
+							end = 2;
+						else
+							throw InvalidInputException("unexpected \"=\" while decoding base64 sequence");
+					}
+					b = 0;
+				} else {
+					b = PgBase64Value(c);
+					if (b < 0)
+						throw InvalidInputException(
+							"invalid symbol \"%s\" found while decoding base64 sequence",
+							std::string(s - 1, PgCharLength(s - 1, srcend)));
+				}
+
+				buf = (buf << 6) + b;
+				pos++;
+				if (pos == 4) {
+					*p++ = (char) ((buf >> 16) & 255);
+					if (end == 0 || end > 1)
+						*p++ = (char) ((buf >> 8) & 255);
+					if (end == 0 || end > 2)
+						*p++ = (char) (buf & 255);
+					buf = 0;
+					pos = 0;
+				}
+			}
+
+			if (pos != 0)
+				throw InvalidInputException("invalid base64 end sequence");
+
+			return StringVector::AddStringOrBlob(result, dst, p - dst);
+		});
+}
+
+/*
+ * HexDecodePG implements Postgres's decode(text, 'hex'), a port of
+ * hex_decode_safe(): spaces, tabs and line breaks between pairs of digits
+ * are skipped, and invalid input fails with Postgres's messages.
+ */
+inline void HexDecodePG(DataChunk &args, ExpressionState &state, Vector &result)
+{
+	std::vector<char> decoded;
+
+	UnaryExecutor::Execute<string_t, string_t>(
+		args.data[0], result, args.size(),
+		[&](string_t input) {
+			const char *s = input.GetData();
+			const char *srcend = s + input.GetSize();
+
+			if (decoded.size() < input.GetSize() / 2 + 1)
+				decoded.resize(input.GetSize() / 2 + 1);
+
+			char *dst = decoded.data();
+			char *p = dst;
+
+			while (s < srcend) {
+				if (IsPgDecodeWhitespace(*s)) {
+					s++;
+					continue;
+				}
+
+				unsigned char c1 = (unsigned char) *s;
+				int v1 = c1 < 127 ? PgHexLookup[c1] : -1;
+
+				if (v1 < 0)
+					throw InvalidInputException("invalid hexadecimal digit: \"%s\"",
+												std::string(s, PgCharLength(s, srcend)));
+				s++;
+				if (s >= srcend)
+					throw InvalidInputException("invalid hexadecimal data: odd number of digits");
+
+				unsigned char c2 = (unsigned char) *s;
+				int v2 = c2 < 127 ? PgHexLookup[c2] : -1;
+
+				if (v2 < 0)
+					throw InvalidInputException("invalid hexadecimal digit: \"%s\"",
+												std::string(s, PgCharLength(s, srcend)));
+				s++;
+				*p++ = (char) ((v1 << 4) | v2);
+			}
+
+			return StringVector::AddStringOrBlob(result, dst, p - dst);
+		});
+}
+
+
 /*
  * GetRawUuidUpper returns the first 8 bytes of a UUID as a big-endian
  * integer.  DuckDB stores UUIDs as hugeint with the most significant bit
@@ -767,6 +1015,15 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	auto initcap_function = ScalarFunction("initcap_pg", {LogicalType::VARCHAR}, LogicalType::VARCHAR, InitcapPG);
 	loader.RegisterFunction(initcap_function);
+
+	auto base64_encode_function = ScalarFunction("base64_encode_pg", {LogicalType::BLOB}, LogicalType::VARCHAR, Base64EncodePG);
+	loader.RegisterFunction(base64_encode_function);
+
+	auto base64_decode_function = ScalarFunction("base64_decode_pg", {LogicalType::VARCHAR}, LogicalType::BLOB, Base64DecodePG);
+	loader.RegisterFunction(base64_decode_function);
+
+	auto hex_decode_function = ScalarFunction("hex_decode_pg", {LogicalType::VARCHAR}, LogicalType::BLOB, HexDecodePG);
+	loader.RegisterFunction(hex_decode_function);
 
 	auto uuid_extract_timestamp_function = ScalarFunction("uuid_extract_timestamp_pg", {LogicalType::UUID, LogicalType::INTEGER}, LogicalType::TIMESTAMP_TZ, UuidExtractTimestampPG);
 	loader.RegisterFunction(uuid_extract_timestamp_function);
