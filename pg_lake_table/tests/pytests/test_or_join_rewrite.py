@@ -140,6 +140,14 @@ test_cases = [
            WHERE l.alt_id = a.id OR l.alt_id = a.alt_location_id""",
         False,
     ),
+    (
+        "already_joined_through_third_table",
+        """SELECT a.id, b.id, l.name FROM or_join.fa a
+           JOIN or_join.fb b ON a.id = b.a_id
+           JOIN or_join.fl l ON l.id = b.location_id
+           WHERE l.alt_id = a.id OR l.alt_id = a.alt_location_id""",
+        False,
+    ),
     # Each branch would run a MATERIALIZED CTE again
     (
         "materialized_cte",

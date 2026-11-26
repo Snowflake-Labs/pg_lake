@@ -108,6 +108,7 @@ static bool FindOrClause(Node *quals, int joinRtIndex, List *joinedRelids,
 						 OrJoinCondition * condition);
 static List *CollectJoinedRelids(Node *jtnode, List *joinedRelids);
 static List *AddJoinedRelids(Node *quals, List *joinedRelids);
+static List *MergeOverlappingRelids(List *joinedRelids);
 static bool IsAlreadyJoined(Node *clause, List *joinedRelids);
 static bool HasMaterializedCte(Query *query);
 static bool IsOrJoinClause(Node *clause);
@@ -261,7 +262,8 @@ static bool
 FindOrJoinCondition(Query *query, OrJoinCondition * condition)
 {
 	FromExpr   *fromExpr = query->jointree;
-	List	   *joinedRelids = CollectJoinedRelids((Node *) fromExpr, NIL);
+	List	   *joinedRelids =
+		MergeOverlappingRelids(CollectJoinedRelids((Node *) fromExpr, NIL));
 	ListCell   *lc;
 
 	if (FindOrClause(fromExpr->quals, 0, joinedRelids, condition))
@@ -332,8 +334,43 @@ AddJoinedRelids(Node *quals, List *joinedRelids)
 
 
 /*
+ * MergeOverlappingRelids merges the sets of relations in joinedRelids that
+ * share a relation, since a chain of equalities such as a.id = b.a_id and
+ * b.id = c.b_id hash joins a and c as well.
+ */
+static List *
+MergeOverlappingRelids(List *joinedRelids)
+{
+	List	   *mergedRelids = NIL;
+	ListCell   *lc;
+
+	foreach(lc, joinedRelids)
+	{
+		Relids		relids = bms_copy((Relids) lfirst(lc));
+		List	   *disjointRelids = NIL;
+		ListCell   *mergedCell;
+
+		foreach(mergedCell, mergedRelids)
+		{
+			Relids		otherRelids = (Relids) lfirst(mergedCell);
+
+			if (bms_overlap(relids, otherRelids))
+				relids = bms_add_members(relids, otherRelids);
+			else
+				disjointRelids = lappend(disjointRelids, otherRelids);
+		}
+
+		mergedRelids = lappend(disjointRelids, relids);
+	}
+
+	return mergedRelids;
+}
+
+
+/*
  * IsAlreadyJoined returns whether the relations of the given clause are all
- * joined by one of the equalities in joinedRelids. DuckDB then already uses
+ * joined, directly or through other relations, by the equalities in
+ * joinedRelids. DuckDB then already uses
  * a hash join and evaluates the clause as a filter, so splitting it would
  * only run the join once more per arm.
  */
