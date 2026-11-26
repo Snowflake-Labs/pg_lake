@@ -734,3 +734,149 @@ def test_catalog_commit_error_after_commit(
         == expected_rows
     )
     pg_conn.commit()
+
+
+def test_catalog_commit_schema_changed_elsewhere(
+    pg_conn, commit_mode_schema, with_default_location, installcheck
+):
+    """A schema or partition change by another engine stops reads and writes,
+    since PostgreSQL holds the field ids and partition specs we write with."""
+    if installcheck:
+        return
+
+    from pyiceberg.types import StringType
+
+    other_engine = create_iceberg_rest_catalog(SCHEMA)
+
+    for table_name in ["schema_changed", "spec_changed", "changed_after_read"]:
+        run_command(
+            f"""CREATE TABLE {SCHEMA}.{table_name} USING iceberg
+                WITH (catalog = 'rest', commit_mode = 'catalog')
+                AS SELECT 1::bigint AS a, 'x' AS b""",
+            pg_conn,
+        )
+        pg_conn.commit()
+
+    with other_engine.load_table(f"{SCHEMA}.schema_changed").update_schema() as update:
+        update.add_column("c", StringType())
+    with other_engine.load_table(f"{SCHEMA}.spec_changed").update_spec() as update:
+        update.add_identity("b")
+
+    for table_name, kind in [
+        ("schema_changed", "schema"),
+        ("spec_changed", "partitioning"),
+    ]:
+        for statement in [
+            f"SELECT count(*) FROM {SCHEMA}.{table_name}",
+            f"INSERT INTO {SCHEMA}.{table_name} VALUES (2, 'y')",
+            f"ALTER TABLE {SCHEMA}.{table_name} ADD COLUMN d int",
+        ]:
+            error = run_command(statement, pg_conn, raise_error=False)
+            if error is None:
+                error = run_command("COMMIT", pg_conn, raise_error=False)
+            assert (
+                f'{kind} of table "{table_name}" was changed in the REST catalog'
+                in str(error)
+            ), statement
+            pg_conn.rollback()
+
+    # a change after the transaction read the table fails the commit
+    assert (
+        run_query(f"SELECT count(*) FROM {SCHEMA}.changed_after_read", pg_conn)[0][0]
+        == 1
+    )
+    with other_engine.load_table(
+        f"{SCHEMA}.changed_after_read"
+    ).update_schema() as update:
+        update.add_column("c", StringType())
+    run_command(f"INSERT INTO {SCHEMA}.changed_after_read VALUES (2, 'y')", pg_conn)
+    with pytest.raises(psycopg2.errors.SerializationFailure, match="schema"):
+        pg_conn.commit()
+    pg_conn.rollback()
+
+    # our own schema changes in the transaction are fine
+    run_command(
+        f"""CREATE TABLE {SCHEMA}.altered USING iceberg
+            WITH (catalog = 'rest', commit_mode = 'catalog')
+            AS SELECT 1::bigint AS a""",
+        pg_conn,
+    )
+    pg_conn.commit()
+    assert run_query(f"SELECT count(*) FROM {SCHEMA}.altered", pg_conn)[0][0] == 1
+    run_command(f"ALTER TABLE {SCHEMA}.altered ADD COLUMN b text", pg_conn)
+    run_command(f"INSERT INTO {SCHEMA}.altered VALUES (2, 'y')", pg_conn)
+    run_command(f"ALTER TABLE {SCHEMA}.altered RENAME COLUMN b TO c", pg_conn)
+    pg_conn.commit()
+    assert run_query(
+        f"SELECT array_agg(a ORDER BY a), max(c) FROM {SCHEMA}.altered", pg_conn
+    )[0] == [[1, 2], "y"]
+    pg_conn.commit()
+
+    # also when the ALTER is the first thing the transaction does
+    run_command(f"ALTER TABLE {SCHEMA}.altered ADD COLUMN d int", pg_conn)
+    run_command(f"INSERT INTO {SCHEMA}.altered VALUES (3, 'z', 4)", pg_conn)
+    pg_conn.commit()
+    assert run_query(f"SELECT sum(d) FROM {SCHEMA}.altered", pg_conn)[0][0] == 4
+    pg_conn.commit()
+
+
+def test_catalog_commit_snapshot_expiration(
+    pg_conn, superuser_conn, commit_mode_schema, with_default_location, installcheck
+):
+    """Snapshot expiration keeps the snapshots of branches and tags, and leaves
+    the files of the snapshots it expires to orphan file cleanup."""
+    if installcheck:
+        return
+
+    run_command(
+        f"""CREATE TABLE {SCHEMA}.expiring USING iceberg
+            WITH (catalog = 'rest', commit_mode = 'catalog')
+            AS SELECT 1::bigint AS a""",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    other_engine = create_iceberg_rest_catalog(SCHEMA)
+    other_table = other_engine.load_table(f"{SCHEMA}.expiring")
+    tagged_snapshot_id = other_table.current_snapshot().snapshot_id
+    other_table.manage_snapshots().create_tag(tagged_snapshot_id, "keep").commit()
+
+    # remove the files of the tagged snapshot and of one that is not
+    for statement in [
+        f"DELETE FROM {SCHEMA}.expiring",
+        f"INSERT INTO {SCHEMA}.expiring VALUES (2)",
+        f"DELETE FROM {SCHEMA}.expiring",
+        f"INSERT INTO {SCHEMA}.expiring VALUES (3)",
+    ]:
+        run_command(statement, pg_conn)
+        pg_conn.commit()
+
+    run_command(
+        f"ALTER FOREIGN TABLE {SCHEMA}.expiring OPTIONS (ADD max_snapshot_age '0')",
+        pg_conn,
+    )
+    pg_conn.commit()
+    run_command_outside_tx([f"VACUUM {SCHEMA}.expiring"])
+
+    other_table = other_engine.load_table(f"{SCHEMA}.expiring")
+    snapshot_ids = {snapshot.snapshot_id for snapshot in other_table.snapshots()}
+    assert snapshot_ids == {
+        tagged_snapshot_id,
+        other_table.current_snapshot().snapshot_id,
+    }
+    assert other_table.refs()["keep"].snapshot_id == tagged_snapshot_id
+
+    tagged_rows = other_table.scan(snapshot_id=tagged_snapshot_id).to_arrow()
+    assert tagged_rows.column("a").to_pylist() == [1]
+    assert catalog_rows("expiring") == [3]
+
+    location = other_table.location()
+    assert (
+        run_query(
+            f"""SELECT count(*) FROM lake_engine.deletion_queue
+                WHERE path LIKE '{location}/data/%'""",
+            superuser_conn,
+        )[0][0]
+        == 0
+    )
+    superuser_conn.commit()

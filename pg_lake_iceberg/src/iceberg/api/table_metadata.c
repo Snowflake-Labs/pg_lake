@@ -76,9 +76,11 @@ static void DeleteUnreferencedFiles(Oid relationId, IcebergTableMetadata * metad
 									bool appendOnlyCommit);
 static void SetSnapshotReference(IcebergTableMetadata * metadata, uint64_t snapshotId);
 static void GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
+								  bool keepReferencedSnapshots,
 								  IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
 								  IcebergSnapshot * nonExpiredSnapshots, int *nonExpiredSnapshotCount);
 static bool SnapshotAgeExceeded(IcebergSnapshot * snapshot, int64_t currentTimeMs, int maxAgeInSecs);
+static bool IsSnapshotReferenced(IcebergTableMetadata * metadata, int64_t snapshotId);
 static int32_t MaxSchemaId(IcebergTableSchema * schemas, size_t schemasLength);
 
 /*
@@ -242,7 +244,14 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 		palloc0(sizeof(IcebergSnapshot) * metadata->snapshots_length);
 	int			nonExpiredSnapshotCount = 0;
 
-	GroupExpiredSnapshots(metadata, maxSnapshotAgeInSecs, expiredSnapshots, &expiredSnapshotCount,
+	/*
+	 * Other engines may write a table in catalog commit mode, and add
+	 * branches and tags to it, which removing their snapshot would remove.
+	 */
+	bool		catalogCommit = IsCatalogCommitRestTable(relationId);
+
+	GroupExpiredSnapshots(metadata, maxSnapshotAgeInSecs, catalogCommit,
+						  expiredSnapshots, &expiredSnapshotCount,
 						  nonExpiredSnapshots, &nonExpiredSnapshotCount);
 
 	if (expiredSnapshotCount == 0)
@@ -281,8 +290,14 @@ RemoveOldSnapshotsFromMetadata(Oid relationId, IcebergTableMetadata * metadata,
 						get_rel_name(relationId))));
 	}
 
-	DeleteUnreferencedFiles(relationId, metadata, expiredSnapshots, expiredSnapshotCount, nonExpiredSnapshots, nonExpiredSnapshotCount,
-							appendOnlyCommit);
+	/*
+	 * Our commit cannot assert that another engine did not just start using
+	 * an expired snapshot, so we leave its files to orphan file cleanup.
+	 */
+	if (!catalogCommit)
+		DeleteUnreferencedFiles(relationId, metadata, expiredSnapshots, expiredSnapshotCount,
+								nonExpiredSnapshots, nonExpiredSnapshotCount,
+								appendOnlyCommit);
 
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 	bool		writableRestCatalogTable = catalogType == REST_CATALOG_READ_WRITE;
@@ -520,6 +535,7 @@ AdjustAndRetainMetadataLogs(IcebergTableMetadata * metadata, char *prevMetadataP
 
 static void
 GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
+					  bool keepReferencedSnapshots,
 					  IcebergSnapshot * expiredSnapshots, int *expiredSnapshotCount,
 					  IcebergSnapshot * nonExpiredSnapshots, int *nonExpiredSnapshotCount)
 {
@@ -533,7 +549,9 @@ GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
 
 	for (int snapshotIndex = 0; snapshotIndex < allSnapshotCount; snapshotIndex++)
 	{
-		if (SnapshotAgeExceeded(&allSnapshots[snapshotIndex], currentTimeMs, maxSnapshotAgeInSecs))
+		if (SnapshotAgeExceeded(&allSnapshots[snapshotIndex], currentTimeMs, maxSnapshotAgeInSecs) &&
+			!(keepReferencedSnapshots &&
+			  IsSnapshotReferenced(metadata, allSnapshots[snapshotIndex].snapshot_id)))
 		{
 			expiredSnapshots[(*expiredSnapshotCount)++] = allSnapshots[snapshotIndex];
 		}
@@ -543,6 +561,23 @@ GroupExpiredSnapshots(IcebergTableMetadata * metadata, int maxSnapshotAgeInSecs,
 		}
 	}
 }
+
+/*
+ * IsSnapshotReferenced returns whether a branch or tag of the table points to
+ * the snapshot.
+ */
+static bool
+IsSnapshotReferenced(IcebergTableMetadata * metadata, int64_t snapshotId)
+{
+	for (size_t refIndex = 0; refIndex < metadata->refs_length; refIndex++)
+	{
+		if (metadata->refs[refIndex].snapshot_id == snapshotId)
+			return true;
+	}
+
+	return false;
+}
+
 
 /*
 * SnapshotAgeExceeded checks whether the snapshot is too old based on the

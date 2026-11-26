@@ -27,6 +27,7 @@
 #include "access/xact.h"
 #include "catalog/namespace.h"
 #include "pg_lake/ddl/alter_table.h"
+#include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/ddl/create_table.h"
 #include "pg_lake/ddl/drop_table.h"
 #include "pg_lake/ddl/utility_hook.h"
@@ -473,6 +474,7 @@ _PG_init(void)
 	RegisterPgLakeCustomNodes();
 
 	IcebergRegisterCallbacks();
+	CatalogCommitTableReadHook = ErrorIfCatalogCommitTableChanged;
 
 	/*
 	 * Wire pg_lake_iceberg's OAT_DROP user-mapping hook to the txn-local

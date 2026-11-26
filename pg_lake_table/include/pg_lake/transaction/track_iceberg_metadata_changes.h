@@ -20,6 +20,7 @@
 #include "postgres.h"
 #include "access/hash.h"
 #include "access/xact.h"
+#include "pg_lake/iceberg/metadata_spec.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 
 typedef struct TableMetadataOperationTracker
@@ -94,3 +95,4 @@ extern PGDLLEXPORT void IcebergMetadataSubXactCallback(SubXactEvent event,
 extern PGDLLEXPORT void RecordRestCatalogStagedTable(Oid relationId, const char *uuid);
 extern PGDLLEXPORT void RecordPendingDataFileOperations(Oid relationId, List *metadataOperations);
 extern PGDLLEXPORT List *GetPendingDataFileOperations(Oid relationId);
+extern PGDLLEXPORT void ErrorIfCatalogCommitTableChanged(Oid relationId, IcebergTableMetadata * metadata);

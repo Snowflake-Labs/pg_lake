@@ -25,5 +25,9 @@ extern PGDLLEXPORT List *ApplyIcebergMetadataChanges(Oid relationId, List *metad
 extern PGDLLEXPORT IcebergTableMetadata * GetWritableRestCatalogTableMetadata(Oid relationId, char **metadataLocation);
 extern PGDLLEXPORT IcebergTableMetadata * GetCatalogCommitTableMetadata(Oid relationId, bool copy);
 extern PGDLLEXPORT void GetCatalogCommitTableFiles(Oid relationId, List **dataFiles, List **deleteFiles);
+
+/* checks the table a transaction in catalog commit mode first reads */
+typedef void (*CatalogCommitTableReadHookType) (Oid relationId, IcebergTableMetadata * metadata);
+extern PGDLLEXPORT CatalogCommitTableReadHookType CatalogCommitTableReadHook;
 extern PGDLLEXPORT bool ShouldSkipMetadataChangeToIceberg(List *metadataOperationTypes);
 extern PGDLLEXPORT List *GetMetadataOperationTypes(List *metadataOperations);

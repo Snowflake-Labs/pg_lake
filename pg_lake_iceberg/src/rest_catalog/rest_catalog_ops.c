@@ -2793,9 +2793,10 @@ GetRemoveSnapshotCatalogRequest(List *removedSnapshotIds, Oid relationId)
 /*
  * GetAssertTableStateCatalogRequest creates a RestCatalogRequest whose body
  * holds the commit requirements for a change computed from the given
- * metadata: the table is still the same table, and its main branch still
- * points to the same snapshot. The catalog rejects the commit if another
- * writer committed to the table in the meantime.
+ * metadata: the table is still the same table, its main branch still points
+ * to the same snapshot, and it has the same schema and partition spec. The
+ * catalog rejects the commit if another writer changed the table in the
+ * meantime.
  */
 RestCatalogRequest *
 GetAssertTableStateCatalogRequest(Oid relationId, IcebergTableMetadata * metadata)
@@ -2813,7 +2814,19 @@ GetAssertTableStateCatalogRequest(Oid relationId, IcebergTableMetadata * metadat
 		appendStringInfo(body, "%" PRId64, metadata->current_snapshot_id);
 	else
 		appendStringInfoString(body, "null");
-	appendStringInfoChar(body, '}');
+	appendStringInfoString(body, "},");
+
+	/*
+	 * A schema or partition change adds no snapshot, but our changes are
+	 * written for the schema, partition spec and field ids we read.
+	 */
+	appendStringInfo(body,
+					 "{\"type\":\"assert-current-schema-id\",\"current-schema-id\":%d},"
+					 "{\"type\":\"assert-last-assigned-field-id\",\"last-assigned-field-id\":%d},"
+					 "{\"type\":\"assert-default-spec-id\",\"default-spec-id\":%d},"
+					 "{\"type\":\"assert-last-assigned-partition-id\",\"last-assigned-partition-id\":%d}",
+					 metadata->current_schema_id, metadata->last_column_id,
+					 metadata->default_spec_id, metadata->last_partition_id);
 
 	RestCatalogRequest *request = palloc0(sizeof(RestCatalogRequest));
 

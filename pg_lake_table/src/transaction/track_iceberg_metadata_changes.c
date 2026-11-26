@@ -563,6 +563,51 @@ ForgetPendingDataFile(TableMetadataOperationTracker * opTracker, const char *pat
 
 
 /*
+ * ErrorIfCatalogCommitTableChanged errors if the schema or partition spec
+ * that the transaction first reads from the catalog for a table in catalog
+ * commit mode is not the one PostgreSQL has, because another engine changed
+ * it. The field ids and partition specs we write with come from PostgreSQL.
+ */
+void
+ErrorIfCatalogCommitTableChanged(Oid relationId, IcebergTableMetadata * metadata)
+{
+	TableMetadataOperationTracker *opTracker =
+		TrackedIcebergMetadataOperationsHash != NULL ?
+		hash_search(TrackedIcebergMetadataOperationsHash, &relationId, HASH_FIND, NULL) :
+		NULL;
+
+	/*
+	 * Our own DDL in the transaction already changed the table in PostgreSQL.
+	 * ALTER TABLE reads the table before it, so only DDL that changes the
+	 * table in other ways gets here, and the commit requirements still hold.
+	 */
+	if (opTracker != NULL &&
+		(opTracker->relationAltered || opTracker->relationPartitionByChanged))
+		return;
+
+	IcebergTableSchema *catalogSchema = GetCurrentIcebergTableSchema(metadata);
+	DataFileSchema *postgresSchema = GetDataFileSchemaForTable(relationId);
+
+	if (!AreSchemasEqual(catalogSchema, postgresSchema))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("schema of table \"%s\" was changed in the REST catalog",
+						get_rel_name(relationId)),
+				 errdetail("The current schema in the catalog does not match the "
+						   "columns of the table in PostgreSQL.")));
+
+	if (metadata->default_spec_id != GetCurrentSpecId(relationId))
+		ereport(ERROR,
+				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				 errmsg("partitioning of table \"%s\" was changed in the REST catalog",
+						get_rel_name(relationId)),
+				 errdetail("The default partition spec in the catalog is %d, but "
+						   "PostgreSQL has %d.", metadata->default_spec_id,
+						   GetCurrentSpecId(relationId))));
+}
+
+
+/*
  * GetPendingDataFileOperations returns the data file operations a table in
  * catalog commit mode has in the current transaction.
  */
@@ -2133,6 +2178,13 @@ GetLastPushedIcebergMetadata(const TableMetadataOperationTracker * opTracker)
 	 * rather than reading the file back from storage. Only writable tables
 	 * reach this write-tracking path.
 	 */
+	if (IsCatalogCommitRestTable(relationId))
+	{
+		bool		copy = false;
+
+		return GetCatalogCommitTableMetadata(relationId, copy);
+	}
+
 	if (GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE)
 		return GetWritableRestCatalogTableMetadata(relationId, NULL);
 

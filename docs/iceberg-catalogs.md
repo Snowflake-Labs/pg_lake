@@ -480,10 +480,17 @@ changes. `UPDATE` and `DELETE` always add position delete files, regardless of
 does not compact their data files. PostgreSQL still keeps the table definition and the mapping
 of columns to Iceberg field IDs and partition specs.
 
+PostgreSQL decides the schema and partitioning of these tables. If another engine changes
+the schema or the partition spec in the catalog, reads and writes of the table fail with an
+error, and a commit fails with a serialization failure if the change came after the
+transaction read the table.
+
 Once the catalog accepts a commit its files are live, even if the PostgreSQL transaction
 aborts afterwards, so `VACUUM` does not remove the files of failed writes to these tables.
-Like the files other engines leave behind after a failed commit, they stay in object storage
-until an orphan file cleanup, such as Spark's `remove_orphan_files`, removes them.
+Snapshot expiration keeps the snapshots that branches and tags point to, and does not
+delete the files of the snapshots it expires, since another engine may still use them. Like
+the files other engines leave behind after a failed commit, these files stay in object
+storage until an orphan file cleanup, such as Spark's `remove_orphan_files`, removes them.
 
 Because the catalog makes the decision, a transaction in `catalog` mode cannot also write to
 tables that commit through PostgreSQL: regular tables, Iceberg tables in the PostgreSQL or

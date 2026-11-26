@@ -1566,6 +1566,8 @@ typedef struct CatalogCommitTableSnapshot
 /* CatalogCommitTableSnapshot by relation id, or NULL outside of a transaction */
 static HTAB *CatalogCommitTableSnapshots = NULL;
 
+CatalogCommitTableReadHookType CatalogCommitTableReadHook = NULL;
+
 static CatalogCommitTableSnapshot * GetCatalogCommitTableSnapshot(Oid relationId);
 static void ForgetCatalogCommitTableSnapshots(void *arg);
 
@@ -1675,6 +1677,9 @@ GetCatalogCommitTableSnapshot(Oid relationId)
 	char	   *metadataLocation = pstrdup(result.metadataLocation);
 
 	MemoryContextSwitchTo(oldContext);
+
+	if (CatalogCommitTableReadHook != NULL)
+		CatalogCommitTableReadHook(relationId, metadata);
 
 	tableSnapshot = hash_search(CatalogCommitTableSnapshots, &relationId, HASH_ENTER, NULL);
 	tableSnapshot->metadata = metadata;

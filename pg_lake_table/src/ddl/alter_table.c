@@ -60,6 +60,7 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/util/rel_utils.h"
@@ -342,6 +343,20 @@ ProcessAlterTable(ProcessUtilityParams * processUtilityParams, void *arg)
 	/* if there is an OPTIONS (...) subcommand, perform additional validation */
 	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE)
 		HandleIcebergOptionsChanges(relationId, alterStmt);
+
+	/*
+	 * Read a table in catalog commit mode before we change it, which checks
+	 * that PostgreSQL still has the schema and partitioning of the catalog.
+	 */
+	if (tableType == PG_LAKE_ICEBERG_TABLE_TYPE && IsCatalogCommitRestTable(relationId) &&
+		!IsIcebergTableCreatedInCurrentTransaction(relationId) &&
+		(RequiresNewIcebergSchema(alterStmt) || HasPartitionByAdded(alterStmt) ||
+		 HasPartitionByDropped(alterStmt)))
+	{
+		bool		copy = false;
+
+		(void) GetCatalogCommitTableMetadata(relationId, copy);
+	}
 
 	/*
 	 * Do the actual DDL using internal ProcessUtility. We use
