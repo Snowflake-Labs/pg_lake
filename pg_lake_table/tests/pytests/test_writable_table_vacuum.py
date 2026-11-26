@@ -776,6 +776,162 @@ def test_vacuum_compaction_summary_after_failed_round(
     pg_conn.autocommit = False
 
 
+def make_partition_file_unreadable(s3, pg_conn, superuser_conn, table_name, value):
+    """Remove one data file of the partition from storage and return its path."""
+    path = run_query(
+        f"""
+        SELECT f.path
+        FROM lake_table.files f
+        JOIN lake_table.data_file_partition_values v USING (table_name, id)
+        WHERE f.table_name = '{table_name}'::regclass AND v.value = '{value}'
+        ORDER BY f.id LIMIT 1
+    """,
+        superuser_conn,
+    )[0][0]
+    superuser_conn.rollback()
+    s3.delete_object(Bucket=TEST_BUCKET, Key=path.removeprefix(f"s3://{TEST_BUCKET}/"))
+
+    # pgduck_server keeps a cached copy of the files it writes
+    run_query(f"SELECT lake_file_cache.remove('{path}')", pg_conn)
+    return path
+
+
+def files_per_partition(superuser_conn, table_name):
+    rows = run_query(
+        f"""
+        SELECT v.value, count(*)
+        FROM lake_table.files f
+        JOIN lake_table.data_file_partition_values v USING (table_name, id)
+        WHERE f.table_name = '{table_name}'::regclass
+        GROUP BY v.value ORDER BY v.value
+    """,
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+    return [tuple(row) for row in rows]
+
+
+def test_vacuum_compaction_skips_failed_partition(
+    s3, pg_conn, superuser_conn, extension
+):
+    """A round that fails on one partition does not keep VACUUM from
+    compacting the other partitions."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compaction_skips_failed_partition/"
+
+    pg_conn.autocommit = True
+
+    # partition 1 has the most candidates, so the first round picks it
+    files = {1: 3, 2: 2, 3: 2}
+    inserts = "".join(
+        f"INSERT INTO test_vacuum_compaction_skip VALUES ({p}, 'x');"
+        for p, n in files.items()
+        for _ in range(n)
+    )
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_compaction_skip (p int, value text)
+        USING pg_lake_iceberg
+        WITH (location = '{location}', partition_by = 'p', autovacuum_enabled = 'false');
+        {inserts}
+        SET pg_lake_table.vacuum_compact_min_input_files TO 1;
+        SET client_min_messages TO LOG;
+    """,
+        pg_conn,
+    )
+
+    path = make_partition_file_unreadable(
+        s3, pg_conn, superuser_conn, "test_vacuum_compaction_skip", "1"
+    )
+
+    pg_conn.notices.clear()
+
+    run_command("VACUUM test_vacuum_compaction_skip;", pg_conn)
+
+    warnings = [line for line in pg_conn.notices if line.startswith("WARNING")]
+    assert len(warnings) == 1 and path in warnings[0], pg_conn.notices
+
+    assert files_per_partition(superuser_conn, "test_vacuum_compaction_skip") == [
+        ("1", 3),
+        ("2", 1),
+        ("3", 1),
+    ]
+
+    run_command(
+        f"""
+        RESET client_min_messages;
+        RESET pg_lake_table.vacuum_compact_min_input_files;
+        DROP TABLE test_vacuum_compaction_skip;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.autocommit = False
+
+
+def test_vacuum_compaction_stops_after_failed_rounds(
+    s3, pg_conn, superuser_conn, extension
+):
+    """VACUUM stops compacting a table after three failed rounds, when the
+    failures are unlikely to be about one partition."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compaction_stops_after_failed_rounds/"
+
+    pg_conn.autocommit = True
+
+    # partitions 1 to 3 have the most candidates, so the first three rounds
+    # pick them; partition 4 could be compacted, but comes fourth
+    files = {1: 5, 2: 4, 3: 3, 4: 2}
+    inserts = "".join(
+        f"INSERT INTO test_vacuum_compaction_stop VALUES ({p}, 'x');"
+        for p, n in files.items()
+        for _ in range(n)
+    )
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_compaction_stop (p int, value text)
+        USING pg_lake_iceberg
+        WITH (location = '{location}', partition_by = 'p', autovacuum_enabled = 'false');
+        {inserts}
+        SET pg_lake_table.vacuum_compact_min_input_files TO 1;
+        SET client_min_messages TO LOG;
+    """,
+        pg_conn,
+    )
+
+    paths = [
+        make_partition_file_unreadable(
+            s3, pg_conn, superuser_conn, "test_vacuum_compaction_stop", str(p)
+        )
+        for p in (1, 2, 3)
+    ]
+
+    pg_conn.notices.clear()
+
+    run_command("VACUUM test_vacuum_compaction_stop;", pg_conn)
+
+    warnings = [line for line in pg_conn.notices if line.startswith("WARNING")]
+    assert len(warnings) == 3, pg_conn.notices
+    for path in paths:
+        assert any(path in line for line in warnings), (path, warnings)
+
+    assert files_per_partition(superuser_conn, "test_vacuum_compaction_stop") == [
+        ("1", 5),
+        ("2", 4),
+        ("3", 3),
+        ("4", 2),
+    ]
+
+    run_command(
+        f"""
+        RESET client_min_messages;
+        RESET pg_lake_table.vacuum_compact_min_input_files;
+        DROP TABLE test_vacuum_compaction_stop;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.autocommit = False
+
+
 def test_autovacuum_compaction_summary_log(s3, pg_conn, extension, installcheck):
     """The compaction summary must also be emitted on the autovacuum worker
     path.  The worker has no portal or active snapshot, so the summary's

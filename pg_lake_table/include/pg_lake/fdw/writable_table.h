@@ -57,6 +57,16 @@ typedef struct CompactionStats
 }			CompactionStats;
 
 /*
+ * CompactionPartition is the partition a compaction round picked, by the key
+ * that groups its data files.
+ */
+typedef struct CompactionPartition
+{
+	bool		picked;
+	uint64		key;
+}			CompactionPartition;
+
+/*
  * DataFileModificationType reflects a type of modification.
  */
 typedef enum DataFileModificationType
@@ -124,7 +134,10 @@ extern PGDLLEXPORT void RemoveAllDataFilesFromTable(Oid relationId);
 extern PGDLLEXPORT void RemoveAllDataFilesFromPgLakeCatalogFromTable(Oid relationId);
 extern PGDLLEXPORT bool CompactDataFiles(Oid relaitonId, TimestampTz compactionStartTime,
 										 bool forceMerge, bool isVerbose,
-										 CompactionStats * runStats);
+										 CompactionStats * runStats,
+										 const uint64 *skippedPartitionKeys,
+										 int skippedPartitionCount,
+										 CompactionPartition * pickedPartition);
 extern PGDLLEXPORT void CompactMetadata(Oid relationId, bool isVerbose);
 extern PGDLLEXPORT List *GetPositionDeleteFilesForDataFiles(Oid relationId, List *dataFiles,
 															Snapshot snapshot, uint64 *rowCount);
