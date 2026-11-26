@@ -1273,12 +1273,14 @@ RewriteIntegralNumericConst(Const *constExpr)
  * many digits before the point as the column. A smaller scale is never taken,
  * since the value would then be rounded more than with numeric(38,9).
  *
- * Arithmetic is left as it is, since DuckDB adds the scales of a product.
+ * Arithmetic is left as it is, since DuckDB adds the scales of a product. Only
+ * the scale that PostgreSQL knows is seen: an aggregate such as min(n) or a
+ * scalar subquery has none in PostgreSQL, though DuckDB keeps the column's.
  */
 static void
 RaiseUnboundedNumericScaleToSiblings(Node *node)
 {
-	if (IsA(node, OpExpr) || IsA(node, NullIfExpr))
+	if (IsA(node, OpExpr) || IsA(node, DistinctExpr) || IsA(node, NullIfExpr))
 	{
 		OpExpr	   *opExpr = (OpExpr *) node;
 

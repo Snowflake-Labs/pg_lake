@@ -60,16 +60,20 @@ precision, is created as `double precision` instead. Set
 
 Queries on lake tables compute with DuckDB decimals, which hold at most 38 digits. A `numeric`
 without a precision in a query, such as a query parameter or a cast to `numeric`, is sent as
-`numeric(38,9)` by default, so it is rounded to 9 decimal places. When it is compared with a
-`numeric` of a larger scale, or is a choice of `COALESCE`, `CASE`, `GREATEST`, `LEAST`, `NULLIF`
-or `IN` next to one, it takes that scale instead, so that neither is rounded. DuckDB brings
-decimals to one type of at most 38 digits by keeping the digits before the point, so some
-combinations still lose decimal places or overflow:
+`numeric(38,9)` by default, so it is rounded to 9 decimal places.
 
-- A `UNION` of a `numeric(38,20)` column with a `bigint` cast to `numeric` keeps 19 decimal
-  places.
-- The product of a `numeric(38,20)` column and a `numeric` without a precision holds only 9
-  digits before the point, and the query fails above that.
+Only where it meets a `numeric` whose scale PostgreSQL knows, such as a `numeric(38,20)`
+column, directly in a comparison (including `IS DISTINCT FROM` and `IN`) or as another choice
+of `COALESCE`, `CASE`, `GREATEST`, `LEAST` or `NULLIF`, does it take that larger scale, so
+that neither is rounded. Anywhere else, DuckDB brings the decimals to one type of at most 38
+digits by keeping the digits before the point, which can round a value with a larger scale
+to fewer decimal places, or overflow. With a `numeric(38,20)` column `n` that holds `1e-20`:
+
+- `SELECT n UNION ALL SELECT $1`, `ARRAY[n, $1]` and `coalesce(min(n), $1)` round it to 0,
+  since a `UNION`, an array and an aggregate such as `min` have no declared scale in
+  PostgreSQL. So does a `bigint` cast to `numeric` in a `UNION`, and `n = (SELECT $1)`
+  compares `n` with the rounded value.
+- `n * $1` holds only 9 digits before the point, and the query fails above that.
 - Without full query pushdown, a `numeric[]` value without a precision, such as an `IN` list
   that a custom plan folds into an array, is read as `numeric(18,3)[]`.
 
