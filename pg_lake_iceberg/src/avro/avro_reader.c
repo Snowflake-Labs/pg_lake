@@ -142,6 +142,39 @@ AvroReaderReadRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry
 
 
 /*
+ * AvroReaderReadTransientRecord is AvroReaderReadRecord for parse functions
+ * that copy whatever they keep: the record is freed once parseFn returns, so
+ * reading a file holds one record at a time rather than all of them.
+ */
+bool
+AvroReaderReadTransientRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry, void *context)
+{
+	avro_value_t record;
+
+	avro_generic_value_new(reader->dataInterface, &record);
+
+	int			rc = avro_file_reader_read_value(reader->dataReader, &record);
+
+	if (rc == EOF)
+	{
+		avro_value_decref(&record);
+		return false;
+	}
+
+	if (rc != 0)
+	{
+		ereport(ERROR, (errmsg("unable to read avro record: %s", avro_strerror())));
+	}
+
+	parseFn(&record, entry, context);
+
+	avro_value_decref(&record);
+
+	return true;
+}
+
+
+/*
  * AvroReaderClose releases all Avro-related resources.
  */
 void

@@ -52,6 +52,8 @@ typedef struct AvroReader
 
 AvroReader *AvroReaderCreate(const char *filePath);
 bool		AvroReaderReadRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry, void *context);
+bool		AvroReaderReadTransientRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry,
+										  void *context);
 void		AvroReaderClose(AvroReader * reader);
 
 bool		AvroFieldExists(avro_value_t * record, char *fieldName);

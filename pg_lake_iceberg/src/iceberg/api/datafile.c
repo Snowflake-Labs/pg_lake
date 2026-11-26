@@ -239,7 +239,10 @@ FetchDataFilesFromManifest(IcebergManifest * manifest, bool pathOnly, ManifestEn
 				 errmsg("manifest is NULL")));
 	}
 
-	List	   *manifestEntries = FetchManifestEntriesFromManifest(manifest, manifestEntryPredicateFn);
+	/* a data file predicate may look at any field of the data file */
+	List	   *manifestEntries = pathOnly && dataFilePredicateFn == NULL
+		? FetchManifestEntryPathsFromManifest(manifest, manifestEntryPredicateFn)
+		: FetchManifestEntriesFromManifest(manifest, manifestEntryPredicateFn);
 
 	List	   *dataFiles = NIL;
 
