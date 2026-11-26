@@ -39,15 +39,18 @@ static void SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats
 											 ColumnBound * *upperBounds,
 											 size_t *nUpperBounds,
 											 ColumnStat * *nanValueCounts,
-											 size_t *nNanValueCounts);
+											 size_t *nNanValueCounts,
+											 ColumnStat * *nullValueCounts,
+											 size_t *nNullValueCounts);
 static ColumnBound * CreateColumnBoundForLeafField(LeafField * leafField, char *columnBoundText);
 static ColumnBound * FindColumnBound(ColumnBound * bounds, size_t boundCount, int fieldId);
 static bool DataFileHasNoNaN(DataFile * dataFile, int fieldId);
+static ColumnStat * FindColumnStat(ColumnStat * stats, size_t statCount, int fieldId);
 static char *ColumnBoundText(ColumnBound * bound, LeafField * leafField);
 
 /*
- * SetIcebergDataFileStats sets the record count, file size, lower and upper bounds
- * and NaN counts for the given data file stats.
+ * SetIcebergDataFileStats sets the record count, file size, lower and upper bounds,
+ * NaN counts and null counts for the given data file stats.
  */
 void
 SetIcebergDataFileStats(const DataFileStats * dataFileStats,
@@ -58,14 +61,17 @@ SetIcebergDataFileStats(const DataFileStats * dataFileStats,
 						ColumnBound * *upperBounds,
 						size_t *nUpperBounds,
 						ColumnStat * *nanValueCounts,
-						size_t *nNanValueCounts)
+						size_t *nNanValueCounts,
+						ColumnStat * *nullValueCounts,
+						size_t *nNullValueCounts)
 {
 	*recordCount = dataFileStats->rowCount;
 	*fileSizeInBytes = dataFileStats->fileSize;
 
 	SetColumnBoundsFromDataFileStats(dataFileStats, lowerBounds, nLowerBounds,
 									 upperBounds, nUpperBounds,
-									 nanValueCounts, nNanValueCounts);
+									 nanValueCounts, nNanValueCounts,
+									 nullValueCounts, nNullValueCounts);
 }
 
 
@@ -76,6 +82,9 @@ SetIcebergDataFileStats(const DataFileStats * dataFileStats,
  * A float or double column only has bounds when the file has no NaN (see
  * ExtractMinMaxForColumn), so it also gets a NaN count of zero. Readers need
  * that count to trust its bounds, since Iceberg bounds leave out NaN.
+ *
+ * A column also gets a null count when we know it, independently of whether
+ * its bounds serialize, since the count does not depend on them.
  */
 static void
 SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
@@ -84,7 +93,9 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 								 ColumnBound * *upperBounds,
 								 size_t *nUpperBounds,
 								 ColumnStat * *nanValueCounts,
-								 size_t *nNanValueCounts)
+								 size_t *nNanValueCounts,
+								 ColumnStat * *nullValueCounts,
+								 size_t *nNullValueCounts)
 {
 	List	   *columnStats = dataFileStats->columnStats;
 
@@ -96,9 +107,12 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 	ColumnStat *nanCounts = palloc0(sizeof(ColumnStat) * totalColumnStats);
 
+	ColumnStat *nullCounts = palloc0(sizeof(ColumnStat) * totalColumnStats);
+
 	int			totalLowerBounds = 0;
 	int			totalUpperBounds = 0;
 	int			totalNanCounts = 0;
+	int			totalNullCounts = 0;
 
 	for (int columnStatIdx = 0; columnStatIdx < totalColumnStats; columnStatIdx++)
 	{
@@ -112,6 +126,13 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 		ColumnBound *lowerBound = NULL;
 		ColumnBound *upperBound = NULL;
+
+		if (columnStat->hasNullCount)
+		{
+			nullCounts[totalNullCounts].column_id = leafField->fieldId;
+			nullCounts[totalNullCounts].value = columnStat->nullCount;
+			totalNullCounts++;
+		}
 
 		if (lowerBoundText != NULL)
 			lowerBound = CreateColumnBoundForLeafField(leafField, lowerBoundText);
@@ -160,6 +181,9 @@ SetColumnBoundsFromDataFileStats(const DataFileStats * dataFileStats,
 
 	*nanValueCounts = nanCounts;
 	*nNanValueCounts = totalNanCounts;
+
+	*nullValueCounts = nullCounts;
+	*nNullValueCounts = totalNullCounts;
 }
 
 
@@ -314,6 +338,16 @@ GetIcebergDataFileColumnStats(DataFile * dataFile, List *leafFields)
 		columnStats->lowerBoundText = lowerBoundText;
 		columnStats->upperBoundText = upperBoundText;
 
+		ColumnStat *nullCount = FindColumnStat(dataFile->null_value_counts,
+											   dataFile->null_value_counts_length,
+											   leafField->fieldId);
+
+		if (nullCount != NULL && nullCount->value >= 0)
+		{
+			columnStats->hasNullCount = true;
+			columnStats->nullCount = nullCount->value;
+		}
+
 		columnStatsList = lappend(columnStatsList, columnStats);
 	}
 
@@ -332,6 +366,23 @@ FindColumnBound(ColumnBound * bounds, size_t boundCount, int fieldId)
 	{
 		if (bounds[boundIndex].column_id == fieldId)
 			return &bounds[boundIndex];
+	}
+
+	return NULL;
+}
+
+
+/*
+ * FindColumnStat returns the count for the given field id, or NULL if the
+ * data file has none.
+ */
+static ColumnStat *
+FindColumnStat(ColumnStat * stats, size_t statCount, int fieldId)
+{
+	for (size_t statIndex = 0; statIndex < statCount; statIndex++)
+	{
+		if (stats[statIndex].column_id == fieldId)
+			return &stats[statIndex];
 	}
 
 	return NULL;

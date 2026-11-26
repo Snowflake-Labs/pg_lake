@@ -1370,7 +1370,9 @@ CreateIcebergManifestEntryFromMetadataOperation(TableMetadataOperation * operati
 							&manifestEntry->data_file.upper_bounds,
 							&manifestEntry->data_file.upper_bounds_length,
 							&manifestEntry->data_file.nan_value_counts,
-							&manifestEntry->data_file.nan_value_counts_length);
+							&manifestEntry->data_file.nan_value_counts_length,
+							&manifestEntry->data_file.null_value_counts,
+							&manifestEntry->data_file.null_value_counts_length);
 
 	return manifestEntry;
 }
