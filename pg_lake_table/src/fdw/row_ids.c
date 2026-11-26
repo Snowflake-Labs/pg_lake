@@ -58,7 +58,7 @@ EnableRowIdsOnTable(Oid relationId)
 	bool		dataOnly = true;
 	bool		newFilesOnly = false;
 	List	   *dataFiles = GetTableDataFilesFromCatalog(relationId, dataOnly,
-														 newFilesOnly, false, NULL, NULL);
+														 newFilesOnly, false, NULL);
 
 	ListCell   *dataFileCell = NULL;
 

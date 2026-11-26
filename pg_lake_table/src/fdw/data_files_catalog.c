@@ -88,7 +88,6 @@ static void RemoveDataFileFromTable(Oid relationId, const char *path);
 static void RemoveAllDataFilesFromCatalog(Oid relationId);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
-static List *TableDataFileHashToList(HTAB *dataFiles);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
 static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
@@ -106,13 +105,13 @@ static List *CollectAdjacentOpsOfType(List *operations, ListCell **cursor,
  */
 List *
 GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-							 bool forUpdate, char *orderBy, Snapshot snapshot)
+							 bool forUpdate, Snapshot snapshot)
 {
 	List	   *partitionTransforms = AllPartitionTransformList(relationId);
 
 	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly,
 																 newFilesOnly, forUpdate,
-																 orderBy, snapshot,
+																 snapshot,
 																 partitionTransforms,
 																 false /* skipColumnStats */ );
 
@@ -129,7 +128,6 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  * If dataOnly is true, position deletes are excluded.
  * If forUpdate is true, files are locked with FOR UPDATE.
  * If newFilesOnly is true, only data files that are added in the current transaction are returned.
- * If orderBy is not null, it is used to sort results.
  * If snapshot is set, it is used for the query.
  * If skipColumnStats is true, the per-column min/max stats are not loaded.
  * Callers that only need file-level info (path, id, row count, partition) can
@@ -138,7 +136,7 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  */
 HTAB *
 GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-								 bool forUpdate, char *orderBy, Snapshot snapshot,
+								 bool forUpdate, Snapshot snapshot,
 								 List *partitionTransforms, bool skipColumnStats)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
@@ -224,11 +222,6 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 							   "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
 							   "                       AND NOT a.attisdropped)"
 							   ") sma USING (table_name, path)");
-
-
-	if (orderBy != NULL)
-		appendStringInfo(&metadataQuery, " order by %s",
-						 quote_identifier(orderBy));
 
 
 	/*
@@ -394,11 +387,11 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
  */
 HTAB *
 GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-									   bool forUpdate, char *orderBy, Snapshot snapshot,
+									   bool forUpdate, Snapshot snapshot,
 									   List *partitionTransforms, bool skipColumnStats)
 {
 	HTAB	   *filesById = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
-															 forUpdate, orderBy, snapshot,
+															 forUpdate, snapshot,
 															 partitionTransforms, skipColumnStats);
 
 	HTAB	   *filesByPath = CreateDataFilesByPathHash();
@@ -738,9 +731,10 @@ CreateDataFilesByPathHash(void)
 
 
 /*
- * TableDataFileHashToList converts a hash table of data files to a list.
+ * TableDataFileHashToList converts a hash table of data files to a list, in
+ * hash order.
  */
-static List *
+List *
 TableDataFileHashToList(HTAB *dataFiles)
 {
 	List	   *result = NIL;

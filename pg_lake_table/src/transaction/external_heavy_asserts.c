@@ -137,7 +137,7 @@ ExternalHeavyAssertsOnIcebergMetadataChange(void)
 
 			List	   *dataFiles =
 				GetTableDataFilesFromCatalog(relationId, dataOnly,
-											 false, false, NULL, NULL);
+											 false, false, NULL);
 
 			AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(relationId, dataOnly, dataFiles);
 

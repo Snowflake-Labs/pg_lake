@@ -1717,11 +1717,10 @@ GetDataFileMetadataOperations(const TableMetadataOperationTracker * opTracker,
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
 	bool		forUpdate = false;
-	char	   *orderBy = NULL;
 	Snapshot	snapshot = GetTransactionSnapshot();
 
 	HTAB	   *currentFilesMap = GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
-																		 forUpdate, orderBy, snapshot, allTransforms,
+																		 forUpdate, snapshot, allTransforms,
 																		 true /* skipColumnStats */ );
 
 	/*
@@ -1863,12 +1862,11 @@ GetAddedOnlyDataFileMetadataOperations(const TableMetadataOperationTracker * opT
 	bool		dataOnly = false;
 	bool		newFilesOnly = true;
 	bool		forUpdate = false;
-	char	   *orderBy = NULL;
 	Snapshot	snapshot = GetTransactionSnapshot();
 
 	HTAB	   *addedFilesMap =
 		GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
-											   forUpdate, orderBy, snapshot, allTransforms,
+											   forUpdate, snapshot, allTransforms,
 											   false /* skipColumnStats */ );
 
 	List	   *addedFiles = NIL;
@@ -1936,12 +1934,11 @@ AssertAddedOnlyOperationsMatchDiff(const TableMetadataOperationTracker * opTrack
 	bool		dataOnly = false;
 	bool		newFilesOnly = false;
 	bool		forUpdate = false;
-	char	   *orderBy = NULL;
 	Snapshot	snapshot = GetTransactionSnapshot();
 
 	HTAB	   *currentFilesMap =
 		GetTableDataFilesByPathHashFromCatalog(opTracker->relationId, dataOnly, newFilesOnly,
-											   forUpdate, orderBy, snapshot, allTransforms,
+											   forUpdate, snapshot, allTransforms,
 											   true /* skipColumnStats */ );
 
 	List	   *addedFiles = NIL;

@@ -2016,6 +2016,80 @@ def test_target_row_group_size(pg_conn, duckdb_conn, extension, tmp_path):
     pg_conn.rollback()
 
 
+def test_vacuum_compacts_oldest_files_first(s3, superuser_conn, extension):
+    """A compaction round that cannot take every eligible file takes the
+    oldest ones."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compacts_oldest_files_first/"
+
+    superuser_conn.autocommit = True
+
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_oldest_first (id int, value text)
+        USING pg_lake_iceberg
+        WITH (location = '{location}', autovacuum_enabled = 'false');
+    """,
+        superuser_conn,
+    )
+
+    for i in range(15):
+        run_command(
+            f"""
+            INSERT INTO test_vacuum_oldest_first
+            SELECT g, md5(g::text) FROM generate_series({i * 10000 + 1}, {(i + 1) * 10000}) g;
+        """,
+            superuser_conn,
+        )
+
+    files_before = run_query(
+        """
+        SELECT path FROM lake_table.files
+        WHERE table_name = 'test_vacuum_oldest_first'::regclass
+        ORDER BY updated_time, id
+    """,
+        superuser_conn,
+    )
+    paths_before = [row[0] for row in files_before]
+    assert len(paths_before) == 15
+
+    # with a 1MB target a round stops once its inputs pass 0.75MB, which
+    # these files reach well before all 15 are taken
+    run_command(
+        """
+        SET pg_lake_table.target_file_size_mb TO 1;
+        SET pg_lake_table.max_compactions_per_vacuum TO 1;
+    """,
+        superuser_conn,
+    )
+    run_command("VACUUM test_vacuum_oldest_first;", superuser_conn)
+
+    paths_after = {
+        row[0]
+        for row in run_query(
+            """
+            SELECT path FROM lake_table.files
+            WHERE table_name = 'test_vacuum_oldest_first'::regclass
+        """,
+            superuser_conn,
+        )
+    }
+    removed = [path for path in paths_before if path not in paths_after]
+
+    assert 1 < len(removed) < len(paths_before), f"removed {len(removed)} files"
+    assert removed == paths_before[: len(removed)]
+
+    run_command(
+        """
+        RESET pg_lake_table.target_file_size_mb;
+        RESET pg_lake_table.max_compactions_per_vacuum;
+        DROP TABLE test_vacuum_oldest_first;
+    """,
+        superuser_conn,
+    )
+
+    superuser_conn.autocommit = False
+
+
 def get_table_options(table_type):
     if table_type == "pg_lake":
         return "writable 'true', format 'parquet',"
