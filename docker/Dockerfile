@@ -8,7 +8,6 @@ ARG BASE_IMAGE_OS
 ARG BASE_IMAGE_TAG
 
 # Set environment variables for non-interactive installations and PostgreSQL/PostGIS versions
-ENV PG_LAKE_REF=main
 ARG PG16_VERSION=16.16
 ARG PG17_VERSION=17.12
 ARG PG18_VERSION=18.7
@@ -288,6 +287,7 @@ ENV VCPKG_TOOLCHAIN_PATH="/home/postgres/vcpkg/scripts/buildsystems/vcpkg.cmake"
 
 ############## base image for pg_lake_postgres and pgduck_server ##############
 FROM dev_base AS base
+ARG PG_LAKE_REF=main
 
 # Clone pg_lake project
 RUN git clone https://github.com/snowflake-labs/pg_lake.git \
