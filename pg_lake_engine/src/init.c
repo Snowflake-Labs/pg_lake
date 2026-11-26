@@ -46,6 +46,7 @@
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
 #include "pg_lake/pgduck/rewrite_left_join.h"
+#include "pg_lake/pgduck/rewrite_or_join.h"
 #include "pg_lake/util/s3_writer_utils.h"
 #include "utils/guc.h"
 #include "utils/varlena.h"
@@ -129,6 +130,18 @@ _PG_init(void)
 										  "which the query engine can run as a hash join"),
 							 NULL,
 							 &EnableLeftJoinRewrite,
+							 true,
+							 PGC_USERSET,
+							 0,
+							 NULL, NULL, NULL);
+
+	DefineCustomBoolVariable(
+							 "pg_lake_engine.enable_or_join_rewrite",
+							 gettext_noop("Rewrites an OR of join conditions into a UNION "
+										  "ALL with one join per condition, which the "
+										  "query engine can run as hash joins"),
+							 NULL,
+							 &EnableOrJoinRewrite,
 							 true,
 							 PGC_USERSET,
 							 0,
