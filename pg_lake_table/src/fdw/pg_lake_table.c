@@ -2453,8 +2453,6 @@ StoreDeleteReturningSlot(TupleTableSlot *planSlot,
 {
 	TupleDesc	planSlotTupleDesc = planSlot->tts_tupleDescriptor;
 	TupleDesc	relationTupleDesc = returningSlot->tts_tupleDescriptor;
-	Datum	   *values = (Datum *) palloc0(relationTupleDesc->natts * sizeof(Datum));
-	bool	   *nulls = (bool *) palloc(relationTupleDesc->natts * sizeof(bool));
 
 	if (planSlotTupleDesc->natts == 0)
 		/* no RETURNING */
@@ -2463,6 +2461,13 @@ StoreDeleteReturningSlot(TupleTableSlot *planSlot,
 	if (relationTupleDesc->natts == 0)
 		/* 0 column table */
 		return;
+
+	/*
+	 * We are called once per deleted row in the per-query memory context, so
+	 * free values and nulls before returning.
+	 */
+	Datum	   *values = (Datum *) palloc0(relationTupleDesc->natts * sizeof(Datum));
+	bool	   *nulls = (bool *) palloc(relationTupleDesc->natts * sizeof(bool));
 
 	/*
 	 * make sure the tuple is fully deconstructed, since we'll use all the
@@ -2501,6 +2506,9 @@ StoreDeleteReturningSlot(TupleTableSlot *planSlot,
 
 	HeapTuple	returningTuple =
 		heap_form_tuple(returningSlot->tts_tupleDescriptor, values, nulls);
+
+	pfree(values);
+	pfree(nulls);
 
 	/*
 	 * Only set t_self, not t_data->t_ctid. heap_form_tuple stamps a composite
