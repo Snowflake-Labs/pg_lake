@@ -220,4 +220,3 @@ JoinTreeRelids(Node *jtnode)
 
 	elog(ERROR, "unrecognized node type in join tree: %d", (int) nodeTag(jtnode));
 }
-
