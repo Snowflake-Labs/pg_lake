@@ -68,6 +68,8 @@ options (path 's3://your_bucket_name/data/*.csv.gz');
 
 When writing CSV with **`COPY ... TO`**, the defaults are the same as PostgreSQL, but you can use the options to override them.
 
+`timestamptz` and `timetz` values without an offset are read in the session's `TimeZone`, as PostgreSQL does.
+
 The CSV format supports the following additional options:
 
 | **Option** | **Description** |
@@ -88,6 +90,8 @@ create foreign table your_table_json ()
 server pg_lake 
 options (path 's3://your_bucket_name/values.json.zst');
 ```
+
+**`COPY ... FROM`** reads top-level `timestamptz` and `timetz` values without an offset in the session's `TimeZone`. Foreign tables and nested fields read them as UTC.
 
 The JSON format supports the following additional options:
 

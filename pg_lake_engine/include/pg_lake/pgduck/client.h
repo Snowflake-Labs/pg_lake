@@ -40,6 +40,7 @@ typedef struct PGDuckConnection
 }			PGDuckConnection;
 
 extern PGDLLEXPORT PGDuckConnection * GetPGDuckConnection(void);
+extern PGDLLEXPORT PGDuckConnection * GetPGDuckConnectionWithSessionTimeZone(void);
 extern PGDLLEXPORT PGDuckConnection * TryGetPGDuckConnection(char **errorMessage);
 extern PGDLLEXPORT void ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection);
 extern PGDLLEXPORT int64 ExecuteCommandInPGDuck(char *query);

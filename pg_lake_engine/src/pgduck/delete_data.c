@@ -101,7 +101,8 @@ PerformDeleteFromParquet(char *sourcePath,
 												  leafFields,
 												  schema,
 												  destinationPath,
-												  DATA_FORMAT_PARQUET);
+												  DATA_FORMAT_PARQUET,
+												  false /* useSessionTimeZone */ );
 }
 
 

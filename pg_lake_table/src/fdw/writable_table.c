@@ -137,7 +137,8 @@ static List *PrepareToAddQueryResultToTable(Oid relationId,
 											IcebergOutOfRangePolicy outOfRangePolicy,
 											IcebergCompatibilityMode compatibilityMode,
 											bool wrapNativeTypes,
-											List *partitionByExprs);
+											List *partitionByExprs,
+											bool useSessionTimeZone);
 static List *GetPossiblePositionDeleteFiles(Oid relationId, List *sourcePathList,
 											Snapshot snapshot);
 static void ApplyMetadataChanges(Oid relationId, List *metadataOperations);
@@ -1027,7 +1028,8 @@ TryCompactDataFiles(Oid relationId, TupleDesc tupleDescriptor, List *candidates,
 									   ICEBERG_OOR_NONE,
 									   ICEBERG_COMPAT_AUTO /* compatibilityMode */ ,
 									   false /* wrapNativeTypes */ ,
-									   NIL /* partitionByExprs */ );
+									   NIL /* partitionByExprs */ ,
+									   false /* useSessionTimeZone */ );
 
 	metadataOperations = list_concat(metadataOperations, newFileOps);
 
@@ -1086,7 +1088,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 							   IcebergOutOfRangePolicy outOfRangePolicy,
 							   IcebergCompatibilityMode compatibilityMode,
 							   bool wrapNativeTypes,
-							   List *partitionByExprs)
+							   List *partitionByExprs,
+							   bool useSessionTimeZone)
 {
 	PgLakeTableProperties properties = GetPgLakeTableProperties(relationId);
 	List	   *options = properties.options;
@@ -1152,7 +1155,8 @@ PrepareToAddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryT
 						   outOfRangePolicy,
 						   compatibilityMode,
 						   wrapNativeTypes,
-						   partitionByExprs);
+						   partitionByExprs,
+						   useSessionTimeZone);
 
 	/*
 	 * Drop (and queue for deletion) any zero-row files DuckDB produced, so
@@ -1247,7 +1251,8 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 									   outOfRangePolicy,
 									   compatibilityMode,
 									   wrapNativeTypes,
-									   partitionByExprs);
+									   partitionByExprs,
+									   true /* useSessionTimeZone */ );
 
 	/*
 	 * For partitioned pushdown, each file may belong to a different
