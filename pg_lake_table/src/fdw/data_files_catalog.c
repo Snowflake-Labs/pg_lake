@@ -200,10 +200,15 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	 * not all tables (or all columns) have the stats. For example, iceberg
 	 * tables created before we added this catalog or data types that do not
 	 * have min/max or pg_lake tables.
+	 *
+	 * The joined catalogs repeat the table filter because the planner does
+	 * not carry it out of a subquery that locks its rows, so with forUpdate
+	 * they would otherwise be read for every table in the database.
 	 */
 	appendStringInfoString(&metadataQuery,
 						   ") f "
-						   "LEFT JOIN (" DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED
+						   "LEFT JOIN ((select * from " DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED
+						   " where table_name OPERATOR(pg_catalog.=) $1) pv"
 						   " JOIN " PARTITION_FIELDS_TABLE_QUALIFIED
 						   " USING (table_name, partition_field_id) "
 						   ") p USING (table_name, id) ");
@@ -211,7 +216,8 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	if (!skipColumnStats)
 		appendStringInfoString(&metadataQuery,
 							   "LEFT JOIN ("
-							   DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " s "
+							   "(select * from " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED
+							   " where table_name OPERATOR(pg_catalog.=) $1) s "
 							   "JOIN " MAPPING_TABLE_NAME
 							   " m USING (table_name, field_id) "
 							   "JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
