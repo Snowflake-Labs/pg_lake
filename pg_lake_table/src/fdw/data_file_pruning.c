@@ -313,6 +313,41 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	return retainedDataFiles;
 }
 
+
+/*
+ * ColumnStatsFieldIdsForPruning returns the field ids whose column stats
+ * PruneDataFiles reads for the given filters, or NIL if it reads none.
+ */
+List *
+ColumnStatsFieldIdsForPruning(Oid relationId, List *baseRestrictInfoList)
+{
+	if (!EnableDataFilePruning || !IsIcebergTable(relationId))
+		return NIL;
+
+	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
+
+	if (columnsUsedInFilters == NIL)
+		return NIL;
+
+	HTAB	   *fieldIdsUsedInQuery = CreateFieldIdMappingHash();
+
+	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId,
+						   GetPgLakeTableProperties(relationId), columnsUsedInFilters);
+
+	List	   *fieldIds = NIL;
+	HASH_SEQ_STATUS status;
+	ColumnToFieldIdMapping *entry = NULL;
+
+	hash_seq_init(&status, fieldIdsUsedInQuery);
+	while ((entry = hash_seq_search(&status)) != NULL)
+		fieldIds = lappend_int(fieldIds, entry->fieldId);
+
+	hash_destroy(fieldIdsUsedInQuery);
+
+	return fieldIds;
+}
+
+
 /*
  * GetDataFileStatsAndPartition returns the column stats of a single data file
  * and sets *partition to that file's partition.

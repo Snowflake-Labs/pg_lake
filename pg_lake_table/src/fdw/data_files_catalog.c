@@ -86,6 +86,12 @@ static int64 GetFileIdForPath(Oid relatoinId, const char *path);
 static void UpdateDeletedRowCount(Oid relationId, const char *path, int64 deletedRowCount);
 static void RemoveDataFileFromTable(Oid relationId, const char *path);
 static void RemoveAllDataFilesFromCatalog(Oid relationId);
+static HTAB *GetTableDataFilesHashForStatsFields(Oid relationId, bool dataOnly,
+												 bool newFilesOnly, bool forUpdate,
+												 Snapshot snapshot,
+												 List *partitionTransforms,
+												 bool skipColumnStats,
+												 List *statsFieldIds);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
@@ -138,6 +144,46 @@ HTAB *
 GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 								 bool forUpdate, Snapshot snapshot,
 								 List *partitionTransforms, bool skipColumnStats)
+{
+	return GetTableDataFilesHashForStatsFields(relationId, dataOnly, newFilesOnly,
+											   forUpdate, snapshot,
+											   partitionTransforms, skipColumnStats,
+											   NIL);
+}
+
+
+/*
+ * GetTableDataFilesForScan returns the data files of a table to scan, with
+ * the column stats of only the fields in statsFieldIds, and none if it is NIL.
+ */
+List *
+GetTableDataFilesForScan(Oid relationId, bool forUpdate, Snapshot snapshot,
+						 List *statsFieldIds)
+{
+	bool		dataOnly = true;
+	bool		newFilesOnly = false;
+	List	   *partitionTransforms = AllPartitionTransformList(relationId);
+
+	HTAB	   *dataFilesHash =
+		GetTableDataFilesHashForStatsFields(relationId, dataOnly, newFilesOnly,
+											forUpdate, snapshot,
+											partitionTransforms,
+											statsFieldIds == NIL, statsFieldIds);
+
+	return TableDataFileHashToList(dataFilesHash);
+}
+
+
+/*
+ * GetTableDataFilesHashForStatsFields is GetTableDataFilesHashFromCatalog,
+ * except that a non-NIL statsFieldIds limits the column stats it loads to
+ * those fields.
+ */
+static HTAB *
+GetTableDataFilesHashForStatsFields(Oid relationId, bool dataOnly, bool newFilesOnly,
+									bool forUpdate, Snapshot snapshot,
+									List *partitionTransforms, bool skipColumnStats,
+									List *statsFieldIds)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -212,16 +258,18 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 						   ") p USING (table_name, id) ");
 
 	if (!skipColumnStats)
-		appendStringInfoString(&metadataQuery,
-							   "LEFT JOIN ("
-							   "(select * from " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED
-							   " where table_name OPERATOR(pg_catalog.=) $1) s "
-							   "JOIN " MAPPING_TABLE_NAME
-							   " m USING (table_name, field_id) "
-							   "JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
-							   "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
-							   "                       AND NOT a.attisdropped)"
-							   ") sma USING (table_name, path)");
+		appendStringInfo(&metadataQuery,
+						 "LEFT JOIN ("
+						 "(select * from " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED
+						 " where table_name OPERATOR(pg_catalog.=) $1%s) s "
+						 "JOIN " MAPPING_TABLE_NAME
+						 " m USING (table_name, field_id) "
+						 "JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
+						 "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
+						 "                       AND NOT a.attisdropped)"
+						 ") sma USING (table_name, path)",
+						 statsFieldIds != NIL ?
+						 " and field_id OPERATOR(pg_catalog.=) ANY($2)" : "");
 
 
 	/*
@@ -235,10 +283,24 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	 */
 	bool		readOnly = false;
 
+	ArrayType  *statsFieldIdArray = NULL;
+
+	if (statsFieldIds != NIL)
+	{
+		int			fieldCount = list_length(statsFieldIds);
+		Datum	   *fieldIdDatums = palloc(sizeof(Datum) * fieldCount);
+
+		for (int fieldIndex = 0; fieldIndex < fieldCount; fieldIndex++)
+			fieldIdDatums[fieldIndex] = Int64GetDatum(list_nth_int(statsFieldIds, fieldIndex));
+
+		statsFieldIdArray = MakeArrayFromDatums(fieldIdDatums, NULL, fieldCount, INT8OID);
+	}
+
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
-	DECLARE_SPI_ARGS(1);
+	DECLARE_SPI_ARGS(2);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, INT8ARRAYOID, statsFieldIdArray, statsFieldIdArray == NULL);
 
 	if (!snapshot)
 	{
