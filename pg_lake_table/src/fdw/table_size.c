@@ -48,16 +48,17 @@ pg_lake_table_size(PG_FUNCTION_ARGS)
 	if (IsCatalogCommitRestTable(relationId) &&
 		!IsIcebergTableCreatedInCurrentTransaction(relationId))
 	{
-		/* the catalog keeps the files, so count its current snapshot */
-		IcebergTableMetadata *metadata = GetWritableRestCatalogTableMetadata(relationId, NULL);
+		/* the catalog keeps the files, so count the snapshot we read */
 		List	   *dataFiles = NIL;
 		List	   *deleteFiles = NIL;
 		int64		tableSize = 0;
 
-		FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
+		GetCatalogCommitTableFiles(relationId, &dataFiles, &deleteFiles);
 
-		foreach_ptr(DataFile, dataFile, list_concat(dataFiles, deleteFiles))
+		foreach_ptr(DataFile, dataFile, dataFiles)
 			tableSize += dataFile->file_size_in_bytes;
+		foreach_ptr(DataFile, deleteFile, deleteFiles)
+			tableSize += deleteFile->file_size_in_bytes;
 
 		PG_RETURN_INT64(tableSize);
 	}

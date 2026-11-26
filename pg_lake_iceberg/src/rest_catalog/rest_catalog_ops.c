@@ -2622,7 +2622,17 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 	appendStringInfo(body, ",\"timestamp-ms\":%ld", (long) (PostgresTimestampToIcebergTimestampMs()));	/* coarse ms */
 	appendStringInfoString(body, ",\"manifest-list\":");
 	appendStringInfoString(body, EscapeJson(newSnapshot->manifest_list));
-	appendStringInfoString(body, ",\"summary\":{\"operation\": \"append\"}");
+
+	/* SetSnapshotOperation names what the snapshot does */
+	const char *operation = "append";
+
+	for (size_t propertyIndex = 0; propertyIndex < newSnapshot->summary_length; propertyIndex++)
+	{
+		if (strcmp(newSnapshot->summary[propertyIndex].key, "operation") == 0)
+			operation = newSnapshot->summary[propertyIndex].value;
+	}
+
+	appendStringInfo(body, ",\"summary\":{\"operation\": %s}", EscapeJson(operation));
 	appendStringInfo(body, ",\"schema-id\":%d", newSnapshot->schema_id);
 	appendStringInfoString(body, "}}, ");	/* end add-snapshot */
 

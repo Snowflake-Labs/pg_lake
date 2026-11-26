@@ -106,6 +106,9 @@ PgLakeScanSnapshot *CreatePgLakeScanSnapshot(List *rteList,
 PgLakeTableScan *GetTableScanByRelationId(PgLakeScanSnapshot * snapshot, Oid relationId);
 extern PGDLLEXPORT List *GetFileScanPathList(List *fileScans, uint64 *rowCount, bool skipFullScans);
 void		SnapshotFilesScanned(PgLakeScanSnapshot * scanSnapshot, int *dataFileScans, int *deleteFileScans);
+extern PGDLLEXPORT struct Partition *GetCatalogCommitDataFilePartition(Oid relationId,
+																	   const char *path,
+																	   int32 *partitionSpecId);
 extern PGDLLEXPORT void CreateTableScanForIcebergMetadata(Oid relationId,
 														  IcebergTableMetadata * metadata,
 														  List *baseRestrictInfoList,

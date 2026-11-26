@@ -75,6 +75,9 @@ static int64 TransactionOperationId = 0;
 /* each backend should register the callbacks */
 static bool TransactionCallbackRegistered = false;
 
+/* whether the transaction records no in-progress files, see SkipInProgressFileRecords */
+static bool SkippingInProgressFileRecords = false;
+
 /*
  * Cached result of InProgressTableVisibleToExternalTx().
  *
@@ -453,6 +456,26 @@ DeleteInProgressFileRecords(List *paths)
 
 
 /*
+ * SkipInProgressFileRecords stops recording the files the transaction writes
+ * as in progress, for the rest of the transaction.
+ *
+ * A record makes VACUUM remove the file unless the writing transaction
+ * commits. That is wrong when a REST catalog decides the commit: once the
+ * catalog accepts a snapshot its files are live, even if the PostgreSQL
+ * transaction aborts afterwards. The files of a commit that did not happen
+ * are left behind instead, as they are for other Iceberg writers.
+ */
+void
+SkipInProgressFileRecords(void)
+{
+	/* registers the callback that ends the skipping with the transaction */
+	(void) GetTransactionOperationId();
+
+	SkippingInProgressFileRecords = true;
+}
+
+
+/*
  * ClearInProgressFiles removes every row from the in-progress file table
  * without deleting the files they name.
  *
@@ -479,6 +502,10 @@ ClearInProgressFiles(void)
 void
 ReplaceInProgressPrefixPathWithFullPaths(char *prefixPath, List *fullPaths)
 {
+	/* the prefix was never recorded */
+	if (SkippingInProgressFileRecords)
+		return;
+
 	/*
 	 * Let's do a sanity check, ensuring fullPaths are prefixed with
 	 * prefixPath
@@ -582,7 +609,7 @@ InsertInProgressFileRecord(char *path)
 void
 InsertInProgressFileRecordExtended(char *path, bool isPrefix, bool autoDeleteRecord)
 {
-	if (XactReadOnly)
+	if (XactReadOnly || SkippingInProgressFileRecords)
 	{
 		/* this check covers RecoveryInProgress() as well */
 		return;
@@ -788,6 +815,7 @@ InProgressFileTransactionCallback(XactEvent event, void *arg)
 		 * from OPERATION_ID_SEQUENCE when needed.
 		 */
 		TransactionOperationId = 0;
+		SkippingInProgressFileRecords = false;
 	}
 }
 

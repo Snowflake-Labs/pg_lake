@@ -79,7 +79,6 @@
 #include "pg_lake/duckdb/transform_query_to_duckdb.h"
 #include "pg_lake/fdw/deparse_ruleutils.h"
 #include "pg_lake/fdw/pg_lake_table.h"
-#include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/fdw/shippable.h"
 #include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/fdw/update_tracking.h"
@@ -2058,21 +2057,6 @@ postgresPlanForeignModify(PlannerInfo *root,
 						  int subplan_index)
 {
 	RangeTblEntry *rte = planner_rt_fetch(resultRelation, root);
-
-	/*
-	 * UPDATE and DELETE find the existing deletion files and partition of a
-	 * data file in the data files catalog, which a table in catalog commit
-	 * mode does not use.
-	 */
-	if (plan->operation != CMD_INSERT && IsCatalogCommitRestTable(rte->relid))
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("%s is not supported for table \"%s\" with commit_mode 'catalog'",
-						plan->operation == CMD_UPDATE ? "UPDATE" :
-						plan->operation == CMD_DELETE ? "DELETE" : "MERGE",
-						get_rel_name(rte->relid)),
-				 errdetail("Tables with commit_mode 'catalog' support inserts, "
-						   "COPY and TRUNCATE.")));
 
 	/*
 	 * Extract the relevant RETURNING list if any.

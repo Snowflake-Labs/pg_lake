@@ -103,6 +103,7 @@ extern bool CheckHttpClientTlsDirectory(char **newval, void **extra, GucSource s
 #define HTTP_STATUS_UNAUTHORIZED		401
 #define HTTP_STATUS_FORBIDDEN			403
 #define HTTP_STATUS_NOT_FOUND			404
+#define HTTP_STATUS_CONFLICT			409
 #define HTTP_STATUS_TOKEN_EXPIRED		419
 #define HTTP_STATUS_TOO_MANY_REQUESTS	429
 #define HTTP_STATUS_SERVICE_UNAVAILABLE	503

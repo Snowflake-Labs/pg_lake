@@ -431,6 +431,11 @@ RestCatalogErrorCode(long status, const char *type)
 	if (status == HTTP_STATUS_FORBIDDEN)
 		return ERRCODE_INSUFFICIENT_PRIVILEGE;
 
+	/* a commit whose requirements failed, which a retry may pass */
+	if (status == HTTP_STATUS_CONFLICT && type != NULL &&
+		strcmp(type, "CommitFailedException") == 0)
+		return ERRCODE_T_R_SERIALIZATION_FAILURE;
+
 	if (status == HTTP_STATUS_NOT_FOUND && type != NULL)
 	{
 		if (strcmp(type, "NoSuchTableException") == 0)

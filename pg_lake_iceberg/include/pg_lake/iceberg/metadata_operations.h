@@ -23,5 +23,7 @@
 
 extern PGDLLEXPORT List *ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms, int maxSnapshotAgeInSecs, bool isVerbose);
 extern PGDLLEXPORT IcebergTableMetadata * GetWritableRestCatalogTableMetadata(Oid relationId, char **metadataLocation);
+extern PGDLLEXPORT IcebergTableMetadata * GetCatalogCommitTableMetadata(Oid relationId, bool copy);
+extern PGDLLEXPORT void GetCatalogCommitTableFiles(Oid relationId, List **dataFiles, List **deleteFiles);
 extern PGDLLEXPORT bool ShouldSkipMetadataChangeToIceberg(List *metadataOperationTypes);
 extern PGDLLEXPORT List *GetMetadataOperationTypes(List *metadataOperations);

@@ -25,6 +25,7 @@
 #include "common/int.h"
 #include "utils/memutils.h"
 
+#include "pg_extension_base/pg_compat.h"
 #include "pg_lake/cleanup/in_progress_files.h"
 #include "pg_lake/data_file/data_files.h"
 #include "pg_lake/extensions/pg_lake_engine.h"
@@ -126,8 +127,9 @@ static void AssertAddedOnlyOperationsMatchDiff(const TableMetadataOperationTrack
 static TableMetadataOperation * CopyAddDataFileOperation(const TableDataFile * dataFile);
 static List *GetDDLMetadataOperations(const TableMetadataOperationTracker * opTracker);
 static void DeleteInProgressAddedFiles(Oid relationId, List *addedFiles);
-static void DeleteInProgressPendingFiles(List *pendingOperations);
 static TableMetadataOperation * CopyPendingDataFileOperation(const TableMetadataOperation * operation);
+static const char *FindDeletedFromPath(List *metadataOperations, const char *deletionFilePath);
+static bool ForgetPendingDataFile(TableMetadataOperationTracker * opTracker, const char *path);
 static bool AreSchemasEqual(IcebergTableSchema * existingSchema, DataFileSchema * newSchema);
 static int32_t GetSchemaIdForIcebergTableIfExists(const TableMetadataOperationTracker * opTracker, DataFileSchema * schema);
 static int	ComparePartitionSpecsById(const ListCell *a, const ListCell *b);
@@ -421,31 +423,11 @@ RecordRestCatalogStagedTable(Oid relationId, const char *uuid)
 /*
  * RecordPendingDataFileOperations keeps the data file operations of a
  * statement on a table in catalog commit mode until the commit sends them to
- * the catalog. Only adding files and removing all files are supported, since
- * anything else needs to know the table's files.
+ * the catalog. Scans in the transaction apply them to the snapshot it read.
  */
 void
 RecordPendingDataFileOperations(Oid relationId, List *metadataOperations)
 {
-	ListCell   *operationCell = NULL;
-
-	foreach(operationCell, metadataOperations)
-	{
-		TableMetadataOperation *operation = lfirst(operationCell);
-
-		/* nothing to forget for a dropped table, the catalog drops it */
-		if (operation->type == DATA_FILE_DROP_TABLE)
-			continue;
-
-		if (operation->type != DATA_FILE_ADD && operation->type != DATA_FILE_REMOVE_ALL)
-			ereport(ERROR,
-					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-					 errmsg("this change to table \"%s\" is not supported with "
-							"commit_mode 'catalog'", get_rel_name(relationId)),
-					 errdetail("Tables with commit_mode 'catalog' support inserts, "
-							   "COPY and TRUNCATE.")));
-	}
-
 	List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);
 
 	if (ShouldSkipMetadataChangeToIceberg(operationTypes))
@@ -460,27 +442,123 @@ RecordPendingDataFileOperations(Oid relationId, List *metadataOperations)
 
 	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
 
-	foreach(operationCell, metadataOperations)
+	foreach_ptr(TableMetadataOperation, operation, metadataOperations)
 	{
-		TableMetadataOperation *operation = lfirst(operationCell);
+		switch (operation->type)
+		{
+			case DATA_FILE_ADD:
+				{
+					TableMetadataOperation *pendingOperation =
+						CopyPendingDataFileOperation(operation);
 
-		/*
-		 * Files added before a TRUNCATE in the same transaction never reach
-		 * the catalog. Their in-progress records stay, so they are deleted
-		 * like the files of an aborted write.
-		 */
-		if (operation->type == DATA_FILE_DROP_TABLE)
-			continue;
+					/* for forgetting the deletion file with its data file */
+					if (operation->content == CONTENT_POSITION_DELETES)
+						pendingOperation->deletedFrom =
+							pstrdup(FindDeletedFromPath(metadataOperations, operation->path));
 
-		if (operation->type == DATA_FILE_REMOVE_ALL)
-			opTracker->pendingDataFileOperations = NIL;
+					opTracker->pendingDataFileOperations =
+						lappend(opTracker->pendingDataFileOperations, pendingOperation);
+					break;
+				}
 
-		opTracker->pendingDataFileOperations =
-			lappend(opTracker->pendingDataFileOperations,
-					CopyPendingDataFileOperation(operation));
+			case DATA_FILE_REMOVE:
+				{
+					/* a file the transaction added never reaches the catalog */
+					if (ForgetPendingDataFile(opTracker, operation->path))
+						break;
+
+					opTracker->pendingDataFileOperations =
+						lappend(opTracker->pendingDataFileOperations,
+								RemoveDataFileOperation(pstrdup(operation->path)));
+					break;
+				}
+
+			case DATA_FILE_REMOVE_ALL:
+				{
+					TableMetadataOperation *removeAllOp = palloc0(sizeof(TableMetadataOperation));
+
+					/*
+					 * Files added before a TRUNCATE in the same transaction
+					 * never reach the catalog, and are left behind.
+					 */
+					removeAllOp->type = DATA_FILE_REMOVE_ALL;
+					opTracker->pendingDataFileOperations = list_make1(removeAllOp);
+					break;
+				}
+
+				/* bookkeeping of the data files catalog, which we do not use */
+			case DATA_FILE_ADD_DELETE_MAPPING:
+			case DATA_FILE_UPDATE_DELETED_ROW_COUNT:
+
+				/* nothing to forget for a dropped table, the catalog drops it */
+			case DATA_FILE_DROP_TABLE:
+				break;
+
+			default:
+				ereport(ERROR,
+						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						 errmsg("this change to table \"%s\" is not supported with "
+								"commit_mode 'catalog'", get_rel_name(relationId))));
+		}
 	}
 
 	MemoryContextSwitchTo(oldContext);
+}
+
+
+/*
+ * FindDeletedFromPath returns the data file that a new position deletion
+ * file of a statement deletes from.
+ */
+static const char *
+FindDeletedFromPath(List *metadataOperations, const char *deletionFilePath)
+{
+	foreach_ptr(TableMetadataOperation, operation, metadataOperations)
+	{
+		if (operation->type == DATA_FILE_ADD_DELETE_MAPPING &&
+			strcmp(operation->path, deletionFilePath) == 0)
+			return operation->deletedFrom;
+	}
+
+	elog(ERROR, "no data file for deletion file %s", deletionFilePath);
+}
+
+
+/*
+ * ForgetPendingDataFile forgets the deletion files the transaction added for
+ * a data file that is removed, and the data file itself if the transaction
+ * added it, in which case it returns true.
+ */
+static bool
+ForgetPendingDataFile(TableMetadataOperationTracker * opTracker, const char *path)
+{
+	List	   *remainingOperations = NIL;
+	bool		forgotAny = false;
+	bool		forgotDataFile = false;
+
+	foreach_ptr(TableMetadataOperation, operation, opTracker->pendingDataFileOperations)
+	{
+		bool		isDataFile = operation->type == DATA_FILE_ADD &&
+			operation->content == CONTENT_DATA &&
+			strcmp(operation->path, path) == 0;
+		bool		isDeletionFile = operation->type == DATA_FILE_ADD &&
+			operation->content == CONTENT_POSITION_DELETES &&
+			strcmp(operation->deletedFrom, path) == 0;
+
+		if (isDataFile || isDeletionFile)
+		{
+			forgotAny = true;
+			forgotDataFile |= isDataFile;
+			continue;
+		}
+
+		remainingOperations = lappend(remainingOperations, operation);
+	}
+
+	if (forgotAny)
+		opTracker->pendingDataFileOperations = remainingOperations;
+
+	return forgotDataFile;
 }
 
 
@@ -502,19 +580,13 @@ GetPendingDataFileOperations(Oid relationId)
 
 
 /*
- * CopyPendingDataFileOperation copies a data file operation into the current
- * memory context.
+ * CopyPendingDataFileOperation copies the operation that adds a file into
+ * the current memory context.
  */
 static TableMetadataOperation *
 CopyPendingDataFileOperation(const TableMetadataOperation * operation)
 {
-	if (operation->type == DATA_FILE_REMOVE_ALL)
-	{
-		TableMetadataOperation *removeAllOp = palloc0(sizeof(TableMetadataOperation));
-
-		removeAllOp->type = DATA_FILE_REMOVE_ALL;
-		return removeAllOp;
-	}
+	Assert(operation->type == DATA_FILE_ADD);
 
 	DataFileStats *copiedStats = DeepCopyDataFileStats(&operation->dataFileStats);
 	Partition  *copiedPartition =
@@ -723,6 +795,8 @@ CommitRestCatalogRequestsBeforeCommit(void)
 
 	/* the catalog has everything, nothing is left for post-commit */
 	ResetRestCatalogRequests();
+
+	INJECTION_POINT_COMPAT("after-rest-catalog-commit");
 }
 
 
@@ -1188,7 +1262,16 @@ BindXactRestCatalogCommitMode(Oid relationId)
 	if (PgLakeXactRestCatalog->commitMode == REST_CATALOG_COMMIT_MODE_UNSET)
 	{
 		if (relationCommitMode == REST_CATALOG_COMMIT_MODE_CATALOG)
+		{
 			ErrorIfXactWrotePostgresTables(relationId);
+
+			/*
+			 * The catalog commit makes the files live whatever happens to the
+			 * PostgreSQL transaction after it, so VACUUM must not take them
+			 * for files of an aborted write.
+			 */
+			SkipInProgressFileRecords();
+		}
 
 		PgLakeXactRestCatalog->commitMode = relationCommitMode;
 	}
@@ -1499,31 +1582,6 @@ ConsumeTrackedIcebergMetadataChanges(bool isVerbose)
 
 
 /*
- * DeleteInProgressPendingFiles removes the in-progress records of the files
- * the commit adds to the catalog.
- */
-static void
-DeleteInProgressPendingFiles(List *pendingOperations)
-{
-	List	   *addedFilePaths = NIL;
-	ListCell   *operationCell = NULL;
-
-	foreach(operationCell, pendingOperations)
-	{
-		TableMetadataOperation *operation = lfirst(operationCell);
-
-		if (operation->type == DATA_FILE_ADD)
-			addedFilePaths = lappend(addedFilePaths, (char *) operation->path);
-	}
-
-	if (addedFilePaths != NIL)
-		DeleteInProgressFileRecords(addedFilePaths);
-
-	list_free(addedFilePaths);
-}
-
-
-/*
  * GetEffectiveMaxSnapshotAgeInSecs returns the effective max snapshot age
  * in seconds for the given relation. If the table has a per-table
  * max_snapshot_age option set, that value is used. Otherwise, the global
@@ -1658,7 +1716,6 @@ ApplyTrackedIcebergMetadataChanges(bool isVerbose)
 			 */
 			metadataOperations = list_concat(metadataOperations,
 											 opTracker->pendingDataFileOperations);
-			DeleteInProgressPendingFiles(opTracker->pendingDataFileOperations);
 		}
 		else if (opTracker->relationDataFileChanged)
 		{

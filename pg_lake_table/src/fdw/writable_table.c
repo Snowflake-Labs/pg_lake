@@ -60,6 +60,7 @@
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
+#include "pg_lake/fdw/snapshot.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/rel_utils.h"
@@ -516,6 +517,7 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;
 	bool		hasRowIds = GetBoolOption(options, "row_ids", false);
+	bool		catalogCommit = IsCatalogCommitRestTable(relationId);
 
 	CopyDataFormat format;
 	CopyDataCompression compression;
@@ -554,13 +556,17 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 		 *
 		 * Copy-on-write with row IDs is not yet supported. We'd want to
 		 * preserve the row IDs similar to compaction.
+		 *
+		 * Nor for a table in catalog commit mode, since the rewrite finds the
+		 * existing deletion files of the source file in the data files
+		 * catalog.
 		 */
 		bool		exceedsRowLimit = (CopyOnWriteMaxDeleteRows >= 0 &&
 									   *totalPositionDeletedRows >= (int64) CopyOnWriteMaxDeleteRows);
 
 		if ((ShouldRewriteAfterDeletions(sourceRowCount, totalDeletedRowCount) ||
 			 exceedsRowLimit) &&
-			!hasRowIds)
+			!hasRowIds && !catalogCommit)
 		{
 			/*
 			 * Copy-on-write deletion. The FDW produces a CSV file with the
@@ -685,9 +691,14 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 			 * partition spec. So, pass AllPartitionTransformList.
 			 */
 			int32		partitionSpecId = DEFAULT_SPEC_ID;
-			List	   *transforms = AllPartitionTransformList(relationId);
-			Partition  *partition =
-				GetDataFilePartition(relationId, transforms, sourcePath, &partitionSpecId);
+			Partition  *partition = NULL;
+
+			if (catalogCommit)
+				partition = GetCatalogCommitDataFilePartition(relationId, sourcePath,
+															  &partitionSpecId);
+			else
+				partition = GetDataFilePartition(relationId, AllPartitionTransformList(relationId),
+												 sourcePath, &partitionSpecId);
 
 			/* store the deletion file in the metadata */
 			TableMetadataOperation *addDeletionFileOperation =
@@ -1418,8 +1429,8 @@ ApplyDataFileModifications(Relation rel, List *modifications)
 	 * that copy_on_write_max_delete_rows limits the table-wide total, not
 	 * just the rows deleted in this single operation.  Skip the catalog query
 	 * when the limit is disabled (< 0) to avoid unnecessary overhead, and for
-	 * a table in catalog commit mode, which only inserts and keeps no files
-	 * in the catalog.
+	 * a table in catalog commit mode, which keeps no files in the catalog and
+	 * does not rewrite them.
 	 */
 	int64		totalPositionDeletedRows =
 		(CopyOnWriteMaxDeleteRows >= 0 && !IsCatalogCommitRestTable(relationId))

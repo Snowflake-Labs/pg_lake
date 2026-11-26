@@ -49,6 +49,7 @@
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/iceberg/iceberg_field.h"
+#include "pg_lake/iceberg/partitioning/partition.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/iceberg/metadata_operations.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
@@ -86,6 +87,7 @@ static void CreateTableScanForCatalogCommitTable(Oid relationId, List *baseRestr
 												 List **fileScans, List **positionDeleteScans,
 												 List **equalityDeleteScans,
 												 List **equalityDeleteReadGroups);
+static HTAB *CreatePathSet(void);
 static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
 static int	NullSafeStrcmp(const char *a, const char *b);
 static bool TypesAreCompatible(PGType pgType, PGType icebergType);
@@ -736,11 +738,9 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 /*
  * CreateTableScanForCatalogCommitTable creates a table scan for a table in
  * catalog commit mode, which pg_lake keeps no data files for: the files of
- * the catalog's current snapshot, unless the transaction created or
- * truncated the table, and the files the transaction added so far.
- *
- * Like a read-only REST catalog table, the scan sees the catalog's latest
- * commit rather than the transaction's PostgreSQL snapshot.
+ * the snapshot the transaction read from the catalog, unless the transaction
+ * created or truncated the table, with the files the transaction added and
+ * removed so far applied to them.
  */
 static void
 CreateTableScanForCatalogCommitTable(Oid relationId, List *baseRestrictInfoList,
@@ -750,6 +750,7 @@ CreateTableScanForCatalogCommitTable(Oid relationId, List *baseRestrictInfoList,
 {
 	List	   *pendingOperations = GetPendingDataFileOperations(relationId);
 	List	   *pendingFiles = NIL;
+	HTAB	   *removedPaths = NULL;
 	bool		removedAllFiles = false;
 
 	foreach_ptr(TableMetadataOperation, operation, pendingOperations)
@@ -760,7 +761,27 @@ CreateTableScanForCatalogCommitTable(Oid relationId, List *baseRestrictInfoList,
 			continue;
 		}
 
-		Assert(operation->type == DATA_FILE_ADD && operation->content == CONTENT_DATA);
+		if (operation->type == DATA_FILE_REMOVE)
+		{
+			if (removedPaths == NULL)
+				removedPaths = CreatePathSet();
+
+			hash_search(removedPaths, operation->path, HASH_ENTER, NULL);
+			continue;
+		}
+
+		Assert(operation->type == DATA_FILE_ADD);
+
+		if (operation->content == CONTENT_POSITION_DELETES)
+		{
+			PgLakeFileScan *positionDeleteScan = palloc0(sizeof(PgLakeFileScan));
+
+			positionDeleteScan->path = (char *) operation->path;
+			positionDeleteScan->rowCount = operation->dataFileStats.rowCount;
+
+			*positionDeleteScans = lappend(*positionDeleteScans, positionDeleteScan);
+			continue;
+		}
 
 		TableDataFile *pendingFile = palloc0(sizeof(TableDataFile));
 
@@ -776,11 +797,25 @@ CreateTableScanForCatalogCommitTable(Oid relationId, List *baseRestrictInfoList,
 	/* a table created in this transaction is only staged in the catalog */
 	if (!removedAllFiles && !IsIcebergTableCreatedInCurrentTransaction(relationId))
 	{
-		IcebergTableMetadata *metadata = GetWritableRestCatalogTableMetadata(relationId, NULL);
+		bool		copy = false;
+		IcebergTableMetadata *metadata = GetCatalogCommitTableMetadata(relationId, copy);
 		List	   *dataFiles = NIL;
 		List	   *deleteFiles = NIL;
 
-		FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
+		GetCatalogCommitTableFiles(relationId, &dataFiles, &deleteFiles);
+
+		if (removedPaths != NULL)
+		{
+			List	   *remainingFiles = NIL;
+
+			foreach_ptr(DataFile, dataFile, dataFiles)
+			{
+				if (!hash_search(removedPaths, dataFile->file_path, HASH_FIND, NULL))
+					remainingFiles = lappend(remainingFiles, dataFile);
+			}
+
+			dataFiles = remainingFiles;
+		}
 
 		bool		filesFromMetadata = true;
 		List	   *retainedFiles = PruneDataFilesExtended(relationId, dataFiles,
@@ -809,6 +844,64 @@ CreateTableScanForCatalogCommitTable(Oid relationId, List *baseRestrictInfoList,
 
 		*fileScans = lappend(*fileScans, fileScan);
 	}
+}
+
+
+/*
+ * GetCatalogCommitDataFilePartition returns the partition of a data file of
+ * a table in catalog commit mode, which is either a file the transaction
+ * added or one in the snapshot it read.
+ */
+Partition *
+GetCatalogCommitDataFilePartition(Oid relationId, const char *path,
+								  int32 *partitionSpecId)
+{
+	foreach_ptr(TableMetadataOperation, operation, GetPendingDataFileOperations(relationId))
+	{
+		if (operation->type == DATA_FILE_ADD && operation->content == CONTENT_DATA &&
+			strcmp(operation->path, path) == 0)
+		{
+			*partitionSpecId = operation->partitionSpecId;
+			return operation->partition;
+		}
+	}
+
+	List	   *dataFiles = NIL;
+	List	   *deleteFiles = NIL;
+
+	GetCatalogCommitTableFiles(relationId, &dataFiles, &deleteFiles);
+
+	foreach_ptr(DataFile, dataFile, dataFiles)
+	{
+		if (strcmp(dataFile->file_path, path) == 0)
+		{
+			*partitionSpecId = dataFile->partition_spec_id;
+			return CopyPartition(&dataFile->partition);
+		}
+	}
+
+	ereport(ERROR,
+			(errcode(ERRCODE_INTERNAL_ERROR),
+			 errmsg("could not find data file %s of table \"%s\"",
+					path, get_rel_name(relationId))));
+}
+
+
+/*
+ * CreatePathSet creates a hash set of file paths in the current memory
+ * context.
+ */
+static HTAB *
+CreatePathSet(void)
+{
+	HASHCTL		hashInfo = {0};
+
+	hashInfo.keysize = MAXPGPATH;
+	hashInfo.entrysize = MAXPGPATH;
+	hashInfo.hcxt = CurrentMemoryContext;
+
+	return hash_create("removed data files", 32, &hashInfo,
+					   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 }
 
 

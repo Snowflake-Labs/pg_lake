@@ -212,7 +212,21 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 	}
 	else
 	{
-		if (writableRestCatalogTable)
+		if (writableRestCatalogTable && IsCatalogCommitRestTable(relationId))
+		{
+			/*
+			 * The changes below build on the version of the table the
+			 * transaction read, and the commit asserts it is still current.
+			 * The catalog owns the metadata files, so we leave metadataPath
+			 * unset and do not delete the previous one.
+			 */
+			bool		copy = true;
+
+			metadata = GetCatalogCommitTableMetadata(relationId, copy);
+			assertTableStateRequest =
+				GetAssertTableStateCatalogRequest(relationId, metadata);
+		}
+		else if (writableRestCatalogTable)
 		{
 			/*
 			 * metadata for writable rest catalog is intended to be read-only
@@ -223,13 +237,6 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 			 * held until end of transaction.
 			 */
 			metadata = GetWritableRestCatalogTableMetadata(relationId, &metadataPath);
-
-			/*
-			 * The changes below build on this version of the table, so a
-			 * commit that the catalog decides on asserts it is still current.
-			 */
-			assertTableStateRequest =
-				GetAssertTableStateCatalogRequest(relationId, metadata);
 		}
 		else
 		{
@@ -1537,6 +1544,158 @@ GetWritableRestCatalogTableMetadata(Oid relationId, char **metadataLocation)
 		return ReadIcebergTableMetadata(result.metadataLocation);
 
 	return ParseIcebergTableMetadata(result.metadata);
+}
+
+
+/*
+ * The table metadata a transaction in catalog commit mode read for a table,
+ * in TopTransactionContext. The files are read from the manifests once they
+ * are needed.
+ */
+typedef struct CatalogCommitTableSnapshot
+{
+	Oid			relationId;
+	IcebergTableMetadata *metadata;
+	char	   *metadataLocation;
+	Jsonb	   *metadataJson;
+	bool		filesLoaded;
+	List	   *dataFiles;
+	List	   *deleteFiles;
+}			CatalogCommitTableSnapshot;
+
+/* CatalogCommitTableSnapshot by relation id, or NULL outside of a transaction */
+static HTAB *CatalogCommitTableSnapshots = NULL;
+
+static CatalogCommitTableSnapshot * GetCatalogCommitTableSnapshot(Oid relationId);
+static void ForgetCatalogCommitTableSnapshots(void *arg);
+
+
+/*
+ * GetCatalogCommitTableMetadata returns the metadata of a table in catalog
+ * commit mode as the transaction first read it from the catalog.
+ *
+ * Every statement of the transaction sees that version of the table, and
+ * its commit asserts that the catalog is still at it, so that the changes
+ * the transaction made based on what it read cannot overwrite a commit that
+ * came in between. The caller must not modify the result, unless it asks
+ * for a copy.
+ */
+IcebergTableMetadata *
+GetCatalogCommitTableMetadata(Oid relationId, bool copy)
+{
+	CatalogCommitTableSnapshot *tableSnapshot = GetCatalogCommitTableSnapshot(relationId);
+
+	if (!copy)
+		return tableSnapshot->metadata;
+
+	if (tableSnapshot->metadataJson == NULL)
+		return ReadIcebergTableMetadata(tableSnapshot->metadataLocation);
+
+	return ParseIcebergTableMetadata(tableSnapshot->metadataJson);
+}
+
+
+/*
+ * GetCatalogCommitTableFiles returns the data and delete files of the
+ * snapshot GetCatalogCommitTableMetadata returns. The caller must not modify
+ * the lists or the files.
+ */
+void
+GetCatalogCommitTableFiles(Oid relationId, List **dataFiles, List **deleteFiles)
+{
+	CatalogCommitTableSnapshot *tableSnapshot = GetCatalogCommitTableSnapshot(relationId);
+
+	if (!tableSnapshot->filesLoaded)
+	{
+		MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+
+		FetchAllDataAndDeleteFilesFromCurrentSnapshot(tableSnapshot->metadata,
+													  &tableSnapshot->dataFiles,
+													  &tableSnapshot->deleteFiles);
+		tableSnapshot->filesLoaded = true;
+
+		MemoryContextSwitchTo(oldContext);
+	}
+
+	*dataFiles = tableSnapshot->dataFiles;
+	*deleteFiles = tableSnapshot->deleteFiles;
+}
+
+
+/*
+ * GetCatalogCommitTableSnapshot returns the version of the table the
+ * transaction reads, loading it from the catalog on first use.
+ */
+static CatalogCommitTableSnapshot *
+GetCatalogCommitTableSnapshot(Oid relationId)
+{
+	if (CatalogCommitTableSnapshots == NULL)
+	{
+		HASHCTL		hashInfo = {0};
+
+		hashInfo.keysize = sizeof(Oid);
+		hashInfo.entrysize = sizeof(CatalogCommitTableSnapshot);
+		hashInfo.hcxt = TopTransactionContext;
+
+		CatalogCommitTableSnapshots =
+			hash_create("catalog commit table snapshots", 8, &hashInfo,
+						HASH_ELEM | HASH_BLOBS | HASH_CONTEXT);
+
+		MemoryContextCallback *forgetCallback =
+			MemoryContextAlloc(TopTransactionContext, sizeof(MemoryContextCallback));
+
+		forgetCallback->func = ForgetCatalogCommitTableSnapshots;
+		forgetCallback->arg = NULL;
+		MemoryContextRegisterResetCallback(TopTransactionContext, forgetCallback);
+	}
+
+	CatalogCommitTableSnapshot *tableSnapshot =
+		hash_search(CatalogCommitTableSnapshots, &relationId, HASH_FIND, NULL);
+
+	if (tableSnapshot != NULL)
+		return tableSnapshot;
+
+	/* enter the table only once it loaded, an error may be caught */
+	RestCatalogLoadTableResult result =
+		LoadTableFromRestCatalogForIcebergTable(relationId);
+	MemoryContext oldContext = MemoryContextSwitchTo(TopTransactionContext);
+	Jsonb	   *metadataJson = NULL;
+	IcebergTableMetadata *metadata = NULL;
+
+	/* the field is required, but a catalog that omits it still works */
+	if (result.metadata != NULL)
+	{
+		metadataJson = palloc(VARSIZE(result.metadata));
+		memcpy(metadataJson, result.metadata, VARSIZE(result.metadata));
+		metadata = ParseIcebergTableMetadata(metadataJson);
+	}
+	else
+		metadata = ReadIcebergTableMetadata(result.metadataLocation);
+
+	char	   *metadataLocation = pstrdup(result.metadataLocation);
+
+	MemoryContextSwitchTo(oldContext);
+
+	tableSnapshot = hash_search(CatalogCommitTableSnapshots, &relationId, HASH_ENTER, NULL);
+	tableSnapshot->metadata = metadata;
+	tableSnapshot->metadataLocation = metadataLocation;
+	tableSnapshot->metadataJson = metadataJson;
+	tableSnapshot->filesLoaded = false;
+	tableSnapshot->dataFiles = NIL;
+	tableSnapshot->deleteFiles = NIL;
+
+	return tableSnapshot;
+}
+
+
+/*
+ * ForgetCatalogCommitTableSnapshots forgets the tables the transaction read,
+ * when TopTransactionContext goes.
+ */
+static void
+ForgetCatalogCommitTableSnapshots(void *arg)
+{
+	CatalogCommitTableSnapshots = NULL;
 }
 
 

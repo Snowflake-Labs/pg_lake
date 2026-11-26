@@ -442,7 +442,7 @@ The commit mode decides who commits the changes to a writable REST catalog table
 | Mode | What it does |
 |:--|:--|
 | `post_commit` (default) | PostgreSQL tracks the table's data files and commits the transaction, then pg_lake sends the changes to the catalog. A rejected change only produces a `WARNING`. |
-| `catalog` | The catalog holds the table's state and commits its changes. pg_lake keeps none of the table's data files in PostgreSQL: queries read the catalog's current snapshot, and writes go to the catalog just before the PostgreSQL commit. If the catalog rejects them, the transaction aborts with an `ERROR`. |
+| `catalog` | The catalog holds the table's state and commits its changes. pg_lake keeps none of the table's data files in PostgreSQL: queries read the snapshot in the catalog, and writes go to the catalog just before the PostgreSQL commit. If the catalog rejects them, the transaction aborts with an `ERROR`. |
 
 A table gets its mode when it is created, from its own `commit_mode` option, then from the
 `commit_mode` option of its catalog server, then from
@@ -457,16 +457,33 @@ CREATE TABLE staging_events (id bigint, payload text) USING iceberg
 WITH (catalog = 'polaris', commit_mode = 'post_commit');
 ```
 
-In `catalog` mode, queries see the latest commit in the catalog, including commits by other
-engines, together with the changes of the current transaction. Each commit asserts that the
-table is still at the snapshot pg_lake built it on. If another engine committed to the table
-in the meantime, the catalog rejects the change with a `409` and nothing is overwritten.
+In `catalog` mode, a transaction reads a table at the snapshot the catalog has when the
+transaction first reads it, including commits by other engines, together with its own changes.
+Its commit asserts that the table is still at that snapshot. If another engine committed to
+the table in the meantime, the catalog rejects the change and the transaction aborts with a
+serialization failure (`40001`) instead of overwriting the other commit. Running the
+transaction again reads the new snapshot.
 
-Tables in `catalog` mode support `INSERT`, `COPY`, `TRUNCATE` and schema changes. `UPDATE`,
-`DELETE`, `MERGE` and the `row_ids` option are not supported yet, and `VACUUM` does not
-compact their data files. PostgreSQL still keeps the table definition, the mapping of columns
-to Iceberg field IDs and partition specs, and the queue of files to delete after an aborted
-write.
+```sql
+BEGIN;
+SELECT count(*) FROM order_summary;
+-- another engine commits to order_summary
+DELETE FROM order_summary WHERE region = 'emea';
+COMMIT;
+ERROR:  could not commit changes to catalog "polaris" in the REST catalog: Requirement failed: branch main has changed: expected id 7542889883645213785 != 3097807718846245370
+DETAIL:  The REST catalog returned HTTP 409 (CommitFailedException).
+```
+
+Tables in `catalog` mode support `INSERT`, `COPY`, `UPDATE`, `DELETE`, `TRUNCATE` and schema
+changes. `UPDATE` and `DELETE` always add position delete files, regardless of
+`pg_lake_table.copy_on_write_threshold`. The `row_ids` option is not supported, and `VACUUM`
+does not compact their data files. PostgreSQL still keeps the table definition and the mapping
+of columns to Iceberg field IDs and partition specs.
+
+Once the catalog accepts a commit its files are live, even if the PostgreSQL transaction
+aborts afterwards, so `VACUUM` does not remove the files of failed writes to these tables.
+Like the files other engines leave behind after a failed commit, they stay in object storage
+until an orphan file cleanup, such as Spark's `remove_orphan_files`, removes them.
 
 Because the catalog makes the decision, a transaction in `catalog` mode cannot also write to
 tables that commit through PostgreSQL: regular tables, Iceberg tables in the PostgreSQL or
