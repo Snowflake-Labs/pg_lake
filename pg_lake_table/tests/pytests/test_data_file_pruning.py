@@ -1186,8 +1186,8 @@ def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_locatio
     assert results[0][0] == 2
     assert results[0][1] == 0
 
-    # the remaining files are all NULL, but nullable columns never use stats
-    # for a full match, so IS NULL also has to scan the files
+    # the remaining files are all NULL, so they have no bounds to prove that
+    # every row matches IS NULL, and have to be scanned
     results = run_query(
         f"{explain_prefix} delete from test_pruning_deletes_nulls.tbl where col1 is null",
         pg_conn,
@@ -1204,6 +1204,163 @@ def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_locatio
     assert results[0][0] == 0
 
     run_command("DROP SCHEMA test_pruning_deletes_nulls CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_pruning_deletes_with_null_counts(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """
+    A nullable column can prove that every row of a file matches when the
+    file records no NULLs for it, which is what makes expiring old rows by
+    a timestamp cheap. Files with NULLs, or without a known null count, are
+    still scanned.
+    """
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_null_counts;
+        CREATE TABLE test_pruning_null_counts.events (
+            ts timestamptz, val int
+        ) USING iceberg WITH (autovacuum_enabled='False');
+
+        -- one file per day, the val column has NULLs in every file
+        INSERT INTO test_pruning_null_counts.events
+        SELECT '2026-01-01'::timestamptz + i * interval '1 minute',
+               CASE WHEN i % 10 = 0 THEN NULL ELSE i END
+        FROM generate_series(0, 1439) i;
+        INSERT INTO test_pruning_null_counts.events
+        SELECT '2026-01-02'::timestamptz + i * interval '1 minute',
+               CASE WHEN i % 10 = 0 THEN NULL ELSE i END
+        FROM generate_series(0, 1439) i;
+        INSERT INTO test_pruning_null_counts.events
+        SELECT '2026-01-03'::timestamptz + i * interval '1 minute',
+               CASE WHEN i % 10 = 0 THEN NULL ELSE i END
+        FROM generate_series(0, 1439) i;
+
+        -- a file of the same day with a NULL ts
+        INSERT INTO test_pruning_null_counts.events
+        VALUES ('2026-01-01 12:00', 1), (NULL, 2);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    expire = "delete from test_pruning_null_counts.events where ts < '2026-01-03'"
+
+    # the two older files have no NULL ts and are removed without a scan;
+    # the newest cannot match, and the file with a NULL ts is scanned
+    results = run_query(f"{explain_prefix} {expire}", pg_conn)
+    assert int(fetch_data_files_used(results)) == 1
+    assert int(fetch_data_files_skipped(results)) == 2
+
+    # a NULL in another column does not matter
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_null_counts.events "
+        "where ts >= '2026-01-03'",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 0
+    assert int(fetch_data_files_skipped(results)) == 1
+
+    # but a filter on that column has to scan the files with a NULL val;
+    # only the small file, whose val has none, is a full match
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_null_counts.events "
+        "where val >= 0",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 3
+    assert int(fetch_data_files_skipped(results)) == 1
+
+    run_command(expire, pg_conn)
+    pg_conn.commit()
+
+    results = run_query(
+        "select count(*), count(ts), min(ts) from test_pruning_null_counts.events",
+        pg_conn,
+    )
+    assert results[0][0] == 1440 + 1
+    assert results[0][1] == 1440
+    assert str(results[0][2]).startswith("2026-01-03")
+
+    # an UPDATE on a file that is a full match still updates every row
+    run_command(
+        "update test_pruning_null_counts.events set val = 0 "
+        "where ts >= '2026-01-03'",
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "select count(*), count(val), sum(val) from test_pruning_null_counts.events",
+        pg_conn,
+    )
+    assert tuple(results[0]) == (1441, 1441, 2)
+
+    run_command("DROP SCHEMA test_pruning_null_counts CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_pruning_deletes_without_null_counts(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    """
+    Files written before null counts were recorded have none in the catalog.
+    Their bounds must not prove a full match on a nullable column, even when
+    the file in fact has no NULLs, and a file that does have NULLs keeps its
+    NULL rows.
+    """
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_no_null_counts;
+        CREATE TABLE test_pruning_no_null_counts.tbl (
+            col1 int
+        ) USING iceberg WITH (autovacuum_enabled='False');
+
+        INSERT INTO test_pruning_no_null_counts.tbl VALUES (1), (2);
+        INSERT INTO test_pruning_no_null_counts.tbl VALUES (1), (NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_no_null_counts.tbl where col1 > 0",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+    assert int(fetch_data_files_skipped(results)) == 1
+
+    # make the files look like they predate null counts
+    run_command(
+        """
+        UPDATE lake_table.data_file_column_stats SET null_count = NULL
+        WHERE table_name = 'test_pruning_no_null_counts.tbl'::regclass
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_no_null_counts.tbl where col1 > 0",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 2
+    assert int(fetch_data_files_skipped(results)) == 0
+
+    run_command("delete from test_pruning_no_null_counts.tbl where col1 > 0", pg_conn)
+    pg_conn.commit()
+
+    results = run_query(
+        "select count(*), count(col1) from test_pruning_no_null_counts.tbl", pg_conn
+    )
+    assert tuple(results[0]) == (1, 0)
+
+    run_command("DROP SCHEMA test_pruning_no_null_counts CASCADE", pg_conn)
     pg_conn.commit()
 
 

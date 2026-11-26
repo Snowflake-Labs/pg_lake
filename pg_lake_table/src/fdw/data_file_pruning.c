@@ -126,6 +126,7 @@ static bool ColumnIsNotNull(Oid relationId, AttrNumber attrNo);
 static bool CollationOrdersByBytes(Oid collation);
 static bool DefaultCollationOrdersByBytes(void);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
+													  bool requireNoNulls,
 													  ColumnToFieldIdMapping * entry);
 static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
 													List *partitionTransformsUsedInQuery, Partition * partition);
@@ -655,21 +656,22 @@ GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
 		/*
-		 * Column min/max stats only describe the non-NULL values in a file
-		 * and say nothing about whether the file also contains NULLs. That is
-		 * fine for refuting a filter (PARTIAL_MATCH), since NULLs never
-		 * satisfy a strict filter, but it cannot prove that every row in the
-		 * file matches (FULL_MATCH). Only use the stats for that when the
-		 * column cannot be NULL.
+		 * Column min/max stats only describe the non-NULL values in a file.
+		 * That is fine for refuting a filter (PARTIAL_MATCH), since NULLs
+		 * never satisfy a strict filter, but to prove that every row in the
+		 * file matches (FULL_MATCH) we also need to know the file has no
+		 * NULLs in the column: either the column cannot be NULL, or the file
+		 * records a null count of zero for it.
 		 */
-		bool		useColumnStats = EnableDataFilePruning &&
-			(pruneType != FULL_MATCH || ColumnIsNotNull(relationId, entry->attrNo));
+		bool		requireNoNulls = pruneType == FULL_MATCH &&
+			!ColumnIsNotNull(relationId, entry->attrNo);
 
-		if (useColumnStats)
+		if (EnableDataFilePruning)
 		{
 			List	   *columnStatsBoundConstraints =
 				GetColumnBoundConstraintsFromColumnStats(relationId,
 														 columnStats,
+														 requireNoNulls,
 														 entry);
 
 			constraintList = list_concat(constraintList, columnStatsBoundConstraints);
@@ -779,9 +781,14 @@ DefaultCollationOrdersByBytes(void)
 * GetColumnBoundConstraintsFromColumnStats returns the constraints for the
 * columns used in the query. The constraints are based on the column
 * min/max statistics stored in iceberg metadata.
+*
+* If requireNoNulls is true, only stats of files known to have no NULLs in the
+* column are used. A file without a null count, such as one written before we
+* recorded them, is treated as possibly having NULLs.
 */
 static List *
 GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
+										 bool requireNoNulls,
 										 ColumnToFieldIdMapping * entry)
 {
 	List	   *constraintList = NIL;
@@ -805,6 +812,15 @@ GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 			/*
 			 * We do not have stats for the column, so we cannot prune the
 			 * file based on the column's bounds.
+			 */
+			continue;
+		}
+		else if (requireNoNulls &&
+				 !(columnStat->hasNullCount && columnStat->nullCount == 0))
+		{
+			/*
+			 * The file may have NULLs in the column, which the bounds do not
+			 * describe, so they cannot prove that every row matches.
 			 */
 			continue;
 		}
