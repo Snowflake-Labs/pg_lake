@@ -122,6 +122,7 @@ static List *GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
 									   HTAB *fieldIdCache, List *columnStats,
 									   List *partitionTransformsUsedInQuery, Partition * partition);
 static bool ColumnIsNotNull(Oid relationId, AttrNumber attrNo);
+static bool FileColumnHasNoNulls(List *columnStats, int fieldId);
 static bool CollationOrdersByBytes(Oid collation);
 static bool DefaultCollationOrdersByBytes(void);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
@@ -611,10 +612,13 @@ GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
 		 * fine for refuting a filter (PARTIAL_MATCH), since NULLs never
 		 * satisfy a strict filter, but it cannot prove that every row in the
 		 * file matches (FULL_MATCH). Only use the stats for that when the
-		 * column cannot be NULL.
+		 * column cannot be NULL, or when the file records that it has no
+		 * NULLs in the column.
 		 */
 		bool		useColumnStats = EnableDataFilePruning &&
-			(pruneType != FULL_MATCH || ColumnIsNotNull(relationId, entry->attrNo));
+			(pruneType != FULL_MATCH ||
+			 FileColumnHasNoNulls(columnStats, entry->fieldId) ||
+			 ColumnIsNotNull(relationId, entry->attrNo));
 
 		if (useColumnStats)
 		{
@@ -660,6 +664,28 @@ ColumnIsNotNull(Oid relationId, AttrNumber attrNo)
 	}
 
 	return notNull;
+}
+
+
+/*
+ * FileColumnHasNoNulls returns whether the column stats of a data file record
+ * a null count of zero for the given field. A missing count, as for files
+ * written before pg_lake collected null counts, means the file may have NULLs.
+ */
+static bool
+FileColumnHasNoNulls(List *columnStats, int fieldId)
+{
+	ListCell   *columnStatCell = NULL;
+
+	foreach(columnStatCell, columnStats)
+	{
+		DataFileColumnStats *columnStat = lfirst(columnStatCell);
+
+		if (columnStat->leafField.fieldId == fieldId)
+			return columnStat->hasNullCount && columnStat->nullCount == 0;
+	}
+
+	return false;
 }
 
 

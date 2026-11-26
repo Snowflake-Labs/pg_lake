@@ -1186,8 +1186,8 @@ def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_locatio
     assert results[0][0] == 2
     assert results[0][1] == 0
 
-    # the remaining files are all NULL, but nullable columns never use stats
-    # for a full match, so IS NULL also has to scan the files
+    # the remaining files are all NULL, so they have no bounds to prove a
+    # full match with, and IS NULL also has to scan the files
     results = run_query(
         f"{explain_prefix} delete from test_pruning_deletes_nulls.tbl where col1 is null",
         pg_conn,
@@ -1204,6 +1204,77 @@ def test_pruning_deletes_with_nulls(s3, pg_conn, extension, with_default_locatio
     assert results[0][0] == 0
 
     run_command("DROP SCHEMA test_pruning_deletes_nulls CASCADE", pg_conn)
+    pg_conn.commit()
+
+
+def test_pruning_deletes_with_null_counts(
+    s3, pg_conn, superuser_conn, extension, with_default_location
+):
+    explain_prefix = "EXPLAIN (verbose, format json) "
+
+    run_command(
+        """
+        CREATE SCHEMA test_pruning_deletes_null_counts;
+        CREATE TABLE test_pruning_deletes_null_counts.tbl (
+            col1 INT
+        ) USING iceberg WITH (autovacuum_enabled='False');
+
+        -- no NULLs, so the bounds cover every row
+        INSERT INTO test_pruning_deletes_null_counts.tbl VALUES (1), (1);
+        INSERT INTO test_pruning_deletes_null_counts.tbl VALUES (2), (3);
+
+        -- min/max of the non-NULL values match, but the file also has a NULL
+        INSERT INTO test_pruning_deletes_null_counts.tbl VALUES (2), (NULL);
+        """,
+        pg_conn,
+    )
+    pg_conn.commit()
+
+    # the file with only 1s has a null count of 0, so it is a full match
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_null_counts.tbl where col1 = 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 0
+    assert int(fetch_data_files_skipped(results)) == 1
+
+    # the second file is a full match, the third has a NULL and is scanned
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_null_counts.tbl where col1 > 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+    assert int(fetch_data_files_skipped(results)) == 1
+
+    # files written before pg_lake recorded null counts have none, which
+    # means they may contain NULLs
+    run_command(
+        """
+        UPDATE lake_table.data_file_column_stats SET null_count = NULL
+        WHERE table_name = 'test_pruning_deletes_null_counts.tbl'::regclass
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    results = run_query(
+        f"{explain_prefix} delete from test_pruning_deletes_null_counts.tbl where col1 = 1",
+        pg_conn,
+    )
+    assert int(fetch_data_files_used(results)) == 1
+    assert int(fetch_data_files_skipped(results)) == 0
+
+    run_command(
+        "delete from test_pruning_deletes_null_counts.tbl where col1 > 1", pg_conn
+    )
+    pg_conn.commit()
+
+    results = run_query(
+        "select col1 from test_pruning_deletes_null_counts.tbl order by 1", pg_conn
+    )
+    assert results == [[1], [1], [None]]
+
+    run_command("DROP SCHEMA test_pruning_deletes_null_counts CASCADE", pg_conn)
     pg_conn.commit()
 
 
