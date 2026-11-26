@@ -30,7 +30,9 @@ extern PGDLLEXPORT void SetIcebergDataFileStats(const DataFileStats * dataFileSt
 												ColumnBound * *upperBounds,
 												size_t *nUpperBounds,
 												ColumnStat * *nanValueCounts,
-												size_t *nNanValueCounts);
+												size_t *nNanValueCounts,
+												ColumnStat * *nullValueCounts,
+												size_t *nNullValueCounts);
 extern PGDLLEXPORT unsigned char *IcebergSerializeColumnBoundText(char *columnBoundText,
 																  Field * field,
 																  size_t *binaryLen);

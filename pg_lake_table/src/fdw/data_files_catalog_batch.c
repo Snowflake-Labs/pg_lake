@@ -73,11 +73,13 @@ static int	AppendColumnStatsForFile(TableMetadataOperation * operation,
 									 int statIndex, Datum *pathDatums,
 									 Datum *fieldIdDatums, Datum *lowerDatums,
 									 bool *lowerNulls, Datum *upperDatums,
-									 bool *upperNulls);
+									 bool *upperNulls, Datum *nullCountDatums,
+									 bool *nullCountNulls);
 static void ExecInsertDataFileColumnStats(Oid relationId, ArrayType *pathArray,
 										  ArrayType *fieldIdArray,
 										  ArrayType *lowerArray,
-										  ArrayType *upperArray);
+										  ArrayType *upperArray,
+										  ArrayType *nullCountArray);
 static void BulkInsertDataFilePartitionValues(Oid relationId, List *addOps,
 											  HTAB *pathToFileId);
 static int	AppendPartitionValuesForFile(TableMetadataOperation * operation,
@@ -342,6 +344,8 @@ BulkInsertDataFileColumnStats(Oid relationId, List *addOps)
 	bool	   *lowerNulls = palloc(sizeof(bool) * statCapacity);
 	Datum	   *upperDatums = palloc(sizeof(Datum) * statCapacity);
 	bool	   *upperNulls = palloc(sizeof(bool) * statCapacity);
+	Datum	   *nullCountDatums = palloc(sizeof(Datum) * statCapacity);
+	bool	   *nullCountNulls = palloc(sizeof(bool) * statCapacity);
 	int			statIndex = 0;
 
 	foreach(operationCell, addOps)
@@ -354,7 +358,8 @@ BulkInsertDataFileColumnStats(Oid relationId, List *addOps)
 		statIndex = AppendColumnStatsForFile(operation, statIndex,
 											 pathDatums, fieldIdDatums,
 											 lowerDatums, lowerNulls,
-											 upperDatums, upperNulls);
+											 upperDatums, upperNulls,
+											 nullCountDatums, nullCountNulls);
 	}
 	Assert(statIndex <= statCapacity);
 
@@ -365,9 +370,10 @@ BulkInsertDataFileColumnStats(Oid relationId, List *addOps)
 	ArrayType  *fieldIdArray = MakeArrayFromDatums(fieldIdDatums, NULL, statIndex, INT8OID);
 	ArrayType  *lowerArray = MakeArrayFromDatums(lowerDatums, lowerNulls, statIndex, TEXTOID);
 	ArrayType  *upperArray = MakeArrayFromDatums(upperDatums, upperNulls, statIndex, TEXTOID);
+	ArrayType  *nullCountArray = MakeArrayFromDatums(nullCountDatums, nullCountNulls, statIndex, INT8OID);
 
 	ExecInsertDataFileColumnStats(relationId, pathArray, fieldIdArray,
-								  lowerArray, upperArray);
+								  lowerArray, upperArray, nullCountArray);
 }
 
 
@@ -380,7 +386,8 @@ static int
 AppendColumnStatsForFile(TableMetadataOperation * operation, int statIndex,
 						 Datum *pathDatums, Datum *fieldIdDatums,
 						 Datum *lowerDatums, bool *lowerNulls,
-						 Datum *upperDatums, bool *upperNulls)
+						 Datum *upperDatums, bool *upperNulls,
+						 Datum *nullCountDatums, bool *nullCountNulls)
 {
 	ListCell   *statsCell = NULL;
 
@@ -406,6 +413,10 @@ AppendColumnStatsForFile(TableMetadataOperation * operation, int statIndex,
 			? CStringGetTextDatum(columnStats->upperBoundText)
 			: (Datum) 0;
 		upperNulls[statIndex] = (columnStats->upperBoundText == NULL);
+		nullCountDatums[statIndex] = columnStats->hasNullCount
+			? Int64GetDatum(columnStats->nullCount)
+			: (Datum) 0;
+		nullCountNulls[statIndex] = !columnStats->hasNullCount;
 
 		statIndex++;
 	}
@@ -418,7 +429,7 @@ AppendColumnStatsForFile(TableMetadataOperation * operation, int statIndex,
 static void
 ExecInsertDataFileColumnStats(Oid relationId, ArrayType *pathArray,
 							  ArrayType *fieldIdArray, ArrayType *lowerArray,
-							  ArrayType *upperArray)
+							  ArrayType *upperArray, ArrayType *nullCountArray)
 {
 	/*
 	 * See ExecInsertDataFiles: multi-arg unnest cannot be
@@ -426,17 +437,18 @@ ExecInsertDataFileColumnStats(Oid relationId, ArrayType *pathArray,
 	 */
 	char	   *query =
 		"INSERT INTO " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " "
-		"(table_name, path, field_id, lower_bound, upper_bound) "
-		"SELECT $1, path, field_id, lower_bound, upper_bound "
-		"FROM unnest($2, $3, $4, $5) "
-		"AS t(path, field_id, lower_bound, upper_bound)";
+		"(table_name, path, field_id, lower_bound, upper_bound, null_count) "
+		"SELECT $1, path, field_id, lower_bound, upper_bound, null_count "
+		"FROM unnest($2, $3, $4, $5, $6) "
+		"AS t(path, field_id, lower_bound, upper_bound, null_count)";
 
-	DECLARE_SPI_ARGS(5);
+	DECLARE_SPI_ARGS(6);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
 	SPI_ARG_VALUE(2, TEXTARRAYOID, pathArray, false);
 	SPI_ARG_VALUE(3, INT8ARRAYOID, fieldIdArray, false);
 	SPI_ARG_VALUE(4, TEXTARRAYOID, lowerArray, false);
 	SPI_ARG_VALUE(5, TEXTARRAYOID, upperArray, false);
+	SPI_ARG_VALUE(6, INT8ARRAYOID, nullCountArray, false);
 
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 	SPI_EXECUTE(query, /* readOnly = */ false);

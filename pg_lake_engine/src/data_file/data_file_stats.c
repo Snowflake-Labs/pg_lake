@@ -34,11 +34,15 @@
 #include "utils/builtins.h"
 #include "utils/lsyscache.h"
 
-static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs);
-static void ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs);
-static void ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs);
+static void ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs,
+											List **nullCounts);
+static void ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs,
+									   List **nullCounts);
+static void ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs,
+								   List **nullCounts);
 static char *UnescapeDoubleQuotes(char *s);
-static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema);
+static List *GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *nullCounts,
+										List *leafFields, DataFileSchema * schema);
 static int	FindIndexInStringList(List *names, const char *targetName);
 static ColumnStatsConfig GetColumnStatsConfig(Oid relationId);
 static void ApplyColumnStatsModeForType(ColumnStatsConfig columnStatsConfig,
@@ -162,9 +166,11 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 				List	   *names = NIL;
 				List	   *mins = NIL;
 				List	   *maxs = NIL;
+				List	   *nullCounts = NIL;
 
-				ParseDuckdbColumnMinMaxFromText(resultValue, &names, &mins, &maxs);
-				fileStats->columnStats = GetDataFileColumnStatsList(names, mins, maxs, leafFields, schema);
+				ParseDuckdbColumnMinMaxFromText(resultValue, &names, &mins, &maxs, &nullCounts);
+				fileStats->columnStats = GetDataFileColumnStatsList(names, mins, maxs, nullCounts,
+																	leafFields, schema);
 			}
 			else if (strcmp(resultColName, "file_size_bytes") == 0)
 			{
@@ -200,10 +206,13 @@ GetDataFileStatsListFromPGResult(PGresult *result, List *leafFields, DataFileSch
 
 /*
  * ExtractMinMaxFromStatsMapDatum extracts min and max values from given stats map
- * of type map(varchar,varchar).
+ * of type map(varchar,varchar), along with the null count when DuckDB reports
+ * one. DuckDB leaves null_count out unless every row group recorded it, so a
+ * missing count is unknown rather than zero, and nullCounts gets NULL for it.
  */
 static void
-ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs)
+ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List **maxs,
+					   List **nullCounts)
 {
 	ArrayType  *elementsArray = DatumGetArrayTypeP(map);
 
@@ -217,6 +226,7 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 
 	char	   *minText = NULL;
 	char	   *maxText = NULL;
+	char	   *nullCountText = NULL;
 	bool		hasNaN = false;
 
 	ArrayIterator arrayIterator = array_create_iterator(elementsArray, 0, NULL);
@@ -255,6 +265,10 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 		{
 			hasNaN = strcmp(TextDatumGetCString(statsValDatum), "true") == 0;
 		}
+		else if (strcmp(statsKey, "null_count") == 0)
+		{
+			nullCountText = TextDatumGetCString(statsValDatum);
+		}
 	}
 
 	/*
@@ -266,6 +280,7 @@ ExtractMinMaxForColumn(Datum map, char *colName, List **names, List **mins, List
 		*names = lappend(*names, colName);
 		*mins = lappend(*mins, minText);
 		*maxs = lappend(*maxs, maxText);
+		*nullCounts = lappend(*nullCounts, nullCountText);
 	}
 
 	array_free_iterator(arrayIterator);
@@ -319,7 +334,8 @@ UnescapeDoubleQuotes(char *s)
  * of type map(text,text).
  */
 static void
-ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs)
+ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List **maxs,
+						   List **nullCounts)
 {
 	ArrayType  *elementsArray = DatumGetArrayTypeP(returnStatsMap);
 
@@ -359,7 +375,7 @@ ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List
 		 */
 		char	   *unescapedColName = UnescapeDoubleQuotes(colName);
 
-		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs);
+		ExtractMinMaxForColumn(colStatsDatum, unescapedColName, names, mins, maxs, nullCounts);
 	}
 
 	array_free_iterator(arrayIterator);
@@ -375,7 +391,8 @@ ExtractMinMaxForAllColumns(Datum returnStatsMap, List **names, List **mins, List
  * 		}
  */
 static void
-ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs)
+ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **maxs,
+								List **nullCounts)
 {
 	/*
 	 * e.g. { 'id_col' => {'min' => '12', 'max' => 23, ...}, 'name_col' =>
@@ -400,16 +417,17 @@ ParseDuckdbColumnMinMaxFromText(char *input, List **names, List **mins, List **m
 	 * directly to avoid invoking the set-returning `entries()` function in a
 	 * non-SRF context.
 	 */
-	ExtractMinMaxForAllColumns(statsMapDatum, names, mins, maxs);
+	ExtractMinMaxForAllColumns(statsMapDatum, names, mins, maxs, nullCounts);
 }
 
 
 /*
  * GetDataFileColumnStatsList builds DataFileColumnStats list from given
- * names, mins, maxs lists and schema.
+ * names, mins, maxs, nullCounts lists and schema.
  */
 static List *
-GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields, DataFileSchema * schema)
+GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *nullCounts,
+						   List *leafFields, DataFileSchema * schema)
 {
 	List	   *columnStatsList = NIL;
 
@@ -445,12 +463,19 @@ GetDataFileColumnStatsList(List *names, List *mins, List *maxs, List *leafFields
 
 		char	   *minStr = list_nth(mins, nameIndex);
 		char	   *maxStr = list_nth(maxs, nameIndex);
+		char	   *nullCountStr = list_nth(nullCounts, nameIndex);
 
 		DataFileColumnStats *colStats = palloc0(sizeof(DataFileColumnStats));
 
 		colStats->leafField = *leafField;
 		colStats->lowerBoundText = pstrdup(minStr);
 		colStats->upperBoundText = pstrdup(maxStr);
+
+		if (nullCountStr != NULL)
+		{
+			colStats->hasNullCount = true;
+			colStats->nullCount = pg_strtoint64(nullCountStr);
+		}
 		columnStatsList = lappend(columnStatsList, colStats);
 	}
 
@@ -600,6 +625,13 @@ ApplyColumnStatsModeForAllFileStats(Oid relationId, List *dataFileStats)
 			char	  **upperBoundText = &columnStats->upperBoundText;
 
 			ApplyColumnStatsModeForType(columnStatsConfig, columnStats->leafField.pgType, lowerBoundText, upperBoundText);
+
+			/*
+			 * The null count is only stored alongside the bounds, so drop it
+			 * when the column stats mode drops them.
+			 */
+			if (*lowerBoundText == NULL)
+				columnStats->hasNullCount = false;
 		}
 	}
 }

@@ -93,7 +93,9 @@ static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
 static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
 													   char *lowerBoundText,
-													   char *upperBoundText);
+													   char *upperBoundText,
+													   bool hasNullCount,
+													   int64 nullCount);
 static void ApplySingleOp(Oid relationId, TableMetadataOperation * operation);
 static List *CollectAdjacentOpsOfType(List *operations, ListCell **cursor,
 									  TableMetadataOperationType runType);
@@ -176,7 +178,16 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 						    /* 14 */ "p.partition_field_id, "
 						    /* 15 */ "p.partition_field_name, "
 						    /* 16 */ "p.value, "
-						    /* 17 */ "p.spec_id "
+						    /* 17 */ "p.spec_id ");
+
+	if (!skipColumnStats)
+		appendStringInfoString(&metadataQuery,
+							    /* 18 */ ", sma.null_count ");
+	else
+		appendStringInfoString(&metadataQuery,
+							   ", NULL::bigint ");
+
+	appendStringInfoString(&metadataQuery,
 						   "from (");
 
 	appendStringInfoString(&metadataQuery,
@@ -462,7 +473,8 @@ LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPath, List *dataFiles)
 		 /* 3 */ "m.field_pg_type, "
 		 /* 4 */ "m.field_pg_typemod, "
 		 /* 5 */ "s.lower_bound, "
-		 /* 6 */ "s.upper_bound "
+		 /* 6 */ "s.upper_bound, "
+		 /* 7 */ "s.null_count "
 		"from " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " s "
 		"JOIN " MAPPING_TABLE_NAME " m USING (table_name, field_id) "
 		"JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
@@ -553,8 +565,12 @@ LoadColumnStatsForFiles(Oid relationId, HTAB *filesByPath, List *dataFiles)
 		if (!isUpperBoundNull)
 			upperBoundText = TextDatumGetCString(upperBoundDatum);
 
+		bool		isNullCountNull = false;
+		int64		nullCount = GET_SPI_VALUE(INT8OID, rowIndex, 7, &isNullCountNull);
+
 		DataFileColumnStats *columnStats =
-			CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
+			CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText,
+									  !isNullCountNull, nullCount);
 
 		dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
 
@@ -599,8 +615,13 @@ FillDataFileColumnStats(TableDataFile * dataFile, int64 fieldId, int rowIndex)
 		upperBoundText = TextDatumGetCString(upperBoundDatum);
 	}
 
+	bool		isNullCountNull = false;
+	int64		nullCount = GET_SPI_VALUE(INT8OID, rowIndex, 18, &isNullCountNull);
+
 	/* create column stats from catalog values */
-	DataFileColumnStats *columnStats = CreateDataFileColumnStats(fieldId, pgType, lowerBoundText, upperBoundText);
+	DataFileColumnStats *columnStats = CreateDataFileColumnStats(fieldId, pgType,
+																 lowerBoundText, upperBoundText,
+																 !isNullCountNull, nullCount);
 
 	dataFile->stats.columnStats = lappend(dataFile->stats.columnStats, columnStats);
 }
@@ -1457,13 +1478,16 @@ ApplySingleOp(Oid relationId, TableMetadataOperation * operation)
  * parameters.
  */
 static DataFileColumnStats *
-CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char *upperBoundText)
+CreateDataFileColumnStats(int fieldId, PGType pgType, char *lowerBoundText, char *upperBoundText,
+						  bool hasNullCount, int64 nullCount)
 {
 	DataFileColumnStats *columnStats = palloc0(sizeof(DataFileColumnStats));
 
 	columnStats->leafField.fieldId = fieldId;
 	columnStats->lowerBoundText = lowerBoundText;
 	columnStats->upperBoundText = upperBoundText;
+	columnStats->hasNullCount = hasNullCount;
+	columnStats->nullCount = hasNullCount ? nullCount : 0;
 	columnStats->leafField.pgType = pgType;
 
 	bool		forAddColumn = false;
