@@ -508,6 +508,60 @@ def test_delete_row_number_versioned_datum_offset(
     pg_conn.commit()
 
 
+def test_delete_memory_per_row(superuser_conn, s3, extension, with_default_location):
+    """
+    ExecForeignDelete runs in the per-query memory context, so anything it
+    allocates per row and does not free grows ExecutorState with the number of
+    deleted rows. A large DELETE could run the backend out of memory.
+
+    Reading pg_backend_memory_contexts requires superuser.
+    """
+    columns = ", ".join(f"c{i} int" for i in range(1, 31))
+    values = ", ".join("s" for _ in range(1, 31))
+
+    run_command(
+        f"""
+        CREATE TABLE test_delete_memory (id bigint, {columns}) USING iceberg;
+        INSERT INTO test_delete_memory
+        SELECT s, {values} FROM generate_series(1, 200000) s;
+
+        -- a volatile function with an argument is called again for every row
+        CREATE FUNCTION test_delete_memory_used(bigint)
+        RETURNS bigint LANGUAGE plpgsql VOLATILE AS $$
+        BEGIN
+            RETURN (SELECT sum(used_bytes) FROM pg_backend_memory_contexts
+                    WHERE name = 'ExecutorState');
+        END $$;
+    """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    result = run_query(
+        """
+        DELETE FROM test_delete_memory WHERE id % 2 = 0
+        RETURNING test_delete_memory_used(id)
+    """,
+        superuser_conn,
+    )
+    assert len(result) == 100000
+
+    # leaking around 300 bytes per row would grow ExecutorState by ~30MB
+    used = [row[0] for row in result]
+    assert max(used) - min(used) < 1024 * 1024
+
+    superuser_conn.rollback()
+
+    run_command(
+        """
+        DROP FUNCTION test_delete_memory_used(bigint);
+        DROP TABLE test_delete_memory;
+    """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+
 def test_merge_on_read(pg_conn, extension):
     location = f"s3://{TEST_BUCKET}/test_merge_on_read/"
 
