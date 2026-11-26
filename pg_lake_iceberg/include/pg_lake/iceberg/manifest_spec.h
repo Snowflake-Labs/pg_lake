@@ -241,6 +241,7 @@ typedef struct IcebergManifestEntry
 
 extern List *ReadIcebergManifests(const char *manifestListPath, bool forWrite);
 extern PGDLLEXPORT List *ReadManifestEntries(const char *manifestPath, bool forWrite);
+extern List *ReadManifestEntryPaths(const char *manifestPath, bool forWrite);
 
 extern PGDLLEXPORT void WriteIcebergManifestList(const char *manifestListPath, List *manifests);
 extern PGDLLEXPORT void WriteIcebergManifest(const char *manifestPath, List *manifestEntries,

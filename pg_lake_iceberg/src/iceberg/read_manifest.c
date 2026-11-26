@@ -72,6 +72,9 @@ typedef struct ManifestReaderContext
 
 	/* whether to read s3a:// and s3n:// URLs as s3:// */
 	bool		rewriteHadoopSchemes;
+
+	/* whether to copy out only what lists the data files */
+	bool		pathOnly;
 }			ManifestReaderContext;
 
 
@@ -85,6 +88,7 @@ static void ReadPartitionFromAvro(avro_value_t * record, Partition * partition, 
 static void ReadIcebergManifestFromAvro(avro_value_t * record, IcebergManifest * manifest, void *context);
 static void ReadIcebergManifestEntryFromAvro(avro_value_t * record, IcebergManifestEntry * entry,
 											 ManifestReaderContext * context);
+static List *ReadManifestEntriesInternal(const char *manifestPath, bool forWrite, bool pathOnly);
 static HTAB *CreateManifestPartitionFieldMap(AvroReader * manifestReader);
 static IcebergScalarAvroType IcebergAvroTypeFromString(const char *physicalTypeName, const char *logicalTypeName);
 static avro_schema_t ManifestRecordFieldSchema(avro_schema_t parent, const char *fieldName);
@@ -158,6 +162,27 @@ ReadIcebergManifests(const char *manifestListPath, bool forWrite)
 List *
 ReadManifestEntries(const char *manifestPath, bool forWrite)
 {
+	return ReadManifestEntriesInternal(manifestPath, forWrite, false);
+}
+
+
+/*
+ * ReadManifestEntryPaths is ReadManifestEntries for callers that only list the
+ * data files: an entry carries its status, sequence numbers and the data
+ * file's content and path, and nothing else. Each record is freed once read,
+ * which matters because a decoded record holds every per-column stat and
+ * bound of its data file.
+ */
+List *
+ReadManifestEntryPaths(const char *manifestPath, bool forWrite)
+{
+	return ReadManifestEntriesInternal(manifestPath, forWrite, true);
+}
+
+
+static List *
+ReadManifestEntriesInternal(const char *manifestPath, bool forWrite, bool pathOnly)
+{
 	if (!forWrite)
 		manifestPath = S3URLFromHadoopScheme(manifestPath);
 
@@ -192,10 +217,15 @@ ReadManifestEntries(const char *manifestPath, bool forWrite)
 
 	context->partitionFieldMap = CreateManifestPartitionFieldMap(manifestReader);
 	context->rewriteHadoopSchemes = !forWrite;
+	context->pathOnly = pathOnly;
 
-	while (AvroReaderReadRecord(manifestReader,
-								(AvroParseFunction) ReadIcebergManifestEntryFromAvro,
-								manifestEntry, context))
+	while (pathOnly
+		   ? AvroReaderReadTransientRecord(manifestReader,
+										   (AvroParseFunction) ReadIcebergManifestEntryFromAvro,
+										   manifestEntry, context)
+		   : AvroReaderReadRecord(manifestReader,
+								  (AvroParseFunction) ReadIcebergManifestEntryFromAvro,
+								  manifestEntry, context))
 	{
 		ErrorIfURLLeavesObjectStorage(manifestEntry->data_file.file_path, manifestPath);
 		manifestEntries = lappend(manifestEntries, manifestEntry);
@@ -337,6 +367,13 @@ ReadDataFileFromAvro(avro_value_t * record, DataFile * dataFile, ManifestReaderC
 	}
 
 	ValidateStorageURL(dataFile->file_path);
+
+	if (context->pathOnly)
+	{
+		/* the path points into the record, which is freed once read */
+		dataFile->file_path = pstrdup(dataFile->file_path);
+		return;
+	}
 
 	AvroGetStringField(record, "file_format", AVRO_FIELD_REQUIRED, &dataFile->file_format, &dataFile->file_format_length);
 

@@ -31,6 +31,9 @@
 #include "pg_lake/util/s3_writer_utils.h"
 #include "pg_lake/util/string_utils.h"
 
+static List *FetchManifestEntries(IcebergManifest * manifest, ManifestEntryPredicateFn manifestEntryPredicateFn,
+								  bool pathOnly);
+
 /*
  * IsManifestEntryStatusScannable checks if the given manifest entry is scannable.
  */
@@ -64,6 +67,26 @@ IsManifestEntryStatusScannable(IcebergManifestEntry * manifestEntry)
 List *
 FetchManifestEntriesFromManifest(IcebergManifest * manifest, ManifestEntryPredicateFn manifestEntryPredicateFn)
 {
+	return FetchManifestEntries(manifest, manifestEntryPredicateFn, false);
+}
+
+
+/*
+ * FetchManifestEntryPathsFromManifest is FetchManifestEntriesFromManifest for
+ * callers that only list the data files; see ReadManifestEntryPaths for what
+ * the entries carry.
+ */
+List *
+FetchManifestEntryPathsFromManifest(IcebergManifest * manifest, ManifestEntryPredicateFn manifestEntryPredicateFn)
+{
+	return FetchManifestEntries(manifest, manifestEntryPredicateFn, true);
+}
+
+
+static List *
+FetchManifestEntries(IcebergManifest * manifest, ManifestEntryPredicateFn manifestEntryPredicateFn,
+					 bool pathOnly)
+{
 	if (manifest == NULL)
 	{
 		ereport(ERROR,
@@ -71,7 +94,9 @@ FetchManifestEntriesFromManifest(IcebergManifest * manifest, ManifestEntryPredic
 				 errmsg("manifest is NULL")));
 	}
 
-	List	   *manifestEntries = ReadManifestEntries(manifest->manifest_path, false);
+	List	   *manifestEntries = pathOnly
+		? ReadManifestEntryPaths(manifest->manifest_path, false)
+		: ReadManifestEntries(manifest->manifest_path, false);
 
 	List	   *filteredManifestEntries = NIL;
 

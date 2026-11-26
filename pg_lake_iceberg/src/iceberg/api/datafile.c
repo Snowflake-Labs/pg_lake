@@ -239,7 +239,14 @@ FetchDataFilesFromManifest(IcebergManifest * manifest, bool pathOnly, ManifestEn
 				 errmsg("manifest is NULL")));
 	}
 
-	List	   *manifestEntries = FetchManifestEntriesFromManifest(manifest, manifestEntryPredicateFn);
+	/*
+	 * With pathOnly, entries carry just the status, sequence numbers, content
+	 * and path, so the manifest entry predicate may look at nothing else. A
+	 * data file predicate may look at any field, so it needs full entries.
+	 */
+	List	   *manifestEntries = pathOnly && dataFilePredicateFn == NULL
+		? FetchManifestEntryPathsFromManifest(manifest, manifestEntryPredicateFn)
+		: FetchManifestEntriesFromManifest(manifest, manifestEntryPredicateFn);
 
 	List	   *dataFiles = NIL;
 

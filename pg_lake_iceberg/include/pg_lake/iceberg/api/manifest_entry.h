@@ -38,6 +38,7 @@ extern PGDLLEXPORT bool IsManifestEntryStatusScannable(IcebergManifestEntry * ma
 
 /* read api */
 extern PGDLLEXPORT List *FetchManifestEntriesFromManifest(IcebergManifest * manifest, ManifestEntryPredicateFn manifestEntryPredicateFn);
+List	   *FetchManifestEntryPathsFromManifest(IcebergManifest * manifest, ManifestEntryPredicateFn manifestEntryPredicateFn);
 
 /* write api */
 extern PGDLLEXPORT void AppendNewManifestEntriesToSnapshot(const char *metadataLocation, bool mergeAddManifests,
