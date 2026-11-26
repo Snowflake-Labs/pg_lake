@@ -46,18 +46,36 @@ test_cases = [
            GROUP BY a.kind""",
         True,
     ),
-    # The controls below are left alone
-    (
-        "no_equality",
-        """SELECT a.id, l.name FROM left_join.fa a
-           LEFT JOIN left_join.fl l ON a.kind = 'x' AND l.id > 3""",
-        False,
-    ),
     (
         "condition_on_other_relation",
         """SELECT a.id, b.id, l.name FROM left_join.fa a
            JOIN left_join.fb b ON a.id = b.a_id
            LEFT JOIN left_join.fl l ON b.id > 10 AND a.location_id = l.id""",
+        True,
+    ),
+    (
+        "right_join",
+        """SELECT a.id, l.name FROM left_join.fl l
+           RIGHT JOIN left_join.fa a ON a.kind = 'x' AND a.location_id = l.id""",
+        True,
+    ),
+    (
+        "right_join_inner_side_condition",
+        """SELECT a.id, l.name FROM left_join.fa a
+           RIGHT JOIN left_join.fl l ON a.kind = 'x' AND a.location_id = l.id""",
+        False,
+    ),
+    # The controls below are left alone
+    (
+        "volatile_condition",
+        """SELECT a.id, l.name FROM left_join.fa a
+           LEFT JOIN left_join.fl l ON a.id + random() < 1000 AND a.location_id = l.id""",
+        False,
+    ),
+    (
+        "no_equality",
+        """SELECT a.id, l.name FROM left_join.fa a
+           LEFT JOIN left_join.fl l ON a.kind = 'x' AND l.id > 3""",
         False,
     ),
     (

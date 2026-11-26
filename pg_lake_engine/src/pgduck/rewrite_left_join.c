@@ -28,7 +28,8 @@
  *
  * which is a plain equality between the two sides, so it becomes a hash
  * join. When the condition is not true, the key is NULL and never matches,
- * so the row of a is NULL-extended just like before.
+ * so the row of a is NULL-extended just like before. A RIGHT JOIN gets the
+ * same treatment with the sides swapped.
  *
  *-------------------------------------------------------------------------
  */
@@ -46,10 +47,9 @@
 bool		EnableLeftJoinRewrite = true;
 
 static void RewriteLeftJoinsInJoinTree(Node *jtnode);
-static void RewriteLeftJoin(JoinExpr *join);
+static void RewriteLeftJoin(JoinExpr *join, Node *outerSide, Node *innerSide);
 static bool IsSafeToEvaluate(Node *expr);
 static Relids JoinTreeRelids(Node *jtnode);
-static Relids JoinTreeJoinRtIndexes(Node *jtnode);
 
 
 /*
@@ -88,25 +88,27 @@ RewriteLeftJoinsInJoinTree(Node *jtnode)
 		RewriteLeftJoinsInJoinTree(join->rarg);
 
 		if (join->jointype == JOIN_LEFT)
-			RewriteLeftJoin(join);
+			RewriteLeftJoin(join, join->larg, join->rarg);
+		else if (join->jointype == JOIN_RIGHT)
+			RewriteLeftJoin(join, join->rarg, join->larg);
 	}
 }
 
 
 /*
- * RewriteLeftJoin folds the ON conditions of the given LEFT JOIN that only
- * reference the left side into a CASE around the left key of an equality
- * between the two sides.
+ * RewriteLeftJoin folds the ON conditions of the given outer join that only
+ * reference the outer (preserved) side into a CASE around the outer key of
+ * an equality between the two sides.
  */
 static void
-RewriteLeftJoin(JoinExpr *join)
+RewriteLeftJoin(JoinExpr *join, Node *outerSide, Node *innerSide)
 {
-	Relids		leftRelids = JoinTreeRelids(join->larg);
-	Relids		rightRelids = JoinTreeRelids(join->rarg);
-	List	   *leftOnlyQuals = NIL;
+	Relids		outerRelids = JoinTreeRelids(outerSide);
+	Relids		innerRelids = JoinTreeRelids(innerSide);
+	List	   *outerOnlyQuals = NIL;
 	List	   *otherQuals = NIL;
 	OpExpr	   *equality = NULL;
-	bool		leftKeyIsFirst = false;
+	bool		outerKeyIsFirst = false;
 	ListCell   *lc;
 
 	foreach(lc, make_ands_implicit((Expr *) join->quals))
@@ -114,10 +116,10 @@ RewriteLeftJoin(JoinExpr *join)
 		Node	   *qual = lfirst(lc);
 		Relids		relids = pull_varnos(NULL, qual);
 
-		if (!bms_is_empty(relids) && bms_is_subset(relids, leftRelids) &&
+		if (!bms_is_empty(relids) && bms_is_subset(relids, outerRelids) &&
 			IsSafeToEvaluate(qual))
 		{
-			leftOnlyQuals = lappend(leftOnlyQuals, qual);
+			outerOnlyQuals = lappend(outerOnlyQuals, qual);
 			continue;
 		}
 
@@ -132,18 +134,18 @@ RewriteLeftJoin(JoinExpr *join)
 			if (op_hashjoinable(opExpr->opno, exprType(linitial(opExpr->args))) &&
 				!bms_is_empty(firstRelids) && !bms_is_empty(secondRelids))
 			{
-				if (bms_is_subset(firstRelids, leftRelids) &&
-					bms_is_subset(secondRelids, rightRelids))
+				if (bms_is_subset(firstRelids, outerRelids) &&
+					bms_is_subset(secondRelids, innerRelids))
 				{
 					equality = opExpr;
-					leftKeyIsFirst = true;
+					outerKeyIsFirst = true;
 					continue;
 				}
-				else if (bms_is_subset(firstRelids, rightRelids) &&
-						 bms_is_subset(secondRelids, leftRelids))
+				else if (bms_is_subset(firstRelids, innerRelids) &&
+						 bms_is_subset(secondRelids, outerRelids))
 				{
 					equality = opExpr;
-					leftKeyIsFirst = false;
+					outerKeyIsFirst = false;
 					continue;
 				}
 			}
@@ -152,47 +154,31 @@ RewriteLeftJoin(JoinExpr *join)
 		otherQuals = lappend(otherQuals, qual);
 	}
 
-	if (leftOnlyQuals == NIL || equality == NULL)
+	if (outerOnlyQuals == NIL || equality == NULL)
 		return;
 
-	Node	   *leftKey = leftKeyIsFirst ?
+	Node	   *outerKey = outerKeyIsFirst ?
 		linitial(equality->args) : lsecond(equality->args);
-
-	/*
-	 * DuckDB only uses an equality as a hash join key when each side refers
-	 * to a single relation, so the CASE only helps if the conditions and the
-	 * key all come from the same relation. We leave out the outer joins that
-	 * pull_varnos reports for Vars that they can NULL.
-	 */
-	Relids		caseRelids = pull_varnos(NULL, leftKey);
-
-	foreach(lc, leftOnlyQuals)
-		caseRelids = bms_add_members(caseRelids, pull_varnos(NULL, lfirst(lc)));
-
-	caseRelids = bms_del_members(caseRelids, JoinTreeJoinRtIndexes(join->larg));
-
-	if (bms_num_members(caseRelids) != 1)
-		return;
 
 	CaseWhen   *caseWhen = makeNode(CaseWhen);
 
-	caseWhen->expr = make_ands_explicit(leftOnlyQuals);
-	caseWhen->result = (Expr *) leftKey;
+	caseWhen->expr = make_ands_explicit(outerOnlyQuals);
+	caseWhen->result = (Expr *) outerKey;
 	caseWhen->location = -1;
 
 	CaseExpr   *caseExpr = makeNode(CaseExpr);
 
-	caseExpr->casetype = exprType(leftKey);
-	caseExpr->casecollid = exprCollation(leftKey);
+	caseExpr->casetype = exprType(outerKey);
+	caseExpr->casecollid = exprCollation(outerKey);
 	caseExpr->args = list_make1(caseWhen);
-	caseExpr->defresult = (Expr *) makeNullConst(exprType(leftKey),
-												 exprTypmod(leftKey),
-												 exprCollation(leftKey));
+	caseExpr->defresult = (Expr *) makeNullConst(exprType(outerKey),
+												 exprTypmod(outerKey),
+												 exprCollation(outerKey));
 	caseExpr->location = -1;
 
 	OpExpr	   *newEquality = (OpExpr *) copyObject(equality);
 
-	if (leftKeyIsFirst)
+	if (outerKeyIsFirst)
 		linitial(newEquality->args) = caseExpr;
 	else
 		lsecond(newEquality->args) = caseExpr;
@@ -235,20 +221,3 @@ JoinTreeRelids(Node *jtnode)
 	elog(ERROR, "unrecognized node type in join tree: %d", (int) nodeTag(jtnode));
 }
 
-
-/*
- * JoinTreeJoinRtIndexes returns the range table indexes of the joins under
- * the given join tree node.
- */
-static Relids
-JoinTreeJoinRtIndexes(Node *jtnode)
-{
-	if (!IsA(jtnode, JoinExpr))
-		return NULL;
-
-	JoinExpr   *join = (JoinExpr *) jtnode;
-	Relids		relids = bms_make_singleton(join->rtindex);
-
-	relids = bms_add_members(relids, JoinTreeJoinRtIndexes(join->larg));
-	return bms_add_members(relids, JoinTreeJoinRtIndexes(join->rarg));
-}
