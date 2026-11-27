@@ -717,10 +717,10 @@ RegionAwareS3FileSystem::TryGetBucketRegionFromS3(const string &url, optional_pt
 
 
 /*
- * S3DeleteBatch is a set of paths that one DeleteObjects request can carry:
+ * RegionAwareS3DeleteBatch is a set of paths that one DeleteObjects request can carry:
  * they live in the same bucket and resolve to the same credentials.
  */
-struct S3DeleteBatch
+struct RegionAwareS3DeleteBatch
 {
 	string bucketUrl;
 	S3AuthParams authParams;
@@ -772,7 +772,7 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 	 * that set either one explicitly, and for anything that is not S3, and use
 	 * the simpler single-file path.
 	 */
-	vector<S3DeleteBatch> batches;
+	vector<RegionAwareS3DeleteBatch> batches;
 
 	for (const string &path : paths)
 	{
@@ -789,14 +789,14 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 		ParsedS3Url parsedPath = s3fs.S3UrlParse(path, pathAuthParams);
 		string bucketUrl = parsedPath.prefix + parsedPath.bucket;
 
-		S3DeleteBatch *batch = nullptr;
+		RegionAwareS3DeleteBatch *batch = nullptr;
 
 		/*
 		 * A linear scan: a set of paths to delete is one table's files or one
 		 * batch off the deletion queue, so the number of distinct buckets and
 		 * credentials in it is a handful at worst.
 		 */
-		for (S3DeleteBatch &candidate : batches)
+		for (RegionAwareS3DeleteBatch &candidate : batches)
 		{
 			if (candidate.bucketUrl == bucketUrl &&
 				SameS3Credentials(candidate.authParams, pathAuthParams))
@@ -824,7 +824,7 @@ RegionAwareS3FileSystem::RemoveFiles(const vector<string> &paths,
 	 * entry point does: it gets the cached region, and a mismatch refreshes the
 	 * region and retries the batch.
 	 */
-	for (S3DeleteBatch &batch : batches)
+	for (RegionAwareS3DeleteBatch &batch : batches)
 	{
 		WithResolvedRegion(batch.paths[0], opener,
 						   [&](const string &resolvedFirstPath) {
