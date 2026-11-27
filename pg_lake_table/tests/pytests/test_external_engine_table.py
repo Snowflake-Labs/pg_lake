@@ -1217,6 +1217,113 @@ def test_connecting_can_be_interrupted(
         superuser_conn.commit()
 
 
+def recv_exactly(sock, size):
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            raise OSError("connection closed")
+        data += chunk
+    return data
+
+
+def test_abort_with_an_engine_that_ignores_cancel_requests(
+    superuser_conn, pg_conn, engine_server, app_user
+):
+    if int(run_query("SHOW server_version_num", superuser_conn)[0][0]) < 170000:
+        pytest.skip("cancel requests only wait with a timeout from PostgreSQL 17")
+
+    # a proxy in front of the engine that passes connections through, but
+    # accepts cancel requests and never answers them
+    engine_socket = (
+        f"{server_params.PGDUCK_UNIX_DOMAIN_PATH}/.s.PGSQL.{server_params.PGDUCK_PORT}"
+    )
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(16)
+    port = listener.getsockname()[1]
+    ignored_cancel_requests = []
+
+    def forward(source, target):
+        try:
+            while data := source.recv(65536):
+                target.sendall(data)
+        except OSError:
+            pass
+        finally:
+            for sock in (source, target):
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+    def serve():
+        while True:
+            try:
+                client, _ = listener.accept()
+                startup = recv_exactly(client, 8)
+            except OSError:
+                return
+
+            if startup[4:8] == (80877102).to_bytes(4, "big"):
+                ignored_cancel_requests.append(client)
+                continue
+
+            engine = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            engine.connect(engine_socket)
+            engine.sendall(startup)
+            for source, target in [(client, engine), (engine, client)]:
+                threading.Thread(
+                    target=forward, args=(source, target), daemon=True
+                ).start()
+
+    threading.Thread(target=serve, daemon=True).start()
+
+    try:
+        run_command(
+            f"""
+            CREATE SERVER ext_engine_proxy FOREIGN DATA WRAPPER pg_lake_remote
+                OPTIONS (conninfo 'host=127.0.0.1 port={port} sslmode=disable');
+            CREATE USER MAPPING FOR PUBLIC SERVER ext_engine_proxy
+                OPTIONS (password_required 'false');
+            CREATE FOREIGN TABLE ext_engine.slow_proxy (x bigint)
+                SERVER ext_engine_proxy OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'slow');
+            GRANT SELECT ON ext_engine.slow_proxy TO {app_user};
+        """,
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+        # the engine still runs the query when the transaction aborts
+        run_command(
+            "DECLARE slow CURSOR FOR SELECT x FROM ext_engine.slow_proxy", pg_conn
+        )
+        assert run_query("FETCH 1 FROM slow", pg_conn) == [[0]]
+        pg_conn.notices.clear()
+
+        start = time.monotonic()
+        thread = threading.Thread(target=pg_conn.rollback, daemon=True)
+        thread.start()
+        thread.join(timeout=120)
+
+        # the cancel request gives up after the cleanup timeout
+        assert not thread.is_alive(), "ROLLBACK waits for the cancel request"
+        assert time.monotonic() - start < 90
+        assert len(ignored_cancel_requests) == 1
+        assert any("could not send cancel request" in n for n in pg_conn.notices)
+
+        # the session can query the engine again
+        assert run_query("SELECT count(*) FROM ext_engine.events", pg_conn) == [[100]]
+        pg_conn.rollback()
+    finally:
+        listener.close()
+        for sock in ignored_cancel_requests:
+            sock.close()
+        rollback(superuser_conn)
+        run_command("DROP SERVER ext_engine_proxy CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
 def test_explain(pg_conn, engine_server):
     query = "SELECT id, label FROM ext_engine.events WHERE amount > 140"
 

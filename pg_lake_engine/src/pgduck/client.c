@@ -54,7 +54,7 @@ static void PGDuckClientSubtransactionCallback(SubXactEvent event,
 static uint32 ReleaseAllPGDuckConnections(SubTransactionId subTransactionId);
 static void CancelRunningCommandOnConnection(PGconn *conn);
 static bool CancelQuery(PGconn *conn);
-static bool StartCancelQuery(PGconn *conn);
+static bool StartCancelQuery(PGconn *conn, TimestampTz endtime);
 static bool FinishCancelQuery(PGconn *conn, TimestampTz endtime, bool consume_input);
 static bool WaitForLastResultWithTimeout(PGconn *conn, TimestampTz endtime,
 										 PGresult **result, bool *timed_out);
@@ -1150,20 +1150,35 @@ CancelQuery(PGconn *conn)
 	endtime = TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
 										  CONNECTION_CLEANUP_TIMEOUT);
 
-	if (!StartCancelQuery(conn))
+	if (!StartCancelQuery(conn, endtime))
 		return false;
 	return FinishCancelQuery(conn, endtime, false);
 }
 
 
 /*
- * StartCancelQuery sends a cancellation over the given connection.
+ * StartCancelQuery sends a cancellation over the given connection. From
+ * PostgreSQL 17 on, it waits for the server at most until endtime, so that an
+ * external query engine that never answers cannot hang the backend.
  *
- * Copied ad verbatim from pgfdw_cancel_query_begin.
+ * Copied from pgfdw_cancel_query_begin.
  */
 static bool
-StartCancelQuery(PGconn *conn)
+StartCancelQuery(PGconn *conn, TimestampTz endtime)
 {
+#if PG_VERSION_NUM >= 170000
+	const char *errorMessage = CancelQueryEngineCommand(conn, endtime);
+
+	if (errorMessage != NULL)
+	{
+		ereport(WARNING,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send cancel request: %s", errorMessage)));
+		return false;
+	}
+
+	return true;
+#else
 	PGcancel   *cancel;
 	char		errbuf[256];
 
@@ -1186,6 +1201,7 @@ StartCancelQuery(PGconn *conn)
 	}
 
 	return true;
+#endif
 }
 
 /*

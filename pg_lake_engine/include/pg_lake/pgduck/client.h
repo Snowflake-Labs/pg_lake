@@ -20,6 +20,7 @@
 
 #include "libpq-fe.h"
 
+#include "datatype/timestamp.h"
 #include "nodes/pg_list.h"
 
 #define DEFAULT_PGDUCK_SERVER_CONNINFO "host=/tmp port=5332"
@@ -51,6 +52,9 @@ extern PGDLLEXPORT PGDuckConnection * TryGetPGDuckConnectionWithConninfo(const c
 extern PGDLLEXPORT void ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection);
 extern PGDLLEXPORT PGconn *ConnectToExternalQueryEngine(const char *conninfo);
 extern PGDLLEXPORT void DisconnectFromExternalQueryEngine(PGconn *connection);
+#if PG_VERSION_NUM >= 170000
+extern PGDLLEXPORT const char *CancelQueryEngineCommand(PGconn *connection, TimestampTz endtime);
+#endif
 extern PGDLLEXPORT int64 ExecuteCommandInPGDuck(char *query);
 extern PGDLLEXPORT List *ExecuteCommandsInPGDuck(List *commands);
 extern PGDLLEXPORT bool ExecuteOptionalCommandInPGDuck(char *command);

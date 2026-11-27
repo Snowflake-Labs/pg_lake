@@ -16,7 +16,8 @@
  */
 
 /*
- * Connecting to and disconnecting from an external query engine.
+ * Connecting to and disconnecting from an external query engine, and
+ * cancelling a command on a connection.
  *
  * From PostgreSQL 19, libpq-be-fe-helpers.h includes libpq-be-fe.h, which
  * redefines PGresult and the libpq functions that use it in every file that
@@ -54,3 +55,20 @@ DisconnectFromExternalQueryEngine(PGconn *connection)
 {
 	libpqsrv_disconnect(connection);
 }
+
+
+#if PG_VERSION_NUM >= 170000
+
+/*
+ * CancelQueryEngineCommand asks the server of a connection to cancel the
+ * command it runs, waiting for it at most until endtime, and returns NULL, or
+ * else an error message. Unlike PQcancel, a server that accepts the cancel
+ * request but never answers cannot hang the backend, as in postgres_fdw.
+ */
+const char *
+CancelQueryEngineCommand(PGconn *connection, TimestampTz endtime)
+{
+	return libpqsrv_cancel(connection, endtime);
+}
+
+#endif
