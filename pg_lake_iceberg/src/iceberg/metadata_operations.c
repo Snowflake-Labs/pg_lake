@@ -466,6 +466,62 @@ ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allT
 
 
 /*
+ * BuildSnapshotOnExternalTableMetadata writes the manifests and manifest list
+ * for a child of the current snapshot in metadata, a table of a REST catalog
+ * that pg_lake does not own, and returns the catalog updates that add it and
+ * move the main branch to it.  The table's metadata is left untouched: what
+ * the snapshot is a child of is for the catalog to check on commit.
+ *
+ * Only data file changes can be applied, since the schema and partitioning of
+ * the table belong to the catalog.  Returns NIL when the changes leave the
+ * snapshot as it was.
+ */
+List *
+BuildSnapshotOnExternalTableMetadata(Oid relationId, IcebergTableMetadata * metadata,
+									 List *metadataOperations, List *allTransforms)
+{
+	Assert(metadataOperations != NIL);
+
+	ValidateStorageURL(metadata->location);
+	ErrorIfURLLeavesObjectStorage(metadata->location, NULL);
+
+	/*
+	 * The new snapshot and the entries in its new manifests take the next
+	 * sequence number.
+	 */
+	metadata->last_sequence_number = metadata->last_sequence_number + 1;
+
+	IcebergSnapshotBuilder *builder = CreateIcebergSnapshotBuilder(metadata, metadataOperations);
+
+	ProcessIcebergMetadataOperations(relationId, metadataOperations, builder);
+
+	if (builder->createTable || builder->regenerateSchema ||
+		builder->regeneratePartitionSpec || builder->expireOldSnapshots)
+		ereport(ERROR,
+				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				 errmsg("only data changes can be made to an external REST catalog table")));
+
+	bool		writableRestCatalogTable = false;
+	IcebergManifestWriteContext *manifestWriteContext =
+		CreateManifestWriteContext(relationId, metadata, builder, writableRestCatalogTable);
+
+	bool		isVerbose = false;
+	IcebergSnapshot *newSnapshot = FinalizeNewSnapshot(builder,
+													   relationId,
+													   metadata->location,
+													   metadata->current_schema_id,
+													   allTransforms,
+													   manifestWriteContext,
+													   isVerbose);
+
+	if (newSnapshot == NULL)
+		return NIL;
+
+	return list_make1(GetAddSnapshotCatalogRequest(newSnapshot, relationId));
+}
+
+
+/*
  * CreateIcebergSnapshotBuilder prepares a snapshot builder that keeps track
  * of all the changes to the current snapshot.
  */
@@ -1024,6 +1080,39 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 	}
 
 	/*
+	 * If we have any files to be marked as removed, we need to update the
+	 * manifest entries to mark them as deleted. We do no create anything new
+	 * here, we just update the existing manifest entries. If any entry
+	 * changes in a manifest, we write a new manifest file.
+	 *
+	 * This runs before the manifests for new files are added, so removing all
+	 * files only removes the ones that existed before this snapshot.
+	 */
+	if (removedEntries != NIL || removeAllEntries)
+	{
+		/* do not modify input lists */
+		List	   *manifestList = list_concat_copy(finalDataManifestList,
+													finalDeleteManifestList);
+
+		ListCell   *manifestCell = NULL;
+
+		foreach(manifestCell, manifestList)
+		{
+			IcebergManifest *manifest = lfirst(manifestCell);
+
+			if (RewriteManifestForRemoval(manifest, removedEntries, removeAllEntries,
+										  snapshotId, newSnapshot,
+										  metadataLocation, snapshotUUID,
+										  &manifestIndex, allTransforms, writeContext,
+										  &finalDataManifestList,
+										  &finalDeleteManifestList))
+			{
+				createNewSnapshot = true;
+			}
+		}
+	}
+
+	/*
 	 * Iterate on the newDataManifestEntries HTAB, which is already grouped by
 	 * partitionSpecId. For each partitionSpecId, create a new manifest.
 	 */
@@ -1093,36 +1182,6 @@ FinalizeNewSnapshot(IcebergSnapshotBuilder * builder, Oid relationId, const char
 			finalDeleteManifestList = lappend(finalDeleteManifestList, newDeleteManifest);
 
 			createNewSnapshot = true;
-		}
-	}
-
-	/*
-	 * If we have any files to be marked as removed, we need to update the
-	 * manifest entries to mark them as deleted. We do no create anything new
-	 * here, we just update the existing manifest entries. If any entry
-	 * changes in a manifest, we write a new manifest file.
-	 */
-	if (removedEntries != NIL || removeAllEntries)
-	{
-		/* do not modify input lists */
-		List	   *manifestList = list_concat_copy(finalDataManifestList,
-													finalDeleteManifestList);
-
-		ListCell   *manifestCell = NULL;
-
-		foreach(manifestCell, manifestList)
-		{
-			IcebergManifest *manifest = lfirst(manifestCell);
-
-			if (RewriteManifestForRemoval(manifest, removedEntries, removeAllEntries,
-										  snapshotId, newSnapshot,
-										  metadataLocation, snapshotUUID,
-										  &manifestIndex, allTransforms, writeContext,
-										  &finalDataManifestList,
-										  &finalDeleteManifestList))
-			{
-				createNewSnapshot = true;
-			}
 		}
 	}
 

@@ -46,6 +46,7 @@
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/fdw/data_file_pruning.h"
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/fdw/partition_transform.h"
 #include "pg_lake/fdw/pg_lake_table.h"
 #include "pg_lake/iceberg/iceberg_field.h"
@@ -80,9 +81,14 @@ static List *IdentityPartitionFieldsForFileConstants(IcebergTableMetadata * meta
 static List *FileConstantsForDataFile(DataFile * dataFile, List *identityPartitionFields);
 static char *FileConstantText(Datum value, PGType pgType);
 static void AppendEscapedFileConstant(StringInfo buffer, const char *text);
-static void ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata);
 static int	NullSafeStrcmp(const char *a, const char *b);
-static bool TypesAreCompatible(PGType pgType, PGType icebergType);
+static void CreateTableScanForExternalTableChanges(Oid relationId, IcebergTableMetadata * metadata,
+												   List *pendingOperations,
+												   List *baseRestrictInfoList,
+												   List **fileScans, List **positionDeleteScans,
+												   List **equalityDeleteScans,
+												   List **equalityDeleteReadGroups);
+static HTAB *CreatePathSet(void);
 
 /*
  * CreatePgLakeScanSnapshot generates a current snapshot for a list
@@ -320,13 +326,22 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 */
 		IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-		if (catalogType == REST_CATALOG_READ_ONLY ||
+		if (IsExternalRestCatalogType(catalogType) ||
 			catalogType == OBJECT_STORE_READ_ONLY ||
 			catalogType == NONE_CATALOG)
 			ErrorIfSchemasDoNotMatch(relationId, metadata);
 
-		CreateTableScanForIcebergMetadata(relationId, metadata, baseRestrictInfoList, &fileScans, &positionDeleteScans,
-										  &equalityDeleteScans, &equalityDeleteReadGroups);
+		List	   *pendingOperations = catalogType == REST_CATALOG_EXTERNAL_READ_WRITE ?
+			GetPendingExternalTableOperations(relationId) : NIL;
+
+		if (pendingOperations != NIL)
+			CreateTableScanForExternalTableChanges(relationId, metadata, pendingOperations,
+												   baseRestrictInfoList, &fileScans,
+												   &positionDeleteScans, &equalityDeleteScans,
+												   &equalityDeleteReadGroups);
+		else
+			CreateTableScanForIcebergMetadata(relationId, metadata, baseRestrictInfoList, &fileScans, &positionDeleteScans,
+											  &equalityDeleteScans, &equalityDeleteReadGroups);
 	}
 	else
 	{
@@ -436,7 +451,7 @@ NullSafeStrcmp(const char *a, const char *b)
 * ErrorIfSchemasDoNotMatch is a helper function that checks if the Iceberg
 * table schema matches the Postgres table schema.
 */
-static void
+void
 ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 {
 	IcebergTableSchema *icebergTableSchema = GetCurrentIcebergTableSchema(metadata);
@@ -563,7 +578,7 @@ ErrorIfSchemasDoNotMatch(Oid relationId, IcebergTableMetadata * metadata)
 * arrays, compatibility means the element types are compatible. For maps,
 * compatibility means the key and value types are compatible.
 */
-static bool
+bool
 TypesAreCompatible(PGType pgType, PGType icebergType)
 {
 	/* if both are the same base type, they are compatible */
@@ -719,6 +734,107 @@ CreateTableScanForIcebergMetadata(Oid relationId, IcebergTableMetadata * metadat
 									  fileScans, positionDeleteScans);
 	*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles, deleteFiles,
 														   *fileScans, equalityDeleteScans);
+}
+
+
+/*
+ * CreateTableScanForExternalTableChanges creates a table scan for an external
+ * REST catalog table that the transaction changed: the files of the snapshot
+ * it read, unless it removed all of them, with the files the transaction
+ * added and removed so far applied to them.
+ */
+static void
+CreateTableScanForExternalTableChanges(Oid relationId, IcebergTableMetadata * metadata,
+									   List *pendingOperations, List *baseRestrictInfoList,
+									   List **fileScans, List **positionDeleteScans,
+									   List **equalityDeleteScans,
+									   List **equalityDeleteReadGroups)
+{
+	List	   *addedFileScans = NIL;
+	HTAB	   *removedPaths = NULL;
+	bool		removedAllFiles = false;
+
+	foreach_ptr(TableMetadataOperation, operation, pendingOperations)
+	{
+		if (operation->type == DATA_FILE_REMOVE_ALL)
+		{
+			removedAllFiles = true;
+			continue;
+		}
+
+		if (operation->type == DATA_FILE_REMOVE)
+		{
+			if (removedPaths == NULL)
+				removedPaths = CreatePathSet();
+
+			hash_search(removedPaths, operation->path, HASH_ENTER, NULL);
+			continue;
+		}
+
+		Assert(operation->type == DATA_FILE_ADD);
+
+		PgLakeFileScan *fileScan = palloc0(sizeof(PgLakeFileScan));
+
+		fileScan->path = (char *) operation->path;
+		fileScan->rowCount = operation->dataFileStats.rowCount;
+
+		if (operation->content == CONTENT_POSITION_DELETES)
+			*positionDeleteScans = lappend(*positionDeleteScans, fileScan);
+		else
+			addedFileScans = lappend(addedFileScans, fileScan);
+	}
+
+	if (!removedAllFiles)
+	{
+		List	   *dataFiles = NIL;
+		List	   *deleteFiles = NIL;
+
+		FetchAllDataAndDeleteFilesFromCurrentSnapshot(metadata, &dataFiles, &deleteFiles);
+
+		if (removedPaths != NULL)
+		{
+			List	   *remainingFiles = NIL;
+
+			foreach_ptr(DataFile, dataFile, dataFiles)
+			{
+				if (!hash_search(removedPaths, dataFile->file_path, HASH_FIND, NULL))
+					remainingFiles = lappend(remainingFiles, dataFile);
+			}
+
+			dataFiles = remainingFiles;
+		}
+
+		List	   *retainedFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList,
+												   PARTIAL_MATCH);
+		List	   *fileConstants = FileConstantsForDataFiles(metadata, retainedFiles);
+
+		ConvertIcebergDataFilesToFileScan(retainedFiles, deleteFiles, fileConstants,
+										  fileScans, positionDeleteScans);
+		*equalityDeleteReadGroups = PlanIcebergEqualityDeletes(metadata, retainedFiles,
+															   deleteFiles, *fileScans,
+															   equalityDeleteScans);
+	}
+
+	/* the transaction's own files go after those the equality deletes cover */
+	*fileScans = list_concat(*fileScans, addedFileScans);
+}
+
+
+/*
+ * CreatePathSet creates a hash set of file paths in the current memory
+ * context.
+ */
+static HTAB *
+CreatePathSet(void)
+{
+	HASHCTL		hashInfo = {0};
+
+	hashInfo.keysize = MAXPGPATH;
+	hashInfo.entrysize = MAXPGPATH;
+	hashInfo.hcxt = CurrentMemoryContext;
+
+	return hash_create("removed data files", 32, &hashInfo,
+					   HASH_ELEM | HASH_STRINGS | HASH_CONTEXT);
 }
 
 

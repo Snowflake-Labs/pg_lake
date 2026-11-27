@@ -341,7 +341,7 @@ CountCatalogTableScans(List *rteList)
 	{
 		RangeTblEntry *rte = lfirst(rteCell);
 
-		if (GetIcebergCatalogType(rte->relid) != REST_CATALOG_READ_ONLY)
+		if (!IsExternalRestCatalogType(GetIcebergCatalogType(rte->relid)))
 			continue;
 
 		pg_atomic_fetch_add_u64(&CatalogStats->tableScans[RelationCatalogKind(rte->relid)], 1);

@@ -80,6 +80,7 @@
 #include "pg_lake/planner/dbt.h"
 #include "pg_lake/query/execute.h"
 #include "pg_lake/object_store_catalog/object_store_catalog.h"
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
 #include "pg_lake/storage/storage_credentials.h"
@@ -863,8 +864,13 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * Instead, the table is created only in PostgreSQL’s system
 		 * catalogs. When the table is queried, its metadata is fetched on
 		 * demand from the external catalog.
+		 *
+		 * An external=true REST table attaches to its catalog table the same
+		 * way. It differs only in that pg_lake may also write it.
 		 */
-		bool		hasExternalCatalogReadOnlyOption = HasReadOnlyOption(createStmt->options);
+		bool		attachesToCatalogTable =
+			HasReadOnlyOption(createStmt->options) ||
+			(hasRestCatalogOption && HasExternalCatalogTableOption(createStmt->options));
 
 		/*
 		 * Snowflake stores unquoted identifiers in uppercase, so a table
@@ -874,7 +880,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 */
 		DefElem    *attachCatalogOption = GetOption(createStmt->options, "catalog");
 
-		if (hasExternalCatalogReadOnlyOption &&
+		if (attachesToCatalogTable &&
 			createStmt->base.tableElts == NIL &&
 			attachCatalogOption != NULL &&
 			pg_strcasecmp(strVal(attachCatalogOption->arg), SNOWFLAKE_CATALOG_NAME) == 0 &&
@@ -884,16 +890,19 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 						makeDefElem(LOWERCASE_COLUMN_NAMES_OPTION,
 									(Node *) makeString("true"), -1));
 
-		if (hasExternalCatalogReadOnlyOption &&
+		if (attachesToCatalogTable &&
 			GetOption(createStmt->options, "partition_by") != NULL)
 			ereport(ERROR, (errcode(ERRCODE_INVALID_PARAMETER_VALUE),
-							errmsg("read-only external catalog iceberg tables do not "
+							errmsg("external catalog iceberg tables do not "
 								   "allow the partition_by option"),
-							errdetail("Partitioning of a read-only table is derived "
+							errdetail("Partitioning of an external catalog table is derived "
 									  "from the source table in the external catalog.")));
 
 		char	   *metadataLocation = NULL;
 		Jsonb	   *catalogTableMetadata = NULL;
+
+		/* an external table with columns that the catalog does not have yet */
+		bool		createInCatalog = false;
 		char	   *catalogNamespace = NULL;
 		char	   *catalogTableName = NULL;
 		char	   *catalogName = NULL;
@@ -906,7 +915,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 		 * to default values. The default values are the table's schema name
 		 * and table name.
 		 */
-		if (catalogNamespaceProvided == NULL && hasExternalCatalogReadOnlyOption)
+		if (catalogNamespaceProvided == NULL && attachesToCatalogTable)
 		{
 			catalogNamespace = get_namespace_name(namespaceId);
 
@@ -922,7 +931,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		char	   *catalogTableNameProvided = GetStringOption(createStmt->options, "catalog_table_name", false);
 
-		if (catalogTableNameProvided == NULL && hasExternalCatalogReadOnlyOption)
+		if (catalogTableNameProvided == NULL && attachesToCatalogTable)
 		{
 			catalogTableName = pstrdup(createStmt->base.relation->relname);
 			createStmt->options =
@@ -936,7 +945,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 		char	   *catalogNameProvided = GetStringOption(createStmt->options, "catalog_name", false);
 
-		if (catalogNameProvided == NULL && hasExternalCatalogReadOnlyOption)
+		if (catalogNameProvided == NULL && attachesToCatalogTable)
 		{
 			if (hasRestCatalogOption)
 			{
@@ -962,7 +971,20 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			catalogName = catalogNameProvided;
 		}
 
-		if (hasRestCatalogOption && hasExternalCatalogReadOnlyOption)
+		if (hasRestCatalogOption && attachesToCatalogTable &&
+			!HasReadOnlyOption(createStmt->options) &&
+			createStmt->base.tableElts != NIL)
+		{
+			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
+			RestCatalogOptions *opts =
+				ResolveRestCatalogOptions(catalogOptionValue);
+
+			createInCatalog = !RestCatalogTableExists(opts, catalogName,
+													  catalogNamespace,
+													  catalogTableName);
+		}
+
+		if (hasRestCatalogOption && attachesToCatalogTable && !createInCatalog)
 		{
 			char	   *catalogOptionValue = GetStringOption(createStmt->options, "catalog", false);
 			RestCatalogOptions *opts =
@@ -981,7 +1003,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 			metadataLocation = loadResult.metadataLocation;
 			catalogTableMetadata = loadResult.metadata;
 		}
-		else if (hasObjectStoreCatalogOption && hasExternalCatalogReadOnlyOption)
+		else if (hasObjectStoreCatalogOption && attachesToCatalogTable)
 		{
 			ErrorIfExternalObjectStoreCatalogDoesNotExist(catalogName);
 
@@ -991,7 +1013,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 																	   catalogTableName);
 		}
 
-		if (!hasExternalCatalogReadOnlyOption)
+		if (!attachesToCatalogTable)
 		{
 			/*
 			 * Writable tables derive catalog_namespace and catalog_table_name
@@ -1037,7 +1059,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 											(Node *) makeString(writableCatalogName), -1));
 			}
 		}
-		else if (createStmt->base.tableElts == NIL && hasExternalCatalogReadOnlyOption)
+		else if (createStmt->base.tableElts == NIL && attachesToCatalogTable)
 		{
 			/*
 			 * Infer the columns from the metadata the catalog inlined in its
@@ -1081,6 +1103,10 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 			/* Keep in sync with the writable-table call below. */
 			RecordIcebergCatalogServerDependency(readOnlyRelId, createStmt->options);
+
+			if (createInCatalog)
+				CreateExternalRestCatalogTableInCatalog(readOnlyRelId,
+														createStmt->base.tableElts);
 
 			return true;
 		}

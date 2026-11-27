@@ -601,6 +601,7 @@ InitPgLakeIcebergOptions(void)
 		{"partition_by", ForeignTableRelationId},
 		{"catalog", ForeignTableRelationId},
 		{"read_only", ForeignTableRelationId},
+		{EXTERNAL_CATALOG_TABLE_OPTION, ForeignTableRelationId},
 
 		{"catalog_name", ForeignTableRelationId},
 		{"catalog_table_name", ForeignTableRelationId},
@@ -704,6 +705,7 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	/* if not provided, assume postgres catalog */
 	IcebergCatalogType icebergCatalogType = POSTGRES_CATALOG;
 	bool		readOnlyExternalCatalogTable = false;
+	bool		externalCatalogTable = false;
 	bool		lowercaseColumnNames = false;
 	char	   *catalogName = NULL;
 	char	   *catalogTableName = NULL;
@@ -845,6 +847,12 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 			readOnlyExternalCatalogTable = defGetBoolean(def);
 		}
 		else if (catalog == ForeignTableRelationId &&
+				 strcmp(def->defname, EXTERNAL_CATALOG_TABLE_OPTION) == 0)
+		{
+			/* only accept boolean */
+			externalCatalogTable = defGetBoolean(def);
+		}
+		else if (catalog == ForeignTableRelationId &&
 				 strcmp(def->defname, LOWERCASE_COLUMN_NAMES_OPTION) == 0)
 		{
 			/* only accept boolean */
@@ -950,7 +958,15 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 	/* first, adjust readable vs writable for external catalog tables */
 	if (catalog == ForeignTableRelationId && icebergCatalogType == REST_CATALOG_READ_ONLY &&
 		!readOnlyExternalCatalogTable)
-		icebergCatalogType = REST_CATALOG_READ_WRITE;
+		icebergCatalogType = externalCatalogTable ?
+			REST_CATALOG_EXTERNAL_READ_WRITE : REST_CATALOG_READ_WRITE;
+
+	if (catalog == ForeignTableRelationId && externalCatalogTable &&
+		!IsExternalRestCatalogType(icebergCatalogType))
+		ereport(ERROR,
+				(errcode(ERRCODE_INVALID_PARAMETER_VALUE),
+				 errmsg("\"%s\" option is only valid for catalog=\"rest\"",
+						EXTERNAL_CATALOG_TABLE_OPTION)));
 	if (catalog == ForeignTableRelationId && icebergCatalogType == OBJECT_STORE_READ_ONLY &&
 		!readOnlyExternalCatalogTable)
 		icebergCatalogType = OBJECT_STORE_READ_WRITE;
@@ -982,12 +998,13 @@ pg_lake_iceberg_validator(PG_FUNCTION_ARGS)
 
 	if (catalog == ForeignTableRelationId)
 	{
-		if (icebergCatalogType == REST_CATALOG_READ_ONLY || icebergCatalogType == OBJECT_STORE_READ_ONLY)
+		if (IsExternalRestCatalogType(icebergCatalogType) ||
+			icebergCatalogType == OBJECT_STORE_READ_ONLY)
 		{
 			/*
 			 * catalog_name, catalog_namespace, and catalog_table_name are
-			 * required for read-only external catalog tables, i.e.
-			 * catalog=rest and catalog=object_store.
+			 * required for tables of an external catalog: read-only
+			 * catalog=rest and catalog=object_store, and external=true.
 			 *
 			 * In practice these are always auto-populated by create_table.c,
 			 * but we check here as a safety net.

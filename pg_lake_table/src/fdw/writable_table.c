@@ -60,6 +60,7 @@
 #include "pg_lake/pgduck/remote_storage.h"
 #include "pg_lake/pgduck/write_data.h"
 #include "pg_lake/pgduck/iceberg_validation.h"
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_extension_base/spi_helpers.h"
@@ -482,8 +483,23 @@ GenerateDataFileNameForTable(Oid relationId, bool withExtension)
 
 	/* if the location has query arguments, we need to append them to the path */
 	char	   *queryArguments = "";
+	char	   *location = NULL;
 
-	char	   *location = GetWritableTableLocation(relationId, &queryArguments);
+	if (IsWritableExternalRestCatalogTable(relationId))
+	{
+		/*
+		 * the table is where the catalog says it is, as of the snapshot we
+		 * read
+		 */
+		char	   *metadataLocation = GetIcebergMetadataLocation(relationId, false);
+		IcebergTableMetadata *metadata =
+			ReadIcebergTableMetadataForRelation(relationId, metadataLocation);
+		bool		inPlace = true;
+
+		location = StripTrailingSlash(pstrdup(metadata->location), inPlace);
+	}
+	else
+		location = GetWritableTableLocation(relationId, &queryArguments);
 	char	   *dataFilePath = NULL;
 
 	dataFilePath = psprintf("%s/data/%.2s/%s%s",
@@ -554,13 +570,18 @@ ApplyDeleteFile(Relation rel, char *sourcePath, int64 sourceRowCount, int64 live
 		 *
 		 * Copy-on-write with row IDs is not yet supported. We'd want to
 		 * preserve the row IDs similar to compaction.
+		 *
+		 * Nor on external REST catalog tables, since the position deletes the
+		 * rewrite has to apply are in the catalog's snapshot rather than in
+		 * ours, and other engines may have added them.
 		 */
 		bool		exceedsRowLimit = (CopyOnWriteMaxDeleteRows >= 0 &&
 									   *totalPositionDeletedRows >= (int64) CopyOnWriteMaxDeleteRows);
 
 		if ((ShouldRewriteAfterDeletions(sourceRowCount, totalDeletedRowCount) ||
 			 exceedsRowLimit) &&
-			!hasRowIds)
+			!hasRowIds &&
+			!IsWritableExternalRestCatalogTable(relationId))
 		{
 			/*
 			 * Copy-on-write deletion. The FDW produces a CSV file with the
@@ -1210,6 +1231,9 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 
 	BindRelationToXactRestCatalog(relationId);
 
+	if (IsWritableExternalRestCatalogTable(relationId))
+		PrepareExternalRestCatalogTableWrite(relationId);
+
 	int64		rowsProcessed = 0;
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;
@@ -1504,6 +1528,13 @@ ApplyMetadataChanges(Oid relationId, List *metadataOperations)
 
 		case PG_LAKE_ICEBERG_TABLE_TYPE:
 			{
+				/* the catalog holds the files of the table, we hold none */
+				if (IsWritableExternalRestCatalogTable(relationId))
+				{
+					RecordExternalRestCatalogTableChanges(relationId, metadataOperations);
+					break;
+				}
+
 				ApplyDataFileCatalogChanges(relationId, metadataOperations);
 
 				List	   *operationTypes = GetMetadataOperationTypes(metadataOperations);

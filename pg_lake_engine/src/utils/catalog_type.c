@@ -60,6 +60,10 @@ GetIcebergCatalogType(Oid relationId)
 	{
 		return REST_CATALOG_READ_ONLY;
 	}
+	else if (hasRestCatalogOption && HasExternalCatalogTableOption(options))
+	{
+		return REST_CATALOG_EXTERNAL_READ_WRITE;
+	}
 	else if (hasRestCatalogOption && !hasReadOnlyOption)
 	{
 		return REST_CATALOG_READ_WRITE;
@@ -116,6 +120,17 @@ HasReadOnlyOption(List *options)
 	char	   *readOnly = GetStringOption(options, "read_only", false);
 
 	return readOnly ? pg_strncasecmp(readOnly, "true", strlen("true")) == 0 : false;
+}
+
+
+/*
+ * HasExternalCatalogTableOption returns true if the options contain
+ * external='true'.
+ */
+bool
+HasExternalCatalogTableOption(List *options)
+{
+	return GetBoolOption(options, EXTERNAL_CATALOG_TABLE_OPTION, false);
 }
 
 

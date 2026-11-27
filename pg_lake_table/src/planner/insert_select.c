@@ -19,6 +19,7 @@
 #include "catalog/pg_type_d.h"
 
 #include "access/table.h"
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/extensions/postgis.h"
 #include "pg_lake/iceberg/catalog.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
@@ -97,7 +98,8 @@ IsPushdownableInsertSelectQuery(Query *query)
 
 	Oid			insertIntoRelid = GetInsertRelidFromInsertSelect(query);
 
-	if (!IsWritablePgLakeTable(insertIntoRelid) && !IsWritableIcebergTable(insertIntoRelid))
+	if (!IsWritablePgLakeTable(insertIntoRelid) && !IsWritableIcebergTable(insertIntoRelid) &&
+		!IsWritableExternalRestCatalogTable(insertIntoRelid))
 	{
 		ereport(DEBUG4,
 				(errmsg("INSERT..SELECT into read-only pg_lake table is not pushdownable")));

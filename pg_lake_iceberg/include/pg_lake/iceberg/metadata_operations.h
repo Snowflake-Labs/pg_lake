@@ -22,6 +22,10 @@
 #include "pg_lake/iceberg/metadata_spec.h"
 
 extern PGDLLEXPORT List *ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms, int maxSnapshotAgeInSecs, bool isVerbose);
+extern PGDLLEXPORT List *BuildSnapshotOnExternalTableMetadata(Oid relationId,
+															  IcebergTableMetadata * metadata,
+															  List *metadataOperations,
+															  List *allTransforms);
 extern PGDLLEXPORT IcebergTableMetadata * GetWritableRestCatalogTableMetadata(Oid relationId, char **metadataLocation);
 extern PGDLLEXPORT bool ShouldSkipMetadataChangeToIceberg(List *metadataOperationTypes);
 extern PGDLLEXPORT List *GetMetadataOperationTypes(List *metadataOperations);

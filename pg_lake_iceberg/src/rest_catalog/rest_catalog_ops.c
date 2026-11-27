@@ -175,6 +175,23 @@ RestCatalogStagedTable
 StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFileSchema,
 										const char *requestedLocation)
 {
+	bool		stageCreate = true;
+
+	return CreateRestCatalogIcebergTable(relationId, dataFileSchema,
+										 requestedLocation, stageCreate);
+}
+
+
+/*
+ * CreateRestCatalogIcebergTable sends the createTable request for the
+ * relation to the rest catalog, as StartStageRestCatalogIcebergTableCreate
+ * describes. Without stageCreate, the catalog commits the table right away,
+ * whatever happens to the transaction.
+ */
+RestCatalogStagedTable
+CreateRestCatalogIcebergTable(Oid relationId, DataFileSchema * dataFileSchema,
+							  const char *requestedLocation, bool stageCreate)
+{
 	const char *relationName = GetRestCatalogTableName(relationId);
 
 	StringInfo	body = makeStringInfo();
@@ -195,7 +212,8 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFil
 
 	AppendIcebergTableSchemaForRestCatalog(body, schema, 1);
 	/* pg_lake's metadata-file reader currently expects uncompressed JSON. */
-	appendStringInfoString(body, ",\"stage-create\":true,\"properties\":{\"format-version\":\"2\",\"write.metadata.compression-codec\":\"none\"}");
+	appendStringInfo(body, ",\"stage-create\":%s,\"properties\":{\"format-version\":\"2\",\"write.metadata.compression-codec\":\"none\"}",
+					 stageCreate ? "true" : "false");
 
 	appendStringInfoChar(body, '}');	/* close body */
 
@@ -233,7 +251,7 @@ StartStageRestCatalogIcebergTableCreate(Oid relationId, DataFileSchema * dataFil
 		staged.location == NULL || staged.location[0] == '\0')
 		ereport(ERROR,
 				(errcode(ERRCODE_EXTERNAL_ROUTINE_EXCEPTION),
-				 errmsg("REST stage-create response must include a table UUID and location")));
+				 errmsg("REST createTable response must include a table UUID and location")));
 	/* Validate before saving the UUID for the post-commit create request. */
 	(void) DirectFunctionCall1(uuid_in, CStringGetDatum(staged.uuid));
 
@@ -644,6 +662,24 @@ ResolveReadOnlyRestCatalogTable(RestCatalogOptions * opts, char **catalogName,
 
 	/* repeat the load as given to report the catalog's own error */
 	return LoadTableFromRestCatalog(opts, *catalogName, *namespaceName, *tableName);
+}
+
+
+/*
+ * RestCatalogTableExists returns whether the REST catalog has the table.
+ */
+bool
+RestCatalogTableExists(RestCatalogOptions * opts, const char *catalogName,
+					   const char *namespaceName, const char *tableName)
+{
+	if (!RestNamespaceExists(opts, catalogName, namespaceName))
+		return false;
+
+	RestCatalogLoadTableResult result = {0};
+	bool		missingOk = true;
+
+	return TryLoadTableFromRestCatalog(opts, catalogName, namespaceName,
+									   tableName, missingOk, &result);
 }
 
 
@@ -2268,7 +2304,7 @@ IcebergProvideStorageCredentials(Oid relationId)
 	ListCell   *credsCell = NULL;
 	StorageCredential *sc;
 
-	if (catalogType != REST_CATALOG_READ_ONLY)
+	if (!IsExternalRestCatalogType(catalogType))
 		return NIL;
 
 	/*
@@ -2394,7 +2430,7 @@ IcebergProvideStorageCredentials(Oid relationId)
 void
 ErrorIfVendedCredentialsWithheld(Oid relationId)
 {
-	if (GetIcebergCatalogType(relationId) != REST_CATALOG_READ_ONLY ||
+	if (!IsExternalRestCatalogType(GetIcebergCatalogType(relationId)) ||
 		!RestCatalogVendingEnabledForRelation(relationId))
 		return;
 
@@ -2472,10 +2508,10 @@ GetRestCatalogTableName(Oid relationId)
 {
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+	Assert(IsExternalRestCatalogType(catalogType) ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
-	if (catalogType == REST_CATALOG_READ_ONLY)
+	if (IsExternalRestCatalogType(catalogType))
 	{
 		ForeignTable *foreignTable = GetForeignTable(relationId);
 		List	   *options = foreignTable->options;
@@ -2508,10 +2544,10 @@ GetRestCatalogNamespace(Oid relationId)
 {
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+	Assert(IsExternalRestCatalogType(catalogType) ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
-	if (catalogType == REST_CATALOG_READ_ONLY)
+	if (IsExternalRestCatalogType(catalogType))
 	{
 
 		ForeignTable *foreignTable = GetForeignTable(relationId);
@@ -2555,7 +2591,7 @@ GetRestCatalogName(Oid relationId)
 {
 	IcebergCatalogType catalogType = GetIcebergCatalogType(relationId);
 
-	Assert(catalogType == REST_CATALOG_READ_ONLY ||
+	Assert(IsExternalRestCatalogType(catalogType) ||
 		   catalogType == REST_CATALOG_READ_WRITE);
 
 	ForeignTable *foreignTable = GetForeignTable(relationId);
@@ -2611,6 +2647,18 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 {
 	StringInfo	body = makeStringInfo();
 
+	/*
+	 * other engines skip snapshots by operation, so do not call a delete an
+	 * append
+	 */
+	const char *operation = "append";
+
+	for (size_t propertyIndex = 0; propertyIndex < newSnapshot->summary_length; propertyIndex++)
+	{
+		if (strcmp(newSnapshot->summary[propertyIndex].key, "operation") == 0)
+			operation = newSnapshot->summary[propertyIndex].value;
+	}
+
 	appendStringInfoString(body,
 						   "{\"action\":\"add-snapshot\",\"snapshot\":{");
 
@@ -2622,7 +2670,7 @@ GetAddSnapshotCatalogRequest(IcebergSnapshot * newSnapshot, Oid relationId)
 	appendStringInfo(body, ",\"timestamp-ms\":%ld", (long) (PostgresTimestampToIcebergTimestampMs()));	/* coarse ms */
 	appendStringInfoString(body, ",\"manifest-list\":");
 	appendStringInfoString(body, EscapeJson(newSnapshot->manifest_list));
-	appendStringInfoString(body, ",\"summary\":{\"operation\": \"append\"}");
+	appendStringInfo(body, ",\"summary\":{\"operation\": %s}", EscapeJson(operation));
 	appendStringInfo(body, ",\"schema-id\":%d", newSnapshot->schema_id);
 	appendStringInfoString(body, "}}, ");	/* end add-snapshot */
 

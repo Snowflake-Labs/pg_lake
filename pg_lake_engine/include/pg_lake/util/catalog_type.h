@@ -84,13 +84,40 @@ typedef enum IcebergCatalogType
 	 * Similar to REST_CATALOG_READ_WRITE, but using an object store
 	 * compatible API instead of a REST catalog server.
 	 */
-	OBJECT_STORE_READ_WRITE = 5
+	OBJECT_STORE_READ_WRITE = 5,
+
+	/*
+	 * catalog='rest', external=True The REST catalog is the authority, as for
+	 * REST_CATALOG_READ_ONLY: we keep only a pointer to the catalog table and
+	 * read every snapshot from the catalog. Unlike REST_CATALOG_READ_ONLY,
+	 * pg_lake can write it, by committing a child of the snapshot it read.
+	 */
+	REST_CATALOG_EXTERNAL_READ_WRITE = 6
 } IcebergCatalogType;
+
+/*
+ * Option of a REST catalog table whose state lives only in the catalog, see
+ * REST_CATALOG_EXTERNAL_READ_WRITE.  A read_only table is always external.
+ */
+#define EXTERNAL_CATALOG_TABLE_OPTION "external"
+
+/*
+ * IsExternalRestCatalogType returns whether a table of the given type is
+ * owned by its REST catalog, so its metadata comes from the catalog rather
+ * than from our catalogs.
+ */
+static inline bool
+IsExternalRestCatalogType(IcebergCatalogType catalogType)
+{
+	return catalogType == REST_CATALOG_READ_ONLY ||
+		catalogType == REST_CATALOG_EXTERNAL_READ_WRITE;
+}
 
 extern PGDLLEXPORT IcebergCatalogType GetIcebergCatalogType(Oid relationId);
 extern PGDLLEXPORT bool HasRestCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasObjectStoreCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasReadOnlyOption(List *options);
+extern PGDLLEXPORT bool HasExternalCatalogTableOption(List *options);
 extern PGDLLEXPORT bool HasLowercaseColumnNamesOption(List *options);
 extern PGDLLEXPORT bool LowercasesColumnNames(Oid relationId);
 extern PGDLLEXPORT bool IsCatalogOwnedByExtension(const char *catalog);

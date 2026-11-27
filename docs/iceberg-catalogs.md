@@ -302,10 +302,70 @@ Fields nested in a column, such as struct fields, list elements and map keys and
 read by their field IDs too, so a nested field renamed, or dropped and added again, in the
 source catalog reads from the right field of every file.
 
-Attached tables cannot be written to. Writing would mean taking over the table's metadata,
-field IDs and file inventory from whatever produced them, which pg_lake does not do: it writes
-only to tables it created. To move existing data under pg_lake, create a new table and copy
-into it.
+A `read_only` table cannot be written to. To write to a table that other engines also write,
+attach it with `external` instead.
+
+### Write tables shared with other engines
+
+{: .note }
+Writing to tables shared with other engines is experimental.
+
+A table attached with `external = true` reads like a `read_only` one: the catalog is the only
+place its state lives, and PostgreSQL keeps just the pointer to it. pg_lake can also write it.
+A transaction that modifies the table commits one new snapshot to the catalog when it commits,
+as a child of the snapshot the transaction read, on condition that nobody changed the table in
+between:
+
+```sql
+CREATE TABLE events () USING iceberg
+WITH (catalog = 'polaris', external = true,
+      catalog_name = 'sales', catalog_namespace = 'analytics',
+      catalog_table_name = 'events');
+
+BEGIN;
+INSERT INTO events SELECT * FROM staging_events;
+DELETE FROM events WHERE ts < now() - interval '90 days';
+COMMIT;
+```
+
+When columns are given and the catalog has no such table, pg_lake creates it in the catalog
+first, outside any transaction block. The catalog creates it right away, so an error later in
+the same statement leaves it there. A column type that Iceberg would hand back as another type,
+such as `varchar(10)`, is rejected. Partitioning and a location cannot be set yet.
+
+```sql
+-- creates analytics.events in the catalog, then attaches it
+CREATE TABLE analytics.events (id bigint NOT NULL, payload text) USING iceberg
+WITH (catalog = 'polaris', external = true);
+```
+
+A transaction reads the table at the snapshot the catalog has when the transaction first reads
+it, whatever the isolation level, together with its own changes. Rolling back to a savepoint
+forgets the changes made since. Commits from other engines are visible to the next
+transaction. If another engine changes the table after the transaction read it, the catalog
+rejects the commit and the transaction fails with a serialization failure (`SQLSTATE 40001`).
+Run it again to apply it to the new snapshot.
+
+The catalog commits the changes before PostgreSQL does, so:
+
+- A transaction that modifies external tables cannot also write tables that commit through
+  PostgreSQL, such as regular tables and Iceberg tables pg_lake owns. Temporary tables are
+  allowed. All external tables a transaction modifies must be in the same catalog, and commit
+  together.
+- `PREPARE TRANSACTION` is not supported for such a transaction.
+
+Other limits:
+
+- Tables with a partitioned spec cannot be written yet, and neither `row_ids` nor schema and
+  partitioning changes are supported. If another engine changes the schema, queries and writes
+  fail until the table is attached again.
+- Deletes and updates add position delete files rather than rewrite data files.
+
+Files written for a commit that did not happen, because the catalog rejected it or the
+transaction failed, stay in object storage, as they do for other Iceberg writers. pg_lake does
+not remove orphan files, expire snapshots or compact these tables yet.
+
+Dropping the table only removes it from PostgreSQL.
 
 pg_lake reads manifests and manifest lists that are uncompressed or compressed with deflate
 (Iceberg's default, `gzip`) or snappy. A table whose manifests are compressed with zstd or
