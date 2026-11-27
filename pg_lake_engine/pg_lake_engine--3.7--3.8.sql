@@ -21,3 +21,8 @@ CREATE FUNCTION __lake__internal__nsp__.hex_decode_pg(text)
  LANGUAGE C
  IMMUTABLE PARALLEL SAFE STRICT
 AS 'MODULE_PATHNAME', $function$pg_lake_internal_dummy_function$function$;
+
+-- replaced by the wrappers above
+DROP FUNCTION __lake__internal__nsp__.to_base64(bytea);
+DROP FUNCTION __lake__internal__nsp__.from_base64(text);
+DROP FUNCTION __lake__internal__nsp__.from_hex(text);

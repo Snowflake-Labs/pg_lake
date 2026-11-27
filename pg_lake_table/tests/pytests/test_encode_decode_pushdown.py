@@ -91,6 +91,43 @@ def test_encode_decode_pushdown(
 
 
 @pytest.mark.parametrize(
+    "format,value",
+    [
+        # whitespace with part of a group read
+        ("base64", "YW Jj"),
+        ("base64", "Y\\tW\\nJ\\rj"),
+        ("base64", "YQ= ="),
+        ("base64", "YW\\nI="),
+        # padding Postgres accepts in the middle
+        ("base64", "ab=c"),
+        ("base64", "YQ==YQ=="),
+        ("hex", " 61 \\t62\\n"),
+    ],
+)
+def test_decode_whitespace_and_padding_pushdown(
+    s3, pg_conn, extension, with_default_location, format, value
+):
+    """Pushed down, decode() reads what Postgres reads, wherever the whitespace
+    and padding fall."""
+    run_command(
+        f"""
+            CREATE TABLE test_decode_stored_text (col_text text) USING iceberg;
+            INSERT INTO test_decode_stored_text VALUES (E'{value}');
+        """,
+        pg_conn,
+    )
+
+    query = f"SELECT decode(col_text, '{format}') FROM test_decode_stored_text"
+    explain = run_query(f"EXPLAIN (VERBOSE, FORMAT JSON) {query}", pg_conn)
+    assert f'"{format}_decode_pg"(' in fetch_remote_sql(explain)
+
+    expected = run_query(f"SELECT decode(E'{value}', '{format}')", pg_conn)
+    assert run_query(query, pg_conn) == expected
+
+    pg_conn.rollback()
+
+
+@pytest.mark.parametrize(
     "format,value,error",
     [
         ("base64", "a=bc", 'unexpected "=" while decoding base64 sequence'),
