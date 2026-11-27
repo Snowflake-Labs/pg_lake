@@ -115,7 +115,9 @@ static List *GetNewFileOpsFromFileStats(Oid relationId, List *dataFileStats,
 										bool isVerbose, List **newFiles);
 static bool ShouldRewriteAfterDeletions(int64 sourceRowCount, uint64 totalDeletedRowCount);
 static CompactionDataFileHashEntry * GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime,
-																	   bool forceMerge, bool forceCompactDeletions);
+																	   bool forceMerge, bool forceCompactDeletions,
+																	   const uint64 *skippedPartitionKeys,
+																	   int skippedPartitionCount);
 static int	CompareDataFilesByCreationTime(const ListCell *a, const ListCell *b);
 static HTAB *CreateCompactionDataFileHash(void);
 static HTAB *GroupDataFilesByPartition(List *dataFiles, TimestampTz compactionStartTime, bool forceMerge);
@@ -778,10 +780,16 @@ RemoveAllDataFilesFromPgLakeCatalogFromTable(Oid relationId)
  * same partition spec and partition tuple. It picks the partition with
  * the most files first to avoid being stuck in recompacting the same
  * partition that always generate big file forever.
+ *
+ * It does not pick the partitions in skippedPartitionKeys, and it marks
+ * pickedPartition while compacting it, so that the caller knows which
+ * partition to skip if the round fails then.
  */
 bool
 CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
-				 bool forceMerge, bool isVerbose, CompactionStats * runStats)
+				 bool forceMerge, bool isVerbose, CompactionStats * runStats,
+				 const uint64 *skippedPartitionKeys, int skippedPartitionCount,
+				 CompactionPartition * pickedPartition)
 {
 	/* prevent concurrent update/delete which might rewrite files too */
 	LockTableForUpdate(relationId);
@@ -825,7 +833,9 @@ CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
 	}
 
 	CompactionDataFileHashEntry *entry = GetPartitionWithMostEligibleFiles(relationId, compactionStartTime,
-																		   forceMerge, forceCompactDeletions);
+																		   forceMerge, forceCompactDeletions,
+																		   skippedPartitionKeys,
+																		   skippedPartitionCount);
 
 	if (entry == NULL)
 	{
@@ -835,8 +845,13 @@ CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
 		return false;
 	}
 
+	pickedPartition->key = entry->partitionHash;
+	pickedPartition->compacting = true;
+
 	List	   *newFileOps = TryCompactDataFiles(relationId, tupleDescriptor, entry->dataFiles,
 												 runStats, tableType, options, forceMerge, isVerbose);
+
+	pickedPartition->compacting = false;
 
 	table_close(rel, NoLock);
 	PopActiveSnapshot();
@@ -1319,10 +1334,13 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
  * same partition spec and partition tuple. It picks the partition with
  * the most files first to avoid being stuck in recompacting the same
  * partition that always generate big file forever.
+ *
+ * Partitions in skippedPartitionKeys are not picked.
  */
 static CompactionDataFileHashEntry *
 GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTime, bool forceMerge,
-								  bool forceCompactDeletions)
+								  bool forceCompactDeletions, const uint64 *skippedPartitionKeys,
+								  int skippedPartitionCount)
 {
 	/* we're going to rewrite files, so lock them */
 	bool		forUpdate = true;
@@ -1361,6 +1379,20 @@ GetPartitionWithMostEligibleFiles(Oid relationId, TimestampTz compactionStartTim
 
 	while ((entry = hash_seq_search(&status)) != NULL)
 	{
+		bool		skipped = false;
+
+		for (int skippedIndex = 0; skippedIndex < skippedPartitionCount; skippedIndex++)
+		{
+			if (skippedPartitionKeys[skippedIndex] == entry->partitionHash)
+			{
+				skipped = true;
+				break;
+			}
+		}
+
+		if (skipped)
+			continue;
+
 		/* filter out files that are not eligible for compaction */
 		entry->dataFiles = FilterCompactionCandidates(entry->dataFiles,
 													  compactionStartTime,

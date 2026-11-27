@@ -73,6 +73,13 @@
 /* managed by a GUC, not exposed to the user, mostly to ensure termination, compact at most 100 times */
 int			MaxCompactionsPerVacuum = 100;
 
+/*
+ * The skip list of VacuumCompactDataFiles is a fixed array because it has to
+ * outlive the transactions its rounds commit. At the default
+ * MaxCompactionsPerVacuum the rounds run out before the array does.
+ */
+#define MAX_SKIPPED_COMPACTION_PARTITIONS 100
+
 /* case insensitive */
 #define PG_LAKE_ICEBERG_VACUUM_FLAG "iceberg"
 
@@ -859,6 +866,12 @@ VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
 
 /*
  * VacuumCompactDataFiles compacts data files for the given relation.
+ *
+ * A round that fails while compacting a partition leaves that partition out
+ * of the remaining rounds, so partitions that cannot be compacted do not keep
+ * the others from being compacted. A failure before a round picks a
+ * partition, or after it compacted one, would recur in every round, so we
+ * stop.
  */
 static void
 VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
@@ -866,6 +879,8 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 	volatile bool continueCompaction = false;
 	int			compactionCount = 0;
 	CompactionStats runStats = {0};
+	uint64		failedPartitionKeys[MAX_SKIPPED_COMPACTION_PARTITIONS];
+	int			failedPartitionCount = 0;
 
 	/*
 	 * Compact files that are created before VACUUM starts. We do this because
@@ -902,6 +917,12 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 		volatile bool roundSucceeded = false;
 
 		/*
+		 * The round sets the partition it picks from inside PG_TRY, and a
+		 * local would be indeterminate in PG_CATCH after a failure.
+		 */
+		CompactionPartition *roundPartition = palloc0(sizeof(CompactionPartition));
+
+		/*
 		 * We may need to rollback the initial state of the database in case
 		 * of rollback.
 		 */
@@ -915,7 +936,9 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			/* do compaction */
 			continueCompaction = CompactDataFiles(relationId, compactionStartTime,
-												  isFull, isVerbose, &roundStats);
+												  isFull, isVerbose, &roundStats,
+												  failedPartitionKeys, failedPartitionCount,
+												  roundPartition);
 
 			VacuumConsumeTrackedIcebergMetadataChanges(isVerbose);
 
@@ -963,7 +986,11 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			ThrowErrorData(edata);
 
-			continueCompaction = false;
+			if (roundPartition->compacting)
+				failedPartitionKeys[failedPartitionCount++] = roundPartition->key;
+
+			continueCompaction = roundPartition->compacting &&
+				failedPartitionCount < MAX_SKIPPED_COMPACTION_PARTITIONS;
 		}
 		PG_END_TRY();
 
