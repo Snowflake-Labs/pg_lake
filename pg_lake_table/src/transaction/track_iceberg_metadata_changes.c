@@ -39,6 +39,7 @@
 #include "pg_lake/iceberg/partitioning/spec_generation.h"
 #include "pg_lake/partitioning/partition_spec_catalog.h"
 #include "pg_lake/rest_catalog/rest_catalog.h"
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/transaction/track_iceberg_metadata_changes.h"
 #include "pg_lake/transaction/transaction_hooks.h"
 #include "pg_lake/util/injection_points.h"
@@ -1005,6 +1006,12 @@ RegisterRestCatalogXactCaptureCallback(void)
 void
 BindRelationToXactRestCatalog(Oid relationId)
 {
+	/*
+	 * Lake tables commit through PostgreSQL, also when a pushdown path writes
+	 * them without the executor seeing a result relation.
+	 */
+	RecordTableWriteInTx(relationId);
+
 	if (!IsPgLakeIcebergForeignTableById(relationId) ||
 		GetIcebergCatalogType(relationId) != REST_CATALOG_READ_WRITE)
 		return;

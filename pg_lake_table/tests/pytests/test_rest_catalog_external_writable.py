@@ -5,6 +5,7 @@ read_only table. pyiceberg plays the other engine that commits to the
 same table.
 """
 
+import io
 import threading
 import time
 
@@ -219,8 +220,8 @@ def test_write_after_external_commit(pg_conn, shared_table):
 
 
 def autocommit_conn():
-    """Writes to an external table cannot be in a transaction block, which
-    psycopg2 opens for every statement unless autocommit is on."""
+    """A connection on which each statement is its own transaction, which
+    psycopg2 otherwise wraps in a transaction block."""
     conn = open_pg_conn()
     conn.autocommit = True
     return conn
@@ -383,33 +384,181 @@ def test_insert_select_and_copy(pg_conn, shared_table, tmp_path):
     assert (150, "gen-150") in rows and (201, "copy-201") in rows
 
 
-def test_writes_rejected_in_transaction_block(pg_conn, shared_table):
+def test_insert_select_pushdown(pg_conn, rest_catalog, shared_table, set_polaris_gucs):
+    """INSERT..SELECT into an external table without NOT NULL columns runs in
+    pgduck_server, and commits like any other write."""
     table, pg_name = shared_table
+    target_name = f'"{NAMESPACE}"."pushdown_target"'
 
-    error = run_command(
-        f"INSERT INTO {pg_name} VALUES (100, 'tx')", pg_conn, raise_error=False
+    conn = autocommit_conn()
+    run_command(
+        f"""CREATE TABLE {target_name} (id bigint, val text) USING iceberg
+            WITH (catalog='rest', external='true')""",
+        conn,
     )
-    assert "in a transaction block" in str(error)
+
+    try:
+        insert_select = f"INSERT INTO {target_name} SELECT id * 10, val FROM {pg_name}"
+        plan = run_query(f"EXPLAIN {insert_select}", conn)
+        assert "Custom Scan (Query Pushdown)" in str(plan)
+
+        run_command("BEGIN", conn)
+        run_command(insert_select, conn)
+        run_command(insert_select, conn)
+        assert run_query(f"SELECT count(*) FROM {target_name}", conn) == [[4]]
+        run_command("COMMIT", conn)
+
+        target = rest_catalog.load_table(f"{NAMESPACE}.pushdown_target")
+        assert catalog_rows(target) == [
+            (10, "spark-1"),
+            (10, "spark-1"),
+            (20, "spark-2"),
+            (20, "spark-2"),
+        ]
+    finally:
+        run_command(f"DROP TABLE IF EXISTS {target_name}", conn)
+        conn.close()
+        rest_catalog.drop_table(f"{NAMESPACE}.pushdown_target")
+
+
+def test_writes_in_transaction_block(pg_conn, shared_table):
+    """
+    A transaction block sees its own changes, savepoints roll them back, and
+    the commit sends them to the catalog as one snapshot.
+    """
+    table, pg_name = shared_table
+    base_snapshot = table.current_snapshot().snapshot_id
+
+    run_command(f"INSERT INTO {pg_name} VALUES (10, 'pg-10'), (11, 'pg-11')", pg_conn)
+    run_command(f"INSERT INTO {pg_name} VALUES (12, 'pg-12')", pg_conn)
+    res = run_query(f"SELECT id FROM {pg_name} ORDER BY id", pg_conn)
+    assert res == [[1], [2], [10], [11], [12]]
+
+    # from the other engine's file, and from files of this transaction
+    run_command(f"DELETE FROM {pg_name} WHERE id IN (2, 11, 12)", pg_conn)
+    run_command("SAVEPOINT s1", pg_conn)
+    run_command(f"DELETE FROM {pg_name} WHERE id = 1", pg_conn)
+    run_command(f"INSERT INTO {pg_name} VALUES (13, 'pg-13')", pg_conn)
+    run_command("ROLLBACK TO SAVEPOINT s1", pg_conn)
+    run_command(f"UPDATE {pg_name} SET val = 'pg-upd' WHERE id IN (1, 10)", pg_conn)
+    res = run_query(f"SELECT id, val FROM {pg_name} ORDER BY id", pg_conn)
+    assert [tuple(row) for row in res] == [(1, "pg-upd"), (10, "pg-upd")]
+
+    # nothing reaches the catalog before the commit
+    assert catalog_rows(table) == [(1, "spark-1"), (2, "spark-2")]
+    pg_conn.commit()
+
+    table.refresh()
+    assert table.current_snapshot().parent_snapshot_id == base_snapshot
+    assert catalog_rows(table) == [(1, "pg-upd"), (10, "pg-upd")]
+
+    # a rolled back transaction leaves the catalog alone
+    run_command(f"INSERT INTO {pg_name} VALUES (20, 'pg-20')", pg_conn)
     pg_conn.rollback()
 
-    # so is a multi-statement query string, which runs as one transaction
+    # TRUNCATE and INSERT in one transaction, also as one query string
     conn = autocommit_conn()
-    error = run_command(
-        f"INSERT INTO {pg_name} VALUES (100, 'tx'); SELECT 1",
-        conn,
-        raise_error=False,
-    )
-    assert "in a transaction block" in str(error)
-
-    # reads in a transaction block are fine
-    run_command("BEGIN", conn)
-    res = run_query(f"SELECT count(*) FROM {pg_name}", conn)
-    assert res == [[2]]
-    run_command("ROLLBACK", conn)
+    run_command(f"TRUNCATE {pg_name}; INSERT INTO {pg_name} VALUES (30, 'pg-30')", conn)
     conn.close()
+    assert catalog_rows(table) == [(30, "pg-30")]
 
-    # nothing reached the catalog
-    assert catalog_rows(table) == [(1, "spark-1"), (2, "spark-2")]
+    res = run_query(
+        f"SELECT count(*) FROM lake_table.files WHERE table_name = '{pg_name}'::regclass",
+        pg_conn,
+    )
+    assert res == [[0]]
+    pg_conn.commit()
+
+
+def test_snapshot_per_transaction(pg_conn, shared_table):
+    """
+    A transaction reads one snapshot of the table, and cannot commit changes
+    after another engine committed on top of it.
+    """
+    table, pg_name = shared_table
+
+    assert run_query(f"SELECT count(*) FROM {pg_name}", pg_conn) == [[2]]
+    external_append(table, [(20, "spark-20")])
+
+    # still the snapshot the transaction read first, also in READ COMMITTED
+    assert run_query(f"SELECT count(*) FROM {pg_name}", pg_conn) == [[2]]
+
+    run_command(f"DELETE FROM {pg_name} WHERE id = 1", pg_conn)
+    with pytest.raises(psycopg2.errors.SerializationFailure):
+        pg_conn.commit()
+    pg_conn.rollback()
+
+    # running it again reads the new snapshot
+    run_command(f"DELETE FROM {pg_name} WHERE id = 1", pg_conn)
+    pg_conn.commit()
+    assert catalog_rows(table) == [(2, "spark-2"), (20, "spark-20")]
+
+    # a schema change adds no snapshot, but fails the commit as well
+    assert run_query(f"SELECT count(*) FROM {pg_name}", pg_conn) == [[2]]
+    with table.update_schema() as update:
+        update.add_column("extra", StringType())
+    run_command(f"INSERT INTO {pg_name} VALUES (40, 'pg-40')", pg_conn)
+    with pytest.raises(psycopg2.errors.SerializationFailure):
+        pg_conn.commit()
+    pg_conn.rollback()
+    assert catalog_rows(table) == [(2, "spark-2"), (20, "spark-20")]
+
+
+def test_writes_with_postgres_tables_rejected(
+    pg_conn, shared_table, with_default_location
+):
+    """
+    The catalog commits the changes to external tables before PostgreSQL
+    commits, so a transaction cannot also write tables that PostgreSQL
+    commits.
+    """
+    table, pg_name = shared_table
+
+    run_command(f'CREATE TABLE "{NAMESPACE}".heap (a int)', pg_conn)
+    run_command(f'CREATE TABLE "{NAMESPACE}".internal (a int) USING iceberg', pg_conn)
+    pg_conn.commit()
+
+    try:
+        # a PostgreSQL table first
+        run_command(f'INSERT INTO "{NAMESPACE}".heap VALUES (1)', pg_conn)
+        error = run_command(
+            f"INSERT INTO {pg_name} VALUES (10, 'pg-10')", pg_conn, raise_error=False
+        )
+        assert 'after writing to table "heap"' in str(error)
+        pg_conn.rollback()
+
+        # an external table first, then a heap table, COPY or an internal table
+        for statement in [
+            f'INSERT INTO "{NAMESPACE}".heap VALUES (1)',
+            f'INSERT INTO "{NAMESPACE}".internal VALUES (1)',
+        ]:
+            run_command(f"INSERT INTO {pg_name} VALUES (10, 'pg-10')", pg_conn)
+            error = run_command(statement, pg_conn, raise_error=False)
+            assert "in a transaction that modifies external REST catalog tables" in str(
+                error
+            ), statement
+            pg_conn.rollback()
+
+        run_command(f"INSERT INTO {pg_name} VALUES (10, 'pg-10')", pg_conn)
+        with pytest.raises(psycopg2.errors.FeatureNotSupported, match='"heap"'):
+            pg_conn.cursor().copy_expert(
+                f'COPY "{NAMESPACE}".heap FROM STDIN', io.StringIO("1\n")
+            )
+        pg_conn.rollback()
+
+        # temporary tables are fine
+        run_command("CREATE TEMP TABLE scratch AS SELECT 11 AS a", pg_conn)
+        run_command(f"INSERT INTO {pg_name} SELECT a, 'tmp' FROM scratch", pg_conn)
+        run_command("INSERT INTO scratch VALUES (12)", pg_conn)
+        pg_conn.commit()
+
+        assert catalog_rows(table) == [(1, "spark-1"), (2, "spark-2"), (11, "tmp")]
+        assert run_query(f'SELECT count(*) FROM "{NAMESPACE}".heap', pg_conn) == [[0]]
+        pg_conn.commit()
+    finally:
+        pg_conn.rollback()
+        run_command(f'DROP TABLE "{NAMESPACE}".heap, "{NAMESPACE}".internal', pg_conn)
+        pg_conn.commit()
 
 
 def test_drop_table_leaves_catalog_table(pg_conn, rest_catalog, shared_table):

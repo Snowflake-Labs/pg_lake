@@ -4726,14 +4726,19 @@ postgresExecForeignTruncate(List *relations,
 	{
 		Relation	relation = lfirst(relationCell);
 		Oid			relationId = RelationGetRelid(relation);
+		bool		externalTable = IsWritableExternalRestCatalogTable(relationId);
 
-		ErrorIfReadOnlyIcebergTable(relationId);
+		if (!externalTable)
+			ErrorIfReadOnlyIcebergTable(relationId);
 
 		/* extra checks */
 		if (PgLakeModifyValidityCheckHook)
 			PgLakeModifyValidityCheckHook(relationId);
 
 		BindRelationToXactRestCatalog(relationId);
+
+		if (externalTable)
+			PrepareExternalRestCatalogTableWrite(relationId);
 
 		RemoveAllDataFilesFromTable(relationId);
 	}

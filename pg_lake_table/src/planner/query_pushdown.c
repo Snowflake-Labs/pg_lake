@@ -29,6 +29,7 @@
 #include "catalog/pg_collation.h"
 #include "catalog/pg_collation_d.h"
 #include "catalog/pg_inherits.h"
+#include "pg_lake/transaction/external_rest_catalog_table.h"
 #include "pg_lake/duckdb/transform_query_to_duckdb.h"
 #include "pg_lake/extensions/pg_lake_table.h"
 #include "pg_extension_base/extension_ids.h"
@@ -1880,7 +1881,8 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 														   false,
 														   insertSchema);
 
-			if (IsWritableIcebergTable(scanState->insertIntoRelid))
+			if (IsWritableIcebergTable(scanState->insertIntoRelid) ||
+				IsWritableExternalRestCatalogTable(scanState->insertIntoRelid))
 			{
 				queryString =
 					IcebergWrapQueryWithRewrites(queryString,

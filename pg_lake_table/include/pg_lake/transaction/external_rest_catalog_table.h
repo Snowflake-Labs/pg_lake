@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include "access/xact.h"
 #include "nodes/pg_list.h"
 
 extern PGDLLEXPORT bool IsWritableExternalRestCatalogTable(Oid relationId);
@@ -25,3 +26,8 @@ extern void CreateExternalRestCatalogTableInCatalog(Oid relationId, List *tableE
 extern void RecordExternalRestCatalogTableChanges(Oid relationId, List *metadataOperations);
 extern void CommitExternalRestCatalogTableChanges(void);
 extern void ResetExternalRestCatalogTableChanges(void);
+extern PGDLLEXPORT List *GetPendingExternalTableOperations(Oid relationId);
+extern void ErrorIfPrepareWithExternalTableChanges(void);
+extern void ExternalRestCatalogTableSubXactCallback(SubXactEvent event, SubTransactionId mySubid,
+													SubTransactionId parentSubid, void *arg);
+extern PGDLLEXPORT void RecordTableWriteInTx(Oid relationId);

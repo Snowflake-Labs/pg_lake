@@ -53,6 +53,7 @@
 #include "pg_lake/partitioning/partition_by_parser.h"
 #include "pg_lake/iceberg/api.h"
 #include "pg_lake/iceberg/catalog.h"
+#include "pg_lake/util/catalog_type.h"
 #include "pg_lake/parquet/field.h"
 #include "pg_lake/parsetree/columns.h"
 #include "pg_lake/permissions/roles.h"
@@ -832,7 +833,8 @@ IsCopyFromPushdownable(Relation relation, List *columnNameList,
 	/*
 	 * All of this only works for writable pg_lake tables.
 	 */
-	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId))
+	if (!IsWritablePgLakeTable(relationId) && !IsWritableIcebergTable(relationId) &&
+		GetIcebergCatalogType(relationId) != REST_CATALOG_EXTERNAL_READ_WRITE)
 		return false;
 
 	bool		allowDefaultConsts = false;

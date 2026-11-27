@@ -312,8 +312,9 @@ Writing to tables shared with other engines is experimental.
 
 A table attached with `external = true` reads like a `read_only` one: the catalog is the only
 place its state lives, and PostgreSQL keeps just the pointer to it. pg_lake can also write it.
-Each statement that modifies the table commits a new snapshot to the catalog, as a child of the
-snapshot the statement read, on condition that nobody committed in between:
+A transaction that modifies the table commits one new snapshot to the catalog when it commits,
+as a child of the snapshot the transaction read, on condition that nobody changed the table in
+between:
 
 ```sql
 CREATE TABLE events () USING iceberg
@@ -321,8 +322,10 @@ WITH (catalog = 'polaris', external = true,
       catalog_name = 'sales', catalog_namespace = 'analytics',
       catalog_table_name = 'events');
 
+BEGIN;
 INSERT INTO events SELECT * FROM staging_events;
 DELETE FROM events WHERE ts < now() - interval '90 days';
+COMMIT;
 ```
 
 When columns are given and the catalog has no such table, pg_lake creates it in the catalog
@@ -336,24 +339,30 @@ CREATE TABLE analytics.events (id bigint NOT NULL, payload text) USING iceberg
 WITH (catalog = 'polaris', external = true);
 ```
 
-Commits from other engines are visible to the next statement, and the next write builds on top
-of them. If another engine commits after a statement read the table and before it commits, the
-catalog rejects the commit and the statement fails with a serialization failure
-(`SQLSTATE 40001`). Run it again to apply it to the new snapshot.
+A transaction reads the table at the snapshot the catalog has when the transaction first reads
+it, whatever the isolation level, together with its own changes. Rolling back to a savepoint
+forgets the changes made since. Commits from other engines are visible to the next
+transaction. If another engine changes the table after the transaction read it, the catalog
+rejects the commit and the transaction fails with a serialization failure (`SQLSTATE 40001`).
+Run it again to apply it to the new snapshot.
 
-Since the catalog commits each change on its own, a change cannot be part of a larger
-transaction:
+The catalog commits the changes before PostgreSQL does, so:
 
-- `INSERT`, `UPDATE`, `DELETE` and `COPY FROM` must run outside a transaction block, and a
-  statement can modify a table only once. Several external tables of the same catalog can be
-  modified by one statement, and commit together.
-- Tables whose default partition spec is partitioned cannot be written yet, and neither
-  `row_ids` nor schema and partitioning changes are supported. If another engine changes the
-  schema, queries and writes fail until the table is attached again.
+- A transaction that modifies external tables cannot also write tables that commit through
+  PostgreSQL, such as regular tables and Iceberg tables pg_lake owns. Temporary tables are
+  allowed. All external tables a transaction modifies must be in the same catalog, and commit
+  together.
+- `PREPARE TRANSACTION` is not supported for such a transaction.
+
+Other limits:
+
+- Tables with a partitioned spec cannot be written yet, and neither `row_ids` nor schema and
+  partitioning changes are supported. If another engine changes the schema, queries and writes
+  fail until the table is attached again.
 - Deletes and updates add position delete files rather than rewrite data files.
 
 Files written for a commit that did not happen, because the catalog rejected it or the
-statement failed, stay in object storage, as they do for other Iceberg writers. pg_lake does
+transaction failed, stay in object storage, as they do for other Iceberg writers. pg_lake does
 not remove orphan files, expire snapshots or compact these tables yet.
 
 Dropping the table only removes it from PostgreSQL.

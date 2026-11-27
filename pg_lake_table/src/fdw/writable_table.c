@@ -1231,6 +1231,9 @@ AddQueryResultToTable(Oid relationId, char *readQuery, TupleDesc queryTupleDesc,
 
 	BindRelationToXactRestCatalog(relationId);
 
+	if (IsWritableExternalRestCatalogTable(relationId))
+		PrepareExternalRestCatalogTableWrite(relationId);
+
 	int64		rowsProcessed = 0;
 	ForeignTable *foreignTable = GetForeignTable(relationId);
 	List	   *options = foreignTable->options;

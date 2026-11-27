@@ -29,7 +29,9 @@
  * A portal covers a statement across Bind and Execute, and everything that
  * runs inside it. A cursor, including the one a PL/pgSQL FOR loop opens, is
  * a portal of its own and asks again when it opens, like a READ COMMITTED
- * query in a volatile function takes a new snapshot.
+ * query in a volatile function takes a new snapshot. A table that pg_lake
+ * writes as external='true' is held for the whole transaction, since its
+ * commit builds on the snapshot the transaction read.
  *
  * A REST catalog answers per table, so we hold the metadata location of each
  * relation asked about, along with the metadata document the catalog inlined
@@ -91,6 +93,7 @@ static char *FindHeldAnswer(ResourceOwner scopeOwner, const char *key);
 static void HoldAnswer(ResourceOwner scopeOwner, const char *key,
 					   const char *value);
 static ResourceOwner GetVersionScopeOwner(void);
+static ResourceOwner GetVersionScopeOwnerForRelation(Oid relationId);
 static void ReleaseHeldAnswers(ResourceReleasePhase phase, bool isCommit,
 							   bool isTopLevel, void *arg);
 static void ForgetHeldAnswers(void *arg);
@@ -135,7 +138,7 @@ ResolveIcebergExternalMetadataLocation(Oid relationId)
 static char *
 ResolveRestCatalogTable(Oid relationId)
 {
-	ResourceOwner scopeOwner = GetVersionScopeOwner();
+	ResourceOwner scopeOwner = GetVersionScopeOwnerForRelation(relationId);
 	char	   *key = psprintf("rest:%u", relationId);
 	char	   *metadataLocation = FindHeldAnswer(scopeOwner, key);
 
@@ -181,7 +184,8 @@ FindHeldRestCatalogMetadata(Oid relationId, const char *metadataLocation)
 
 	char	   *metadataKey = psprintf("rest-metadata:%u:%s", relationId,
 									   metadataLocation);
-	char	   *document = FindHeldAnswer(GetVersionScopeOwner(), metadataKey);
+	char	   *document = FindHeldAnswer(GetVersionScopeOwnerForRelation(relationId),
+										  metadataKey);
 
 	pfree(metadataKey);
 	if (document == NULL)
@@ -300,6 +304,22 @@ GetVersionScopeOwner(void)
 		return ActivePortal->resowner;
 
 	return TopTransactionResourceOwner;
+}
+
+
+/*
+ * GetVersionScopeOwnerForRelation returns the version scope owner for a REST
+ * catalog table. A transaction that writes an external table commits a child
+ * of the snapshot it read and asserts it is still current, so it reads one
+ * snapshot of such a table, whatever the isolation level.
+ */
+static ResourceOwner
+GetVersionScopeOwnerForRelation(Oid relationId)
+{
+	if (GetIcebergCatalogType(relationId) == REST_CATALOG_EXTERNAL_READ_WRITE)
+		return TopTransactionResourceOwner;
+
+	return GetVersionScopeOwner();
 }
 
 
