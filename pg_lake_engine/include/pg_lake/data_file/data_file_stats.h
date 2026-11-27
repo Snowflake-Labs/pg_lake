@@ -66,6 +66,15 @@ typedef struct DataFileColumnStats
 
 	/* upper bound of the column in text representation of the field's type */
 	char	   *upperBoundText;
+
+	/*
+	 * whether nullCount is known; files written before we collected null
+	 * counts, and files from writers that do not record them, do not have it
+	 */
+	bool		hasNullCount;
+
+	/* number of NULL values of the column in the file, if hasNullCount */
+	int64		nullCount;
 }			DataFileColumnStats;
 
  /*

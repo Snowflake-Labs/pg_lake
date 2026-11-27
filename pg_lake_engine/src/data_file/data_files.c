@@ -146,6 +146,8 @@ DeepCopyDataFileStats(const DataFileStats * stats)
 			copiedColStats->leafField = DeepCopyLeafField(&colStats->leafField);
 			copiedColStats->lowerBoundText = colStats->lowerBoundText ? pstrdup(colStats->lowerBoundText) : NULL;
 			copiedColStats->upperBoundText = colStats->upperBoundText ? pstrdup(colStats->upperBoundText) : NULL;
+			copiedColStats->hasNullCount = colStats->hasNullCount;
+			copiedColStats->nullCount = colStats->nullCount;
 
 			copiedStats->columnStats = lappend(copiedStats->columnStats, copiedColStats);
 		}
