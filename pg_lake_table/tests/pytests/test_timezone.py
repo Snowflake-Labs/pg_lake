@@ -917,3 +917,50 @@ def datetime_result_to_str(result):
             row[i] = str(value)
 
     return result
+
+
+@pytest.mark.parametrize("full_pushdown", ["true", "false"])
+def test_timezone_date_trunc_hour_in_repeated_hour(
+    s3, pg_conn, extension, full_pushdown
+):
+    """
+    date_trunc('hour', ts) in the hour that repeats when clocks go back: in the
+    first of the two, DuckDB alone gives the start of the second one.
+    """
+    uri = f"s3://{TEST_BUCKET}/test_timezone_date_trunc_hour/data.parquet"
+    run_command(
+        f"""
+        CREATE TABLE trunc_heap (id int, ts timestamptz);
+        INSERT INTO trunc_heap VALUES
+            (1, '2026-10-25 00:30:45+00'), -- Europe/Berlin, first 02:30
+            (2, '2026-10-25 01:30:45+00'), -- Europe/Berlin, second 02:30
+            (3, '2026-11-01 05:30:45+00'), -- America/New_York, first 01:30
+            (4, '2026-11-01 06:30:45+00'), -- America/New_York, second 01:30
+            (5, '2026-04-04 15:15:00+00'), -- Australia/Lord_Howe, 30-minute fold
+            (6, '2026-07-01 10:30:45+00'),
+            (7, 'infinity'),
+            (8, '-infinity'),
+            (9, NULL);
+        COPY trunc_heap TO '{uri}';
+        CREATE FOREIGN TABLE trunc_lake (id int, ts timestamptz)
+            SERVER pg_lake OPTIONS (path '{uri}');
+        SET LOCAL pg_lake_table.enable_full_query_pushdown TO {full_pushdown};
+    """,
+        pg_conn,
+    )
+
+    queries = [
+        "SELECT id, date_trunc('hour', ts) FROM {t} ORDER BY id",
+        "SELECT date_trunc('HOURS', ts) AS h, count(*) FROM {t} GROUP BY h ORDER BY h",
+        "SELECT id FROM {t} WHERE date_trunc('hour', ts) > ts ORDER BY id",
+    ]
+
+    for zone in ["Europe/Berlin", "America/New_York", "Australia/Lord_Howe", "UTC"]:
+        run_command(f"SET LOCAL TimeZone TO '{zone}'", pg_conn)
+
+        for query in queries:
+            expected = run_query(query.format(t="trunc_heap"), pg_conn)
+            result = run_query(query.format(t="trunc_lake"), pg_conn)
+            assert result == expected, (zone, query)
+
+    pg_conn.rollback()

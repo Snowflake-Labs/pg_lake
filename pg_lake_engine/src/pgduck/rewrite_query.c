@@ -45,6 +45,7 @@
 #include "pg_lake/util/operator_utils.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
+#include "optimizer/optimizer.h"
 #include "parser/parse_func.h"
 #include "parser/parse_oper.h"
 #include "rewrite/rewriteManip.h"
@@ -226,6 +227,8 @@ static Node *FindCompatibleFunctionWithName(OpExpr *opExpr, char *funcname);
 static Node *RewriteSQLValueFunction(SQLValueFunction *node, void *context);
 
 static Node *AddOneYear(Node *node);
+static Node *TruncateTimestamptzToHour(Node *timeArg);
+static Node *MakeIsFiniteExpr(Node *node);
 static Node *DereferenceIndex(Node *node, int index);
 static FuncExpr *ConvertOpExprToFuncExpr(OpExpr *opExpr);
 
@@ -1876,6 +1879,13 @@ RewriteFuncExprDateTrunc(Node *node, void *context)
 			{
 				node = AddOneYear(node);
 			}
+			else if ((strcasecmp(fieldText, "hour") == 0 ||
+					  strcasecmp(fieldText, "hours") == 0) &&
+					 exprType(timeArg) == TIMESTAMPTZOID &&
+					 !contain_volatile_functions(timeArg))
+			{
+				node = TruncateTimestamptzToHour(timeArg);
+			}
 		}
 	}
 
@@ -2624,6 +2634,54 @@ FindCompatibleFunctionWithName(OpExpr *opExpr, char *funcname)
 
 	return (Node *) opExpr;
 }
+
+/*
+ * TruncateTimestamptzToHour builds date_trunc('hour', ts) of a timestamptz in
+ * the form that DuckDB computes as PostgreSQL does: ts less the minutes,
+ * seconds and fraction of its wall clock in the session's TimeZone.
+ *
+ * DuckDB truncates the wall clock and reads it back in the zone, which in the
+ * first of the two repeated hours when clocks go back gives the start of the
+ * second one, an hour after ts. Below a day, PostgreSQL keeps the offset of
+ * ts, as this does. DuckDB cannot subtract infinite timestamps, which
+ * date_trunc returns as they are.
+ */
+static Node *
+TruncateTimestamptzToHour(Node *timeArg)
+{
+	Node	   *wallClock = MakeCastExpr(copyObject(timeArg), TIMESTAMPOID);
+	Node	   *wallClockHour = MakeDateTruncExpr("hour", copyObject(wallClock));
+	Node	   *pastTheHour = MakeOpExpr(wallClock, "pg_catalog", "-", wallClockHour);
+	Node	   *truncated = MakeOpExpr(copyObject(timeArg), "pg_catalog", "-",
+									   pastTheHour);
+	CaseExpr   *caseExpr = (CaseExpr *) MakeCaseExpr(MakeIsFiniteExpr(copyObject(timeArg)),
+													 truncated, copyObject(timeArg));
+
+	caseExpr->casetype = TIMESTAMPTZOID;
+
+	return (Node *) caseExpr;
+}
+
+
+/*
+ * MakeIsFiniteExpr builds an isfinite(<node>) expression.
+ */
+static Node *
+MakeIsFiniteExpr(Node *node)
+{
+	List	   *functionName = list_make2(makeString("pg_catalog"),
+										  makeString("isfinite"));
+	Oid			argTypes[] = {exprType(node)};
+	FuncExpr   *funcExpr = makeNode(FuncExpr);
+
+	funcExpr->funcid = LookupFuncName(functionName, 1, argTypes, false);
+	funcExpr->funcresulttype = BOOLOID;
+	funcExpr->location = -1;
+	funcExpr->args = list_make1(node);
+
+	return (Node *) funcExpr;
+}
+
 
 /*
  * AddOneYear constructs a <node> + interval '1 year' expression.
