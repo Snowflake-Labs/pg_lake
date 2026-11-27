@@ -42,5 +42,6 @@ extern bool EnableDataFilePruning;
 extern bool EnablePartitionPruning;
 
 List	   *PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, PruneType pruneType);
+List	   *ColumnStatsFieldIdsForPruning(Oid relationId, List *baseRestrictInfoList);
 Var		   *GetFilenameFilterColumn(Oid relationId, List *baseRestrictInfoList);
 List	   *PruneByFilename(List *paths, Oid relationId, List *baseRestrictInfoList);

@@ -213,12 +213,14 @@ CreateTableScanForRelation(Oid relationId, Snapshot snapshot, int uniqueRelation
 		 * Read only the data files, do not yet include the deletion files.
 		 * We'll calculate the deletion files based on the pruned data files
 		 * using the same snapshot.
+		 *
+		 * Pruning is the only reader of column stats here, so load the stats
+		 * of the filtered columns only; for wide tables with many files, the
+		 * stats of all columns take far more memory than the files.
 		 */
-		bool		dataOnly = true;
-		bool		newFilesOnly = false;
-		List	   *dataFiles =
-			GetTableDataFilesFromCatalog(relationId, dataOnly, newFilesOnly,
-										 isResultRelation, snapshot);
+		List	   *statsFieldIds = ColumnStatsFieldIdsForPruning(relationId, baseRestrictInfoList);
+		List	   *dataFiles = GetTableDataFilesForScan(relationId, isResultRelation,
+														 snapshot, statsFieldIds);
 
 		/* prune the data files based on the filters in the query execution */
 		List	   *prunedDataFiles = PruneDataFiles(relationId, dataFiles, baseRestrictInfoList, PARTIAL_MATCH);

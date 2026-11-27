@@ -47,6 +47,8 @@ extern PGDLLEXPORT List *GetTableDataFilesFromCatalog(Oid relationId, bool dataO
 HTAB	   *GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 											 bool forUpdate, Snapshot snapshot,
 											 List *partitionTransforms, bool skipColumnStats);
+List	   *GetTableDataFilesForScan(Oid relationId, bool forUpdate, Snapshot snapshot,
+									 List *statsFieldIds);
 HTAB	   *GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
 												   bool forUpdate, Snapshot snapshot,
 												   List *partitionTransforms, bool skipColumnStats);
