@@ -32,6 +32,7 @@ tasks:
                   --platform {{.PLATFORMS}} \
                   --target pg_lake_postgres \
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
+                  --build-arg PG_LAKE_REF="${PG_LAKE_REF:-main}" \
                   --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
                   --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
                   -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pg_lake:{{.VERSION}}-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
@@ -55,6 +56,7 @@ tasks:
                   --platform {{.PLATFORMS}} \
                   --target pgduck_server \
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
+                  --build-arg PG_LAKE_REF="${PG_LAKE_REF:-main}" \
                   --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
                   --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
                   -t {{.REGISTRY}}/{{.IMAGE_OWNER}}/pgduck-server:{{.VERSION}}-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
@@ -243,6 +245,7 @@ tasks:
                   --platform linux/{{ARCH}} \
                   --target pg_lake_postgres \
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
+                  --build-arg PG_LAKE_REF="${PG_LAKE_REF:-main}" \
                   --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
                   --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
                   -t pg_lake:local-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
@@ -258,6 +261,7 @@ tasks:
                   --platform linux/{{ARCH}} \
                   --target pgduck_server \
                   --build-arg PG_MAJOR={{.PG_MAJOR}} \
+                  --build-arg PG_LAKE_REF="${PG_LAKE_REF:-main}" \
                   --build-arg BASE_IMAGE_OS={{.BASE_IMAGE_OS}} \
                   --build-arg BASE_IMAGE_TAG={{.BASE_IMAGE_TAG}} \
                   -t pgduck-server:local-pg{{.PG_MAJOR}}-{{.BASE_IMAGE_OS}} \
