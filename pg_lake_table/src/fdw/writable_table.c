@@ -781,9 +781,9 @@ RemoveAllDataFilesFromPgLakeCatalogFromTable(Oid relationId)
  * the most files first to avoid being stuck in recompacting the same
  * partition that always generate big file forever.
  *
- * It does not pick the partitions in skippedPartitionKeys, and it sets
- * pickedPartition before compacting, so that the caller knows which
- * partition to skip if the round fails.
+ * It does not pick the partitions in skippedPartitionKeys, and it marks
+ * pickedPartition while compacting it, so that the caller knows which
+ * partition to skip if the round fails then.
  */
 bool
 CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
@@ -845,11 +845,13 @@ CompactDataFiles(Oid relationId, TimestampTz compactionStartTime,
 		return false;
 	}
 
-	pickedPartition->picked = true;
 	pickedPartition->key = entry->partitionHash;
+	pickedPartition->compacting = true;
 
 	List	   *newFileOps = TryCompactDataFiles(relationId, tupleDescriptor, entry->dataFiles,
 												 runStats, tableType, options, forceMerge, isVerbose);
+
+	pickedPartition->compacting = false;
 
 	table_close(rel, NoLock);
 	PopActiveSnapshot();

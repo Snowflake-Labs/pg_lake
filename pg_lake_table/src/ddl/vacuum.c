@@ -73,8 +73,12 @@
 /* managed by a GUC, not exposed to the user, mostly to ensure termination, compact at most 100 times */
 int			MaxCompactionsPerVacuum = 100;
 
-/* see VacuumCompactDataFiles */
-#define MAX_FAILED_COMPACTION_ROUNDS 3
+/*
+ * The skip list of VacuumCompactDataFiles is a fixed array because it has to
+ * outlive the transactions its rounds commit. At the default
+ * MaxCompactionsPerVacuum the rounds run out before the array does.
+ */
+#define MAX_SKIPPED_COMPACTION_PARTITIONS 100
 
 /* case insensitive */
 #define PG_LAKE_ICEBERG_VACUUM_FLAG "iceberg"
@@ -863,10 +867,11 @@ VacuumTableInSeparateXacts(Oid relationId, bool isFull, bool isVerbose,
 /*
  * VacuumCompactDataFiles compacts data files for the given relation.
  *
- * A round that fails leaves its partition out of the remaining rounds, so a
- * partition that cannot be compacted does not keep the others from being
- * compacted. Once MAX_FAILED_COMPACTION_ROUNDS rounds have failed, the cause
- * is likely not a partition, and we stop.
+ * A round that fails while compacting a partition leaves that partition out
+ * of the remaining rounds, so partitions that cannot be compacted do not keep
+ * the others from being compacted. A failure before a round picks a
+ * partition, or after it compacted one, would recur in every round, so we
+ * stop.
  */
 static void
 VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
@@ -874,7 +879,7 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 	volatile bool continueCompaction = false;
 	int			compactionCount = 0;
 	CompactionStats runStats = {0};
-	uint64		failedPartitionKeys[MAX_FAILED_COMPACTION_ROUNDS];
+	uint64		failedPartitionKeys[MAX_SKIPPED_COMPACTION_PARTITIONS];
 	int			failedPartitionCount = 0;
 
 	/*
@@ -981,12 +986,11 @@ VacuumCompactDataFiles(Oid relationId, bool isFull, bool isVerbose)
 
 			ThrowErrorData(edata);
 
-			/* a round that failed before picking a partition would fail again */
-			if (roundPartition->picked)
+			if (roundPartition->compacting)
 				failedPartitionKeys[failedPartitionCount++] = roundPartition->key;
 
-			continueCompaction = roundPartition->picked &&
-				failedPartitionCount < MAX_FAILED_COMPACTION_ROUNDS;
+			continueCompaction = roundPartition->compacting &&
+				failedPartitionCount < MAX_SKIPPED_COMPACTION_PARTITIONS;
 		}
 		PG_END_TRY();
 

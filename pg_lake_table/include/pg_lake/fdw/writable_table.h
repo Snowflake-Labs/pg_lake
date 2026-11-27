@@ -57,12 +57,13 @@ typedef struct CompactionStats
 }			CompactionStats;
 
 /*
- * CompactionPartition is the partition a compaction round picked, by the key
- * that groups its data files.
+ * CompactionPartition is the partition a compaction round compacts, by the
+ * key that groups its data files. compacting is true only while the round
+ * compacts it, so that a failure then can be told from one before or after.
  */
 typedef struct CompactionPartition
 {
-	bool		picked;
+	bool		compacting;
 	uint64		key;
 }			CompactionPartition;
 
