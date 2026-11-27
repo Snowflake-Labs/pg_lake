@@ -152,6 +152,7 @@ static Node *RewriteUnboundedNumericCast(Node *node);
 static Const *RewriteIntegralNumericConst(Const *constExpr);
 static void RaiseUnboundedNumericScaleToSiblings(Node *node);
 static void RaiseUnboundedNumericScale(List *expressions);
+static void RaiseUnboundedNumericArrayScale(Node *scalar, Node *array);
 static bool IsUnboundedNumericDefaultCast(Node *node);
 static bool IsNumericComparison(Oid operatorId);
 
@@ -1116,7 +1117,8 @@ RewriteParam(Param *paramExpr)
 static int32
 NumericTypmodForDuckDB(Oid typeId, int32 typmod)
 {
-	if (!IsUnboundedNumeric(typeId, typmod))
+	/* the type modifier of numeric[] is that of its elements */
+	if (!IsUnboundedNumeric(typeId == NUMERICARRAYOID ? NUMERICOID : typeId, typmod))
 		return typmod;
 
 	return make_numeric_typmod(UnboundedNumericDefaultPrecision,
@@ -1152,9 +1154,15 @@ RewriteUnboundedNumericCast(Node *node)
 		if (relabelExpr->relabelformat == COERCE_EXPLICIT_CALL)
 			return node;
 
-		/* a numeric(p,s) relabeled as numeric keeps its values, so its typmod */
-		if (IsUnboundedNumeric(relabelExpr->resulttype, relabelExpr->resulttypmod) &&
-			exprType((Node *) relabelExpr->arg) == NUMERICOID && argTypmod >= 0 &&
+		/*
+		 * a numeric(p,s) or numeric(p,s)[] relabeled without a typmod keeps
+		 * its values, so its typmod
+		 */
+		if ((relabelExpr->resulttype == NUMERICOID ||
+			 relabelExpr->resulttype == NUMERICARRAYOID) &&
+			relabelExpr->resulttypmod == -1 &&
+			exprType((Node *) relabelExpr->arg) == relabelExpr->resulttype &&
+			argTypmod >= 0 &&
 			numeric_typmod_precision(argTypmod) <= DUCKDB_MAX_NUMERIC_PRECISION)
 			relabelExpr->resulttypmod = argTypmod;
 		else
@@ -1292,9 +1300,14 @@ RaiseUnboundedNumericScaleToSiblings(Node *node)
 		ScalarArrayOpExpr *arrayOpExpr = (ScalarArrayOpExpr *) node;
 		Node	   *arrayArg = lsecond(arrayOpExpr->args);
 
-		if (IsNumericComparison(arrayOpExpr->opno) && IsA(arrayArg, ArrayExpr))
+		if (!IsNumericComparison(arrayOpExpr->opno))
+			return;
+
+		if (IsA(arrayArg, ArrayExpr))
 			RaiseUnboundedNumericScale(lcons(linitial(arrayOpExpr->args),
 											 list_copy(((ArrayExpr *) arrayArg)->elements)));
+		else
+			RaiseUnboundedNumericArrayScale(linitial(arrayOpExpr->args), arrayArg);
 	}
 	else if (IsA(node, CoalesceExpr))
 	{
@@ -1357,6 +1370,46 @@ RaiseUnboundedNumericScale(List *expressions)
 			((RelabelType *) expression)->resulttypmod =
 				make_numeric_typmod(DUCKDB_MAX_NUMERIC_PRECISION, largestScale);
 	}
+}
+
+
+/*
+ * RaiseUnboundedNumericArrayScale gives an unconstrained numeric[] that a
+ * numeric of a larger scale is compared with, such as the array of
+ * n = ANY($1) or of a folded n IN (...) list, that scale, as
+ * RaiseUnboundedNumericScale does for single values.
+ */
+static void
+RaiseUnboundedNumericArrayScale(Node *scalar, Node *array)
+{
+	int32		typmod = exprTypmod(scalar);
+	int32		defaultTypmod = NumericTypmodForDuckDB(NUMERICOID, -1);
+
+	if (exprType(scalar) != NUMERICOID || typmod < 0 ||
+		numeric_typmod_precision(typmod) > DUCKDB_MAX_NUMERIC_PRECISION)
+		return;
+
+	int			scale = numeric_typmod_scale(typmod);
+
+	if (scale <= UnboundedNumericDefaultScale || scale > DUCKDB_MAX_NUMERIC_PRECISION)
+		return;
+
+	int32		raisedTypmod = make_numeric_typmod(DUCKDB_MAX_NUMERIC_PRECISION, scale);
+
+	/*
+	 * A parameter is cast by RewriteParam, and a constant array reaches us
+	 * serialized by RewriteConst, as a cast of text
+	 */
+	if (!IsA(array, RelabelType))
+		return;
+
+	RelabelType *relabelExpr = (RelabelType *) array;
+
+	if (relabelExpr->resulttype == NUMERICARRAYOID &&
+		relabelExpr->relabelformat == COERCE_EXPLICIT_CAST &&
+		relabelExpr->resulttypmod == defaultTypmod &&
+		(IsA(relabelExpr->arg, Param) || IsA(relabelExpr->arg, Const)))
+		relabelExpr->resulttypmod = raisedTypmod;
 }
 
 

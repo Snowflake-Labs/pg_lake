@@ -391,6 +391,11 @@ def test_unbounded_numeric_params_casts_and_constants(s3, pg_conn, extension):
         "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n > ('1.4999'::text)::numeric",
         "SELECT n::numeric FROM {t} WHERE id = 3",
         "SELECT coalesce(n, ('1'::text)::numeric) FROM {t} WHERE id = 3",
+        # a numeric[] constant, which a folded IN list also becomes
+        "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n IN (1.5001, 7.07)",
+        "SELECT array_agg(id ORDER BY id) FROM {t} "
+        "WHERE n = ANY ('{{0.00000000000000000001,7.07}}'::numeric[])",
+        "SELECT array_agg(id ORDER BY id) FROM {t} WHERE p = ANY ('{{1.505}}'::numeric[])",
         "SELECT sum(i8::numeric) FROM {t}",
         "SELECT round(i8::numeric, 2) FROM {t} WHERE id = 2",
         "SELECT count(*) FROM {t} WHERE n < 100000000000000000",
@@ -413,15 +418,6 @@ def test_unbounded_numeric_params_casts_and_constants(s3, pg_conn, extension):
             run_command(f"SET plan_cache_mode TO {plan_cache_mode}", pg_conn)
 
             for name, query in statements.items():
-                # a custom plan folds the IN list into a numeric[] constant,
-                # which DuckDB still reads as DECIMAL(18,3)[] without pushdown
-                if (
-                    name == "in"
-                    and pushdown == "false"
-                    and plan_cache_mode == "force_custom_plan"
-                ):
-                    continue
-
                 for table in ["heap", "lake"]:
                     run_command(
                         f"PREPARE {name}_{table}(numeric) AS "
