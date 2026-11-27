@@ -291,7 +291,12 @@ def test_explain_explicit_cardinality(pg_conn, s3, with_default_location):
 
     position_delete_projection_plan = hash_join_plan["Plans"][1]
     assert position_delete_projection_plan["Node Type"] == "PROJECTION"
-    assert position_delete_projection_plan["Projections"] == '"row"(file_path, pos)'
+    assert (
+        position_delete_projection_plan["Projections"]
+        == "\"row\"(CASE  WHEN ((starts_with(file_path, 's3a://') OR "
+        "starts_with(file_path, 's3n://'))) THEN (('s3://' || "
+        "array_slice(file_path, 7, []))) ELSE file_path END, pos)"
+    )
     assert position_delete_projection_plan["Estimated Cardinality"] == "1"
 
     position_delete_read_parquet_plan = position_delete_projection_plan["Plans"][0]

@@ -76,10 +76,19 @@
 #define ATTACHED_WORKER_KEY_FLAGS		4
 #define ATTACHED_WORKER_KEY_TUPLE_QUEUE	5
 #define ATTACHED_WORKER_KEY_SEARCH_PATH	6
-#define ATTACHED_WORKER_NKEYS			7
+#define ATTACHED_WORKER_KEY_TIMEOUTS	7
+#define ATTACHED_WORKER_NKEYS			8
 
 #define ATTACHED_WORKER_FLAG_RETURN_RESULTS	0x01
 #define ATTACHED_WORKER_FLAG_CALLER_WRITABLE	0x02
+
+/* the caller's timeouts, in milliseconds (see StartAttachedWorkerInternal) */
+typedef struct AttachedWorkerTimeouts
+{
+	int			statementTimeout;
+	int			lockTimeout;
+	int			transactionTimeout;
+}			AttachedWorkerTimeouts;
 
 /* SQL-callable functions */
 PG_FUNCTION_INFO_V1(pg_extension_base_run_attached_worker);
@@ -180,7 +189,12 @@ RunAttachedWorker(char *command, char *databaseName, char *userName, ReturnSetIn
 
 	PG_TRY();
 	{
-		do
+		/*
+		 * Read until the queue detaches, not until the worker stops: it sends
+		 * CommandComplete before it commits, and an error from the commit
+		 * comes after that.
+		 */
+		for (;;)
 		{
 			CHECK_FOR_INTERRUPTS();
 
@@ -199,7 +213,6 @@ RunAttachedWorker(char *command, char *databaseName, char *userName, ReturnSetIn
 			tuplestore_putvalues(rsinfo->setResult, rsinfo->setDesc, values, nulls);
 			commandId++;
 		}
-		while (IsAttachedWorkerRunning(worker));
 	}
 	PG_FINALLY();
 	{
@@ -378,6 +391,20 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	 */
 	char	   *searchPath = namespace_search_path;
 
+	/*
+	 * The same goes for the timeouts.  The worker would otherwise take ALTER
+	 * DATABASE/ROLE ... SET ones the caller is not subject to, and fail the
+	 * caller's work on a bound it never set.  The caller's own timeouts still
+	 * bound the worker, which ends when the caller's statement does.
+	 */
+	AttachedWorkerTimeouts timeouts = {
+		.statementTimeout = StatementTimeout,
+		.lockTimeout = LockTimeout,
+#if PG_VERSION_NUM >= 170000
+		.transactionTimeout = TransactionTimeout,
+#endif
+	};
+
 	/* estimate size of the background worker input */
 	shm_toc_estimator sharedMemoryEstimator;
 
@@ -386,6 +413,7 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(userName) + 1);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(command) + 1);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, strlen(searchPath) + 1);
+	shm_toc_estimate_chunk(&sharedMemoryEstimator, sizeof(AttachedWorkerTimeouts));
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, QUEUE_SIZE);
 	shm_toc_estimate_chunk(&sharedMemoryEstimator, sizeof(uint32));
 	if (flags & ATTACHED_WORKER_FLAG_RETURN_RESULTS)
@@ -421,6 +449,11 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 
 	strcpy(searchPathInShm, searchPath);
 	shm_toc_insert(toc, ATTACHED_WORKER_KEY_SEARCH_PATH, searchPathInShm);
+
+	AttachedWorkerTimeouts *timeoutsInShm = shm_toc_allocate(toc, sizeof(AttachedWorkerTimeouts));
+
+	*timeoutsInShm = timeouts;
+	shm_toc_insert(toc, ATTACHED_WORKER_KEY_TIMEOUTS, timeoutsInShm);
 
 	/* set up the shared memory queue for responses */
 	shm_mq	   *outputQueue = shm_mq_create(shm_toc_allocate(toc, QUEUE_SIZE), QUEUE_SIZE);
@@ -471,7 +504,14 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	 * has been reset.  EndAttachedWorker frees it.
 	 */
 	MemoryContext callerContext = MemoryContextSwitchTo(TopMemoryContext);
-	bool		registered = RegisterDynamicBackgroundWorker(&worker, &workerHandle);
+	bool		registered = false;
+
+	/*
+	 * A test cannot fill every worker slot, so it gets to say there are none
+	 * free, without a worker being registered behind its back.
+	 */
+	if (!IS_INJECTION_POINT_ATTACHED_COMPAT("attached-worker-out-of-slots"))
+		registered = RegisterDynamicBackgroundWorker(&worker, &workerHandle);
 
 	MemoryContextSwitchTo(callerContext);
 
@@ -508,7 +548,36 @@ StartAttachedWorkerInternal(char *command, char *databaseName, char *userName,
 	 * finishing the command.
 	 */
 	pid_t		pid = 0;
-	BgwHandleStatus status = WaitForBackgroundWorkerStartup(workerHandle, &pid);
+	BgwHandleStatus status;
+
+	PG_TRY();
+	{
+		/* lets a test fail a launch the way a cancel during the wait does */
+		INJECTION_POINT_COMPAT("attached-worker-before-startup-wait");
+
+		status = WaitForBackgroundWorkerStartup(workerHandle, &pid);
+	}
+	PG_CATCH();
+	{
+		/*
+		 * The caller never gets this worker back, so it would run its command
+		 * to the end, and commit, while the caller reports the error.  Held
+		 * interrupts keep a second cancel from cutting the wait short.
+		 */
+		HOLD_INTERRUPTS();
+		TerminateBackgroundWorker(workerHandle);
+		BgwHandleStatus shutdownStatus = WaitForBackgroundWorkerShutdown(workerHandle);
+
+		RESUME_INTERRUPTS();
+
+		dsm_detach(seg);
+
+		if (shutdownStatus == BGWH_STOPPED)
+			RemoveAttachedWorkerHandle(workerHandle);
+
+		PG_RE_THROW();
+	}
+	PG_END_TRY();
 
 	if (status != BGWH_STARTED && status != BGWH_STOPPED)
 	{
@@ -776,8 +845,16 @@ ReadResultsFromAttachedWorker(AttachedWorker * worker, Tuplestorestate *store,
 
 	DestroyTupleQueueReader(reader);
 
-	/* Final drain to catch any trailing errors or notices */
-	ProcessProtocolMessages(worker, true, NULL);
+	/*
+	 * The tuple queue closes when the query ends, before the worker commits,
+	 * so wait here for the protocol queue to detach.  That raises an error
+	 * from the commit, and keeps EndAttachedWorker from terminating a worker
+	 * that is still committing.
+	 */
+	bool		nowait = false;
+
+	while (ProcessProtocolMessages(worker, nowait, NULL) != NULL)
+		;
 }
 
 
@@ -958,6 +1035,7 @@ AttachedWorkerMain(Datum mainArg)
 
 	/* missing_ok, like the flags below, for a caller on an older library */
 	char	   *searchPath = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_SEARCH_PATH, true);
+	AttachedWorkerTimeouts *timeouts = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_TIMEOUTS, true);
 	shm_mq	   *messageQueue = shm_toc_lookup(toc, ATTACHED_WORKER_KEY_QUEUE, false);
 
 	/* Read flags (missing_ok for backward compatibility) */
@@ -1017,6 +1095,21 @@ AttachedWorkerMain(Datum mainArg)
 	 */
 	if (searchPath != NULL)
 		SetConfigOption("search_path", searchPath, PGC_USERSET, PGC_S_SESSION);
+
+	/* likewise the caller's timeouts, before the transaction arms them */
+	if (timeouts != NULL)
+	{
+		SetConfigOption("statement_timeout",
+						psprintf("%d", timeouts->statementTimeout),
+						PGC_USERSET, PGC_S_SESSION);
+		SetConfigOption("lock_timeout", psprintf("%d", timeouts->lockTimeout),
+						PGC_USERSET, PGC_S_SESSION);
+#if PG_VERSION_NUM >= 170000
+		SetConfigOption("transaction_timeout",
+						psprintf("%d", timeouts->transactionTimeout),
+						PGC_USERSET, PGC_S_SESSION);
+#endif
+	}
 
 	/* Start the transaction */
 	StartTransactionCommand();

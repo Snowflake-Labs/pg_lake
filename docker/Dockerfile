@@ -8,11 +8,10 @@ ARG BASE_IMAGE_OS
 ARG BASE_IMAGE_TAG
 
 # Set environment variables for non-interactive installations and PostgreSQL/PostGIS versions
-ENV PG_LAKE_REF=main
-ARG PG16_VERSION=16.15
-ARG PG17_VERSION=17.11
-ARG PG18_VERSION=18.6
-ARG PG19_VERSION=19beta3
+ARG PG16_VERSION=16.16
+ARG PG17_VERSION=17.12
+ARG PG18_VERSION=18.7
+ARG PG19_VERSION=19.0
 ARG POSTGIS_VERSION=3.6.4
 ARG PGAUDIT16_VERSION=REL_16_STABLE
 ARG PGAUDIT17_VERSION=REL_17_STABLE
@@ -122,14 +121,14 @@ RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
         && apt-get clean && rm -rf /var/lib/apt/lists/*; \
     fi
 
-# Install jdk21 for debian
+# Install jdk21 for debian (Temurin; Oracle no longer serves a "latest" JDK 21)
 RUN if [ "$BASE_IMAGE_OS" = "debian" ]; then \
         if [ "$(dpkg --print-architecture)" = "arm64" ]; then \
             ARCH=aarch64; \
         else \
             ARCH=x64; \
         fi && \
-        wget https://download.oracle.com/java/21/latest/jdk-21_linux-${ARCH}_bin.tar.gz && \
+        wget -O jdk-21_linux-${ARCH}_bin.tar.gz https://api.adoptium.net/v3/binary/latest/21/ga/linux/${ARCH}/jdk/hotspot/normal/eclipse && \
         mkdir -p /usr/lib/jvm && \
         tar -xzf jdk-21_linux-${ARCH}_bin.tar.gz -C /usr/lib/jvm/ && \
         mv /usr/lib/jvm/jdk-21.* /usr/lib/jvm/java-21-openjdk && \
@@ -288,6 +287,7 @@ ENV VCPKG_TOOLCHAIN_PATH="/home/postgres/vcpkg/scripts/buildsystems/vcpkg.cmake"
 
 ############## base image for pg_lake_postgres and pgduck_server ##############
 FROM dev_base AS base
+ARG PG_LAKE_REF=main
 
 # Clone pg_lake project
 RUN git clone https://github.com/snowflake-labs/pg_lake.git \

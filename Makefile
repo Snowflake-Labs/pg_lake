@@ -84,8 +84,13 @@ endif
 
 typedefs: $(TYPEDEFS)
 
+# The buildfarm is sometimes unreachable for a few minutes, so retry, and
+# download to a temporary name so a failed attempt does not leave a file that
+# make would take as up to date.
 $(TYPEDEFS):
-	curl -o $(TYPEDEFS) https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PGINDENT_PG_VERSION)_STABLE
+	curl --fail --silent --show-error --connect-timeout 30 --retry 5 \
+		-o $(TYPEDEFS).tmp https://buildfarm.postgresql.org/cgi-bin/typedefs.pl?branch=REL_$(PGINDENT_PG_VERSION)_STABLE
+	mv $(TYPEDEFS).tmp $(TYPEDEFS)
 
 check-indent: typedefs
 	pgindent --typedefs=$(TYPEDEFS) --check --diff $(INDENT_TARGETS)
@@ -201,7 +206,24 @@ installcheck-pg_extension_updater:
 	# no tests yet
 
 check-duckdb_pglake:
-	# noop
+	# test jobs check out the repo without submodules
+	git submodule update --init --depth 1 duckdb_pglake/duckdb
+	git -C duckdb_pglake/duckdb checkout -f .
+	rm -f duckdb_pglake/duckdb/test/common/test_brotli_invalid_block_switch.cpp
+	git -C duckdb_pglake/duckdb apply --ignore-whitespace ../patches/duckdb/brotli-1.1.1-block-switch-cve.patch
+	@set -e; test_runner=$$(mktemp /tmp/duckdb-pglake-brotli-test.XXXXXX); \
+	trap 'rm -f "$$test_runner"; git -C duckdb_pglake/duckdb checkout -f .; rm -f duckdb_pglake/duckdb/test/common/test_brotli_invalid_block_switch.cpp' EXIT; \
+	$(CXX) -O2 -std=c++14 \
+		-I duckdb_pglake/duckdb/third_party/catch \
+		-I duckdb_pglake/duckdb/third_party/brotli/include \
+		-I duckdb_pglake/duckdb/third_party/brotli/common \
+		-I duckdb_pglake/duckdb/third_party/brotli/dec \
+		-o $$test_runner \
+		duckdb_pglake/test/brotli_test_main.cpp \
+		duckdb_pglake/duckdb/test/common/test_brotli_invalid_block_switch.cpp \
+		duckdb_pglake/duckdb/third_party/brotli/common/*.cpp \
+		duckdb_pglake/duckdb/third_party/brotli/dec/*.cpp; \
+	$$test_runner '[brotli]' --reporter compact
 
 
 # other avro stuff managed here

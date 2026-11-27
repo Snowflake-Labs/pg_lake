@@ -114,7 +114,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
 							  ICEBERG_OOR_NONE,
 							  ICEBERG_COMPAT_AUTO /* compatibilityMode */ ,
 							  false /* wrapNativeTypes */ ,
-							  NIL /* partitionByExprs */ );
+							  NIL /* partitionByExprs */ ,
+							  false /* useSessionTimeZone */ );
 }
 
 
@@ -122,6 +123,8 @@ ConvertCSVFileTo(char *csvFilePath, TupleDesc csvTupleDesc, int maxLineSize,
  * WriteQueryResultTo takes the result of a query and writes to
  * destinationPath. There may be multiple files if file_size_bytes
  * is specified in formatOptions.
+ *
+ * Pass useSessionTimeZone=true when the query evaluates user expressions.
  */
 StatsCollector *
 WriteQueryResultTo(char *query,
@@ -136,7 +139,8 @@ WriteQueryResultTo(char *query,
 				   IcebergOutOfRangePolicy outOfRangePolicy,
 				   IcebergCompatibilityMode compatibilityMode,
 				   bool wrapNativeTypes,
-				   List *partitionByExprs)
+				   List *partitionByExprs,
+				   bool useSessionTimeZone)
 {
 	ErrorOnNestedCaseCollision(schema);
 
@@ -466,7 +470,8 @@ WriteQueryResultTo(char *query,
 												  leafFields,
 												  schema,
 												  destinationPath,
-												  destinationFormat);
+												  destinationFormat,
+												  useSessionTimeZone);
 }
 
 

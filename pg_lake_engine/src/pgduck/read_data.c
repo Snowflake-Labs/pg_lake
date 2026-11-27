@@ -47,6 +47,10 @@
 #include "utils/typcache.h"
 
 
+/* the type of the nested fields of a column in read_parquet's schema */
+#define NESTED_FIELDS_TYPE \
+	"STRUCT(parent_id INTEGER, field_id INTEGER, name VARCHAR, names VARCHAR[])[]"
+
 static char *ReadDataSourceFunction(List *sourcePaths,
 									uint64 sourceRowCount,
 									CopyDataFormat sourceFormat,
@@ -55,10 +59,16 @@ static char *ReadDataSourceFunction(List *sourcePaths,
 									List *formatOptions,
 									DataFileSchema * schema,
 									DataFileSchema * scanNameSchema,
+									const char *fileConstants,
 									bool preferVarchar,
 									ReadRowLocationMode emitRowLocation,
 									bool emitRowId);
 static char *BuildParquetSchema(DataFileSchema * schema, bool emitRowId);
+static char *MappedNamesToDuckDBList(List *names);
+static char *NestedFieldsToDuckDBList(Field * field, int fieldId);
+static void AppendNestedFields(StringInfo list, Field * field, int parentId);
+static void AppendNestedField(StringInfo list, int parentId, int fieldId, const char *name,
+							  List *names);
 static char *GetSchemaType(Field * mapping);
 static const char *IcebergScalarTypeNameToDuckDBTypeName(const char *icebergTypeName);
 static char *ReadEmptyDataSource(TupleDesc tupleDesc, CopyDataFormat format,
@@ -105,6 +115,11 @@ static DuckDBTypeInfo VARCHAR_TYPE =
 /*
  * ReadDataSourceQuery constructs a query to read from an external data
  * source.
+ *
+ * fileConstants, if not NULL, is read_parquet's file_constants argument: a
+ * quoted string of the values columns, by field id, have in every row of a
+ * Parquet file, by the file's path, which the scan takes instead of reading
+ * the columns.
  */
 char *
 ReadDataSourceQuery(List *sourcePaths,
@@ -115,6 +130,7 @@ ReadDataSourceQuery(List *sourcePaths,
 					List *formatOptions,
 					DataFileSchema * schema,
 					DataFileSchema * columnNameSchema,
+					const char *fileConstants,
 					ReadDataStats * stats,
 					int flags)
 {
@@ -208,6 +224,7 @@ ReadDataSourceQuery(List *sourcePaths,
 														  formatOptions,
 														  schema,
 														  scanNameSchema,
+														  fileConstants,
 														  preferVarchar,
 														  readRowLocationMode,
 														  emitRowId);
@@ -230,11 +247,20 @@ ReadDataSourceQuery(List *sourcePaths,
 		/*
 		 * Add an anti-join with the position delete files to filter out
 		 * deleted rows. The anti-join is reasonably efficient in DuckDB.
+		 *
+		 * Engines built on Hadoop name the data files in their position
+		 * deletes by s3a:// or s3n:// URLs, which reach this scan as s3://
+		 * (see S3URLFromHadoopScheme), so the names are compared that way.
+		 * The CASE repeats S3URLFromHadoopScheme in SQL, and [7:] relies on
+		 * both schemes being 6 characters: keep the two in sync.
 		 */
 
 		appendStringInfo(&command,
 						 " WHERE (" INTERNAL_FILENAME_COLUMN_NAME ", file_row_number)"
-						 " NOT IN (SELECT (file_path, pos) FROM read_parquet(%s",
+						 " NOT IN (SELECT (CASE WHEN starts_with(file_path, 's3a://')"
+						 " OR starts_with(file_path, 's3n://')"
+						 " THEN 's3://' || file_path[7:] ELSE file_path END, pos)"
+						 " FROM read_parquet(%s",
 						 PathListToString(positionDeletePaths));
 
 		if (stats != NO_STATISTICS && stats->positionDeleteRowCount > 0)
@@ -342,6 +368,7 @@ ReadDataSourceFunction(List *sourcePaths,
 					   List *formatOptions,
 					   DataFileSchema * schema,
 					   DataFileSchema * scanNameSchema,
+					   const char *fileConstants,
 					   bool preferVarchar,
 					   ReadRowLocationMode readRowLocationMode,
 					   bool emitRowId)
@@ -378,6 +405,9 @@ ReadDataSourceFunction(List *sourcePaths,
 
 				if (sourceRowCount > 0)
 					appendStringInfo(&command, ", explicit_cardinality=" UINT64_FORMAT, sourceRowCount);
+
+				if (fileConstants != NULL)
+					appendStringInfo(&command, ", file_constants=%s", fileConstants);
 
 				if (readRowLocationMode != NO_ROW_LOCATION)
 					appendStringInfoString(&command,
@@ -703,6 +733,16 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 
 	bool		addComma = false;
 	bool		hasCollision = DataFileSchemaHasCaseCollision(schema);
+	bool		hasMappedNames = false;
+	bool		hasNestedFields = false;
+
+	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
+	{
+		if (schema->fields[fieldIdx].mappedNames != NIL)
+			hasMappedNames = true;
+		if (schema->fields[fieldIdx].type->type != FIELD_TYPE_SCALAR)
+			hasNestedFields = true;
+	}
 
 	for (size_t fieldIdx = 0; fieldIdx < schema->nfields; fieldIdx++)
 	{
@@ -722,24 +762,140 @@ BuildParquetSchema(DataFileSchema * schema, bool emitRowId)
 		 * add this to the schema 0: {name: 'renamed_i', type: 'BIGINT',
 		 * default_value: '<default>'}
 		 */
-		appendStringInfo(&schemaString, "%d: {name: %s, type: %s, default_value: %s}",
+		appendStringInfo(&schemaString, "%d: {name: %s, type: %s, default_value: %s",
 						 field->id,
 						 quote_literal_cstr(DuckDBNameForFieldId(field->name, field->id,
 																 hasCollision)),
 						 quote_literal_cstr(GetSchemaType(field->type)),
 						 defaultValue);
 
+		/* every map value needs the same struct type */
+		if (hasMappedNames)
+			appendStringInfo(&schemaString, ", names: %s",
+							 MappedNamesToDuckDBList(field->mappedNames));
+		if (hasNestedFields)
+			appendStringInfo(&schemaString, ", nested: %s",
+							 NestedFieldsToDuckDBList(field->type, field->id));
+
+		appendStringInfoString(&schemaString, "}");
+
 		addComma = true;
 	}
 
 	if (emitRowId)
-		appendStringInfo(&schemaString, "%s %d: {name: '_row_id', type: 'BIGINT', default_value: NULL}",
+		appendStringInfo(&schemaString, "%s %d: {name: '_row_id', type: 'BIGINT', default_value: NULL%s%s}",
 						 addComma ? ", " : "",
-						 ICEBERG_ROWID_FIELD_ID);
+						 ICEBERG_ROWID_FIELD_ID,
+						 hasMappedNames ? ", names: NULL::VARCHAR[]" : "",
+						 hasNestedFields ? ", nested: NULL::" NESTED_FIELDS_TYPE : "");
 
 	appendStringInfoString(&schemaString, "}");
 
 	return schemaString.data;
+}
+
+
+/*
+ * NestedFieldsToDuckDBList returns a DuckDB literal of the fields nested in a
+ * column of the given type and field id, by which read_parquet matches the
+ * nested fields of each file by field id, or a NULL one for a scalar column.
+ */
+static char *
+NestedFieldsToDuckDBList(Field * field, int fieldId)
+{
+	if (field->type == FIELD_TYPE_SCALAR)
+		return "NULL::" NESTED_FIELDS_TYPE;
+
+	StringInfoData list;
+
+	initStringInfo(&list);
+	appendStringInfoChar(&list, '[');
+	AppendNestedFields(&list, field, fieldId);
+	appendStringInfoString(&list, "]::" NESTED_FIELDS_TYPE);
+
+	return list.data;
+}
+
+
+/*
+ * AppendNestedFields appends the fields nested in a field of the given type and
+ * field id: a struct field under its name, with the names the name mapping
+ * gives it in files without field ids, a list element as "element", and a map
+ * key and value as "key" and "value".
+ */
+static void
+AppendNestedFields(StringInfo list, Field * field, int parentId)
+{
+	switch (field->type)
+	{
+		case FIELD_TYPE_SCALAR:
+			break;
+
+		case FIELD_TYPE_LIST:
+			AppendNestedField(list, parentId, field->field.list.elementId, "element", NIL);
+			AppendNestedFields(list, field->field.list.element, field->field.list.elementId);
+			break;
+
+		case FIELD_TYPE_MAP:
+			AppendNestedField(list, parentId, field->field.map.keyId, "key", NIL);
+			AppendNestedFields(list, field->field.map.key, field->field.map.keyId);
+			AppendNestedField(list, parentId, field->field.map.valueId, "value", NIL);
+			AppendNestedFields(list, field->field.map.value, field->field.map.valueId);
+			break;
+
+		case FIELD_TYPE_STRUCT:
+			for (size_t fieldIdx = 0; fieldIdx < field->field.structType.nfields; fieldIdx++)
+			{
+				FieldStructElement *element = &field->field.structType.fields[fieldIdx];
+
+				AppendNestedField(list, parentId, element->id, element->name,
+								  element->mappedNames);
+				AppendNestedFields(list, element->type, element->id);
+			}
+			break;
+	}
+}
+
+
+static void
+AppendNestedField(StringInfo list, int parentId, int fieldId, const char *name, List *names)
+{
+	if (list->data[list->len - 1] != '[')
+		appendStringInfoString(list, ", ");
+
+	appendStringInfo(list, "{parent_id: %d, field_id: %d, name: %s, names: %s}",
+					 parentId, fieldId, quote_literal_cstr(name), MappedNamesToDuckDBList(names));
+}
+
+
+/*
+ * MappedNamesToDuckDBList returns a DuckDB VARCHAR[] literal of the given
+ * names, or a NULL one.
+ */
+static char *
+MappedNamesToDuckDBList(List *names)
+{
+	if (names == NIL)
+		return "NULL::VARCHAR[]";
+
+	StringInfoData list;
+
+	initStringInfo(&list);
+	appendStringInfoChar(&list, '[');
+
+	ListCell   *nameCell = NULL;
+
+	foreach(nameCell, names)
+	{
+		if (foreach_current_index(nameCell) > 0)
+			appendStringInfoString(&list, ", ");
+
+		appendStringInfoString(&list, quote_literal_cstr(lfirst(nameCell)));
+	}
+
+	appendStringInfoString(&list, "]::VARCHAR[]");
+
+	return list.data;
 }
 
 

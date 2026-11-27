@@ -517,8 +517,10 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash,
 		/* tests attach here to check that expiry skips data file enumeration */
 		INJECTION_POINT_COMPAT("expiry-fetch-data-files-from-manifest");
 
-		List	   *manifestDataFiles = FetchDataFilesFromManifest(manifest, NULL, IsManifestEntryStatusScannable, NULL);
-		ListCell   *dataFileCell = NULL;
+		bool		pathOnly = true;
+		List	   *dataFilePaths = FetchDataFilesFromManifest(manifest, pathOnly,
+															   IsManifestEntryStatusScannable, NULL);
+		ListCell   *dataFilePathCell = NULL;
 
 		/*
 		 * Add the paths from our own context: AppendFileToHash copies each
@@ -527,11 +529,11 @@ IcebergSnapshotAddAllReferencedFiles(IcebergSnapshot * snapshot, HTAB *fileHash,
 		 */
 		MemoryContextSwitchTo(oldContext);
 
-		foreach(dataFileCell, manifestDataFiles)
+		foreach(dataFilePathCell, dataFilePaths)
 		{
-			DataFile   *dataFile = lfirst(dataFileCell);
+			char	   *dataFilePath = lfirst(dataFilePathCell);
 
-			AppendFileToHash(dataFile->file_path, fileHash);
+			AppendFileToHash(dataFilePath, fileHash);
 		}
 
 		MemoryContextReset(manifestDataFileFetchContext);

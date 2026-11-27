@@ -618,6 +618,164 @@ def test_vacuum_compaction_summary_resolved_rows(s3, pg_conn, extension):
     pg_conn.autocommit = False
 
 
+def test_vacuum_compaction_failed_round(s3, pg_conn, extension, installcheck):
+    """A compaction round that cannot read an input file is rolled back: the
+    summary must not report it, and the demoted error must name the table."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compaction_failed_round/"
+
+    pg_conn.autocommit = True
+
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_compaction_failed_round (
+            id int,
+            value text
+        )
+        USING pg_lake_iceberg
+        WITH (location = '{location}', autovacuum_enabled = 'false');
+        INSERT INTO test_vacuum_compaction_failed_round VALUES (1, 'hello');
+        INSERT INTO test_vacuum_compaction_failed_round VALUES (2, 'world');
+        SET pg_lake_table.vacuum_compact_min_input_files TO 1;
+        SET client_min_messages TO LOG;
+    """,
+        pg_conn,
+    )
+
+    # pgduck_server keeps a cached copy of the files it writes, so drop that
+    # too, or the read would still succeed
+    path = run_query(
+        """
+        SELECT path FROM lake_table.files
+        WHERE table_name = 'test_vacuum_compaction_failed_round'::regclass
+        ORDER BY updated_time LIMIT 1
+    """,
+        pg_conn,
+    )[0][0]
+    s3.delete_object(Bucket=TEST_BUCKET, Key=path.removeprefix(f"s3://{TEST_BUCKET}/"))
+    run_query(f"SELECT lake_file_cache.remove('{path}')", pg_conn)
+
+    pg_conn.notices.clear()
+    offset = None if installcheck else server_log_offset()
+
+    run_command("VACUUM test_vacuum_compaction_failed_round;", pg_conn)
+
+    summary_lines = [
+        line for line in pg_conn.notices if "compacted iceberg table" in line
+    ]
+    assert summary_lines == [], f"failed round reported as compacted: {summary_lines}"
+
+    assert any(
+        line.startswith("WARNING") and path in line for line in pg_conn.notices
+    ), pg_conn.notices
+
+    # clients show the context of errors only, so look for it in the server log
+    if offset is not None:
+        with open(f"{server_params.PG_DIR}/logfile") as f:
+            f.seek(offset)
+            server_log = f.read()
+
+        assert (
+            "CONTEXT:  compacting iceberg table public.test_vacuum_compaction_failed_round"
+            in server_log
+        )
+
+    file_count = run_query(
+        """
+        SELECT count(*) FROM lake_table.files
+        WHERE table_name = 'test_vacuum_compaction_failed_round'::regclass
+    """,
+        pg_conn,
+    )[0][0]
+    assert file_count == 2
+
+    run_command(
+        f"""
+        RESET client_min_messages;
+        RESET pg_lake_table.vacuum_compact_min_input_files;
+        DROP TABLE test_vacuum_compaction_failed_round;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.autocommit = False
+
+
+def test_vacuum_compaction_summary_after_failed_round(
+    s3, pg_conn, superuser_conn, extension
+):
+    """When a round fails after an earlier round of the same VACUUM succeeded,
+    the summary reports the successful round only."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compaction_summary_after_failed_round/"
+
+    pg_conn.autocommit = True
+
+    # partition 1 has the most candidates, so the first round compacts it, and
+    # the second round fails on an unreadable file in partition 2
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_compaction_mixed_rounds (p int, value text)
+        USING pg_lake_iceberg
+        WITH (location = '{location}', partition_by = 'p', autovacuum_enabled = 'false');
+        INSERT INTO test_vacuum_compaction_mixed_rounds VALUES (1, 'a');
+        INSERT INTO test_vacuum_compaction_mixed_rounds VALUES (1, 'b');
+        INSERT INTO test_vacuum_compaction_mixed_rounds VALUES (1, 'c');
+        INSERT INTO test_vacuum_compaction_mixed_rounds VALUES (2, 'd');
+        INSERT INTO test_vacuum_compaction_mixed_rounds VALUES (2, 'e');
+        SET pg_lake_table.vacuum_compact_min_input_files TO 1;
+        SET client_min_messages TO LOG;
+    """,
+        pg_conn,
+    )
+
+    path = run_query(
+        """
+        SELECT f.path
+        FROM lake_table.files f
+        JOIN lake_table.data_file_partition_values v USING (table_name, id)
+        WHERE f.table_name = 'test_vacuum_compaction_mixed_rounds'::regclass
+          AND v.value = '2'
+        ORDER BY f.id LIMIT 1
+    """,
+        superuser_conn,
+    )[0][0]
+    superuser_conn.rollback()
+    s3.delete_object(Bucket=TEST_BUCKET, Key=path.removeprefix(f"s3://{TEST_BUCKET}/"))
+    run_query(f"SELECT lake_file_cache.remove('{path}')", pg_conn)
+
+    pg_conn.notices.clear()
+
+    run_command("VACUUM test_vacuum_compaction_mixed_rounds;", pg_conn)
+
+    assert any(
+        line.startswith("WARNING") and path in line for line in pg_conn.notices
+    ), pg_conn.notices
+
+    summary_lines = [
+        line for line in pg_conn.notices if "compacted iceberg table" in line
+    ]
+    assert len(summary_lines) == 1, summary_lines
+
+    m = re.search(
+        r"rewrote (\d+) files \(\d+ bytes, (\d+) rows\) "
+        r"into (\d+) files \(\d+ bytes, (\d+) rows\); "
+        r"table is now \d+ bytes across (\d+) files",
+        summary_lines[0],
+    )
+    assert m is not None, summary_lines[0]
+    assert [int(g) for g in m.groups()] == [3, 3, 1, 3, 3]
+
+    run_command(
+        f"""
+        RESET client_min_messages;
+        RESET pg_lake_table.vacuum_compact_min_input_files;
+        DROP TABLE test_vacuum_compaction_mixed_rounds;
+    """,
+        pg_conn,
+    )
+
+    pg_conn.autocommit = False
+
+
 def test_autovacuum_compaction_summary_log(s3, pg_conn, extension, installcheck):
     """The compaction summary must also be emitted on the autovacuum worker
     path.  The worker has no portal or active snapshot, so the summary's
@@ -1856,6 +2014,80 @@ def test_target_row_group_size(pg_conn, duckdb_conn, extension, tmp_path):
     assert row_groups_2mb > row_groups_128mb > row_groups_default
 
     pg_conn.rollback()
+
+
+def test_vacuum_compacts_oldest_files_first(s3, superuser_conn, extension):
+    """A compaction round that cannot take every eligible file takes the
+    oldest ones."""
+    location = f"s3://{TEST_BUCKET}/test_vacuum_compacts_oldest_files_first/"
+
+    superuser_conn.autocommit = True
+
+    run_command(
+        f"""
+        CREATE TABLE test_vacuum_oldest_first (id int, value text)
+        USING pg_lake_iceberg
+        WITH (location = '{location}', autovacuum_enabled = 'false');
+    """,
+        superuser_conn,
+    )
+
+    for i in range(15):
+        run_command(
+            f"""
+            INSERT INTO test_vacuum_oldest_first
+            SELECT g, md5(g::text) FROM generate_series({i * 10000 + 1}, {(i + 1) * 10000}) g;
+        """,
+            superuser_conn,
+        )
+
+    files_before = run_query(
+        """
+        SELECT path FROM lake_table.files
+        WHERE table_name = 'test_vacuum_oldest_first'::regclass
+        ORDER BY updated_time, id
+    """,
+        superuser_conn,
+    )
+    paths_before = [row[0] for row in files_before]
+    assert len(paths_before) == 15
+
+    # with a 1MB target a round stops once its inputs pass 0.75MB, which
+    # these files reach well before all 15 are taken
+    run_command(
+        """
+        SET pg_lake_table.target_file_size_mb TO 1;
+        SET pg_lake_table.max_compactions_per_vacuum TO 1;
+    """,
+        superuser_conn,
+    )
+    run_command("VACUUM test_vacuum_oldest_first;", superuser_conn)
+
+    paths_after = {
+        row[0]
+        for row in run_query(
+            """
+            SELECT path FROM lake_table.files
+            WHERE table_name = 'test_vacuum_oldest_first'::regclass
+        """,
+            superuser_conn,
+        )
+    }
+    removed = [path for path in paths_before if path not in paths_after]
+
+    assert 1 < len(removed) < len(paths_before), f"removed {len(removed)} files"
+    assert removed == paths_before[: len(removed)]
+
+    run_command(
+        """
+        RESET pg_lake_table.target_file_size_mb;
+        RESET pg_lake_table.max_compactions_per_vacuum;
+        DROP TABLE test_vacuum_oldest_first;
+    """,
+        superuser_conn,
+    )
+
+    superuser_conn.autocommit = False
 
 
 def get_table_options(table_type):

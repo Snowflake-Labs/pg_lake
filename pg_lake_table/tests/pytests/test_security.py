@@ -44,6 +44,8 @@ def setup_object_store_settings(superuser_conn):
 
     yield
 
+    # a test may leave a transaction open, and autocommit cannot be set in one
+    superuser_conn.rollback()
     superuser_conn.autocommit = True
     run_command(
         "ALTER SYSTEM RESET pg_lake_iceberg.object_store_catalog_location_prefix;",

@@ -21,6 +21,7 @@
 *   execution and statistics of the data files.
 */
 #include "postgres.h"
+#include "miscadmin.h"
 #include "utils/hsearch.h"
 #include "access/htup_details.h"
 #include "catalog/pg_type_d.h"
@@ -29,6 +30,7 @@
 #include "catalog/pg_attribute.h"
 #include "catalog/pg_index.h"
 #include "catalog/pg_collation_d.h"
+#include "catalog/pg_database.h"
 #include "catalog/pg_operator.h"
 #include "catalog/pg_opfamily.h"
 #include "commands/defrem.h"
@@ -108,16 +110,21 @@ typedef struct ColumnToFieldIdMapping
 	int16		typLen;
 }			ColumnToFieldIdMapping;
 
+static HTAB *FieldIdsUsedInFilters(Oid relationId, List *baseRestrictInfoList);
 static HTAB *CreateFieldIdMappingHash(void);
 static void AddFieldIdsUsedInQuery(HTAB *fieldIdsToUseInBounds, Oid relationId,
 								   PgLakeTableProperties tableProperties,
 								   List *columnsUsedInFilters);
 static List *GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds);
+static bool PartitionFieldIdIsAmbiguous(List *partitionFields,
+										IcebergPartitionSpecField * specField);
 static List *GetExternalIcebergFieldsForAttributes(Oid relationId, List *attrNos);
 static List *GetColumnBoundConstraints(Oid relationId, PruneType pruneType,
 									   HTAB *fieldIdCache, List *columnStats,
 									   List *partitionTransformsUsedInQuery, Partition * partition);
 static bool ColumnIsNotNull(Oid relationId, AttrNumber attrNo);
+static bool CollationOrdersByBytes(Oid collation);
+static bool DefaultCollationOrdersByBytes(void);
 static List *GetColumnBoundConstraintsFromColumnStats(Oid relationId, List *columnStats,
 													  ColumnToFieldIdMapping * entry);
 static List *GetColumnBoundConstraintsFromPartition(Oid relationId, ColumnToFieldIdMapping * entry,
@@ -193,8 +200,6 @@ List *
 PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, PruneType pruneType)
 {
 	List	   *retainedDataFiles = NIL;
-	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
-	PgLakeTableProperties tableProperties = GetPgLakeTableProperties(relationId);
 
 	if ((!EnableDataFilePruning && !EnablePartitionPruning) ||
 		!IsIcebergTable(relationId))
@@ -214,11 +219,17 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 		return dataFiles;
 
 	/*
+	 * Map the filtered columns to field ids once here, rather than for each
+	 * data file.
+	 */
+	HTAB	   *fieldIdsUsedInQuery = FieldIdsUsedInFilters(relationId, baseRestrictInfoList);
+
+	/*
 	 * If there are no filters on columns, there is no meaningful pruning we
 	 * can do. We check this after the special case of no clauses + full
 	 * match, since that also has no column filters but we still want pruning.
 	 */
-	if (columnsUsedInFilters == NIL)
+	if (fieldIdsUsedInQuery == NULL)
 		return pruneType == FULL_MATCH ? NIL : dataFiles;
 
 	/*
@@ -231,15 +242,6 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	 * predicated_implied_by requires a simple clause list.
 	 */
 	List	   *clauses = ExtractClausesFromBaseRestrictInfos(baseRestrictInfoList);
-
-	/*
-	 * Create a hash table to store the mapping of attrNo->fieldId, column for
-	 * the columns used in the filters. We do this here to avoid doing this
-	 * for each data file.
-	 */
-	HTAB	   *fieldIdsUsedInQuery = CreateFieldIdMappingHash();
-
-	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId, tableProperties, columnsUsedInFilters);
 
 	/* get partition transforms for the fields used in the query */
 	List	   *partitionFieldsUsedInQuery = GetPartitionSpecFieldsUsedInQuery(relationId, fieldIdsUsedInQuery);
@@ -307,6 +309,59 @@ PruneDataFiles(Oid relationId, List *dataFiles, List *baseRestrictInfoList, Prun
 	return retainedDataFiles;
 }
 
+
+/*
+ * ColumnStatsFieldIdsForPruning returns the field ids whose column stats
+ * PruneDataFiles reads for the given filters, or NIL if it reads none.
+ */
+List *
+ColumnStatsFieldIdsForPruning(Oid relationId, List *baseRestrictInfoList)
+{
+	if (!EnableDataFilePruning || !IsIcebergTable(relationId))
+		return NIL;
+
+	HTAB	   *fieldIdsUsedInQuery = FieldIdsUsedInFilters(relationId, baseRestrictInfoList);
+
+	if (fieldIdsUsedInQuery == NULL)
+		return NIL;
+
+	List	   *fieldIds = NIL;
+	HASH_SEQ_STATUS status;
+	ColumnToFieldIdMapping *entry = NULL;
+
+	hash_seq_init(&status, fieldIdsUsedInQuery);
+	while ((entry = hash_seq_search(&status)) != NULL)
+		fieldIds = lappend_int(fieldIds, entry->fieldId);
+
+	hash_destroy(fieldIdsUsedInQuery);
+
+	return fieldIds;
+}
+
+
+/*
+ * FieldIdsUsedInFilters returns the attrNo => field id mapping of the filtered
+ * columns that pruning can use, or NULL if the filters use no columns.
+ * PruneDataFiles and ColumnStatsFieldIdsForPruning must agree on these fields,
+ * or the scan would leave out stats that pruning reads.
+ */
+static HTAB *
+FieldIdsUsedInFilters(Oid relationId, List *baseRestrictInfoList)
+{
+	List	   *columnsUsedInFilters = ColumnsUsedInRestrictions(relationId, baseRestrictInfoList);
+
+	if (columnsUsedInFilters == NIL)
+		return NULL;
+
+	HTAB	   *fieldIdsUsedInQuery = CreateFieldIdMappingHash();
+
+	AddFieldIdsUsedInQuery(fieldIdsUsedInQuery, relationId,
+						   GetPgLakeTableProperties(relationId), columnsUsedInFilters);
+
+	return fieldIdsUsedInQuery;
+}
+
+
 /*
  * GetDataFileStatsAndPartition returns the column stats of a single data file
  * and sets *partition to that file's partition.
@@ -340,12 +395,21 @@ GetDataFileStatsAndPartition(bool isInternalIcebergTable, void *dataFile,
 
 /*
  * GetPartitionSpecFieldsUsedInQuery gets the partition spec fields that are
- * used in the query filters.
+ * used in the query filters and can prune data files.
  */
 static List *
 GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds)
 {
 	List	   *partitionFields = GetAllPartitionSpecFields(relationId);
+
+	/* the hash is keyed by attribute number, which need not be the field id */
+	List	   *fieldIdsUsedInQuery = NIL;
+	HASH_SEQ_STATUS status;
+	ColumnToFieldIdMapping *mapping = NULL;
+
+	hash_seq_init(&status, fieldIdsToUseInBounds);
+	while ((mapping = hash_seq_search(&status)) != NULL)
+		fieldIdsUsedInQuery = lappend_int(fieldIdsUsedInQuery, mapping->fieldId);
 
 	List	   *filteredPartitionFields = NIL;
 	ListCell   *filteredPartitionFieldCell = NULL;
@@ -354,17 +418,41 @@ GetPartitionSpecFieldsUsedInQuery(Oid relationId, HTAB *fieldIdsToUseInBounds)
 	{
 		IcebergPartitionSpecField *specField = lfirst(filteredPartitionFieldCell);
 
-		bool		found = false;
-
-		hash_search(fieldIdsToUseInBounds, &specField->source_id, HASH_FIND, &found);
-
-		if (found)
+		if (list_member_int(fieldIdsUsedInQuery, specField->source_id) &&
+			PartitionTransformCanPrune(specField->transform) &&
+			!PartitionFieldIdIsAmbiguous(partitionFields, specField))
 		{
 			filteredPartitionFields = lappend(filteredPartitionFields, specField);
 		}
 	}
 
 	return filteredPartitionFields;
+}
+
+
+/*
+ * PartitionFieldIdIsAmbiguous returns whether another partition spec gives
+ * specField's partition field id a different source or transform. A v1
+ * table reuses ids: a dropped partition field keeps its id with a void
+ * transform. Pruning finds a data file's partition values by id across all
+ * specs, so it cannot tell which transform produced such a value.
+ */
+static bool
+PartitionFieldIdIsAmbiguous(List *partitionFields, IcebergPartitionSpecField * specField)
+{
+	ListCell   *otherCell = NULL;
+
+	foreach(otherCell, partitionFields)
+	{
+		IcebergPartitionSpecField *other = lfirst(otherCell);
+
+		if (other->field_id == specField->field_id &&
+			(other->source_id != specField->source_id ||
+			 strcmp(other->transform, specField->transform) != 0))
+			return true;
+	}
+
+	return false;
 }
 
 
@@ -498,50 +586,44 @@ AddFieldIdsUsedInQuery(HTAB *fieldIdsUsedInQuery, Oid relationId, PgLakeTablePro
 		entry->fieldId = field->id;
 		entry->column = column;
 
-		Oid			collation = column->varcollid;
-
 		/*
-		 * We currently do not support data file pruning for columns with
-		 * collations.
+		 * A range over the bounds holds only under a collation that orders
+		 * strings by their bytes, as the bounds are. Equality and null
+		 * constraints compare exact values, so they hold under any collation.
 		 */
-		if (collation == InvalidOid || collation == DEFAULT_COLLATION_OID ||
-			collation == C_COLLATION_OID)
+		if (CollationOrdersByBytes(column->varcollid))
 		{
 			entry->columnBoundInclusiveUpper =
 				BuildConstraintsWithNullConst(column, BTLessEqualStrategyNumber, BTGreaterEqualStrategyNumber);
-			entry->equalityOperatorExpression = MakeOpExpression(column, BTEqualStrategyNumber);
-			entry->isNullExpression = MakeIsNullExpression(column);
 			entry->columnBoundExclusiveUpper =
 				BuildConstraintsWithNullConst(column, BTLessStrategyNumber, BTGreaterEqualStrategyNumber);
-
-			int			syntheticColId = MaxAttrNumber - pgAttNum;
-
-			/*
-			 * For bucket partitioning, we create a synthetic column that
-			 * represents the bucket partition bound.
-			 *
-			 * Our convention is to use the maximum attribute number
-			 * (MaxAttrNumber) minus the attribute number of the column. This
-			 * way, we can ensure that each column/partition field has a
-			 * unique synthetic column id, and we can use it to create the
-			 * synthetic filters for the bucket partitioning.
-			 */
-			entry->syntheticColEqualityOperator = syntheticColId > 0 ?
-				MakeOpExpression(MakeSyntheticInt4Column(syntheticColId), BTEqualStrategyNumber) :
-				NULL;
-
-			get_typlenbyval(column->vartype, &entry->typLen, &entry->constByVal);
 		}
 		else
 		{
 			entry->columnBoundInclusiveUpper = NULL;
-			entry->equalityOperatorExpression = NULL;
-			entry->isNullExpression = NULL;
 			entry->columnBoundExclusiveUpper = NULL;
-			entry->syntheticColEqualityOperator = NULL;
-			entry->constByVal = false;
-			entry->typLen = -1;
 		}
+
+		entry->equalityOperatorExpression = MakeOpExpression(column, BTEqualStrategyNumber);
+		entry->isNullExpression = MakeIsNullExpression(column);
+
+		int			syntheticColId = MaxAttrNumber - pgAttNum;
+
+		/*
+		 * For bucket partitioning, we create a synthetic column that
+		 * represents the bucket partition bound.
+		 *
+		 * Our convention is to use the maximum attribute number
+		 * (MaxAttrNumber) minus the attribute number of the column. This way,
+		 * we can ensure that each column/partition field has a unique
+		 * synthetic column id, and we can use it to create the synthetic
+		 * filters for the bucket partitioning.
+		 */
+		entry->syntheticColEqualityOperator = syntheticColId > 0 ?
+			MakeOpExpression(MakeSyntheticInt4Column(syntheticColId), BTEqualStrategyNumber) :
+			NULL;
+
+		get_typlenbyval(column->vartype, &entry->typLen, &entry->constByVal);
 	}
 }
 
@@ -627,6 +709,70 @@ ColumnIsNotNull(Oid relationId, AttrNumber attrNo)
 	}
 
 	return notNull;
+}
+
+
+/*
+ * CollationOrdersByBytes returns whether a column compares the way file
+ * bounds are ordered. Iceberg orders string bounds by their UTF-8 bytes,
+ * and so does DuckDB's min/max for pg_lake's own files; compared in another
+ * order, a file's bounds can refute a clause the file has rows for.
+ */
+static bool
+CollationOrdersByBytes(Oid collation)
+{
+	if (collation == InvalidOid || collation == C_COLLATION_OID)
+		return true;
+
+	if (collation == DEFAULT_COLLATION_OID)
+		return DefaultCollationOrdersByBytes();
+
+	return false;
+}
+
+
+/*
+ * DefaultCollationOrdersByBytes returns whether the database's default
+ * collation orders strings by their bytes: the libc C, POSIX and C.UTF-8
+ * locales, and every locale of the builtin provider, sort by code point,
+ * which is UTF-8 byte order.
+ */
+static bool
+DefaultCollationOrdersByBytes(void)
+{
+	static int	ordersByBytes = -1;
+
+	if (ordersByBytes >= 0)
+		return ordersByBytes == 1;
+
+	HeapTuple	tuple = SearchSysCache1(DATABASEOID, ObjectIdGetDatum(MyDatabaseId));
+
+	if (!HeapTupleIsValid(tuple))
+		elog(ERROR, "cache lookup failed for database %u", MyDatabaseId);
+
+	char		provider = ((Form_pg_database) GETSTRUCT(tuple))->datlocprovider;
+
+	ordersByBytes = 0;
+
+	if (provider == COLLPROVIDER_LIBC)
+	{
+		Datum		collateDatum = SysCacheGetAttrNotNull(DATABASEOID, tuple,
+														  Anum_pg_database_datcollate);
+		char	   *collate = TextDatumGetCString(collateDatum);
+
+		if (strcmp(collate, "C") == 0 || strcmp(collate, "POSIX") == 0 ||
+			pg_strcasecmp(collate, "C.UTF-8") == 0 ||
+			pg_strcasecmp(collate, "C.utf8") == 0)
+			ordersByBytes = 1;
+	}
+#ifdef COLLPROVIDER_BUILTIN
+	else if (provider == COLLPROVIDER_BUILTIN)
+		ordersByBytes = 1;
+#endif
+
+	ReleaseSysCache(tuple);
+
+	return ordersByBytes == 1;
 }
 
 /*
@@ -824,8 +970,9 @@ PartitionFieldBoundConstraint(PartitionField * partitionField, IcebergPartitionT
 /*
 * IdentityPartitionFieldBoundConstraint creates a constraint for the
 * partition field based on the identity transform. The constraint is
-* created as:
-*   column = partitionField->value
+* created as column IS NULL or as column = partitionField->value AND
+* column IS NOT NULL. The explicit null test allows IS NULL filters to
+* refute the constraint for a non-null partition.
 */
 static Expr *
 IdentityPartitionFieldBoundConstraint(PartitionField * partitionField,
@@ -842,8 +989,14 @@ IdentityPartitionFieldBoundConstraint(PartitionField * partitionField,
 
 		OpExpr	   *columnBoundEquality = copyObject(entry->equalityOperatorExpression);
 
-		return (Expr *) CreateConstraintWithEquality(columnBoundEquality, entry->constByVal, entry->typLen,
-													 partitionDatum);
+		Expr	   *equalityConstraint = (Expr *)
+			CreateConstraintWithEquality(columnBoundEquality, entry->constByVal, entry->typLen,
+										 partitionDatum);
+		NullTest   *isNotNull = copyObject(entry->isNullExpression);
+
+		isNotNull->nulltesttype = IS_NOT_NULL;
+
+		return (Expr *) makeBoolExpr(AND_EXPR, list_make2(equalityConstraint, isNotNull), -1);
 	}
 	else
 	{
@@ -865,6 +1018,9 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 
 	if (pgType.postgresTypeOid == INT4OID || pgType.postgresTypeOid == INT2OID)
 	{
+		if (partitionField->value_length != sizeof(int32))
+			return NULL;
+
 		int32		partitionValue = *(int32_t *) partitionField->value;
 		int			truncateLen = partitionTransform->truncateLen;
 
@@ -895,8 +1051,16 @@ TruncatePartitionFieldBoundConstraint(PartitionField * partitionField,
 	}
 	else if (pgType.postgresTypeOid == INT8OID)
 	{
-		int64		partitionValue = *(int64_t *) partitionField->value;
+		int64		partitionValue;
 		int			truncateLen = partitionTransform->truncateLen;
+
+		/* manifests written before an int column became long store an int */
+		if (partitionField->value_length == sizeof(int32))
+			partitionValue = *(int32_t *) partitionField->value;
+		else if (partitionField->value_length == sizeof(int64))
+			partitionValue = *(int64_t *) partitionField->value;
+		else
+			return NULL;
 
 		int64		upperBound;
 
@@ -2085,6 +2249,13 @@ ConstantEqualityOperatorExpressionOnColumn(Expr *clause, AttrNumber attrNo)
 	}
 
 	if (!EqualityOperator(opExpr->opno))
+	{
+		return NULL;
+	}
+
+	/* a bucket holds a hash of the bytes, which only bytewise equality keeps */
+	if (OidIsValid(opExpr->inputcollid) &&
+		!get_collation_isdeterministic(opExpr->inputcollid))
 	{
 		return NULL;
 	}

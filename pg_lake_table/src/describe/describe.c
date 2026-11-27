@@ -57,13 +57,15 @@ static List *DescribeColumnsForLogFormat(List *options);
 
 /*
  * DescribeColumnsForURL retrieves the columns for a given URL by doing
- * a DESCRIBE operation (this can take some time).
+ * a DESCRIBE operation (this can take some time). With forTable, the
+ * columns of an Iceberg table get the names Postgres can give them.
  */
 List *
 DescribeColumnsForURL(char *url,
 					  CopyDataFormat format,
 					  CopyDataCompression compression,
-					  List *copyOptions)
+					  List *copyOptions,
+					  bool forTable)
 {
 	/*
 	 * we describe iceberg tables from the current schema instead of duckdb's
@@ -73,10 +75,13 @@ DescribeColumnsForURL(char *url,
 	if (format == DATA_FORMAT_ICEBERG)
 	{
 		bool		emitFilename = GetBoolOption(copyOptions, "filename", false);
-		IcebergTableMetadata *metadata = ReadIcebergTableMetadata(url);
+		IcebergTableMetadata *metadata =
+			ReadIcebergTableMetadata(S3URLFromHadoopScheme(url));
 
 		if (HasLowercaseColumnNamesOption(copyOptions))
 			LowercaseIcebergTableMetadataNames(metadata);
+		if (forTable)
+			TruncateIcebergTableMetadataNames(metadata, true);
 
 		return DescribeColumnsFromIcebergMetadata(metadata, emitFilename);
 	}

@@ -1,5 +1,6 @@
 import pytest
 import psycopg2
+import threading
 import time
 from utils_pytest import *
 
@@ -156,6 +157,47 @@ def test_worker_uses_search_path_from_set_local_and_function(
     finally:
         superuser_conn.rollback()
         run_command("DROP SCHEMA attached_sp_local CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
+@pytest.mark.parametrize(
+    "timeout_guc", ["statement_timeout", "lock_timeout", "transaction_timeout"]
+)
+def test_worker_uses_caller_timeouts(superuser_conn, pg_extension_base, timeout_guc):
+    """The worker runs under the caller's timeouts, not the database's, so a
+    database-level timeout the caller is not subject to does not cancel the
+    caller's command."""
+    if timeout_guc == "transaction_timeout" and (
+        get_pg_version_num(superuser_conn) < 170000
+    ):
+        pytest.skip("transaction_timeout requires PostgreSQL 17+")
+
+    db = server_params.PG_DATABASE
+    run_command("CREATE TABLE attached_timeouts (x int)", superuser_conn)
+    superuser_conn.commit()
+
+    # both sessions predate the ALTER, so have no timeout of their own
+    locker = open_pg_conn()
+    run_command("LOCK attached_timeouts", locker)
+    unlock = threading.Timer(0.5, locker.rollback)
+    run_command(f"ALTER DATABASE \"{db}\" SET {timeout_guc} = '50ms'", superuser_conn)
+    superuser_conn.commit()
+
+    # waits on the lock past the database's bound, so lock_timeout applies too
+    command = "LOCK attached_timeouts; SELECT pg_sleep(0.5)"
+    try:
+        unlock.start()
+        result = run_query(
+            f"SELECT * FROM extension_base.run_attached($${command}$$)",
+            superuser_conn,
+        )
+        assert [row["command_tag"] for row in result] == ["LOCK TABLE", "SELECT 1"]
+    finally:
+        unlock.join()
+        superuser_conn.rollback()
+        locker.close()
+        run_command(f'ALTER DATABASE "{db}" RESET {timeout_guc}', superuser_conn)
+        run_command("DROP TABLE attached_timeouts", superuser_conn)
         superuser_conn.commit()
 
 
@@ -771,6 +813,203 @@ def test_returning_more_columns_expected(superuser_conn, pg_extension_base):
     # session should still be alive
     result = run_query("SELECT 1 as alive", superuser_conn)
     assert result[0]["alive"] == 1
+
+
+def test_error_from_commit(superuser_conn, pg_extension_base):
+    # A worker sends CommandComplete before it commits, so a deferred
+    # constraint that fails at commit time has to reach the caller too.
+    run_command(
+        """
+        CREATE TABLE fails_at_commit (x int);
+        CREATE FUNCTION fail_at_commit() RETURNS trigger LANGUAGE plpgsql
+            AS $$ BEGIN RAISE EXCEPTION 'failed at commit'; END $$;
+        CREATE CONSTRAINT TRIGGER fail_at_commit AFTER INSERT ON fails_at_commit
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION fail_at_commit();
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        for command in [
+            "SELECT * FROM extension_base.run_attached($$INSERT INTO fails_at_commit VALUES (1)$$)",
+            "SELECT * FROM extension_base.run_attached_returning("
+            "$$INSERT INTO fails_at_commit VALUES (1) RETURNING x$$) AS t(x int)",
+        ]:
+            error = run_command(command, superuser_conn, raise_error=False)
+            superuser_conn.rollback()
+
+            assert error is not None, command
+            assert "failed at commit" in error, command
+
+        result = run_query("SELECT count(*) FROM fails_at_commit", superuser_conn)
+        assert result[0]["count"] == 0
+    finally:
+        superuser_conn.rollback()
+        run_command(
+            "DROP TABLE fails_at_commit; DROP FUNCTION fail_at_commit()",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
+def test_slow_commit(superuser_conn, pg_extension_base):
+    # A commit that succeeds slowly is done by the time the call returns,
+    # instead of being cut short when the caller ends the worker.
+    run_command(
+        """
+        CREATE TABLE slow_commit (x int);
+        CREATE FUNCTION sleep_at_commit() RETURNS trigger LANGUAGE plpgsql
+            AS $$ BEGIN PERFORM pg_sleep(1); RETURN NULL; END $$;
+        CREATE CONSTRAINT TRIGGER sleep_at_commit AFTER INSERT ON slow_commit
+            DEFERRABLE INITIALLY DEFERRED
+            FOR EACH ROW EXECUTE FUNCTION sleep_at_commit();
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        for command in [
+            "SELECT * FROM extension_base.run_attached($$INSERT INTO slow_commit VALUES (1)$$)",
+            "SELECT * FROM extension_base.run_attached_returning("
+            "$$INSERT INTO slow_commit VALUES (1) RETURNING x$$) AS t(x int)",
+        ]:
+            run_command("TRUNCATE slow_commit", superuser_conn)
+            superuser_conn.commit()
+
+            run_command(command, superuser_conn)
+            superuser_conn.commit()
+
+            result = run_query("SELECT count(*) FROM slow_commit", superuser_conn)
+            superuser_conn.commit()
+            assert result[0]["count"] == 1, command
+    finally:
+        superuser_conn.rollback()
+        run_command(
+            "DROP TABLE slow_commit; DROP FUNCTION sleep_at_commit()",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
+def test_cancelled_launch_stops_worker(
+    superuser_conn, pg_extension_base, create_injection_extension
+):
+    # A cancel that lands after the worker is registered, but before the
+    # caller gets it back, stops the worker instead of leaving it to run the
+    # command, and commit, while the session lives on.
+    if get_pg_version_num(superuser_conn) < 170000:
+        pytest.skip("Injection points not available (requires PostgreSQL 17+)")
+
+    run_command("CREATE TABLE cancelled_launch (x int)", superuser_conn)
+    run_command(
+        "SELECT injection_points_attach('attached-worker-before-startup-wait', 'wait')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # the caller stays connected to the end: its exit would stop the worker
+    caller_conn = open_pg_conn()
+    caller_pid = run_query("SELECT pg_backend_pid() AS pid", caller_conn)[0]["pid"]
+    caller_conn.commit()
+
+    errors = []
+
+    def run_caller():
+        errors.append(
+            run_command(
+                "SELECT * FROM extension_base.run_attached("
+                "$$SELECT pg_sleep(2); INSERT INTO cancelled_launch VALUES (1)$$)",
+                caller_conn,
+                raise_error=False,
+            )
+        )
+        caller_conn.rollback()
+
+    caller = threading.Thread(target=run_caller)
+
+    try:
+        caller.start()
+
+        # cancel the caller at the injection point once its worker is running
+        for _ in range(100):
+            result = run_query(
+                "SELECT count(*) FROM pg_stat_activity "
+                "WHERE backend_type = 'pg_extension_base attached worker' "
+                "AND query LIKE '%cancelled_launch%'",
+                superuser_conn,
+            )
+            superuser_conn.commit()
+            if result[0]["count"] > 0:
+                break
+            time.sleep(0.1)
+
+        assert result[0]["count"] == 1
+
+        run_query(f"SELECT pg_cancel_backend({caller_pid})", superuser_conn)
+        superuser_conn.commit()
+        caller.join(30)
+
+        assert not caller.is_alive()
+        assert errors[0] is not None
+        assert "canceling statement due to user request" in errors[0]
+
+        # long enough for a worker left running to finish its insert
+        time.sleep(4)
+
+        result = run_query("SELECT count(*) FROM cancelled_launch", superuser_conn)
+        superuser_conn.commit()
+        assert result[0]["count"] == 0
+    finally:
+        run_command(
+            "SELECT injection_points_detach('attached-worker-before-startup-wait')",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.commit()
+        caller.join(30)
+        caller_conn.close()
+        run_command("DROP TABLE cancelled_launch", superuser_conn)
+        superuser_conn.commit()
+
+
+def test_out_of_worker_slots(
+    superuser_conn, pg_extension_base, create_injection_extension
+):
+    # A launch the server has no worker slot for fails with that error, and
+    # the next launch works again.
+    if get_pg_version_num(superuser_conn) < 180000:
+        pytest.skip("IS_INJECTION_POINT_ATTACHED requires PostgreSQL 18+")
+
+    run_command(
+        "SELECT injection_points_attach('attached-worker-out-of-slots', 'notice')",
+        superuser_conn,
+    )
+
+    try:
+        error = run_command(
+            "SELECT * FROM extension_base.run_attached($$SELECT 1$$)",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.rollback()
+
+        assert error is not None
+        assert "out of background worker slots" in error
+    finally:
+        run_command(
+            "SELECT injection_points_detach('attached-worker-out-of-slots')",
+            superuser_conn,
+            raise_error=False,
+        )
+        superuser_conn.commit()
+
+    result = run_query(
+        "SELECT * FROM extension_base.run_attached($$SELECT 1$$)", superuser_conn
+    )
+    assert result[0]["command_tag"] == "SELECT 1"
 
 
 def test_worker_dies_before_attaching(

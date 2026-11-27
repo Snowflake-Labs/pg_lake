@@ -27,6 +27,8 @@
 
 
 static void AvroFileReaderClose(AvroReader * reader);
+static bool ReadRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry, void *context,
+					   bool freeRecord);
 static bool GetFieldValue(avro_value_t * record, char *fieldName, AvroFieldRequired required,
 						  avro_value_t * fieldValue);
 static bool GetFieldArrayValue(avro_value_t * record, char *fieldName, AvroFieldRequired required,
@@ -115,6 +117,26 @@ AvroFileReaderClose(AvroReader * reader)
 bool
 AvroReaderReadRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry, void *context)
 {
+	return ReadRecord(reader, parseFn, entry, context, false);
+}
+
+
+/*
+ * AvroReaderReadTransientRecord is AvroReaderReadRecord for parse functions
+ * that copy whatever they keep: the record is freed once parseFn returns, so
+ * reading a file holds one record at a time rather than all of them.
+ */
+bool
+AvroReaderReadTransientRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry, void *context)
+{
+	return ReadRecord(reader, parseFn, entry, context, true);
+}
+
+
+static bool
+ReadRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry, void *context,
+		   bool freeRecord)
+{
 	/*
 	 * always start with a new top level record, otherwise we will get
 	 * duplicate values for some of the fields of different records
@@ -127,6 +149,9 @@ AvroReaderReadRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry
 
 	if (rc == EOF)
 	{
+		if (freeRecord)
+			avro_value_decref(&record);
+
 		return false;
 	}
 
@@ -136,6 +161,9 @@ AvroReaderReadRecord(AvroReader * reader, AvroParseFunction parseFn, void *entry
 	}
 
 	parseFn(&record, entry, context);
+
+	if (freeRecord)
+		avro_value_decref(&record);
 
 	return true;
 }
@@ -733,7 +761,8 @@ AllocateFieldEntries(char *fieldName, size_t entrySize, size_t itemCount)
  * Nullable and present are separate questions: a writer may leave an
  * optional field out of the schema entirely rather than write it as null.
  * An absent AVRO_FIELD_OPTIONAL field reads as "not set", same as an
- * explicit null.
+ * explicit null. A writer may also declare the field without the union,
+ * as v1 manifests declare snapshot_id; its value is then always set.
  */
 static bool
 AvroPrepareGetNullable(avro_value_t * record, char *fieldName, AvroFieldRequired required,
@@ -753,7 +782,8 @@ AvroPrepareGetNullable(avro_value_t * record, char *fieldName, AvroFieldRequired
 
 	if (avro_value_get_type(&unionValue) != AVRO_UNION)
 	{
-		ereport(ERROR, (errmsg("%s is not a nullable field", fieldName)));
+		*innerValue = unionValue;
+		return true;
 	}
 
 	if (avro_value_get_current_branch(&unionValue, innerValue) != 0)

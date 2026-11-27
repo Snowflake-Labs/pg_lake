@@ -487,10 +487,25 @@ ErrorIfUnsupportedLakeTable(CreateForeignTableStmt *createStmt)
 						errmsg("\"path\" option is required for regular "
 							   "pg_lake tables")));
 
-	if (!isWritable && !IsSupportedURL(path))
+	if (!isWritable && !IsSupportedURL(S3URLFromHadoopScheme(path)))
 	{
 		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 						errmsg("pg_lake_table: unsupported URL: \"%s\"", path)));
+	}
+	else if (!isWritable && S3URLFromHadoopScheme(path) != path)
+	{
+		/* only an Iceberg table reads s3a:// and s3n:// as s3:// */
+		CopyDataFormat format = DATA_FORMAT_INVALID;
+		CopyDataCompression compression = DATA_COMPRESSION_INVALID;
+
+		FindDataFormatAndCompression(GetPgLakeTableTypeViaServerName(createStmt->servername),
+									 path, options, &format, &compression);
+
+		if (format != DATA_FORMAT_ICEBERG)
+			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+							errmsg("pg_lake_table: unsupported URL: \"%s\"", path),
+							errhint("s3a:// and s3n:// URLs are read as s3:// only in Iceberg tables; "
+									"use the s3:// URL.")));
 	}
 	else if (isWritable && !IsSupportedURL(location))
 	{
@@ -1060,6 +1075,7 @@ ProcessCreateIcebergTableFromForeignTableStmt(ProcessUtilityParams * params)
 
 			if (HasLowercaseColumnNamesOption(createStmt->options))
 				LowercaseIcebergTableMetadataNames(metadata);
+			TruncateIcebergTableMetadataNames(metadata, true);
 
 			List	   *dataFileColumns =
 				DescribeColumnsFromIcebergMetadata(metadata, false);
@@ -1705,14 +1721,14 @@ AddLakeTableColumnDefinitions(CreateForeignTableStmt *createStmt)
 	DefElem    *pathOption = GetOption(options, "path");
 	char	   *path = pathOption != NULL ? defGetString(pathOption) : "";
 
-	Assert(IsSupportedURL(path));
+	Assert(IsSupportedURL(S3URLFromHadoopScheme(path)));
 
 	/* determine format & compression to make DESCRIBE more precise */
 	FindDataFormatAndCompression(tableType, path, options, &format, &compression);
 
 	List	   *dataFileColumns = DescribeColumnsForURL(path,
 														format, compression,
-														createStmt->options);
+														createStmt->options, true);
 
 	createStmt->base.tableElts = dataFileColumns;
 

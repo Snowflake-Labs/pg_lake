@@ -99,6 +99,7 @@
 #include "pg_lake/pgduck/iceberg_datum_validation.h"
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/explain.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/write_data.h"
@@ -161,6 +162,7 @@ typedef struct PgLakeScanState
 	List	   *retrieved_attrs;	/* list of retrieved attribute numbers */
 
 	/* for remote query execution */
+	QueryEngine queryEngine;	/* query engine of the scanned relations */
 	PGDuckConnection *conn;		/* connection for the scan */
 	bool		prepared_statement_sent;	/* have we executed the prepared
 											 * statement? */
@@ -1684,20 +1686,20 @@ postgresBeginForeignScan(ForeignScanState *node, int eflags)
 	fsstate = (PgLakeScanState *) palloc0(sizeof(PgLakeScanState));
 	node->fdw_state = (void *) fsstate;
 
+	List	   *rteList =
+		list_nth(fsplan->fdw_private, FdwScanPrivateRteList);
+
 	/*
-	 * Get connection to the foreign server.  Connection manager will
-	 * establish new connection if necessary.
+	 * Get connection to the query engine that serves the scanned relations.
 	 */
-	fsstate->conn = GetPGDuckConnection();
+	fsstate->queryEngine = GetQueryEngineForRteList(rteList, fsplan->checkAsUser);
+	fsstate->conn = GetQueryEngineConnection(fsstate->queryEngine, true);
 
 	/* Assign a unique ID for my cursor */
 	fsstate->prepared_statement_sent = false;
 
 	/* Get private info created by planner functions. */
 	fsstate->query = strVal(list_nth(fsplan->fdw_private, FdwScanPrivateSelectSql));
-
-	List	   *rteList =
-		list_nth(fsplan->fdw_private, FdwScanPrivateRteList);
 
 	int			rtindex;
 
@@ -2454,8 +2456,6 @@ StoreDeleteReturningSlot(TupleTableSlot *planSlot,
 {
 	TupleDesc	planSlotTupleDesc = planSlot->tts_tupleDescriptor;
 	TupleDesc	relationTupleDesc = returningSlot->tts_tupleDescriptor;
-	Datum	   *values = (Datum *) palloc0(relationTupleDesc->natts * sizeof(Datum));
-	bool	   *nulls = (bool *) palloc(relationTupleDesc->natts * sizeof(bool));
 
 	if (planSlotTupleDesc->natts == 0)
 		/* no RETURNING */
@@ -2464,6 +2464,13 @@ StoreDeleteReturningSlot(TupleTableSlot *planSlot,
 	if (relationTupleDesc->natts == 0)
 		/* 0 column table */
 		return;
+
+	/*
+	 * We are called once per deleted row in the per-query memory context, so
+	 * free values and nulls before returning.
+	 */
+	Datum	   *values = (Datum *) palloc0(relationTupleDesc->natts * sizeof(Datum));
+	bool	   *nulls = (bool *) palloc(relationTupleDesc->natts * sizeof(bool));
 
 	/*
 	 * make sure the tuple is fully deconstructed, since we'll use all the
@@ -2503,8 +2510,18 @@ StoreDeleteReturningSlot(TupleTableSlot *planSlot,
 	HeapTuple	returningTuple =
 		heap_form_tuple(returningSlot->tts_tupleDescriptor, values, nulls);
 
+	pfree(values);
+	pfree(nulls);
+
+	/*
+	 * Only set t_self, not t_data->t_ctid. heap_form_tuple stamps a composite
+	 * datum version into t_ctid, and our synthetic ctid can have offset
+	 * 0xfffc (VersionedDatumOffsetNumber in 18.7+), in which case its block
+	 * number would be read back as a bogus version and the slot would refuse
+	 * to deform the tuple.
+	 */
 	if (ctid)
-		returningTuple->t_self = returningTuple->t_data->t_ctid = *ctid;
+		returningTuple->t_self = *ctid;
 
 	bool		shouldFree = true;
 
@@ -3233,7 +3250,7 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 	/*
 	 * Add EXPLAIN output for the actual query with read_parquet calls.
 	 */
-	ExplainPGDuckQuery(fullQuery, numParams, paramValues, es);
+	ExplainPGDuckQuery(fsstate->queryEngine, fullQuery, numParams, paramValues, es);
 }
 
 

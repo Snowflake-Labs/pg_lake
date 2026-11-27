@@ -40,7 +40,27 @@ typedef struct PgLakeFileScan
 
 	/* true if we already determined that all rows match our filters */
 	bool		allRowsMatch;
+
+	/*
+	 * PgLakeFileConstants of the columns that have the same value in every
+	 * row of the file, which the scan takes without reading the file
+	 */
+	List	   *constants;
 }			PgLakeFileScan;
+
+/*
+ * PgLakeFileConstant is the value a column, by its field id, has in every row
+ * of a file, as text DuckDB casts to the column's type, or NULL.
+ */
+typedef struct PgLakeFileConstant
+{
+	int			fieldId;
+	char	   *value;
+}			PgLakeFileConstant;
+
+extern PGDLLEXPORT List *FileConstantsForDataFiles(IcebergTableMetadata * metadata,
+												   List *dataFiles);
+extern PGDLLEXPORT char *FileConstantsArgument(List *paths, List *fileConstants);
 
 /*
  * PgLakeTableScan represents a single table to scan.

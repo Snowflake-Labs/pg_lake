@@ -86,6 +86,7 @@ static bool CheckObjectCreatedByLakeInternal(HTAB *referencedObjectsMap, ObjectA
 static bool IsExtensionObjectCreatedByLake(ObjectAddress extensionAddress);
 static HTAB *CreateReferencedObjectsMap(void);
 static Node *CreateObjectCreatedByLakeExpr(Oid catalogTableId, int catalogTableVarNo);
+static bool AddQualToRangeTblRef(Node **jtnodePtr, int rtindex, Node *qual);
 static AttrNumber GetAttributeNumberForCatalogObjectsUsedByPgDepend(Oid catalogTableId);
 static List *GetObjectCreatedByLakeFuncArgs(Oid catalogTableId, int catalogTableVarNo);
 
@@ -311,7 +312,18 @@ HideObjectsCreatedByLakeFromCatalogTables(Node *node, void *context)
 				}
 #endif
 
-				query->jointree->quals = make_and_qual(query->jointree->quals, createdByLakeExpr);
+				/*
+				 * Scope the filter to the catalog table's own jointree node.
+				 * A top-level WHERE qual on the nullable side of an outer
+				 * join would lack varnullingrels, and PG18.7+ join removal
+				 * asserts when it finds such a Var after removing the join.
+				 * An RTE that is not in the jointree, such as an INSERT
+				 * target, still gets a top-level qual.
+				 */
+				if (!AddQualToRangeTblRef((Node **) &query->jointree, varno,
+										  createdByLakeExpr))
+					query->jointree->quals = make_and_qual(query->jointree->quals,
+														   createdByLakeExpr);
 
 				MemoryContextSwitchTo(originalContext);
 			}
@@ -324,6 +336,63 @@ HideObjectsCreatedByLakeFromCatalogTables(Node *node, void *context)
 
 	return expression_tree_walker(node, HideObjectsCreatedByLakeFromCatalogTables,
 								  context);
+}
+
+
+/*
+ * AddQualToRangeTblRef ANDs qual into the FromExpr that directly lists the
+ * RangeTblRef for rtindex, or wraps the RangeTblRef in a new FromExpr when it
+ * is a direct JoinExpr input. Returns false if rtindex is not in the jointree.
+ */
+static bool
+AddQualToRangeTblRef(Node **jtnodePtr, int rtindex, Node *qual)
+{
+	Node	   *jtnode = *jtnodePtr;
+
+	if (jtnode == NULL)
+		return false;
+
+	if (IsA(jtnode, RangeTblRef))
+	{
+		if (((RangeTblRef *) jtnode)->rtindex != rtindex)
+			return false;
+
+		*jtnodePtr = (Node *) makeFromExpr(list_make1(jtnode), qual);
+		return true;
+	}
+
+	if (IsA(jtnode, FromExpr))
+	{
+		FromExpr   *fromExpr = (FromExpr *) jtnode;
+		ListCell   *fromCell = NULL;
+
+		foreach(fromCell, fromExpr->fromlist)
+		{
+			Node	   *fromItem = lfirst(fromCell);
+
+			if (IsA(fromItem, RangeTblRef) &&
+				((RangeTblRef *) fromItem)->rtindex == rtindex)
+			{
+				fromExpr->quals = make_and_qual(fromExpr->quals, qual);
+				return true;
+			}
+
+			if (AddQualToRangeTblRef((Node **) &lfirst(fromCell), rtindex, qual))
+				return true;
+		}
+
+		return false;
+	}
+
+	if (IsA(jtnode, JoinExpr))
+	{
+		JoinExpr   *joinExpr = (JoinExpr *) jtnode;
+
+		return AddQualToRangeTblRef(&joinExpr->larg, rtindex, qual) ||
+			AddQualToRangeTblRef(&joinExpr->rarg, rtindex, qual);
+	}
+
+	return false;
 }
 
 

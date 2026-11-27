@@ -56,15 +56,19 @@ static char *DatumToColumnStatsText(Datum datum, PGType pgType, bool isNull);
 /*
  * ExecuteCopyToCommandOnPGDuckConnection executes the given COPY TO command on
  * a PGDuck connection and returns a StatsCollector.
+ *
+ * Pass useSessionTimeZone=true when the command evaluates user expressions.
  */
 StatsCollector *
 ExecuteCopyToCommandOnPGDuckConnection(char *copyCommand,
 									   List *leafFields,
 									   DataFileSchema * schema,
 									   char *destinationPath,
-									   CopyDataFormat destinationFormat)
+									   CopyDataFormat destinationFormat,
+									   bool useSessionTimeZone)
 {
-	PGDuckConnection *pgDuckConn = GetPGDuckConnection();
+	PGDuckConnection *pgDuckConn = useSessionTimeZone ?
+		GetPGDuckConnectionWithSessionTimeZone() : GetPGDuckConnection();
 	PGresult   *volatile result = NULL;
 	StatsCollector *statsCollector = NULL;
 

@@ -86,9 +86,14 @@ static int64 GetFileIdForPath(Oid relatoinId, const char *path);
 static void UpdateDeletedRowCount(Oid relationId, const char *path, int64 deletedRowCount);
 static void RemoveDataFileFromTable(Oid relationId, const char *path);
 static void RemoveAllDataFilesFromCatalog(Oid relationId);
+static HTAB *GetTableDataFilesHashForStatsFields(Oid relationId, bool dataOnly,
+												 bool newFilesOnly, bool forUpdate,
+												 Snapshot snapshot,
+												 List *partitionTransforms,
+												 bool skipColumnStats,
+												 List *statsFieldIds);
 static HTAB *CreateDataFilesHash(void);
 static HTAB *CreateDataFilesByPathHash(void);
-static List *TableDataFileHashToList(HTAB *dataFiles);
 static bool ColumnStatAlreadyAdded(List *columnStats, int64 fieldId);
 static bool PartitionFieldAlreadyAdded(Partition * partition, int64 fieldId);
 static DataFileColumnStats * CreateDataFileColumnStats(int fieldId, PGType pgType,
@@ -106,13 +111,13 @@ static List *CollectAdjacentOpsOfType(List *operations, ListCell **cursor,
  */
 List *
 GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-							 bool forUpdate, char *orderBy, Snapshot snapshot)
+							 bool forUpdate, Snapshot snapshot)
 {
 	List	   *partitionTransforms = AllPartitionTransformList(relationId);
 
 	HTAB	   *dataFilesHash = GetTableDataFilesHashFromCatalog(relationId, dataOnly,
 																 newFilesOnly, forUpdate,
-																 orderBy, snapshot,
+																 snapshot,
 																 partitionTransforms,
 																 false /* skipColumnStats */ );
 
@@ -129,7 +134,6 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  * If dataOnly is true, position deletes are excluded.
  * If forUpdate is true, files are locked with FOR UPDATE.
  * If newFilesOnly is true, only data files that are added in the current transaction are returned.
- * If orderBy is not null, it is used to sort results.
  * If snapshot is set, it is used for the query.
  * If skipColumnStats is true, the per-column min/max stats are not loaded.
  * Callers that only need file-level info (path, id, row count, partition) can
@@ -138,8 +142,48 @@ GetTableDataFilesFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
  */
 HTAB *
 GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-								 bool forUpdate, char *orderBy, Snapshot snapshot,
+								 bool forUpdate, Snapshot snapshot,
 								 List *partitionTransforms, bool skipColumnStats)
+{
+	return GetTableDataFilesHashForStatsFields(relationId, dataOnly, newFilesOnly,
+											   forUpdate, snapshot,
+											   partitionTransforms, skipColumnStats,
+											   NIL);
+}
+
+
+/*
+ * GetTableDataFilesForScan returns the data files of a table to scan, with
+ * the column stats of only the fields in statsFieldIds, and none if it is NIL.
+ */
+List *
+GetTableDataFilesForScan(Oid relationId, bool forUpdate, Snapshot snapshot,
+						 List *statsFieldIds)
+{
+	bool		dataOnly = true;
+	bool		newFilesOnly = false;
+	List	   *partitionTransforms = AllPartitionTransformList(relationId);
+
+	HTAB	   *dataFilesHash =
+		GetTableDataFilesHashForStatsFields(relationId, dataOnly, newFilesOnly,
+											forUpdate, snapshot,
+											partitionTransforms,
+											statsFieldIds == NIL, statsFieldIds);
+
+	return TableDataFileHashToList(dataFilesHash);
+}
+
+
+/*
+ * GetTableDataFilesHashForStatsFields is GetTableDataFilesHashFromCatalog,
+ * except that a non-NIL statsFieldIds limits the column stats it loads to
+ * those fields.
+ */
+static HTAB *
+GetTableDataFilesHashForStatsFields(Oid relationId, bool dataOnly, bool newFilesOnly,
+									bool forUpdate, Snapshot snapshot,
+									List *partitionTransforms, bool skipColumnStats,
+									List *statsFieldIds)
 {
 	MemoryContext callerContext = CurrentMemoryContext;
 
@@ -200,29 +244,32 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	 * not all tables (or all columns) have the stats. For example, iceberg
 	 * tables created before we added this catalog or data types that do not
 	 * have min/max or pg_lake tables.
+	 *
+	 * The joined catalogs repeat the table filter because the planner does
+	 * not carry it out of a subquery that locks its rows, so with forUpdate
+	 * they would otherwise be read for every table in the database.
 	 */
 	appendStringInfoString(&metadataQuery,
 						   ") f "
-						   "LEFT JOIN (" DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED
+						   "LEFT JOIN ((select * from " DATA_FILE_PARTITION_VALUES_TABLE_QUALIFIED
+						   " where table_name OPERATOR(pg_catalog.=) $1) pv"
 						   " JOIN " PARTITION_FIELDS_TABLE_QUALIFIED
 						   " USING (table_name, partition_field_id) "
 						   ") p USING (table_name, id) ");
 
 	if (!skipColumnStats)
-		appendStringInfoString(&metadataQuery,
-							   "LEFT JOIN ("
-							   DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED " s "
-							   "JOIN " MAPPING_TABLE_NAME
-							   " m USING (table_name, field_id) "
-							   "JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
-							   "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
-							   "                       AND NOT a.attisdropped)"
-							   ") sma USING (table_name, path)");
-
-
-	if (orderBy != NULL)
-		appendStringInfo(&metadataQuery, " order by %s",
-						 quote_identifier(orderBy));
+		appendStringInfo(&metadataQuery,
+						 "LEFT JOIN ("
+						 "(select * from " DATA_FILE_COLUMN_STATS_TABLE_QUALIFIED
+						 " where table_name OPERATOR(pg_catalog.=) $1%s) s "
+						 "JOIN " MAPPING_TABLE_NAME
+						 " m USING (table_name, field_id) "
+						 "JOIN pg_attribute a ON (a.attrelid OPERATOR(pg_catalog.=) m.table_name "
+						 "                       AND a.attnum   OPERATOR(pg_catalog.=) m.pg_attnum "
+						 "                       AND NOT a.attisdropped)"
+						 ") sma USING (table_name, path)",
+						 statsFieldIds != NIL ?
+						 " and field_id OPERATOR(pg_catalog.=) ANY($2)" : "");
 
 
 	/*
@@ -236,10 +283,24 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
 	 */
 	bool		readOnly = false;
 
+	ArrayType  *statsFieldIdArray = NULL;
+
+	if (statsFieldIds != NIL)
+	{
+		int			fieldCount = list_length(statsFieldIds);
+		Datum	   *fieldIdDatums = palloc(sizeof(Datum) * fieldCount);
+
+		for (int fieldIndex = 0; fieldIndex < fieldCount; fieldIndex++)
+			fieldIdDatums[fieldIndex] = Int64GetDatum(list_nth_int(statsFieldIds, fieldIndex));
+
+		statsFieldIdArray = MakeArrayFromDatums(fieldIdDatums, NULL, fieldCount, INT8OID);
+	}
+
 	SPI_START_EXTENSION_OWNER(PgLakeTable);
 
-	DECLARE_SPI_ARGS(1);
+	DECLARE_SPI_ARGS(2);
 	SPI_ARG_VALUE(1, OIDOID, relationId, false);
+	SPI_ARG_VALUE(2, INT8ARRAYOID, statsFieldIdArray, statsFieldIdArray == NULL);
 
 	if (!snapshot)
 	{
@@ -388,11 +449,11 @@ GetTableDataFilesHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnl
  */
 HTAB *
 GetTableDataFilesByPathHashFromCatalog(Oid relationId, bool dataOnly, bool newFilesOnly,
-									   bool forUpdate, char *orderBy, Snapshot snapshot,
+									   bool forUpdate, Snapshot snapshot,
 									   List *partitionTransforms, bool skipColumnStats)
 {
 	HTAB	   *filesById = GetTableDataFilesHashFromCatalog(relationId, dataOnly, newFilesOnly,
-															 forUpdate, orderBy, snapshot,
+															 forUpdate, snapshot,
 															 partitionTransforms, skipColumnStats);
 
 	HTAB	   *filesByPath = CreateDataFilesByPathHash();
@@ -732,9 +793,10 @@ CreateDataFilesByPathHash(void)
 
 
 /*
- * TableDataFileHashToList converts a hash table of data files to a list.
+ * TableDataFileHashToList converts a hash table of data files to a list, in
+ * hash order.
  */
-static List *
+List *
 TableDataFileHashToList(HTAB *dataFiles)
 {
 	List	   *result = NIL;

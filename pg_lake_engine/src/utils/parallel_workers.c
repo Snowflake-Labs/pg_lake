@@ -36,14 +36,25 @@
 #include "utils/rel.h"
 
 #define DEFAULT_JOB_SLEEP 500
+#define MAX_JOB_SLEEP 10000
 
 /* this should probably live in extension_base */
 
+static void RunJobs(List *commands, char *dbname, char *user,
+					AttachedWorker * *workers, int requestedWorkerCount,
+					int maxFailures);
+static void EndRunningJobs(AttachedWorker * *workers, int workerCount);
 static bool JobIsComplete(AttachedWorker * worker);
 
 /*
  * RunCommandsInParallel runs a list of commands in parallel, using at
  * most requestedWorkerCount attached workers at a time.
+ *
+ * Each command commits in its own worker.  When one fails, or the caller is
+ * interrupted, the workers still running are stopped before the error is
+ * raised.  Jobs that had finished stay committed, and some of the unfinished
+ * ones may have committed too, since a worker that is already committing
+ * when it is stopped still commits.
  */
 void
 RunCommandsInParallel(List *commands,
@@ -57,11 +68,35 @@ RunCommandsInParallel(List *commands,
 
 	AttachedWorker **workers = palloc0(sizeof(AttachedWorker *) * requestedWorkerCount);
 
+	PG_TRY();
+	{
+		RunJobs(commands, dbname, user, workers, requestedWorkerCount,
+				maxFailures);
+	}
+	PG_FINALLY();
+	{
+		EndRunningJobs(workers, requestedWorkerCount);
+	}
+	PG_END_TRY();
+
+	pfree(workers);
+}
+
+
+/*
+ * RunJobs runs the commands in the given worker slots until every one of them
+ * has completed.  An error leaves the jobs still running in their slots.
+ */
+static void
+RunJobs(List *commands, char *dbname, char *user,
+		AttachedWorker * *workers, int requestedWorkerCount, int maxFailures)
+{
 	int			jobCount = list_length(commands);
 	int			nextJobIndex = 0;
 	int			completedJobCount = 0;
 	int			sleepTime = DEFAULT_JOB_SLEEP;
 	int			failureCount = 0;
+	MemoryContext callerContext = CurrentMemoryContext;
 
 	/* main loop for our parallel job */
 	while (completedJobCount < jobCount)
@@ -119,33 +154,33 @@ RunCommandsInParallel(List *commands,
 						 * background job, only those with launching.
 						 */
 
-						ErrorData  *errdata;
+						/*
+						 * The catch block runs in ErrorContext, which
+						 * FlushErrorState below resets: CopyErrorData refuses
+						 * to copy into it, and a worker started after this
+						 * would keep its state there, for the next failure to
+						 * free.
+						 */
+						MemoryContextSwitchTo(callerContext);
 
-						MemoryContext oldcontext = MemoryContextSwitchTo(ErrorContext);
+						ErrorData  *errdata = CopyErrorData();
 
-						errdata = CopyErrorData();
-						MemoryContextSwitchTo(oldcontext);
+						/*
+						 * Only a shortage of resources, such as worker slots,
+						 * is worth waiting out.  Anything else, a cancel
+						 * included, is raised as it is, and so is a shortage
+						 * that outlasts maxFailures (-1 for no limit).
+						 */
+						if (ERRCODE_TO_CATEGORY(errdata->sqlerrcode) != ERRCODE_INSUFFICIENT_RESOURCES ||
+							(maxFailures != -1 && ++failureCount > maxFailures))
+							PG_RE_THROW();
 
 						ereport(LOG, (errmsg("error starting job in attached worker: %s (sqlerrcode: %s)",
 											 errdata->message,
 											 unpack_sql_state(errdata->sqlerrcode))));
 
-						/*
-						 * If maxFailures is disabled, we always keep going,
-						 * otherwise see if we've exceeded the limit.
-						 */
-						if (maxFailures != -1 && ++failureCount > maxFailures)
-							ereport(ERROR, (errmsg("failed jobs more than %d times", maxFailures)));
-
-						/*
-						 * Our own cleanup; theoretically we should analyze
-						 * the specific sql state to ensure we are catching
-						 * only the one we care about and PG_RE_THROW()
-						 * otherwise.
-						 */
-
 						nextJobIndex--;
-						sleepTime *= 2;
+						sleepTime = Min(sleepTime * 2, MAX_JOB_SLEEP);
 
 
 						/* cleanup error inspection */
@@ -178,21 +213,56 @@ RunCommandsInParallel(List *commands,
 		if (completedJobCount < jobCount)
 			LightSleep(sleepTime);
 	}
+}
 
-	pfree(workers);
+
+/*
+ * EndRunningJobs stops the workers a failed run left in their slots.
+ */
+static void
+EndRunningJobs(AttachedWorker * *workers, int workerCount)
+{
+	/*
+	 * Signal every worker before waiting for any, and hold interrupts during
+	 * the waits, so that a second cancel cannot raise the error while a
+	 * signalled worker is still running.
+	 */
+	for (int workerIndex = 0; workerIndex < workerCount; workerIndex++)
+	{
+		AttachedWorker *worker = workers[workerIndex];
+
+		if (worker != NULL && IsAttachedWorkerRunning(worker))
+			TerminateBackgroundWorker(worker->workerHandle);
+	}
+
+	HOLD_INTERRUPTS();
+
+	for (int workerIndex = 0; workerIndex < workerCount; workerIndex++)
+	{
+		if (workers[workerIndex] != NULL)
+			EndAttachedWorker(workers[workerIndex]);
+	}
+
+	RESUME_INTERRUPTS();
 }
 
 
 /*
  * JobIsComplete() - check for completion
+ *
+ * A worker sends CommandComplete before it commits, so an error from the
+ * commit follows it on the queue: read everything queued, not just up to the
+ * first command tag.  Ask whether the worker runs before reading, since one
+ * that has stopped has queued all it ever will.
  */
 static bool
 JobIsComplete(AttachedWorker * worker)
 {
 	bool		wait = false;
+	bool		running = IsAttachedWorkerRunning(worker);
 
-	/* consume any messages for now */
-	ReadFromAttachedWorker(worker, wait);
+	while (ReadFromAttachedWorker(worker, wait) != NULL)
+		;
 
-	return !IsAttachedWorkerRunning(worker);
+	return !running;
 }

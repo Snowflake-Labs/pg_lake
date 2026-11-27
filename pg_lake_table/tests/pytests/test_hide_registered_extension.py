@@ -48,3 +48,38 @@ def test_registered_extension_objects_visibility(
     assert result[0][0] == expected
 
     superuser_conn.rollback()
+
+
+@pytest.mark.parametrize("hide_enabled", [True, False])
+def test_hidden_objects_on_nullable_side_of_left_join(
+    superuser_conn, hideable_extension, hide_enabled
+):
+    """Hiding a catalog table on the nullable side of a LEFT JOIN should
+    null-extend hidden rows, and must not break outer join removal."""
+
+    guc_value = "true" if hide_enabled else "false"
+    run_command(
+        f"SET pg_lake_table.hide_objects_created_by_lake TO {guc_value}",
+        superuser_conn,
+    )
+
+    # pg_am is not referenced above the join, so the planner removes it
+    result = run_query(
+        """SELECT c.relname FROM pg_class c
+           LEFT JOIN pg_am am ON c.relam = am.oid
+           WHERE c.oid = 'pg_class'::regclass""",
+        superuser_conn,
+    )
+    assert result == [["pg_class"]]
+
+    # pg_depend is not hidden, so its row survives with a hidden namespace
+    result = run_query(
+        """SELECT n.nspname FROM pg_depend d
+           LEFT JOIN pg_namespace n ON d.objid = n.oid
+           WHERE d.classid = 'pg_namespace'::regclass
+             AND d.objid = 'test_hideable_nsp'::regnamespace""",
+        superuser_conn,
+    )
+    assert result == [[None if hide_enabled else "test_hideable_nsp"]]
+
+    superuser_conn.rollback()

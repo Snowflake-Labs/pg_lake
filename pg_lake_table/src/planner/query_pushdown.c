@@ -52,6 +52,7 @@
 #include "pg_lake/pgduck/client.h"
 #include "pg_lake/pgduck/explain.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/query_engine.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/test/hide_lake_objects.h"
@@ -185,6 +186,7 @@ typedef struct QueryPushdownScanState
 	EState	   *estate;
 
 	/* connection properties */
+	QueryEngine queryEngine;
 	PGDuckConnection *connection;
 	char	  **receivedValues;
 
@@ -1524,6 +1526,9 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 		TransformPushdownableInsertSelect(scanQuery);
 	}
 
+	/* the engine of the tables, and the user they are read as */
+	scanState->queryEngine = GetQueryEngineForQuery(scanQuery);
+
 	/*
 	 * Override all the RTE_RELATIONs that are pg_lake tables with
 	 * read_table('table_name') function calls.
@@ -1569,7 +1574,12 @@ QueryPushdownBeginScan(CustomScanState *node, EState *estate, int eflags)
 	}
 
 	scanState->queryString = queryString;
-	scanState->connection = GetPGDuckConnection();
+	/* in the other cases no query is sent on this connection */
+	bool		setSessionTimeZone = !explainRequested &&
+		scanState->insertIntoRelid == InvalidOid;
+
+	scanState->connection = GetQueryEngineConnection(scanState->queryEngine,
+													 setSessionTimeZone);
 	scanState->tupleDesc = tupleDesc;
 	scanState->attributeInputMetadata = TupleDescGetAttInMetadata(tupleDesc);
 	scanState->estate = estate;
@@ -1895,7 +1905,8 @@ QueryPushdownExplainScan(CustomScanState *node, List *ancestors,
 	}
 
 
-	ExplainPGDuckQuery(realQuery, scanState->numParams, scanState->parameterValues, es);
+	ExplainPGDuckQuery(scanState->queryEngine, realQuery, scanState->numParams,
+					   scanState->parameterValues, es);
 }
 
 

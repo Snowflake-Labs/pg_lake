@@ -1,0 +1,335 @@
+--- a/extension/parquet/include/parquet_reader.hpp
++++ b/extension/parquet/include/parquet_reader.hpp
+@@ -88,6 +88,16 @@
+ 	idx_t row_groups_scanned = 0;
+ };
+ 
++//! A field nested in a column of the schema option, under the field id of its parent: a struct field by its name, a
++//! list element as "element", and a map key and value as "key" and "value"
++struct ParquetNestedField {
++	int32_t parent_id;
++	int32_t field_id;
++	string name;
++	//! Names a struct field has in files written without field ids (an Iceberg name mapping)
++	vector<string> names;
++};
++
+ struct ParquetColumnDefinition {
+ public:
+ 	static ParquetColumnDefinition FromSchemaValue(ClientContext &context, const Value &column_value);
+@@ -101,6 +111,8 @@
+ 	Value identifier;
+ 	//! Names the column has in files written without field ids (an Iceberg name mapping)
+ 	vector<string> mapped_names;
++	//! The fields nested in the column, to match a file's nested fields by field id
++	vector<ParquetNestedField> nested_fields;
+ 
+ public:
+ 	void Serialize(Serializer &serializer) const;
+--- a/extension/parquet/parquet_multi_file_info.cpp
++++ b/extension/parquet/parquet_multi_file_info.cpp
+@@ -84,6 +84,42 @@
+ 	}
+ }
+ 
++//! Gives a column of the schema option the nested fields of its type, with their field ids, so that the fields of
++//! each file are matched by field id at every level rather than cast by name.
++static void AddNestedFieldIds(MultiFileColumnDefinition &column, const vector<ParquetNestedField> &nested) {
++	auto parent_id = column.GetIdentifierFieldId();
++	auto add_child = [&](const string &name, const LogicalType &type, const string &position) {
++		for (auto &field : nested) {
++			if (field.parent_id == parent_id && field.name == position) {
++				MultiFileColumnDefinition child(name, type);
++				child.identifier = Value::INTEGER(field.field_id);
++				child.default_expression = make_uniq<ConstantExpression>(Value(type));
++				AddNestedFieldIds(child, nested);
++				column.children.push_back(std::move(child));
++				return;
++			}
++		}
++		throw InvalidInputException("'schema' has no field id for \"%s\" in the field with id %d", position,
++		                            parent_id);
++	};
++	switch (column.type.id()) {
++	case LogicalTypeId::STRUCT:
++		for (auto &child : StructType::GetChildTypes(column.type)) {
++			add_child(child.first, child.second, child.first);
++		}
++		break;
++	case LogicalTypeId::LIST:
++		add_child("element", ListType::GetChildType(column.type), "element");
++		break;
++	case LogicalTypeId::MAP:
++		add_child("key", MapType::KeyType(column.type), "key");
++		add_child("value", MapType::ValueType(column.type), "value");
++		break;
++	default:
++		break;
++	}
++}
++
+ static void BindSchema(ClientContext &context, vector<LogicalType> &return_types, vector<string> &names,
+                        MultiFileBindData &bind_data) {
+ 	auto &parquet_bind = bind_data.bind_data->Cast<ParquetReadBindData>();
+@@ -128,6 +164,9 @@
+ #endif
+ 
+ 		res.default_expression = make_uniq<ConstantExpression>(column.default_value);
++		if (match_by_field_id && !column.nested_fields.empty()) {
++			AddNestedFieldIds(res, column.nested_fields);
++		}
+ 		reader_bind.schema.emplace_back(res);
+ 	}
+ 	ParseFileRowNumberOption(reader_bind, options, return_types, names);
+@@ -226,10 +265,18 @@
+ 		throw InvalidInputException("'schema' expects the third field of the struct to be called 'default_value'");
+ 	}
+ 	//! NOTE: default_value can be any type
+-	if (children.size() > 3 && (!StringUtil::CIEquals(children[3].first, "names") ||
+-	                            children[3].second != LogicalType::LIST(LogicalType::VARCHAR))) {
+-		throw InvalidInputException("'schema' expects the optional fourth field of the struct to be 'names' of type "
+-		                            "VARCHAR[]");
++	auto nested_type = LogicalType::LIST(LogicalType::STRUCT({{"parent_id", LogicalType::INTEGER},
++	                                                          {"field_id", LogicalType::INTEGER},
++	                                                          {"name", LogicalType::VARCHAR},
++	                                                          {"names", LogicalType::LIST(LogicalType::VARCHAR)}}));
++	for (idx_t child_idx = 3; child_idx < children.size(); child_idx++) {
++		auto &child = children[child_idx];
++		if (!(StringUtil::CIEquals(child.first, "names") && child.second == LogicalType::LIST(LogicalType::VARCHAR)) &&
++		    !(StringUtil::CIEquals(child.first, "nested") && child.second == nested_type)) {
++			throw InvalidInputException("'schema' expects an optional field of the struct to be 'names' of type "
++			                            "VARCHAR[] or 'nested' of type %s",
++			                            nested_type.ToString());
++		}
+ 	}
+ 
+ 	if (key_type.id() != LogicalTypeId::INTEGER && key_type.id() != LogicalTypeId::VARCHAR) {
+--- a/extension/parquet/parquet_reader.cpp
++++ b/extension/parquet/parquet_reader.cpp
+@@ -810,8 +810,9 @@
+ }
+ 
+ //! Gives the top-level columns of a file written without field ids the field ids their names map to, as Iceberg
+-//! readers do with a table's name mapping. A file with field ids keeps them, mapped names or not.
+-static void AssignFieldIdsFromMappedNames(vector<MultiFileColumnDefinition> &columns,
++//! readers do with a table's name mapping, and returns whether it did. A file with field ids keeps them, mapped names
++//! or not.
++static bool AssignFieldIdsFromMappedNames(vector<MultiFileColumnDefinition> &columns,
+                                           const vector<ParquetColumnDefinition> &schema) {
+ 	unordered_map<string, Value> field_ids;
+ 	for (auto &column : schema) {
+@@ -823,11 +824,11 @@
+ 		}
+ 	}
+ 	if (field_ids.empty()) {
+-		return;
++		return false;
+ 	}
+ 	for (auto &column : columns) {
+ 		if (!column.identifier.IsNull() && column.GetIdentifierFieldId() != MultiFileReader::ORDINAL_FIELD_ID) {
+-			return;
++			return false;
+ 		}
+ 	}
+ 	for (auto &column : columns) {
+@@ -839,6 +840,69 @@
+ 			column.identifier = entry->second;
+ 		}
+ 	}
++	return true;
++}
++
++//! Gives the fields nested in a column of a file written without field ids the ids of the schema option's nested
++//! fields under the same parent: a struct field by one of the names the name mapping gives it, a list element and a
++//! map key and value by their position.
++static void AssignNestedFieldIds(MultiFileColumnDefinition &column, const vector<ParquetNestedField> &nested) {
++	if (column.identifier.IsNull() || column.identifier.type().id() != LogicalTypeId::INTEGER) {
++		return;
++	}
++	auto parent_id = column.GetIdentifierFieldId();
++	auto assign = [&](MultiFileColumnDefinition &child, const char *position) {
++		if (child.identifier.IsNull()) {
++			for (auto &field : nested) {
++				if (field.parent_id != parent_id) {
++					continue;
++				}
++				bool matches = position ? field.name == position
++				                        : std::find(field.names.begin(), field.names.end(), child.name) !=
++				                              field.names.end();
++				if (matches) {
++					child.identifier = Value::INTEGER(field.field_id);
++					break;
++				}
++			}
++		}
++		AssignNestedFieldIds(child, nested);
++	};
++	switch (column.type.id()) {
++	case LogicalTypeId::STRUCT:
++		for (auto &child : column.children) {
++			assign(child, nullptr);
++		}
++		break;
++	case LogicalTypeId::LIST:
++		if (column.children.size() == 1) {
++			assign(column.children[0], "element");
++		}
++		break;
++	case LogicalTypeId::MAP:
++		if (column.children.size() == 1 && column.children[0].children.size() == 2) {
++			assign(column.children[0].children[0], "key");
++			assign(column.children[0].children[1], "value");
++		}
++		break;
++	default:
++		break;
++	}
++}
++
++static void AssignNestedFieldIds(vector<MultiFileColumnDefinition> &columns,
++                                 const vector<ParquetColumnDefinition> &schema) {
++	for (auto &column : columns) {
++		if (column.identifier.IsNull() || column.identifier.type().id() != LogicalTypeId::INTEGER) {
++			continue;
++		}
++		for (auto &definition : schema) {
++			if (!definition.nested_fields.empty() && definition.identifier == column.identifier) {
++				AssignNestedFieldIds(column, definition.nested_fields);
++				break;
++			}
++		}
++	}
+ }
+ 
+ void ParquetReader::InitializeSchema(ClientContext &context) {
+@@ -860,7 +924,9 @@
+ 		auto &element = root_schema->children[i];
+ 		columns.push_back(ParseColumnDefinition(*file_meta_data, element));
+ 	}
+-	AssignFieldIdsFromMappedNames(columns, parquet_options.schema);
++	if (AssignFieldIdsFromMappedNames(columns, parquet_options.schema)) {
++		AssignNestedFieldIds(columns, parquet_options.schema);
++	}
+ }
+ 
+ void ParquetReader::AddVirtualColumn(column_t virtual_column_id) {
+@@ -897,10 +963,33 @@
+ 		throw BinderException("Unable to cast Parquet schema default_value \"%s\" to %s", children[2].ToString(),
+ 		                      result.type.ToString());
+ 	}
+-	if (children.size() > 3 && !children[3].IsNull()) {
+-		for (auto &name : ListValue::GetChildren(children[3])) {
+-			if (!name.IsNull()) {
+-				result.mapped_names.push_back(StringValue::Get(name));
++	auto &child_types = StructType::GetChildTypes(column_def.type());
++	for (idx_t child_idx = 3; child_idx < children.size(); child_idx++) {
++		auto &child = children[child_idx];
++		if (child.IsNull()) {
++			continue;
++		}
++		if (StringUtil::CIEquals(child_types[child_idx].first, "names")) {
++			for (auto &name : ListValue::GetChildren(child)) {
++				if (!name.IsNull()) {
++					result.mapped_names.push_back(StringValue::Get(name));
++				}
++			}
++		} else if (StringUtil::CIEquals(child_types[child_idx].first, "nested")) {
++			for (auto &entry : ListValue::GetChildren(child)) {
++				auto &fields = StructValue::GetChildren(entry);
++				ParquetNestedField nested;
++				nested.parent_id = IntegerValue::Get(fields[0]);
++				nested.field_id = IntegerValue::Get(fields[1]);
++				nested.name = StringValue::Get(fields[2]);
++				if (!fields[3].IsNull()) {
++					for (auto &name : ListValue::GetChildren(fields[3])) {
++						if (!name.IsNull()) {
++							nested.names.push_back(StringValue::Get(name));
++						}
++					}
++				}
++				result.nested_fields.push_back(std::move(nested));
+ 			}
+ 		}
+ 	}
+--- a/src/common/multi_file/multi_file_column_mapper.cpp
++++ b/src/common/multi_file/multi_file_column_mapper.cpp
+@@ -537,6 +537,54 @@
+ 	return result;
+ }
+ 
++//! How a file's column nests its fields, matched by field id, compared with the schema's column. Iceberg cannot change
++//! how a field nests, but pg_lake writes a clamped multidimensional array as a list of lists into a list column, whose
++//! values are all NULL; such a list is cast as a whole, as a column without nested field ids is.
++enum class NestingComparison : uint8_t { MATCHES, LIST_FOR_SCALAR, DIFFERS };
++
++static NestingComparison CompareNesting(const MultiFileColumnDefinition &global_column,
++                                        const MultiFileColumnDefinition &local_column) {
++	if (global_column.children.empty()) {
++		if (global_column.type.IsNested() || !local_column.type.IsNested()) {
++			return NestingComparison::MATCHES;
++		}
++		return local_column.type.id() == LogicalTypeId::LIST ? NestingComparison::LIST_FOR_SCALAR
++		                                                     : NestingComparison::DIFFERS;
++	}
++	if (local_column.type.id() != global_column.type.id()) {
++		return NestingComparison::DIFFERS;
++	}
++	auto result = NestingComparison::MATCHES;
++	auto compare_child = [&result](const MultiFileColumnDefinition &global_child,
++	                               const vector<MultiFileColumnDefinition> &local_children) {
++		for (auto &local_child : local_children) {
++			if (!local_child.identifier.IsNull() && !global_child.identifier.IsNull() &&
++			    local_child.identifier == global_child.identifier) {
++				result = MaxValue(result, CompareNesting(global_child, local_child));
++				return;
++			}
++		}
++	};
++	switch (global_column.type.id()) {
++	case LogicalTypeId::STRUCT:
++	case LogicalTypeId::LIST:
++		for (auto &global_child : global_column.children) {
++			compare_child(global_child, local_column.children);
++		}
++		return result;
++	case LogicalTypeId::MAP:
++		if (local_column.children.size() != 1) {
++			return NestingComparison::DIFFERS;
++		}
++		for (auto &global_child : global_column.children) {
++			compare_child(global_child, local_column.children[0].children);
++		}
++		return result;
++	default:
++		return result;
++	}
++}
++
+ static ColumnMapResult MapColumn(ClientContext &context, const MultiFileColumnDefinition &global_column,
+                                  const ColumnIndex &global_index,
+                                  const vector<MultiFileColumnDefinition> &local_columns, const ColumnMapper &mapper,
+@@ -563,7 +611,7 @@
+ 	}
+ 
+ 	mapping = make_uniq<MultiFileIndexMapping>(mapping_idx);
+-	if (global_column.children.empty()) {
++	if (global_column.children.empty() || CompareNesting(global_column, local_column) != NestingComparison::MATCHES) {
+ 		// not a struct - map the column directly
+ 		result.column_map = Value(local_column.name);
+ 		result.column_index = make_uniq<ColumnIndex>(local_id.GetId());
+@@ -745,6 +793,15 @@
+ 			continue;
+ 		}
+ 
++		if (!global_column.children.empty()) {
++			auto entry = mapper.Find(global_column);
++			if (entry.IsValid() &&
++			    CompareNesting(global_column, local_columns[entry.GetIndex()]) == NestingComparison::DIFFERS) {
++				throw InvalidInputException("Failed to read file \"%s\": it nests the fields of column \"%s\" differently "
++				                            "from the table's schema",
++				                            reader.GetFileName(), global_column.name);
++			}
++		}
+ 		auto column_map = MapColumn(context, global_column, global_id, local_columns, mapper, local_idx.GetIndex());
+ 		if (!column_map.column_index) {
+ 			// no columns were emitted

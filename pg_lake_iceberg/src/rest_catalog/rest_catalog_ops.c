@@ -985,6 +985,7 @@ TryLoadTableFromRestCatalog(RestCatalogOptions * opts, const char *restCatalogNa
 		ereport(ERROR,
 				(errmsg("key \"metadata-location\" missing in json response")));
 
+	result->metadataLocation = S3URLFromHadoopScheme(result->metadataLocation);
 	ErrorIfURLLeavesObjectStorage(result->metadataLocation, NULL);
 
 	/*
@@ -1864,12 +1865,12 @@ TableRootFromLoadTableResponse(Jsonb *response)
 		JsonbGetOptionalString(response, 2, "metadata", "location");
 
 	if (tableLocation != NULL && tableLocation[0] != '\0')
-		return NormalizeScopePrefix(tableLocation);
+		return NormalizeScopePrefix(S3URLFromHadoopScheme(tableLocation));
 
 	char	   *metadataFile =
 		JsonbGetOptionalString(response, 1, "metadata-location");
 
-	return TableRootFromMetadataLocation(metadataFile);
+	return TableRootFromMetadataLocation(S3URLFromHadoopScheme(metadataFile));
 }
 
 
@@ -1897,7 +1898,7 @@ ResolveVendedScope(const char *scopePrefix, char *tableRoot)
 	if (scopePrefix == NULL || scopePrefix[0] == '\0')
 		return tableRoot;
 
-	char	   *normScope = NormalizeScopePrefix(scopePrefix);
+	char	   *normScope = S3URLFromHadoopScheme(NormalizeScopePrefix(scopePrefix));
 
 	if (tableRoot == NULL ||
 		strncmp(normScope, tableRoot, strlen(tableRoot)) == 0)

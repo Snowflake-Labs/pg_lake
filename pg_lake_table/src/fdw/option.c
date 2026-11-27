@@ -101,6 +101,7 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 	char	   *path = NULL;
 
 	bool		foundServerPath = false;
+	bool		pathUsesHadoopScheme = false;
 	bool		foundLocation = false;
 	bool		isWritable = false;
 	bool		foundFilename = false;
@@ -205,12 +206,17 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 		{
 			path = defGetString(def);
 
-			if (!IsSupportedURL(path))
+			/* only an Iceberg table, checked below, reads it as s3:// */
+			char	   *readPath = S3URLFromHadoopScheme(path);
+
+			pathUsesHadoopScheme = readPath != path;
+
+			if (!IsSupportedURL(readPath))
 				ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 								errmsg("pg_lake_table: unsupported URL: \"%s\" for the \"path\" option",
 									   path)));
 
-			CheckURLReadAccess(path);
+			CheckURLReadAccess(readPath);
 
 			foundServerPath = true;
 		}
@@ -421,6 +427,13 @@ pg_lake_table_validator(PG_FUNCTION_ARGS)
 	/* additional validation on format and compression */
 	FindDataFormatAndCompression(PG_LAKE_TABLE_TYPE, path, options_list,
 								 &copyDataFormat, &copyDataCompression);
+
+	if (pathUsesHadoopScheme && copyDataFormat != DATA_FORMAT_ICEBERG)
+		ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+						errmsg("pg_lake_table: unsupported URL: \"%s\" for the \"path\" option",
+							   path),
+						errhint("s3a:// and s3n:// URLs are read as s3:// only in Iceberg tables; "
+								"use the s3:// URL.")));
 
 	if (copyDataFormat != DATA_FORMAT_CSV && csvOptionProvided)
 		ereport(ERROR,

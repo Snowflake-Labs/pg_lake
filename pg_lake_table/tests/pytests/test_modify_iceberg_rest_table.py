@@ -2281,6 +2281,117 @@ def test_drop_table_inside_rolled_back_savepoint_preserves_rest_table(
     superuser_conn.commit()
 
 
+def test_table_on_legacy_snowflake_server_keeps_its_server(
+    installcheck,
+    superuser_conn,
+    pg_conn,
+    s3,
+    extension,
+    with_default_location,
+    polaris_session,
+    create_http_helper_functions,
+):
+    """
+    A table created with catalog='snowflake' before the name became an alias
+    for the built-in REST catalog keeps using the user's server of that name,
+    including for DROP TABLE.  New tables cannot use catalog='snowflake' while
+    that server exists.
+    """
+    if installcheck:
+        pytest.skip("Requires an isolated test cluster")
+
+    SERVER_NAME = "rest_legacy_snowflake"
+    SCHEMA_NAME = TABLE_NAMESPACE
+
+    creds = json.loads(Path(server_params.POLARIS_PRINCIPAL_CREDS_FILE).read_text())
+    client_id = creds["credentials"]["clientId"]
+    client_secret = creds["credentials"]["clientSecret"]
+    endpoint = f"http://localhost:{server_params.POLARIS_PORT}/api/catalog"
+
+    run_command(
+        f"""
+        CREATE SERVER {SERVER_NAME} TYPE 'rest'
+            FOREIGN DATA WRAPPER iceberg_catalog
+            OPTIONS (rest_endpoint '{endpoint}',
+                     catalog_name '{server_params.PG_DATABASE}',
+                     location_prefix 's3://{TEST_BUCKET}')
+        """,
+        superuser_conn,
+    )
+    run_command(
+        f"""
+        CREATE USER MAPPING FOR PUBLIC SERVER {SERVER_NAME}
+            OPTIONS (client_id '{client_id}', client_secret '{client_secret}')
+        """,
+        superuser_conn,
+    )
+    run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", superuser_conn)
+    run_command(f"CREATE SCHEMA {SCHEMA_NAME}", superuser_conn)
+    run_command(
+        f"CREATE TABLE {SCHEMA_NAME}.legacy_sf (id bigint) "
+        f"USING iceberg WITH (catalog='{SERVER_NAME}')",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+    run_command(f"INSERT INTO {SCHEMA_NAME}.legacy_sf VALUES (1)", superuser_conn)
+    superuser_conn.commit()
+
+    # CREATE SERVER rejects the name now, so rename the server and the
+    # table's catalog option the way a 3.5 install would have left them
+    run_command(
+        f"""
+        UPDATE pg_foreign_server SET srvname = 'snowflake'
+        WHERE srvname = '{SERVER_NAME}';
+        UPDATE pg_foreign_table
+        SET ftoptions = array_replace(ftoptions, 'catalog={SERVER_NAME}',
+                                      'catalog=snowflake')
+        WHERE ftrelid = '{SCHEMA_NAME}.legacy_sf'::regclass;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    # point the built-in catalog nowhere, so any request routed to it fails
+    run_command(
+        "SET pg_lake_iceberg.rest_catalog_host TO 'http://127.0.0.1:1'",
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        run_command(f"INSERT INTO {SCHEMA_NAME}.legacy_sf VALUES (2)", superuser_conn)
+        superuser_conn.commit()
+        assert run_query(
+            f"SELECT * FROM {SCHEMA_NAME}.legacy_sf ORDER BY id", superuser_conn
+        ) == [[1], [2]]
+
+        with pytest.raises(psycopg2.errors.AmbiguousParameter, match="ambiguous"):
+            run_command(
+                f"CREATE TABLE {SCHEMA_NAME}.new_sf (id bigint) "
+                f"USING iceberg WITH (catalog='snowflake')",
+                superuser_conn,
+            )
+        superuser_conn.rollback()
+
+        run_command(f"DROP TABLE {SCHEMA_NAME}.legacy_sf", superuser_conn)
+        superuser_conn.commit()
+
+        url = (
+            f"http://{server_params.POLARIS_HOSTNAME}:{server_params.POLARIS_PORT}"
+            f"/api/catalog/v1/{server_params.PG_DATABASE}"
+            f"/namespaces/{SCHEMA_NAME}/tables/legacy_sf"
+        )
+        resp = polaris_session.get(url, timeout=5)
+        assert resp.status_code == 404, resp.text
+    finally:
+        superuser_conn.rollback()
+        run_command("RESET pg_lake_iceberg.rest_catalog_host", superuser_conn)
+        run_command(f"DROP SCHEMA IF EXISTS {SCHEMA_NAME} CASCADE", superuser_conn)
+        run_command("DROP SERVER IF EXISTS snowflake CASCADE", superuser_conn)
+        run_command(f"DROP SERVER IF EXISTS {SERVER_NAME} CASCADE", superuser_conn)
+        superuser_conn.commit()
+
+
 def backend_memory_bytes(conn):
     return run_query(
         "SELECT sum(total_bytes)::bigint FROM pg_backend_memory_contexts", conn

@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import psycopg2
 from utils_pytest import *
@@ -143,7 +145,11 @@ def test_reserialize_via_spark(
     assert len(result) > 0
     assert result == result_after_reserialize
 
-    assert_jsons_equivalent(old_metadata, new_metadata)
+    # pg_lake leaves out the empty partition-statistics list Spark writes
+    old_metadata = json.loads(old_metadata)
+    if old_metadata.get("partition-statistics") == []:
+        del old_metadata["partition-statistics"]
+    assert_jsons_equivalent(json.dumps(old_metadata), new_metadata)
 
     # create a pg_lake table from path
     run_command(

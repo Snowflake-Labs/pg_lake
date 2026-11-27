@@ -76,7 +76,7 @@ FetchManifestsFromSnapshot(IcebergSnapshot * snapshot, ManifestPredicateFn manif
 		return NIL;
 	}
 
-	List	   *manifests = ReadIcebergManifests(snapshot->manifest_list);
+	List	   *manifests = ReadIcebergManifests(snapshot->manifest_list, false);
 
 	List	   *filteredManifests = NIL;
 

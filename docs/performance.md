@@ -129,6 +129,16 @@ tables in Iceberg, so the whole query runs in DuckDB.
 | `pg_lake_table.enable_full_query_pushdown` | Set to `off` to only use per-table scans, for example to compare plans. |
 | `pg_lake_table.enable_strict_pushdown` | When `on` (default), only functions and operators known to behave exactly as in PostgreSQL are pushed down. |
 
+### Time zones
+
+Pushed-down expressions use the session's `TimeZone`. If DuckDB does not support the zone, such
+as `+05:45` or a POSIX rule, pg_lake falls back to UTC with a warning, and results can differ
+from PostgreSQL.
+
+Pushed-down `INSERT ... SELECT` and `COPY ... FROM` into writable CSV or JSON tables write
+`timestamptz` values with the session's offset. DuckDB omits seconds from the offset, shifting
+historical values whose UTC offset had seconds.
+
 ## Skipping files
 
 Scans are fastest when they do not read most files at all. pg_lake skips Iceberg data files in
@@ -144,6 +154,12 @@ Data file pruning works best when rows that are queried together are written tog
 naturally the case for time-ordered data. For string columns, pg_lake keeps the first 16 bytes
 of the bounds by default; the `column_stats_mode` [table option](table-options.md) changes this.
 Pruning does not apply to arrays, composite types, maps or geometry.
+
+String bounds are ordered by their bytes, so string columns are pruned only when they compare
+the same way: with the `C` collation, or with a database default collation that sorts by code
+point (the libc `C`, `POSIX` and `C.UTF-8` locales, or the builtin provider). In a database
+whose default collation is linguistic, such as `en_US.UTF-8` or an ICU locale, string columns
+are not pruned.
 
 For files in object storage outside Iceberg, DuckDB uses the row group statistics in Parquet
 files in the same way, and hive-style directory names such as `year=2026/` can be used as

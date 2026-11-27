@@ -12,12 +12,13 @@ is deletion vectors: they arrive as position deletes carried in a Puffin
 blob, and treating that path as Parquet would mean returning rows the
 table considers deleted.
 
-No tool available here writes v3 -- pyiceberg refuses outright and the
-Spark runtime the suite pins predates v3 -- so these fixtures take a
-real v2 table produced by pyiceberg and edit the metadata and manifests
-into the v3 shapes under test.  That covers the version gate, the
-manifest field the v3 writers drop, and the deletion-vector guard.  It
-does not cover v3-only column types or a genuine Puffin blob.
+pyiceberg refuses to write v3, so these fixtures take a real v2 table
+produced by pyiceberg and edit the metadata and manifests into the v3
+shapes under test.  That covers the version gate, the manifest field the
+v3 writers drop, and the deletion-vector guard, without Spark.  The v3
+tables and deletion vectors Spark writes are read in pg_lake_table's
+test_read_only_spark_written_tables.py.  Neither covers v3-only column
+types.
 """
 
 import io
@@ -25,6 +26,7 @@ import json
 
 import fastavro
 import pyarrow
+import pytest
 from pyiceberg.schema import Schema
 from pyiceberg.types import DoubleType, NestedField, StringType
 
@@ -217,15 +219,24 @@ def test_manifest_without_sort_order_id_is_readable(
 
 
 def test_deletion_vector_is_rejected(
-    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck
+    superuser_conn,
+    s3,
+    iceberg_catalog,
+    iceberg_extension,
+    create_reserialize_helper_functions,
+    installcheck,
 ):
     """A Puffin deletion vector fails loudly instead of being read as Parquet.
 
     Silently ignoring deletes it cannot apply would let the scan return
-    rows the table considers deleted, so this must be an error.
+    rows the table considers deleted, so this must be an error.  Listing the
+    table's files reads none of them, so it does not refuse.
     """
     if installcheck:
         return
+
+    # keep the helper functions past the rollbacks below
+    superuser_conn.commit()
 
     table = _make_table(iceberg_catalog, "v3_deletion_vector")
 
@@ -234,14 +245,61 @@ def test_deletion_vector_is_rejected(
         record["data_file"]["file_format"] = "PUFFIN"
         return record
 
+    def as_delete_manifest(record):
+        record["content"] = 1
+        return record
+
     for manifest in _manifest_paths(table):
         _rewrite_manifest(s3, manifest, record_fn=as_deletion_vector)
+    _rewrite_manifest(
+        s3, table.current_snapshot().manifest_list, record_fn=as_delete_manifest
+    )
+
+    _data_files(superuser_conn, table.metadata_location)
 
     offset = server_log_offset()
-    err = _data_files(superuser_conn, table.metadata_location, raise_error=False)
+    superuser_conn.rollback()
+    err = run_query(
+        f"""SELECT lake_iceberg.datafile_paths_from_table_metadata(
+                '{table.metadata_location}', true)""",
+        superuser_conn,
+        raise_error=False,
+    )
+    superuser_conn.rollback()
     assert "deletion vectors are not supported" in str(err)
     assert catalog_log_lines(offset) == [
         "a table uses Iceberg deletion vectors, which pg_lake does not support"
+    ]
+
+
+@pytest.mark.parametrize("type_name", ["timestamp_ns", "timestamptz_ns"])
+def test_v3_nanosecond_timestamp_is_rejected(
+    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck, type_name
+):
+    """A nanosecond timestamp is refused by name, not read as a microsecond
+    one: its bounds would decode to dates tens of millennia away, and the
+    pruning built on them would skip files with matching rows."""
+    if installcheck:
+        return
+
+    table = _make_table(iceberg_catalog, f"v3_{type_name}")
+
+    metadata = json.loads(_get(s3, table.metadata_location))
+    metadata["format-version"] = 3
+    for schema in metadata["schemas"]:
+        if schema["schema-id"] == metadata["current-schema-id"]:
+            schema["fields"][1]["type"] = type_name
+
+    ns_location = table.metadata_location.replace(
+        ".metadata.json", f".v3-{type_name}.metadata.json"
+    )
+    _put(s3, ns_location, json.dumps(metadata).encode())
+
+    offset = server_log_offset()
+    err = _data_files(superuser_conn, ns_location, raise_error=False)
+    assert f"iceberg type {type_name} is not supported" in str(err)
+    assert catalog_log_lines(offset) == [
+        f"a table uses the Iceberg type {type_name}, which pg_lake does not support"
     ]
 
 
@@ -279,3 +337,75 @@ def test_v3_column_default_is_rejected(
     assert catalog_log_lines(offset) == [
         "a table uses Iceberg column default values, which pg_lake does not support"
     ]
+
+
+def test_v3_nested_column_default_is_rejected(
+    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck
+):
+    """A default on a field inside a struct is refused like a top-level one."""
+    if installcheck:
+        return
+
+    table = _make_table(iceberg_catalog, "v3_nested_column_default")
+
+    metadata = json.loads(_get(s3, table.metadata_location))
+    metadata["format-version"] = 3
+    for schema in metadata["schemas"]:
+        if schema["schema-id"] == metadata["current-schema-id"]:
+            schema["fields"].append(
+                {
+                    "id": 3,
+                    "name": "place",
+                    "required": False,
+                    "type": {
+                        "type": "struct",
+                        "fields": [
+                            {
+                                "id": 4,
+                                "name": "country",
+                                "required": False,
+                                "type": "string",
+                                "initial-default": "unknown",
+                            }
+                        ],
+                    },
+                }
+            )
+    metadata["last-column-id"] = 4
+
+    default_location = table.metadata_location.replace(
+        ".metadata.json", ".v3-nested-default.metadata.json"
+    )
+    _put(s3, default_location, json.dumps(metadata).encode())
+
+    offset = server_log_offset()
+    err = _data_files(superuser_conn, default_location, raise_error=False)
+    assert "column default values are not supported" in str(err)
+    assert "country" in str(err)
+    assert catalog_log_lines(offset) == [
+        "a table uses Iceberg column default values, which pg_lake does not support"
+    ]
+
+
+def test_v3_null_column_default_is_no_default(
+    superuser_conn, s3, iceberg_catalog, iceberg_extension, installcheck
+):
+    """A null initial-default is the same as having none, so it is not
+    refused."""
+    if installcheck:
+        return
+
+    table = _make_table(iceberg_catalog, "v3_null_column_default")
+
+    metadata = json.loads(_get(s3, table.metadata_location))
+    metadata["format-version"] = 3
+    for schema in metadata["schemas"]:
+        if schema["schema-id"] == metadata["current-schema-id"]:
+            schema["fields"][0]["initial-default"] = None
+
+    default_location = table.metadata_location.replace(
+        ".metadata.json", ".v3-null-default.metadata.json"
+    )
+    _put(s3, default_location, json.dumps(metadata).encode())
+
+    assert len(_data_files(superuser_conn, default_location)) == 1
