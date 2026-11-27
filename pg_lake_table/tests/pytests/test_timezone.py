@@ -953,6 +953,7 @@ def test_timezone_date_trunc_hour_in_repeated_hour(
         "SELECT id, date_trunc('hour', ts) FROM {t} ORDER BY id",
         "SELECT date_trunc('HOURS', ts) AS h, count(*) FROM {t} GROUP BY h ORDER BY h",
         "SELECT id FROM {t} WHERE date_trunc('hour', ts) > ts ORDER BY id",
+        "SELECT id, date_trunc('hrs', ts) FROM {t} ORDER BY id",
     ]
 
     for zone in ["Europe/Berlin", "America/New_York", "Australia/Lord_Howe", "UTC"]:

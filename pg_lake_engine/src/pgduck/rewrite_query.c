@@ -227,8 +227,9 @@ static Node *FindCompatibleFunctionWithName(OpExpr *opExpr, char *funcname);
 static Node *RewriteSQLValueFunction(SQLValueFunction *node, void *context);
 
 static Node *AddOneYear(Node *node);
-static Node *TruncateTimestamptzToHour(Node *timeArg);
-static Node *MakeIsFiniteExpr(Node *node);
+static bool IsHourField(const char *fieldText);
+static Node *TruncateTimestamptzToHour(Node *dateTruncExpr, Node *timeArg);
+static Node *MakeCatalogFuncExpr(char *functionName, Oid resultType, Node *arg);
 static Node *DereferenceIndex(Node *node, int index);
 static FuncExpr *ConvertOpExprToFuncExpr(OpExpr *opExpr);
 
@@ -1879,12 +1880,11 @@ RewriteFuncExprDateTrunc(Node *node, void *context)
 			{
 				node = AddOneYear(node);
 			}
-			else if ((strcasecmp(fieldText, "hour") == 0 ||
-					  strcasecmp(fieldText, "hours") == 0) &&
+			else if (IsHourField(fieldText) &&
 					 exprType(timeArg) == TIMESTAMPTZOID &&
 					 !contain_volatile_functions(timeArg))
 			{
-				node = TruncateTimestamptzToHour(timeArg);
+				node = TruncateTimestamptzToHour(node, timeArg);
 			}
 		}
 	}
@@ -2635,6 +2635,28 @@ FindCompatibleFunctionWithName(OpExpr *opExpr, char *funcname)
 	return (Node *) opExpr;
 }
 
+/* the names of UTC that DuckDB may report as its TimeZone */
+static const char *const UtcTimeZoneNames[] = {
+	"UTC", "Etc/UTC", "GMT", "Etc/GMT", "UCT", "Etc/UCT",
+	"Universal", "Etc/Universal", "Zulu", "Etc/Zulu"
+};
+
+
+/*
+ * IsHourField returns whether a date_trunc field names hours, in one of the
+ * spellings that PostgreSQL accepts.
+ */
+static bool
+IsHourField(const char *fieldText)
+{
+	return strcasecmp(fieldText, "hour") == 0 ||
+		strcasecmp(fieldText, "hours") == 0 ||
+		strcasecmp(fieldText, "h") == 0 ||
+		strcasecmp(fieldText, "hr") == 0 ||
+		strcasecmp(fieldText, "hrs") == 0;
+}
+
+
 /*
  * TruncateTimestamptzToHour builds date_trunc('hour', ts) of a timestamptz in
  * the form that DuckDB computes as PostgreSQL does: ts less the minutes,
@@ -2643,19 +2665,40 @@ FindCompatibleFunctionWithName(OpExpr *opExpr, char *funcname)
  * DuckDB truncates the wall clock and reads it back in the zone, which in the
  * first of the two repeated hours when clocks go back gives the start of the
  * second one, an hour after ts. Below a day, PostgreSQL keeps the offset of
- * ts, as this does. DuckDB cannot subtract infinite timestamps, which
- * date_trunc returns as they are.
+ * ts, as this does.
+ *
+ * Reading the wall clock takes a conversion for each row, so DuckDB's own
+ * date_trunc is kept when its TimeZone is UTC, which has no repeated hour,
+ * and for infinite values, which DuckDB cannot subtract. DuckDB reads its
+ * TimeZone once for each query, so a plan made in another zone also gets it
+ * right.
  */
 static Node *
-TruncateTimestamptzToHour(Node *timeArg)
+TruncateTimestamptzToHour(Node *dateTruncExpr, Node *timeArg)
 {
 	Node	   *wallClock = MakeCastExpr(copyObject(timeArg), TIMESTAMPOID);
 	Node	   *wallClockHour = MakeDateTruncExpr("hour", copyObject(wallClock));
 	Node	   *pastTheHour = MakeOpExpr(wallClock, "pg_catalog", "-", wallClockHour);
 	Node	   *truncated = MakeOpExpr(copyObject(timeArg), "pg_catalog", "-",
 									   pastTheHour);
-	CaseExpr   *caseExpr = (CaseExpr *) MakeCaseExpr(MakeIsFiniteExpr(copyObject(timeArg)),
-													 truncated, copyObject(timeArg));
+	List	   *plainCases = NIL;
+
+	for (int nameIndex = 0; nameIndex < lengthof(UtcTimeZoneNames); nameIndex++)
+	{
+		Node	   *timeZone = MakeCatalogFuncExpr("current_setting", TEXTOID,
+												   (Node *) MakeStringConst("TimeZone"));
+
+		plainCases = lappend(plainCases,
+							 MakeOpExpr(timeZone, "pg_catalog", "=",
+										(Node *) MakeStringConst(UtcTimeZoneNames[nameIndex])));
+	}
+
+	Node	   *isFinite = MakeCatalogFuncExpr("isfinite", BOOLOID, copyObject(timeArg));
+
+	plainCases = lappend(plainCases, makeBoolExpr(NOT_EXPR, list_make1(isFinite), -1));
+
+	CaseExpr   *caseExpr = (CaseExpr *) MakeCaseExpr((Node *) makeBoolExpr(OR_EXPR, plainCases, -1),
+													 dateTruncExpr, truncated);
 
 	caseExpr->casetype = TIMESTAMPTZOID;
 
@@ -2664,20 +2707,21 @@ TruncateTimestamptzToHour(Node *timeArg)
 
 
 /*
- * MakeIsFiniteExpr builds an isfinite(<node>) expression.
+ * MakeCatalogFuncExpr builds a call of the pg_catalog function of the given
+ * name that takes one argument of the type of arg.
  */
 static Node *
-MakeIsFiniteExpr(Node *node)
+MakeCatalogFuncExpr(char *functionName, Oid resultType, Node *arg)
 {
-	List	   *functionName = list_make2(makeString("pg_catalog"),
-										  makeString("isfinite"));
-	Oid			argTypes[] = {exprType(node)};
+	List	   *qualifiedName = list_make2(makeString("pg_catalog"),
+										   makeString(functionName));
+	Oid			argTypes[] = {exprType(arg)};
 	FuncExpr   *funcExpr = makeNode(FuncExpr);
 
-	funcExpr->funcid = LookupFuncName(functionName, 1, argTypes, false);
-	funcExpr->funcresulttype = BOOLOID;
+	funcExpr->funcid = LookupFuncName(qualifiedName, 1, argTypes, false);
+	funcExpr->funcresulttype = resultType;
 	funcExpr->location = -1;
-	funcExpr->args = list_make1(node);
+	funcExpr->args = list_make1(arg);
 
 	return (Node *) funcExpr;
 }
