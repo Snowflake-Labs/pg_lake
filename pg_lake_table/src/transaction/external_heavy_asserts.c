@@ -55,6 +55,9 @@ static void NormalizePartitionFieldValue(IcebergScalarAvroType internalType,
 										 unsigned char **normalizedValue,
 										 size_t *normalizedLen);
 static List *RemoveDroppedFieldBounds(const List *existingLeafFields, ColumnBound * bounds, size_t boundsLen);
+static void AssertInternalAndExternalNullCountsMatch(const List *existingLeafFields,
+													 TableDataFile * internalDataFile,
+													 DataFile * externalDataFile);
 static int	TableDataFileCompare(const ListCell *a, const ListCell *b);
 static int	DataFileCompare(const ListCell *a, const ListCell *b);
 static int	DataFileColumnStatsCompare(const ListCell *a, const ListCell *b);
@@ -444,6 +447,10 @@ AssertInternalAndExternalIcebergStatsMatchForAllDataFiles(Oid relationId, bool d
 																 externalLowerBounds,
 																 externalUpperBounds);
 
+		AssertInternalAndExternalNullCountsMatch(existingLeafFields,
+												 internalDataFile,
+												 externalDataFile);
+
 		if (internalDataFile->partition->fields_length != externalDataFile->partition.fields_length)
 		{
 			ereport(ERROR,
@@ -822,6 +829,86 @@ SerializeColumnBoundTextForTypePromotion(char *columnBoundText, Field * field,
 		PGIcebergBinarySerializeBoundValue(boundDatum, field, pgType, binaryLen);
 
 	return binaryValue;
+}
+
+
+/*
+ * AssertInternalAndExternalNullCountsMatch checks that a data file's null
+ * counts in lake_table.data_file_column_stats and in its manifest entry agree:
+ * a column has a count in both or in neither, and the counts are equal. A
+ * count missing from one side would make pruning and other readers disagree
+ * about whether the file can have NULLs.
+ */
+static void
+AssertInternalAndExternalNullCountsMatch(const List *existingLeafFields,
+										 TableDataFile * internalDataFile,
+										 DataFile * externalDataFile)
+{
+	int			internalNullCounts = 0;
+	ListCell   *statsCell = NULL;
+
+	foreach(statsCell, internalDataFile->stats.columnStats)
+	{
+		DataFileColumnStats *colStats = lfirst(statsCell);
+		int			fieldId = colStats->leafField.fieldId;
+		ColumnStat *externalNullCount = NULL;
+
+		for (size_t countIdx = 0; countIdx < externalDataFile->null_value_counts_length; countIdx++)
+		{
+			if (externalDataFile->null_value_counts[countIdx].column_id == fieldId)
+			{
+				externalNullCount = &externalDataFile->null_value_counts[countIdx];
+				break;
+			}
+		}
+
+		if (!colStats->hasNullCount)
+		{
+			if (externalNullCount != NULL)
+				ereport(ERROR,
+						(errcode(ERRCODE_INTERNAL_ERROR),
+						 errmsg("external iceberg data file has a null count for field %d "
+								"that the internal column stats do not have, %s",
+								fieldId, internalDataFile->path)));
+			continue;
+		}
+
+		internalNullCounts++;
+
+		if (externalNullCount == NULL)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("internal column stats have a null count for field %d "
+							"that the external iceberg data file does not have, %s",
+							fieldId, internalDataFile->path)));
+
+		if (externalNullCount->value != colStats->nullCount)
+			ereport(ERROR,
+					(errcode(ERRCODE_INTERNAL_ERROR),
+					 errmsg("internal and external iceberg null count mismatch for field %d: "
+							INT64_FORMAT " " INT64_FORMAT ", %s",
+							fieldId, colStats->nullCount,
+							(int64) externalNullCount->value,
+							internalDataFile->path)));
+	}
+
+	/* the manifest must not have counts for live fields we have none for */
+	int			externalNullCounts = 0;
+
+	for (size_t countIdx = 0; countIdx < externalDataFile->null_value_counts_length; countIdx++)
+	{
+		int			fieldId = externalDataFile->null_value_counts[countIdx].column_id;
+
+		if (FindLeafField((List *) existingLeafFields, fieldId) != NULL)
+			externalNullCounts++;
+	}
+
+	if (externalNullCounts != internalNullCounts)
+		ereport(ERROR,
+				(errcode(ERRCODE_INTERNAL_ERROR),
+				 errmsg("internal and external iceberg null count number mismatch %d %d, %s",
+						internalNullCounts, externalNullCounts,
+						internalDataFile->path)));
 }
 
 
