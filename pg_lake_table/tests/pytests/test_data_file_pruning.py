@@ -1335,7 +1335,9 @@ def test_pruning_deletes_without_null_counts(
     assert int(fetch_data_files_used(results)) == 1
     assert int(fetch_data_files_skipped(results)) == 1
 
-    # make the files look like they predate null counts
+    # make the files look like they predate null counts; only the catalog
+    # changes, which the heavy asserts would report as out of sync with the
+    # manifest, so the DELETE below runs without them
     run_command(
         """
         UPDATE lake_table.data_file_column_stats SET null_count = NULL
@@ -1351,9 +1353,16 @@ def test_pruning_deletes_without_null_counts(
     )
     assert int(fetch_data_files_used(results)) == 2
     assert int(fetch_data_files_skipped(results)) == 0
-
-    run_command("delete from test_pruning_no_null_counts.tbl where col1 > 0", pg_conn)
     pg_conn.commit()
+
+    run_command(
+        """
+        SET LOCAL pg_lake_engine.enable_heavy_asserts TO off;
+        delete from test_pruning_no_null_counts.tbl where col1 > 0;
+        """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
 
     results = run_query(
         "select count(*), count(col1) from test_pruning_no_null_counts.tbl", pg_conn
