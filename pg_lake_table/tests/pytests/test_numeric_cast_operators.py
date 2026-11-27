@@ -31,7 +31,7 @@ test_cases = [
     (
         "float8_numeric",
         "WHERE col_float8 = 500::numeric",
-        '("col_float8" = ((500)::numeric)::double precision)',
+        '("col_float8" = ((500)::numeric(10,0))::double precision)',
     ),
     # Downcasting in effect due to PostgreSQL adding float8 casts, while DuckDB prefers float4 casts
     (
@@ -74,7 +74,7 @@ test_cases = [
     (
         "int8_numeric",
         "WHERE col_int8 = 500::numeric",
-        'WHERE (("col_int8")::numeric = (500)::numeric)',
+        'WHERE (("col_int8")::numeric(19,0) = (500)::numeric(10,0))',
     ),
     (
         "int8_smallint",
@@ -105,7 +105,7 @@ test_cases = [
     (
         "int4_numeric",
         "WHERE col_int4 = 500::numeric",
-        'WHERE (("col_int4")::numeric = (500)::numeric)',
+        'WHERE (("col_int4")::numeric(10,0) = (500)::numeric(10,0))',
     ),
     (
         "int4_smallint",
@@ -132,7 +132,7 @@ test_cases = [
     (
         "int2_numeric",
         "WHERE col_int2 = 500::numeric",
-        'WHERE (("col_int2")::numeric = (500)::numeric)',
+        'WHERE (("col_int2")::numeric(5,0) = (500)::numeric(10,0))',
     ),
     (
         "int2_bigint",

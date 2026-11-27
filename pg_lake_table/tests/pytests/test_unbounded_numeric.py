@@ -185,7 +185,7 @@ def test_pg_lake_table_with_no_cols(s3, pg_conn, extension, copy_numeric_to_file
     )
     assert result == [["text", None, None], ["numeric", 5, 3], ["numeric", 38, 9]]
 
-    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric(10,0))'
     query = f"SELECT numeric_large, numeric_small, numeric_unbounded FROM pg_lake_table_with_no_cols {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -210,7 +210,7 @@ def test_pg_lake_table_explicit(s3, pg_conn, extension, copy_numeric_to_file):
     )
     assert result == [["numeric", 39, 10], ["numeric", 5, 3], ["numeric", None, None]]
 
-    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric(10,0))'
     query = f"SELECT numeric_large, numeric_small, numeric_unbounded FROM pg_lake_table_explicit {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -240,7 +240,7 @@ def test_writable_pg_lake_table(s3, pg_conn, extension, copy_numeric_to_file):
     )
     assert result == [["numeric", 39, 10], ["numeric", 5, 3], ["numeric", None, None]]
 
-    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric(10,0))'
     query = f"SELECT * FROM writable_pg_lake_table {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -263,7 +263,7 @@ def test_iceberg_table_load_from(s3, pg_conn, extension, copy_numeric_to_file):
     )
     assert result == [["text", None, None], ["numeric", 5, 3], ["numeric", 38, 9]]
 
-    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric(10,0))'
     query = f"SELECT * FROM iceberg_table {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -286,7 +286,7 @@ def test_iceberg_table_definition_from(
     )
     assert result == [["text", None, None], ["numeric", 5, 3], ["numeric", 38, 9]]
 
-    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric)'
+    expected_expression = 'WHERE ("abs"("numeric_unbounded") > (1)::numeric(10,0))'
     query = f"SELECT * FROM iceberg_table {expected_expression}"
     assert_remote_query_contains_expression(query, expected_expression, pg_conn)
 
@@ -331,6 +331,127 @@ def test_iceberg_create_as_select(s3, pg_conn, extension, with_default_location)
     )
     assert result == [[Decimal("12.223"), 12.223]]
 
+    pg_conn.rollback()
+
+
+def test_unbounded_numeric_params_casts_and_constants(s3, pg_conn, extension):
+    uri = f"s3://{TEST_BUCKET}/unbounded_numeric_params/data.parquet"
+
+    run_command("RESET pg_lake_table.unbounded_numeric_default_precision", pg_conn)
+    run_command("RESET pg_lake_table.unbounded_numeric_default_scale", pg_conn)
+
+    run_command(
+        f"""
+        create table unbounded_numeric_heap (id int, n numeric(38,20), i8 bigint, p numeric(10,2));
+        insert into unbounded_numeric_heap values
+            (1, 1.5, 100000000000000000, 1.50),
+            (2, 7.07, 200000000000000000, 7.07),
+            (3, 0.00000000000000000001, 3, 0.00),
+            (4, 123456789012345678.5, 4, 1.51);
+        copy unbounded_numeric_heap to '{uri}';
+        create foreign table unbounded_numeric_lake (id int, n numeric(38,20), i8 bigint, p numeric(10,2))
+            server pg_lake options (path '{uri}');
+    """,
+        pg_conn,
+    )
+
+    # DuckDB reads a bare NUMERIC as DECIMAL(18,3): 1.4999 would become 1.500
+    # and drop the 1.5 row, and 123456789012345678.5 would not fit. Next to n,
+    # numeric(38,9) would round n's 1e-20 to 0, and next to p, numeric(10,2)
+    # would round 1.505 to a value of p.
+    statements = {
+        "greater": "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n > $1",
+        "equal": "SELECT id FROM {t} WHERE n = $1",
+        "in": "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n IN ($1, 7.07)",
+        "distinct": "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n IS DISTINCT FROM $1",
+        "not_distinct": "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n IS NOT DISTINCT FROM $1",
+        "equal_low_scale": "SELECT array_agg(id ORDER BY id) FROM {t} WHERE p = $1",
+        "param": "SELECT $1 FROM {t} WHERE id = 1",
+        "coalesce": "SELECT coalesce(n, $1) FROM {t} WHERE id = 3",
+        "case": "SELECT CASE WHEN id = 3 THEN n ELSE $1 END FROM {t} WHERE id = 3",
+        "greatest": "SELECT greatest(n, $1) FROM {t} WHERE id = 3",
+        "least": "SELECT least(n, $1) FROM {t} WHERE id = 3",
+        "nullif": "SELECT nullif(n, $1) FROM {t} WHERE id = 3",
+    }
+    values = {
+        "greater": ["1.4999", "7.0699"],
+        "equal": ["123456789012345678.5", "0.00000000000000000001"],
+        "in": ["0.00000000000000000001", "1.5"],
+        "distinct": ["0.00000000000000000001"],
+        "not_distinct": ["0.00000000000000000001"],
+        "equal_low_scale": ["1.505", "1.51"],
+        "param": ["1.4999", "123456789012345678.5"],
+        "coalesce": ["1"],
+        "case": ["1"],
+        "greatest": ["0"],
+        "least": ["1"],
+        "nullif": ["1"],
+    }
+    queries = [
+        "SELECT array_agg(id ORDER BY id) FROM {t} WHERE n > ('1.4999'::text)::numeric",
+        "SELECT n::numeric FROM {t} WHERE id = 3",
+        "SELECT coalesce(n, ('1'::text)::numeric) FROM {t} WHERE id = 3",
+        "SELECT sum(i8::numeric) FROM {t}",
+        "SELECT round(i8::numeric, 2) FROM {t} WHERE id = 2",
+        "SELECT count(*) FROM {t} WHERE n < 100000000000000000",
+        "SELECT n * 2 FROM {t} WHERE id = 4",
+        "SELECT array_agg(x ORDER BY x) FROM (SELECT 2::numeric AS x FROM {t} WHERE id = 1 "
+        "UNION ALL SELECT 0.000001 FROM {t} WHERE id = 1) s",
+    ]
+
+    for pushdown in ["true", "false"]:
+        run_command(
+            f"SET pg_lake_table.enable_full_query_pushdown TO {pushdown}", pg_conn
+        )
+
+        for query in queries:
+            expected = run_query(query.format(t="unbounded_numeric_heap"), pg_conn)
+            result = run_query(query.format(t="unbounded_numeric_lake"), pg_conn)
+            assert result == expected, (pushdown, query)
+
+        for plan_cache_mode in ["force_custom_plan", "force_generic_plan"]:
+            run_command(f"SET plan_cache_mode TO {plan_cache_mode}", pg_conn)
+
+            for name, query in statements.items():
+                # a custom plan folds the IN list into a numeric[] constant,
+                # which DuckDB still reads as DECIMAL(18,3)[] without pushdown
+                if (
+                    name == "in"
+                    and pushdown == "false"
+                    and plan_cache_mode == "force_custom_plan"
+                ):
+                    continue
+
+                for table in ["heap", "lake"]:
+                    run_command(
+                        f"PREPARE {name}_{table}(numeric) AS "
+                        + query.format(t=f"unbounded_numeric_{table}"),
+                        pg_conn,
+                    )
+
+                for value in values[name]:
+                    expected = run_query(f"EXECUTE {name}_heap({value})", pg_conn)
+                    result = run_query(f"EXECUTE {name}_lake({value})", pg_conn)
+                    assert result == expected, (pushdown, plan_cache_mode, name, value)
+
+                run_command(f"DEALLOCATE {name}_heap; DEALLOCATE {name}_lake", pg_conn)
+
+        if pushdown == "true":
+            # next to n, the cast takes n's scale; elsewhere that of unbounded columns
+            explain = run_query(
+                "EXPLAIN (VERBOSE) SELECT id FROM unbounded_numeric_lake WHERE n > ('1.5'::text)::numeric",
+                pg_conn,
+            )
+            assert "numeric(38,20)" in str(explain)
+
+            explain = run_query(
+                "EXPLAIN (VERBOSE) SELECT id FROM unbounded_numeric_lake WHERE p > ('1.5'::text)::numeric",
+                pg_conn,
+            )
+            assert "numeric(38,9)" in str(explain)
+
+    run_command("RESET plan_cache_mode", pg_conn)
+    run_command("RESET pg_lake_table.enable_full_query_pushdown", pg_conn)
     pg_conn.rollback()
 
 

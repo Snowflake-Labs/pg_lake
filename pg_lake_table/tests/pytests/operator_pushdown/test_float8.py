@@ -35,7 +35,7 @@ test_cases = [
     (
         "float8",
         "WHERE col_float8 <= float8(1::numeric)",
-        'WHERE ("col_float8" <= ((1)::numeric)::double precision)',
+        'WHERE ("col_float8" <= ((1)::numeric(10,0))::double precision)',
     ),
     (
         "float8abs",

@@ -34,12 +34,14 @@
 #include "pg_lake/parsetree/columns.h"
 #include "pg_lake/parsetree/expression.h"
 #include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/numeric.h"
 #include "pg_lake/pgduck/rewrite_left_join.h"
 #include "pg_lake/pgduck/rewrite_or_join.h"
 #include "pg_lake/pgduck/rewrite_query.h"
 #include "pg_lake/pgduck/serialize.h"
 #include "pg_lake/pgduck/shippable_builtin_functions.h"
 #include "pg_lake/pgduck/to_char.h"
+#include "pg_lake/util/numeric.h"
 #include "pg_lake/util/operator_utils.h"
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
@@ -50,6 +52,7 @@
 #include "utils/fmgroids.h"
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
+#include "utils/numeric.h"
 #include "utils/syscache.h"
 #include "utils/typcache.h"
 
@@ -144,6 +147,13 @@ static bool IsJsonbCast(Node *node);
 static Node *WrapPgLakeInternalJsonbFunction(Node *data);
 static Node *FindArgForNode(Node *inputNode);
 static Node *RewriteParam(Param *paramExpr);
+static int32 NumericTypmodForDuckDB(Oid typeId, int32 typmod);
+static Node *RewriteUnboundedNumericCast(Node *node);
+static Const *RewriteIntegralNumericConst(Const *constExpr);
+static void RaiseUnboundedNumericScaleToSiblings(Node *node);
+static void RaiseUnboundedNumericScale(List *expressions);
+static bool IsUnboundedNumericDefaultCast(Node *node);
+static bool IsNumericComparison(Oid operatorId);
 
 static RewriteRule *GetRewriteRuleForFunctionId(Oid functionId);
 static ExpressionRewriter GetFunctionCallRewriter(Oid functionId, int *intArg);
@@ -610,6 +620,8 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 	 */
 	node = expression_tree_mutator(node, RewriteQueryTreeForPGDuckMutator, context);
 
+	RaiseUnboundedNumericScaleToSiblings(node);
+
 	/*
 	 * DuckDB does not support JSONB, so we need to rewrite it to JSON.
 	 */
@@ -620,7 +632,7 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 
 	if (IsA(node, Const))
 	{
-		Const	   *constExpr = (Const *) node;
+		Const	   *constExpr = RewriteIntegralNumericConst((Const *) node);
 
 		node = RewriteConst(constExpr);
 	}
@@ -699,7 +711,7 @@ RewriteQueryTreeForPGDuckMutator(Node *node, RewriteQueryTreeContext * context)
 		}
 	}
 
-	return node;
+	return RewriteUnboundedNumericCast(node);
 }
 
 
@@ -1084,12 +1096,316 @@ RewriteParam(Param *paramExpr)
 
 	coerceExpr->arg = (Expr *) paramExpr;
 	coerceExpr->resulttype = paramExpr->paramtype;
-	coerceExpr->resulttypmod = paramExpr->paramtypmod;
+	coerceExpr->resulttypmod = NumericTypmodForDuckDB(paramExpr->paramtype,
+													  paramExpr->paramtypmod);
 	coerceExpr->resultcollid = paramExpr->paramcollid;
 	coerceExpr->relabelformat = COERCE_EXPLICIT_CAST;
 	coerceExpr->location = -1;
 
 	return (Node *) coerceExpr;
+}
+
+
+/*
+ * NumericTypmodForDuckDB returns the type modifier to name a type with in the
+ * query sent to DuckDB. DuckDB reads a bare NUMERIC as DECIMAL(18,3), which
+ * rounds to 3 decimal places and holds 15 digits before the point, so an
+ * unconstrained numeric gets the precision and scale of unbounded numeric
+ * columns instead.
+ */
+static int32
+NumericTypmodForDuckDB(Oid typeId, int32 typmod)
+{
+	if (!IsUnboundedNumeric(typeId, typmod))
+		return typmod;
+
+	return make_numeric_typmod(UnboundedNumericDefaultPrecision,
+							   UnboundedNumericDefaultScale);
+}
+
+
+/*
+ * RewriteUnboundedNumericCast gives a cast to an unconstrained numeric, such as
+ * ('1.5'::text)::numeric or bigint_column::numeric, a precision and scale, so
+ * that DuckDB does not read it as DECIMAL(18,3). The deparser also prints
+ * implicit casts that are operator arguments, so those are rewritten too.
+ *
+ * A cast from an integer type gets the fewest digits that hold every value of
+ * it, with no fraction: DuckDB widens the decimals of a VALUES list or a UNION
+ * to one type, which keeps only 38 digits, so a wider integer would push the
+ * fractions of the other values out. Other casts get the precision and scale
+ * of unbounded numeric columns.
+ *
+ * A cast function or an I/O coercion has no type modifier of its own, so it is
+ * deparsed without its cast and wrapped in a RelabelType that names the type.
+ */
+static Node *
+RewriteUnboundedNumericCast(Node *node)
+{
+	int32		typmod = NumericTypmodForDuckDB(NUMERICOID, -1);
+
+	if (IsA(node, RelabelType))
+	{
+		RelabelType *relabelExpr = (RelabelType *) node;
+		int32		argTypmod = exprTypmod((Node *) relabelExpr->arg);
+
+		if (relabelExpr->relabelformat == COERCE_EXPLICIT_CALL)
+			return node;
+
+		/* a numeric(p,s) relabeled as numeric keeps its values, so its typmod */
+		if (IsUnboundedNumeric(relabelExpr->resulttype, relabelExpr->resulttypmod) &&
+			exprType((Node *) relabelExpr->arg) == NUMERICOID && argTypmod >= 0 &&
+			numeric_typmod_precision(argTypmod) <= DUCKDB_MAX_NUMERIC_PRECISION)
+			relabelExpr->resulttypmod = argTypmod;
+		else
+			relabelExpr->resulttypmod =
+				NumericTypmodForDuckDB(relabelExpr->resulttype,
+									   relabelExpr->resulttypmod);
+
+		return node;
+	}
+	else if (IsA(node, FuncExpr))
+	{
+		FuncExpr   *funcExpr = (FuncExpr *) node;
+
+		/*
+		 * A cast to numeric(p,s) parses as a cast to numeric under a length
+		 * coercion that names the precision and scale, as in a query parsed
+		 * from deparsed SQL, so the inner cast needs none of its own.
+		 */
+		if (funcExpr->funcresulttype == NUMERICOID &&
+			exprIsLengthCoercion(node, NULL) &&
+			IsA(linitial(funcExpr->args), RelabelType) &&
+			((RelabelType *) linitial(funcExpr->args))->resulttype == NUMERICOID)
+		{
+			linitial(funcExpr->args) = ((RelabelType *) linitial(funcExpr->args))->arg;
+			return node;
+		}
+
+		if (funcExpr->funcformat == COERCE_EXPLICIT_CALL ||
+			list_length(funcExpr->args) != 1 ||
+			!IsUnboundedNumeric(funcExpr->funcresulttype, exprTypmod(node)))
+			return node;
+
+		Oid			argType = exprType(linitial(funcExpr->args));
+
+		if (argType == INT2OID)
+			typmod = make_numeric_typmod(5, 0);
+		else if (argType == INT4OID)
+			typmod = make_numeric_typmod(10, 0);
+		else if (argType == INT8OID)
+			typmod = make_numeric_typmod(19, 0);
+
+		funcExpr->funcformat = COERCE_IMPLICIT_CAST;
+	}
+	else if (IsA(node, CoerceViaIO))
+	{
+		CoerceViaIO *coerceExpr = (CoerceViaIO *) node;
+
+		if (coerceExpr->coerceformat == COERCE_EXPLICIT_CALL ||
+			coerceExpr->resulttype != NUMERICOID)
+			return node;
+
+		coerceExpr->coerceformat = COERCE_IMPLICIT_CAST;
+	}
+	else
+		return node;
+
+	RelabelType *castExpr = makeNode(RelabelType);
+
+	castExpr->arg = (Expr *) node;
+	castExpr->resulttype = NUMERICOID;
+	castExpr->resulttypmod = typmod;
+	castExpr->resultcollid = InvalidOid;
+	castExpr->relabelformat = COERCE_EXPLICIT_CAST;
+	castExpr->location = -1;
+
+	return (Node *) castExpr;
+}
+
+
+/*
+ * RewriteIntegralNumericConst gives an unconstrained numeric constant that
+ * holds a whole number the type modifier numeric(<its digits>, 0). The
+ * deparser labels such a constant with ::numeric, which DuckDB reads as
+ * DECIMAL(18,3), so a constant past 15 digits fails to cast and one in
+ * arithmetic shrinks the room left before the point. A constant with a
+ * fraction is deparsed without a label and DuckDB infers its type.
+ */
+static Const *
+RewriteIntegralNumericConst(Const *constExpr)
+{
+	if (constExpr->constisnull ||
+		!IsUnboundedNumeric(constExpr->consttype, constExpr->consttypmod))
+		return constExpr;
+
+	Numeric		value = DatumGetNumeric(constExpr->constvalue);
+
+	if (numeric_is_nan(value) || numeric_is_inf(value))
+		return constExpr;
+
+	char	   *valueText = DatumGetCString(DirectFunctionCall1(numeric_out,
+																NumericGetDatum(value)));
+
+	if (strpbrk(valueText, ".eE") != NULL)
+		return constExpr;
+
+	int			digits = strlen(valueText) - (valueText[0] == '-' ? 1 : 0);
+
+	Const	   *integralConst = copyObject(constExpr);
+
+	integralConst->consttypmod =
+		make_numeric_typmod(Min(digits, DUCKDB_MAX_NUMERIC_PRECISION), 0);
+
+	return integralConst;
+}
+
+
+/*
+ * RaiseUnboundedNumericScaleToSiblings gives an unconstrained numeric that is
+ * compared or combined with numerics of a larger scale, such as $1 in n = $1
+ * or coalesce(n, $1) for a numeric(38,20) column n, the larger scale.
+ *
+ * DuckDB brings decimals to one type of at most 38 digits by keeping the
+ * digits before the point, so numeric(38,9) next to numeric(38,20) would round
+ * the column to 9 decimal places, and the value before a comparison. With the
+ * larger scale, neither loses decimal places, and the value has at least as
+ * many digits before the point as the column. A smaller scale is never taken,
+ * since the value would then be rounded more than with numeric(38,9).
+ *
+ * Arithmetic is left as it is, since DuckDB adds the scales of a product. Only
+ * the scale that PostgreSQL knows is seen: an aggregate such as min(n) or a
+ * scalar subquery has none in PostgreSQL, though DuckDB keeps the column's.
+ */
+static void
+RaiseUnboundedNumericScaleToSiblings(Node *node)
+{
+	if (IsA(node, OpExpr) || IsA(node, DistinctExpr) || IsA(node, NullIfExpr))
+	{
+		OpExpr	   *opExpr = (OpExpr *) node;
+
+		if (IsNumericComparison(opExpr->opno))
+			RaiseUnboundedNumericScale(opExpr->args);
+	}
+	else if (IsA(node, ScalarArrayOpExpr))
+	{
+		ScalarArrayOpExpr *arrayOpExpr = (ScalarArrayOpExpr *) node;
+		Node	   *arrayArg = lsecond(arrayOpExpr->args);
+
+		if (IsNumericComparison(arrayOpExpr->opno) && IsA(arrayArg, ArrayExpr))
+			RaiseUnboundedNumericScale(lcons(linitial(arrayOpExpr->args),
+											 list_copy(((ArrayExpr *) arrayArg)->elements)));
+	}
+	else if (IsA(node, CoalesceExpr))
+	{
+		RaiseUnboundedNumericScale(((CoalesceExpr *) node)->args);
+	}
+	else if (IsA(node, MinMaxExpr))
+	{
+		RaiseUnboundedNumericScale(((MinMaxExpr *) node)->args);
+	}
+	else if (IsA(node, CaseExpr))
+	{
+		CaseExpr   *caseExpr = (CaseExpr *) node;
+		List	   *results = NIL;
+		ListCell   *whenCell = NULL;
+
+		foreach(whenCell, caseExpr->args)
+			results = lappend(results, ((CaseWhen *) lfirst(whenCell))->result);
+
+		if (caseExpr->defresult != NULL)
+			results = lappend(results, caseExpr->defresult);
+
+		RaiseUnboundedNumericScale(results);
+	}
+}
+
+
+/*
+ * RaiseUnboundedNumericScale gives the unconstrained numerics among the given
+ * expressions the largest scale of the others, if it is larger than the scale
+ * of unbounded numeric columns.
+ */
+static void
+RaiseUnboundedNumericScale(List *expressions)
+{
+	int			largestScale = UnboundedNumericDefaultScale;
+	ListCell   *expressionCell = NULL;
+
+	foreach(expressionCell, expressions)
+	{
+		Node	   *expression = lfirst(expressionCell);
+		int32		typmod = exprTypmod(expression);
+
+		if (exprType(expression) != NUMERICOID || typmod < 0 ||
+			IsUnboundedNumericDefaultCast(expression) ||
+			numeric_typmod_precision(typmod) > DUCKDB_MAX_NUMERIC_PRECISION)
+			continue;
+
+		largestScale = Max(largestScale, numeric_typmod_scale(typmod));
+	}
+
+	if (largestScale <= UnboundedNumericDefaultScale ||
+		largestScale > DUCKDB_MAX_NUMERIC_PRECISION)
+		return;
+
+	foreach(expressionCell, expressions)
+	{
+		Node	   *expression = lfirst(expressionCell);
+
+		if (IsUnboundedNumericDefaultCast(expression))
+			((RelabelType *) expression)->resulttypmod =
+				make_numeric_typmod(DUCKDB_MAX_NUMERIC_PRECISION, largestScale);
+	}
+}
+
+
+/*
+ * IsUnboundedNumericDefaultCast returns whether the node is the cast that
+ * RewriteParam or RewriteUnboundedNumericCast gave an unconstrained numeric,
+ * with the precision and scale of unbounded numeric columns.
+ */
+static bool
+IsUnboundedNumericDefaultCast(Node *node)
+{
+	if (!IsA(node, RelabelType))
+		return false;
+
+	RelabelType *relabelExpr = (RelabelType *) node;
+	Node	   *arg = (Node *) relabelExpr->arg;
+
+	if (relabelExpr->resulttype != NUMERICOID ||
+		relabelExpr->relabelformat != COERCE_EXPLICIT_CAST ||
+		relabelExpr->resulttypmod != NumericTypmodForDuckDB(NUMERICOID, -1))
+		return false;
+
+	return IsA(arg, Param) ||
+		(IsA(arg, FuncExpr) && ((FuncExpr *) arg)->funcformat == COERCE_IMPLICIT_CAST) ||
+		(IsA(arg, CoerceViaIO) &&
+		 ((CoerceViaIO *) arg)->coerceformat == COERCE_IMPLICIT_CAST);
+}
+
+
+/*
+ * IsNumericComparison returns whether the operator compares two numerics.
+ */
+static bool
+IsNumericComparison(Oid operatorId)
+{
+	Oid			leftType = InvalidOid;
+	Oid			rightType = InvalidOid;
+
+	op_input_types(operatorId, &leftType, &rightType);
+
+	if (leftType != NUMERICOID || rightType != NUMERICOID)
+		return false;
+
+	char	   *operatorName = get_opname(operatorId);
+
+	return operatorName != NULL &&
+		(strcmp(operatorName, "=") == 0 || strcmp(operatorName, "<>") == 0 ||
+		 strcmp(operatorName, "<") == 0 || strcmp(operatorName, "<=") == 0 ||
+		 strcmp(operatorName, ">") == 0 || strcmp(operatorName, ">=") == 0);
 }
 
 
