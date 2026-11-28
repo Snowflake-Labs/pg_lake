@@ -657,6 +657,39 @@ InsertDeletionQueueRecord(char *path, Oid relationId, TimestampTz orphanedAt)
 
 
 /*
+ * InsertSupersededRestCatalogMetadataRecord queues a metadata file a writable
+ * REST catalog has already replaced.  Every write queues the newest entry of
+ * the catalog's metadata-log, and after a REST commit fails the catalog still
+ * has the same newest entry, so the next write queues it again.  The path may
+ * also still be in the queue from an earlier write, so leave it as it is.
+ */
+void
+InsertSupersededRestCatalogMetadataRecord(char *path, Oid relationId,
+										  TimestampTz orphanedAt)
+{
+	char	   *query =
+		"insert into " DELETION_QUEUE_TABLE " "
+		"(path, table_name, orphaned_at, is_prefix, resolve_metadata) "
+		"values ($1,$2,$3,false,false) "
+		"on conflict (path) do nothing";
+
+	DECLARE_SPI_ARGS(3);
+	SPI_ARG_VALUE(1, TEXTOID, path, false);
+	SPI_ARG_VALUE(2, OIDOID, relationId, false);
+	SPI_ARG_VALUE(3, TIMESTAMPTZOID, orphanedAt, orphanedAt == 0);
+
+	/* switch to schema owner, we assume callers checked permissions */
+	SPI_START_EXTENSION_OWNER(PgLakeTable);
+
+	bool		readOnly = false;
+
+	SPI_EXECUTE(query, readOnly);
+
+	SPI_END();
+}
+
+
+/*
  * InsertMetadataResolveRecord queues a dropped table's metadata.json for
  * deferred resolution: VACUUM later resolves it into the exact referenced
  * files and deletes them (see ExpandMetadataResolveRecord).

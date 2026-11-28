@@ -133,6 +133,7 @@ def assert_iceberg_s3_file_consistency(
     metadata_location=None,
     current_metadata_path=None,
     prev_metadata_path=None,
+    extra_metadata_paths=(),
 ):
 
     files_via_s3_list = iceberg_s3_list_all_files_for_table(
@@ -155,6 +156,7 @@ def assert_iceberg_s3_file_consistency(
         )[0][0]
     if prev_metadata_path:
         files_via_current_iceberg_metadata.append(prev_metadata_path)
+    files_via_current_iceberg_metadata.extend(extra_metadata_paths)
 
     # Apply normalization
     normalized_s3 = set([normalize_dictrow(row) for row in files_via_s3_list])

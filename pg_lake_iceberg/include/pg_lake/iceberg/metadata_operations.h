@@ -17,11 +17,15 @@
 
 #pragma once
 
+#include "datatype/timestamp.h"
 #include "nodes/pg_list.h"
 
 #include "pg_lake/iceberg/metadata_spec.h"
 
 extern PGDLLEXPORT List *ApplyIcebergMetadataChanges(Oid relationId, List *metadataOperations, List *allTransforms, int maxSnapshotAgeInSecs, bool isVerbose);
 extern PGDLLEXPORT IcebergTableMetadata * GetWritableRestCatalogTableMetadata(Oid relationId, char **metadataLocation);
+extern PGDLLEXPORT void QueueSupersededRestCatalogMetadata(IcebergTableMetadata * metadata,
+														   Oid relationId, TimestampTz orphanedAt);
+extern PGDLLEXPORT void TryQueueSupersededRestCatalogMetadataOnDrop(Oid relationId);
 extern PGDLLEXPORT bool ShouldSkipMetadataChangeToIceberg(List *metadataOperationTypes);
 extern PGDLLEXPORT List *GetMetadataOperationTypes(List *metadataOperations);

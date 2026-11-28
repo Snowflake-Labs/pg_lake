@@ -208,6 +208,14 @@ ApplyDDLCatalogChanges(Oid relationId, List *ddlOperations,
 
 				if (previousMetadataPath)
 					InsertDeletionQueueRecord(previousMetadataPath, InvalidOid, GetCurrentTimestamp());
+
+				/*
+				 * Writable REST tables have no previous_metadata_location;
+				 * the file their last write replaced is the one left
+				 * unqueued.
+				 */
+				if (GetIcebergCatalogType(relationId) == REST_CATALOG_READ_WRITE)
+					TryQueueSupersededRestCatalogMetadataOnDrop(relationId);
 			}
 
 			RemoveAllDataFilesFromPgLakeCatalogFromTable(relationId);
