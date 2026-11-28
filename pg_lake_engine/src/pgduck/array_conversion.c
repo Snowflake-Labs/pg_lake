@@ -30,7 +30,7 @@
  *
  * We've only made small adjustments to the code, namely:
  * - use [ ] as brackets
- * - error when there are custom lower bounds
+ * - drop custom lower bounds when writing data, error when pushing down
  * - we do not use fcinfo (not in a UDF) or AnyArrayType
  */
 char *
@@ -73,12 +73,14 @@ ArrayOutForPGDuck(ArrayType *array, CopyDataFormat format)
 	}
 
 	/*
-	 * we will need to add explicit dimensions if any dimension has a lower
-	 * bound other than one
+	 * DuckDB lists have no lower bounds.  When writing data (format is set)
+	 * we drop them, since the stored list cannot carry them either.  In a
+	 * pushed-down query they would change the result of comparisons, so we
+	 * error instead.
 	 */
 	for (i = 0; i < ndim; i++)
 	{
-		if (lb[i] != 1)
+		if (lb[i] != 1 && format == DATA_FORMAT_INVALID)
 		{
 			ereport(ERROR, (errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 							errmsg("cannot push down array with custom lower bounds")));
