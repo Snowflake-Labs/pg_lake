@@ -17,6 +17,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/main/config.hpp"
+#include "utf8proc_wrapper.hpp"
 
 #include "pg_lake/fs/cache_inode_budget.hpp"
 #include "pg_lake/fs/caching_file_system.hpp"
@@ -564,6 +565,191 @@ FileSizeScalarFun(DataChunk &args, ExpressionState &state, Vector &result) {
 }
 
 /*
+ * ReadRangeFunctionData defines the bind data for pg_lake_read_blob_range and
+ * pg_lake_read_text_range.
+ */
+struct ReadRangeFunctionData : public TableFunctionData
+{
+	/* Function arguments */
+	string url;
+	int64_t offset = 0;
+	int64_t length = 0;
+
+	/* whether content is returned as VARCHAR (read_text) or BLOB (read_blob) */
+	bool isText = false;
+};
+
+
+/*
+ * ReadRangeGlobalState holds the per-execution state, since bind data is
+ * shared by every execution of a prepared statement.
+ */
+struct ReadRangeGlobalState : public GlobalTableFunctionState
+{
+	bool finished = false;
+};
+
+
+static unique_ptr<GlobalTableFunctionState>
+ReadRangeInitGlobal(ClientContext &context, TableFunctionInitInput &input)
+{
+	return make_uniq<ReadRangeGlobalState>();
+}
+
+
+/*
+ * ReadRangeBind implements the bind phase for pg_lake_read_blob_range and
+ * pg_lake_read_text_range. The output columns match read_blob and read_text.
+ */
+static unique_ptr<FunctionData>
+ReadRangeBind(ClientContext &context, TableFunctionBindInput &input,
+			  vector<LogicalType> &return_types, vector<string> &names, bool isText)
+{
+	for (const Value &argument : input.inputs)
+		if (argument.IsNull())
+			throw InvalidInputException("arguments of a ranged read cannot be NULL");
+
+	auto functionData = make_uniq<ReadRangeFunctionData>();
+	functionData->url = input.inputs[0].ToString();
+	functionData->offset = input.inputs[1].GetValue<int64_t>();
+	functionData->length = input.inputs[2].GetValue<int64_t>();
+	functionData->isText = isText;
+
+	if (functionData->offset < 0)
+		throw InvalidInputException("offset of a ranged read cannot be negative");
+
+	if (functionData->length < 0)
+		throw InvalidInputException("length of a ranged read cannot be negative");
+
+	return_types.emplace_back(LogicalType::VARCHAR);
+	return_types.emplace_back(isText ? LogicalType::VARCHAR : LogicalType::BLOB);
+	return_types.emplace_back(LogicalType::BIGINT);
+	return_types.emplace_back(LogicalType::TIMESTAMP_TZ);
+	names.emplace_back("filename");
+	names.emplace_back("content");
+	names.emplace_back("size");
+	names.emplace_back("last_modified");
+
+	return std::move(functionData);
+}
+
+
+static unique_ptr<FunctionData>
+ReadBlobRangeBind(ClientContext &context, TableFunctionBindInput &input,
+				  vector<LogicalType> &return_types, vector<string> &names)
+{
+	return ReadRangeBind(context, input, return_types, names, false);
+}
+
+
+static unique_ptr<FunctionData>
+ReadTextRangeBind(ClientContext &context, TableFunctionBindInput &input,
+				  vector<LogicalType> &return_types, vector<string> &names)
+{
+	return ReadRangeBind(context, input, return_types, names, true);
+}
+
+
+/*
+ * RangeReadPath returns the path to open for a ranged read of url. A cached
+ * object is read from the cache, but an uncached one gets the nocache prefix,
+ * since opening it normally makes the whole object a cache candidate.
+ */
+static string
+RangeReadPath(ClientContext &context, const string &url)
+{
+	FileOpener *opener = context.client_data->file_opener.get();
+	shared_ptr<FileCacheManager> cacheManager = FileCacheManager::Get(context);
+	string cacheDir;
+	string cacheFilePath;
+
+	if (!cacheManager->TryGetCacheDir(opener, cacheDir) ||
+		!cacheManager->TryGetCacheFilePath(cacheDir, url, cacheFilePath) ||
+		FileUtils::IsOwnedByCurrentUser(cacheFilePath))
+		return url;
+
+	return NO_CACHE_PREFIX + url;
+}
+
+
+/*
+ * ReadRangeExec implements the execution for pg_lake_read_blob_range and
+ * pg_lake_read_text_range.
+ *
+ * It does a single positional read, so httpfs sends one range GET. A range
+ * that runs past the end of the object returns the shorter tail, and size
+ * and last_modified describe the whole object.
+ */
+static void
+ReadRangeExec(ClientContext &context, TableFunctionInput &data_p, DataChunk &output)
+{
+	auto &functionData = data_p.bind_data->Cast<ReadRangeFunctionData>();
+	auto &globalState = data_p.global_state->Cast<ReadRangeGlobalState>();
+	if (globalState.finished)
+		return;
+
+	const string &url = functionData.url;
+	FileSystem &fs = FileSystem::GetFileSystem(context);
+
+	/* without direct I/O, httpfs reads a whole read buffer for a small range */
+	FileOpenFlags flags = FileFlags::FILE_FLAGS_READ;
+	if (FileSystem::IsRemoteFile(url))
+		flags |= FileFlags::FILE_FLAGS_DIRECT_IO;
+
+	unique_ptr<FileHandle> fileHandle = fs.OpenFile(RangeReadPath(context, url), flags);
+
+	int64_t fileSize = NumericCast<int64_t>(fileHandle->GetFileSize());
+	int64_t readLength = 0;
+
+	if (functionData.offset < fileSize)
+		readLength = MinValue(functionData.length, fileSize - functionData.offset);
+
+	if (readLength > NumericLimits<uint32_t>::Maximum())
+		throw InvalidInputException("ranged read of %lld bytes from '%s' exceeds the maximum of %s",
+									(long long) readLength, url,
+									StringUtil::BytesToHumanReadableString(NumericLimits<uint32_t>::Maximum()));
+
+	Vector &contentVector = output.data[1];
+	string_t content = StringVector::EmptyString(contentVector, NumericCast<idx_t>(readLength));
+
+	if (readLength > 0)
+		fileHandle->Read(content.GetDataWriteable(), NumericCast<idx_t>(readLength),
+						 NumericCast<idx_t>(functionData.offset));
+
+	content.Finalize();
+
+	/* a range can split a multi-byte character, which is then invalid too */
+	if (functionData.isText &&
+		Utf8Proc::Analyze(content.GetData(), content.GetSize()) == UnicodeType::INVALID)
+		throw InvalidInputException("pg_lake_read_text_range: could not read the range of file '%s' as "
+									"valid UTF-8 encoded text", url);
+
+	output.SetValue(0, 0, Value(url));
+	FlatVector::GetData<string_t>(contentVector)[0] = content;
+	output.SetValue(2, 0, Value::BIGINT(fileSize));
+
+	/* httpfs cannot always parse the last modified time, as in read_blob */
+	try
+	{
+		timestamp_t lastModified = fs.GetLastModifiedTime(*fileHandle);
+		output.SetValue(3, 0, Value::TIMESTAMPTZ(timestamp_tz_t(lastModified)));
+	}
+	catch (std::exception &ex)
+	{
+		ErrorData error(ex);
+		if (error.Type() != ExceptionType::CONVERSION &&
+			error.Type() != ExceptionType::NOT_IMPLEMENTED)
+			throw;
+
+		output.SetValue(3, 0, Value(LogicalType::TIMESTAMP_TZ));
+	}
+
+	output.SetCardinality(1);
+	globalState.finished = true;
+}
+
+
+/*
  * Implementation of the pg_lake_remove_file scalar function.
  *
  * DuckDB hands us a whole vector at a time, so we collect the chunk's paths
@@ -865,6 +1051,24 @@ PgLakeFileSystemFunctions::RegisterFunctions(ExtensionLoader &loader)
 						   FileSizeScalarFun);
 
         loader.RegisterFunction(pg_lake_file_size);
+	}
+
+	/* pg_lake_read_blob_range(url varchar, offset bigint, length bigint) */
+	{
+		TableFunction pg_lake_read_blob_range("pg_lake_read_blob_range",
+											  {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
+											  ReadRangeExec, ReadBlobRangeBind, ReadRangeInitGlobal);
+
+		loader.RegisterFunction(pg_lake_read_blob_range);
+	}
+
+	/* pg_lake_read_text_range(url varchar, offset bigint, length bigint) */
+	{
+		TableFunction pg_lake_read_text_range("pg_lake_read_text_range",
+											  {LogicalType::VARCHAR, LogicalType::BIGINT, LogicalType::BIGINT},
+											  ReadRangeExec, ReadTextRangeBind, ReadRangeInitGlobal);
+
+		loader.RegisterFunction(pg_lake_read_text_range);
 	}
 
 	/* pg_lake_remove_file function definition */

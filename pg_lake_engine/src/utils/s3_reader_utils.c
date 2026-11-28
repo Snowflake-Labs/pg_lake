@@ -32,6 +32,7 @@ static char *ReadBlobContent(const char *command, size_t *contentLength);
 static char *ReadTextFileCommand(const char *textFileUri);
 static char *ReadValidJsonFileCommand(const char *jsonFileUri);
 static char *ReadBlobFileCommand(const char *blobFileUri);
+static char *ReadBlobRangeCommand(const char *blobFileUri, int64 offset, int64 length);
 static const char *ResolveReadPath(const char *fileUri, bool bypassCache);
 
 /* bounded retries for a racy fresh read of a fixed-path JSON file */
@@ -177,6 +178,23 @@ GetBlobFromURI(const char *blobFileUri, size_t *contentLength)
 }
 
 /*
+ * GetBlobRangeFromURI reads length bytes starting at offset from a blob file
+ * at a supported cloud URL, fetching only that range from object storage.
+ * A range that runs past the end of the file returns the shorter tail.
+ *
+ * !!NOTE!!: Caller is responsible for freeing the returned content.
+ */
+char *
+GetBlobRangeFromURI(const char *blobFileUri, int64 offset, int64 length,
+					size_t *contentLength)
+{
+	const char *readPath = ResolveReadPath(blobFileUri, false);
+
+	return ReadBlobContent(ReadBlobRangeCommand(readPath, offset, length),
+						   contentLength);
+}
+
+/*
 * ReadTextContent reads the content of a text file from the PGDuck server.
 * The input command should be read_text(), and the
 * result should be a single row with a single column.
@@ -312,6 +330,24 @@ ReadBlobFileCommand(const char *blobFileUri)
 
 	appendStringInfo(&command, "SELECT content FROM read_blob(%s)",
 					 quote_literal_cstr(blobFileUri));
+
+	return command.data;
+}
+
+/*
+ * ReadBlobRangeCommand returns the SQL command to read a byte range of a blob
+ * file.
+ */
+static char *
+ReadBlobRangeCommand(const char *blobFileUri, int64 offset, int64 length)
+{
+	StringInfoData command;
+
+	initStringInfo(&command);
+
+	appendStringInfo(&command,
+					 "SELECT content FROM pg_lake_read_blob_range(%s, " INT64_FORMAT ", " INT64_FORMAT ")",
+					 quote_literal_cstr(blobFileUri), offset, length);
 
 	return command.data;
 }
