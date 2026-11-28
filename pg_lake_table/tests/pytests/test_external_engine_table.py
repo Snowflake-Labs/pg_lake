@@ -504,6 +504,166 @@ def test_non_superuser_cannot_choose_the_remote_table(
         superuser_conn.commit()
 
 
+def test_create_without_column_list(
+    superuser_conn, pg_conn, pgduck_conn, engine_server, app_user
+):
+    run_command(
+        f"""
+        CREATE TABLE {ENGINE_SCHEMA}.typed (
+            id bigint, price decimal(10,2), happened timestamptz, day date,
+            ok boolean, tags integer[], "Mixed Case" varchar);
+        INSERT INTO {ENGINE_SCHEMA}.typed VALUES
+            (1, 12.34, '2026-01-02 03:04:05+00', '2026-01-02', true, [1, 2], 'x');
+    """,
+        pgduck_conn,
+    )
+    pgduck_conn.commit()
+
+    run_command(
+        f"""
+        CREATE FOREIGN TABLE ext_engine.events_described ()
+            SERVER ext_engine OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'events');
+        CREATE FOREIGN TABLE ext_engine.typed ()
+            SERVER ext_engine OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'typed');
+        GRANT SELECT ON ext_engine.events_described, ext_engine.typed TO {app_user};
+    """,
+        superuser_conn,
+    )
+    superuser_conn.commit()
+
+    try:
+        columns_query = """
+            SELECT attname, format_type(atttypid, atttypmod) FROM pg_attribute
+            WHERE attrelid = '{}'::regclass AND attnum > 0 ORDER BY attnum
+        """
+
+        # the columns are in the order of the engine's table
+        columns = run_query(
+            columns_query.format("ext_engine.events_described"), superuser_conn
+        )
+        assert columns == [
+            ["label", "text"],
+            ["id", "integer"],
+            ["amount", "double precision"],
+        ]
+
+        columns = run_query(columns_query.format("ext_engine.typed"), superuser_conn)
+        assert columns == [
+            ["id", "bigint"],
+            ["price", "numeric(10,2)"],
+            ["happened", "timestamp with time zone"],
+            ["day", "date"],
+            ["ok", "boolean"],
+            ["tags", "integer[]"],
+            ["Mixed Case", "text"],
+        ]
+
+        for full_pushdown in [True, False]:
+            set_full_pushdown(full_pushdown, pg_conn)
+
+            query = "SELECT id, label FROM ext_engine.events_described WHERE id = 3"
+            assert run_query(query, pg_conn) == [[3, "event 3"]]
+
+            query = """
+                SELECT id, price::text, happened = '2026-01-02 03:04:05+00', day::text,
+                       ok, tags, "Mixed Case"
+                FROM ext_engine.typed
+            """
+            assert run_query(query, pg_conn) == [
+                [1, "12.34", True, "2026-01-02", True, [1, 2], "x"]
+            ]
+
+        pg_conn.rollback()
+    finally:
+        rollback(pg_conn, superuser_conn)
+        run_command(
+            "DROP FOREIGN TABLE ext_engine.events_described, ext_engine.typed",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+        run_command(f"DROP TABLE {ENGINE_SCHEMA}.typed", pgduck_conn)
+        pgduck_conn.commit()
+
+
+def test_create_without_column_list_checks_first(
+    superuser_conn, pg_conn, pgduck_conn, engine_server, app_user
+):
+    # an existing table is skipped without asking the engine about a missing one
+    run_command(
+        f"""CREATE FOREIGN TABLE IF NOT EXISTS ext_engine.events ()
+                SERVER ext_engine OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'missing')""",
+        superuser_conn,
+    )
+    superuser_conn.rollback()
+
+    error = run_command(
+        f"""CREATE FOREIGN TABLE ext_engine.missing ()
+                SERVER ext_engine OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'missing')""",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert "missing does not exist" in error
+    superuser_conn.rollback()
+
+    error = run_command(
+        "CREATE FOREIGN TABLE ext_engine.no_name () SERVER ext_engine",
+        superuser_conn,
+        raise_error=False,
+    )
+    assert '"table_name" option is required' in error
+    superuser_conn.rollback()
+
+    long_name = "c" * 70
+    run_command(
+        f'CREATE TABLE {ENGINE_SCHEMA}.long_name ("{long_name}" int)', pgduck_conn
+    )
+    pgduck_conn.commit()
+
+    try:
+        error = run_command(
+            f"""CREATE FOREIGN TABLE ext_engine.long_name ()
+                    SERVER ext_engine OPTIONS (schema_name '{ENGINE_SCHEMA}', table_name 'long_name')""",
+            superuser_conn,
+            raise_error=False,
+        )
+        assert f'column name "{long_name}" is too long' in error
+        superuser_conn.rollback()
+    finally:
+        run_command(f"DROP TABLE {ENGINE_SCHEMA}.long_name", pgduck_conn)
+        pgduck_conn.commit()
+
+    # a non-superuser gets the errors of CREATE FOREIGN TABLE, not the engine's
+    secret = "OPTIONS (table_name '/tmp/secret.csv')"
+    error = run_command(
+        f"CREATE FOREIGN TABLE mine () SERVER ext_engine {secret}",
+        pg_conn,
+        raise_error=False,
+    )
+    assert "permission denied for foreign server ext_engine" in error
+    pg_conn.rollback()
+
+    run_command(
+        f"GRANT USAGE ON FOREIGN SERVER ext_engine TO {app_user}", superuser_conn
+    )
+    superuser_conn.commit()
+
+    try:
+        error = run_command(
+            f"CREATE FOREIGN TABLE mine () SERVER ext_engine {secret}",
+            pg_conn,
+            raise_error=False,
+        )
+        assert "table_name and schema_name are superuser-only" in error
+        pg_conn.rollback()
+    finally:
+        rollback(pg_conn, superuser_conn)
+        run_command(
+            f"REVOKE USAGE ON FOREIGN SERVER ext_engine FROM {app_user}",
+            superuser_conn,
+        )
+        superuser_conn.commit()
+
+
 @pytest.mark.parametrize("full_pushdown", [True, False], ids=["pushdown", "fdw"])
 def test_scan_and_filter(pg_conn, engine_server, full_pushdown):
     set_full_pushdown(full_pushdown, pg_conn)
