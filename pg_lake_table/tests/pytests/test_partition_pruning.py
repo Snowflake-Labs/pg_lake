@@ -381,7 +381,7 @@ def test_simple_data_pruning_for_data_types(
 
     for tbl_name in table_list:
         results = run_query(
-            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 = {value_1} AND col2 = {value_2}",
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{tbl_name} WHERE col1 = {value_1} AND col2 = {value_2}",
             pg_conn,
         )
         assert fetch_data_files_used(results) == "1"
@@ -415,10 +415,10 @@ def test_simple_data_pruning_for_data_types(
         )
         assert fetch_data_files_used(results) == expected_files
 
-    # we don't prune based on NULL values
+    # All four files contain non-null values in both columns.
     for tbl_name in table_list:
         results = run_query(
-            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{table_name} WHERE col1 IS NOT NULL and col2 IS NOT NULL",
+            f"{explain_prefix} SELECT * FROM test_data_file_pruning.{tbl_name} WHERE col1 IS NOT NULL and col2 IS NOT NULL",
             pg_conn,
         )
         assert fetch_data_files_used(results) == "4"
@@ -435,7 +435,7 @@ def test_simple_data_pruning_for_data_types(
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
     for tbl_name in table_list:
         results = run_query(
-            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 >= {value_1} and col1 <= {value_1}",
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{tbl_name} WHERE col1 >= {value_1} and col1 <= {value_1}",
             pg_conn,
         )
         assert fetch_data_files_used(results) == "2"
@@ -446,7 +446,7 @@ def test_simple_data_pruning_for_data_types(
 
     for tbl_name in table_list:
         results = run_query(
-            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 IS DISTINCT FROM {value_1}",
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{tbl_name} WHERE col1 IS DISTINCT FROM {value_1}",
             pg_conn,
         )
         assert fetch_data_files_used(results) == "4"
@@ -457,17 +457,25 @@ def test_simple_data_pruning_for_data_types(
 
     for tbl_name in table_list:
         results = run_query(
-            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 IN ({value_1}, {value_2})",
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{tbl_name} WHERE col1 IN ({value_1}, {value_2})",
             pg_conn,
         )
         assert fetch_data_files_used(results) == "4"
 
-    # we should not prune two files given we only cover one value
+    # We should prune two files given we only cover one value.
     value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
 
     for tbl_name in table_list:
+        # Iceberg represents timetz as time in inferred schemas.
+        array_type = column_type
+        if column_type == "timetz" and tbl_name in (
+            f"{table_name}_external",
+            f"{table_name}_object_store_read_only",
+        ):
+            array_type = "time"
+
         results = run_query(
-            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 = ANY(ARRAY[{value_1}]::{column_type}[])",
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{tbl_name} WHERE col1 = ANY(ARRAY[{value_1}]::{array_type}[])",
             pg_conn,
         )
         assert fetch_data_files_used(results) == "2"
@@ -477,7 +485,7 @@ def test_simple_data_pruning_for_data_types(
 
     for tbl_name in table_list:
         results = run_query(
-            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 BETWEEN {value_1} and {value_1}",
+            f"{explain_prefix} SELECT *FROM test_data_file_pruning.{tbl_name} WHERE col1 BETWEEN {value_1} and {value_1}",
             pg_conn,
         )
         assert fetch_data_files_used(results) == "2"
@@ -488,7 +496,7 @@ def test_simple_data_pruning_for_data_types(
 
         for tbl_name in table_list:
             results = run_query(
-                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 NOT BETWEEN {value_1} and {value_1}",
+                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{tbl_name} WHERE col1 NOT BETWEEN {value_1} and {value_1}",
                 pg_conn,
             )
             assert fetch_data_files_used(results) == "2"
@@ -499,7 +507,7 @@ def test_simple_data_pruning_for_data_types(
         value_1 = f"'{rows[2][0]}'" if needs_quote else f"{rows[2][0]}"
         for tbl_name in table_list:
             results = run_query(
-                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 NOT IN ({value_1}, {value_2})",
+                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{tbl_name} WHERE col1 NOT IN ({value_1}, {value_2})",
                 pg_conn,
             )
             assert fetch_data_files_used(results) == "2"
@@ -508,7 +516,7 @@ def test_simple_data_pruning_for_data_types(
         value_1 = f"'{rows[0][0]}'" if needs_quote else f"{rows[0][0]}"
         for tbl_name in table_list:
             results = run_query(
-                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{table_name} WHERE col1 < {value_1} and col1 > {value_1}",
+                f"{explain_prefix} SELECT *FROM test_data_file_pruning.{tbl_name} WHERE col1 < {value_1} and col1 > {value_1}",
                 pg_conn,
             )
             assert fetch_data_files_used(results) == "0"
