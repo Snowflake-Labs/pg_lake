@@ -21,11 +21,15 @@ def test_stat_activity(s3, pgduck_conn):
     sleep_cur = sleep_conn.cursor()
     sleep_cur.execute(sleep_query)
 
+    # Look only at the sleeping session. The server is shared with a
+    # Postgres whose pg_lake cache worker periodically runs
+    # pg_lake_manage_cache, which shows up as a second active query.
     while True:
         state = sleep_conn.poll()
 
         result = run_query(
-            "SELECT query FROM pg_lake_stat_activity() WHERE query NOT LIKE '%activity%'",
+            "SELECT query FROM pg_lake_stat_activity() "
+            f"WHERE connection_id = {sleep_conn.get_backend_pid()}",
             pgduck_conn,
         )
 
