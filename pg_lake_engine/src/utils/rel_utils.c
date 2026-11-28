@@ -42,7 +42,6 @@
 #include "pg_lake/parsetree/options.h"
 #include "pg_lake/pgduck/map.h"
 #include "pg_lake/pgduck/numeric.h"
-#include "pg_lake/pgduck/parse_struct.h"
 #include "pg_lake/pgduck/type.h"
 #include "pg_lake/util/rel_utils.h"
 #include "pg_lake/util/string_utils.h"
@@ -400,45 +399,6 @@ GetPgLakeTableProperties(Oid relationId)
 
 
 /*
- * FindOrCreateCompositeTypeFromColumnDefs builds a DuckDB STRUCT type string
- * from a list of ColumnDef nodes and delegates to GetOrCreatePGStructType,
- * which finds a matching existing type or creates a new one.
- */
-static Oid
-FindOrCreateCompositeTypeFromColumnDefs(List *coldeflist)
-{
-	StringInfoData buf;
-	ListCell   *lc;
-	bool		first = true;
-
-	initStringInfo(&buf);
-	appendStringInfoString(&buf, "STRUCT(");
-
-	foreach(lc, coldeflist)
-	{
-		ColumnDef  *colDef = lfirst(lc);
-		Oid			colTypeOid;
-		int32		colTypmod;
-
-		typenameTypeIdAndMod(NULL, colDef->typeName, &colTypeOid, &colTypmod);
-
-		if (!first)
-			appendStringInfoString(&buf, ", ");
-		first = false;
-
-		appendStringInfo(&buf, "%s %s",
-						 colDef->colname,
-						 GetFullDuckDBTypeNameForPGType(MakePGType(colTypeOid, colTypmod),
-														DATA_FORMAT_ICEBERG));
-	}
-
-	appendStringInfoChar(&buf, ')');
-
-	return GetOrCreatePGStructType(buf.data);
-}
-
-
-/*
  * ConvertTypeTree recursively rewrites a (typeOid, typeMod) by applying a
  * caller-supplied leaf rule to every scalar leaf, while handling the container
  * structure (array / map / domain / composite) itself.  Returns true and fills
@@ -459,16 +419,17 @@ FindOrCreateCompositeTypeFromColumnDefs(List *coldeflist)
  * rules are:
  *
  *   array of X                  -> array of ConvertTypeTree(X) at level + 1
- *   map (domain over array)     -> new map via GetOrCreatePGMapType, key/value
- *                                  converted at level + 1
+ *   map (domain over array)     -> key/value visited at level + 1, never
+ *                                  rewritten
  *   domain (non-map)            -> unwrap and recurse into base at same level
- *   composite containing any    -> new composite via
- *                                  FindOrCreateCompositeTypeFromColumnDefs,
- *                                  fields converted at level + 1, dropped
- *                                  attributes skipped
+ *   composite                   -> fields visited at level + 1 (dropped
+ *                                  attributes skipped), never rewritten
  *
- * User-defined composite/map types are never mutated: a fresh type is created
- * whenever a nested field changes.
+ * A composite or map field is only visited so the leaf rule sees every leaf;
+ * the container itself is always returned unchanged.  Rewriting a field means
+ * declaring a different composite or map type, and a column of that type is no
+ * longer assignable from the type the user wrote, so callers that cannot store
+ * a leaf as it is have to handle that on the Iceberg side.
  */
 bool
 ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
@@ -501,35 +462,18 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 	/* map check must precede the generic domain unwrap (maps are domains) */
 	if (IsMapTypeOid(typeOid))
 	{
-		PGType		origKeyType = GetMapKeyType(typeOid);
-		PGType		origValueType = GetMapValueType(typeOid);
-		Oid			rewrittenKeyOid;
-		int32		rewrittenKeyMod;
-		Oid			rewrittenValueOid;
-		int32		rewrittenValueMod;
+		PGType		keyType = GetMapKeyType(typeOid);
+		PGType		valueType = GetMapValueType(typeOid);
+		Oid			visitedOid;
+		int32		visitedMod;
 
-		bool		keyRewritten = ConvertTypeTree(origKeyType.postgresTypeOid,
-												   origKeyType.postgresTypeMod,
-												   level + 1, leafConv, context,
-												   &rewrittenKeyOid, &rewrittenKeyMod);
-		bool		valueRewritten = ConvertTypeTree(origValueType.postgresTypeOid,
-													 origValueType.postgresTypeMod,
-													 level + 1, leafConv, context,
-													 &rewrittenValueOid, &rewrittenValueMod);
+		/* visit both sides for the leaf rule, keep the map type as it is */
+		ConvertTypeTree(keyType.postgresTypeOid, keyType.postgresTypeMod,
+						level + 1, leafConv, context, &visitedOid, &visitedMod);
+		ConvertTypeTree(valueType.postgresTypeOid, valueType.postgresTypeMod,
+						level + 1, leafConv, context, &visitedOid, &visitedMod);
 
-		if (!keyRewritten && !valueRewritten)
-			return false;
-
-		/* keep the original type for whichever side the leaf rule left alone */
-		Oid			newMapKeyOid = keyRewritten ? rewrittenKeyOid : origKeyType.postgresTypeOid;
-		Oid			newMapValueOid = valueRewritten ? rewrittenValueOid : origValueType.postgresTypeOid;
-		const char *mapTypeName = psprintf("MAP(%s,%s)",
-										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(newMapKeyOid), DATA_FORMAT_ICEBERG),
-										   GetFullDuckDBTypeNameForPGType(MakePGTypeOid(newMapValueOid), DATA_FORMAT_ICEBERG));
-
-		*outTypeOid = GetOrCreatePGMapType(mapTypeName);
-		*outTypeMod = -1;
-		return true;
+		return false;
 	}
 
 	char		typeType = get_typtype(typeOid);
@@ -544,50 +488,28 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 							   outTypeOid, outTypeMod);
 	}
 
-	/* composite: rebuild with rewritten fields if any field changes */
+	/* composite: visit every field for the leaf rule, keep the type as it is */
 	if (typeType == TYPTYPE_COMPOSITE)
 	{
 		TupleDesc	tupdesc = lookup_rowtype_tupdesc(typeOid, -1);
-		List	   *coldeflist = NIL;
-		bool		needsConversion = false;
 
 		for (int i = 0; i < tupdesc->natts; i++)
 		{
 			Form_pg_attribute attr = TupleDescAttr(tupdesc, i);
+			Oid			visitedOid;
+			int32		visitedMod;
 
-			/* dropped columns must be ignored, never converted or re-added */
+			/* dropped columns must be ignored, never visited */
 			if (attr->attisdropped)
 				continue;
 
-			Oid			fieldType = attr->atttypid;
-			int32		fieldMod = attr->atttypmod;
-			Oid			rewrittenFieldOid;
-			int32		rewrittenFieldMod;
-
-			if (ConvertTypeTree(fieldType, fieldMod, level + 1, leafConv, context,
-								&rewrittenFieldOid, &rewrittenFieldMod))
-			{
-				fieldType = rewrittenFieldOid;
-				fieldMod = rewrittenFieldMod;
-				needsConversion = true;
-			}
-
-			ColumnDef  *colDef = makeNode(ColumnDef);
-
-			colDef->colname = pstrdup(NameStr(attr->attname));
-			colDef->typeName = makeTypeNameFromOid(fieldType, fieldMod);
-			colDef->is_local = true;
-			coldeflist = lappend(coldeflist, colDef);
+			ConvertTypeTree(attr->atttypid, attr->atttypmod, level + 1,
+							leafConv, context, &visitedOid, &visitedMod);
 		}
 
 		ReleaseTupleDesc(tupdesc);
 
-		if (!needsConversion)
-			return false;
-
-		*outTypeOid = FindOrCreateCompositeTypeFromColumnDefs(coldeflist);
-		*outTypeMod = -1;
-		return true;
+		return false;
 	}
 
 	return false;
@@ -597,20 +519,23 @@ ConvertTypeTree(Oid typeOid, int32 typeMod, int level,
 /*
  * NumericLeafToDouble is the ConvertTypeTree leaf rule for the unsupported
  * numeric -> float8 pass.  Numeric is never a container, so it applies at any
- * nesting level; level and context are unused.
+ * nesting level; level is unused.  context is an optional bool * set when such
+ * a leaf is seen, which is not the same as the walk rewriting anything: the
+ * container branches discard the rewrite of a nested leaf.
  */
 static bool
 NumericLeafToDouble(Oid typeOid, int32 typeMod, int level, void *context,
 					Oid *outOid, int32 *outMod)
 {
-	if (IsUnsupportedNumericForIceberg(typeOid, typeMod))
-	{
-		*outOid = FLOAT8OID;
-		*outMod = -1;
-		return true;
-	}
+	if (!IsUnsupportedNumericForIceberg(typeOid, typeMod))
+		return false;
 
-	return false;
+	if (context != NULL)
+		*((bool *) context) = true;
+
+	*outOid = FLOAT8OID;
+	*outMod = -1;
+	return true;
 }
 
 
@@ -619,15 +544,20 @@ NumericLeafToDouble(Oid typeOid, int32 typeMod, int level, void *context,
  * numerics.  Returns a PGType with the replacement OID, or with InvalidOid
  * when no conversion is needed.  Thin wrapper over ConvertTypeTree with the
  * numeric leaf rule; columnName is retained for call-site readability.
+ *
+ * containsUnsupportedNumeric, when not NULL, is set if any leaf cannot be
+ * stored as an Iceberg decimal, including the nested ones this leaves alone.
  */
 PGType
-MaybeConvertType(PGType type, char *columnName)
+MaybeConvertType(PGType type, char *columnName,
+				 bool *containsUnsupportedNumeric)
 {
 	Oid			convOid;
 	int32		convMod;
 
 	if (ConvertTypeTree(type.postgresTypeOid, type.postgresTypeMod, 0,
-						NumericLeafToDouble, NULL, &convOid, &convMod))
+						NumericLeafToDouble, containsUnsupportedNumeric,
+						&convOid, &convMod))
 		return MakePGType(convOid, convMod);
 
 	return MakePGTypeOid(InvalidOid);
@@ -640,11 +570,12 @@ MaybeConvertType(PGType type, char *columnName)
  * float8, when pg_lake_iceberg.unsupported_numeric_as_double is enabled.
  * Does nothing when the GUC is off.
  *
- * For top-level numeric and numeric arrays the ColumnDef's typeName is
- * replaced directly.  For composite types and map types a *new* type is
- * created (in lake_struct / map_type schemas) and the column definition
- * is pointed to the new type; the original user-defined type is never
- * modified.
+ * Only a numeric column and an array of numeric are converted, since Postgres
+ * has a cast for both.  A numeric inside a composite type or a map keeps its
+ * declared type, because converting it would mean giving the column a composite
+ * type the user never declared; the Iceberg side stores it as a double anyway
+ * (see PostgresBaseTypeIdToIcebergTypeName), which a NOTICE points out because
+ * the declared type no longer shows it.
  */
 void
 MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList)
@@ -679,11 +610,33 @@ MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList)
 		typeOid = ((Form_pg_type) GETSTRUCT(tup))->oid;
 		ReleaseSysCache(tup);
 
+		bool		containsUnsupportedNumeric = false;
 		PGType		converted = MaybeConvertType(MakePGType(typeOid, typmod),
-												 columnDef->colname);
+												 columnDef->colname,
+												 &containsUnsupportedNumeric);
 
 		if (!OidIsValid(converted.postgresTypeOid))
+		{
+			/*
+			 * The column keeps its declared type, but a numeric nested in it
+			 * still cannot be stored as an Iceberg decimal, so it is stored
+			 * as a double.  Say so at DDL time: \d keeps showing numeric, and
+			 * nothing later in the life of the table points this out.
+			 */
+			if (containsUnsupportedNumeric)
+				ereport(NOTICE,
+						(errmsg("column \"%s\" contains a nested numeric that "
+								"cannot be stored as an Iceberg decimal, "
+								"storing it as double precision",
+								columnDef->colname),
+						 errhint("The column keeps its declared type. Values "
+								 "that do not fit double precision lose digits. "
+								 "Use numeric(P,S) with precision <= %d inside "
+								 "the type to store exact decimals.",
+								 DUCKDB_MAX_NUMERIC_PRECISION)));
+
 			continue;
+		}
 
 		ereport(NOTICE,
 				(errmsg("column \"%s\" has type that cannot be stored as an "

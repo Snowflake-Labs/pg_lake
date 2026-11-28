@@ -45,7 +45,8 @@ extern PGDLLEXPORT char *GetForeignTablePath(Oid foreignTableId);
 extern PGDLLEXPORT void ErrorIfTypeUnsupportedForIcebergTables(Oid typeOid, int32 typmod, char *columnName);
 extern PGDLLEXPORT void ErrorIfTypeUnsupportedNumericForIcebergTables(int32 typmod, char *columnName);
 extern PGDLLEXPORT void MaybeConvertUnsupportedNumericColumnsToDouble(List *columnDefList);
-extern PGDLLEXPORT PGType MaybeConvertType(PGType type, char *columnName);
+extern PGDLLEXPORT PGType MaybeConvertType(PGType type, char *columnName,
+										   bool *containsUnsupportedNumeric);
 
 /* leaf rule for ConvertTypeTree; see rel_utils.c */
 typedef bool (*TypeLeafConverter) (Oid typeOid, int32 typeMod, int level,
