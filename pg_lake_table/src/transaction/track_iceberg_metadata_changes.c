@@ -399,6 +399,24 @@ HasAnyTrackedIcebergMetadataChanges(void)
 
 
 /*
+ * HasTrackedIcebergMetadataChangesForRelation checks if the given relation
+ * has tracked metadata changes in the current transaction.
+ */
+bool
+HasTrackedIcebergMetadataChangesForRelation(Oid relationId)
+{
+	if (TrackedIcebergMetadataOperationsHash == NULL)
+		return false;
+
+	bool		found = false;
+
+	hash_search(TrackedIcebergMetadataOperationsHash, &relationId, HASH_FIND, &found);
+
+	return found;
+}
+
+
+/*
  * IsIcebergTableCreatedInCurrentTransaction checks if there is any
  * create table operation for given relation in the tracked metadata changes
  * in the current transaction.
