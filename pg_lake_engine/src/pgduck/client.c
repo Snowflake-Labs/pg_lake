@@ -42,6 +42,9 @@
 
 static void InitializePGDuckClient(void);
 static void SetupPgDuckConnectionHash(void);
+static PGDuckConnection * TrackPGDuckConnection(PGconn *connection,
+												const char *serverName,
+												bool releaseExternalFD);
 
 static void PGDuckClientTransactionCallback(XactEvent event, void *arg);
 static void PGDuckClientSubtransactionCallback(SubXactEvent event,
@@ -51,7 +54,7 @@ static void PGDuckClientSubtransactionCallback(SubXactEvent event,
 static uint32 ReleaseAllPGDuckConnections(SubTransactionId subTransactionId);
 static void CancelRunningCommandOnConnection(PGconn *conn);
 static bool CancelQuery(PGconn *conn);
-static bool StartCancelQuery(PGconn *conn);
+static bool StartCancelQuery(PGconn *conn, TimestampTz endtime);
 static bool FinishCancelQuery(PGconn *conn, TimestampTz endtime, bool consume_input);
 static bool WaitForLastResultWithTimeout(PGconn *conn, TimestampTz endtime,
 										 PGresult **result, bool *timed_out);
@@ -86,6 +89,9 @@ typedef struct PgDuckServerConnectionHashEntry
 	uint32		key;
 	SubTransactionId subTransactionId;
 	PGDuckConnection pgDuckConnection;
+
+	/* opened by ConnectToExternalQueryEngine, which reserved an fd */
+	bool		releaseExternalFD;
 
 }			PgDuckServerConnectionHashEntry;
 
@@ -230,6 +236,54 @@ TryGetPGDuckConnection(char **errorMessage)
 		return NULL;
 	}
 
+	return TrackPGDuckConnection(connection, NULL, false);
+}
+
+
+/*
+ * TryGetPGDuckConnectionWithConninfo is like TryGetPGDuckConnection, but
+ * connects to the external query engine of the given foreign server at the
+ * given conninfo.
+ *
+ * The engine may be on another host, so unlike pgduck_server's socket the
+ * connection attempt can block for long, and statement_timeout or a cancel
+ * request interrupts it.
+ */
+PGDuckConnection *
+TryGetPGDuckConnectionWithConninfo(const char *conninfo, const char *serverName,
+								   char **errorMessage)
+{
+	InitializePGDuckClient();
+
+	PGconn	   *connection = ConnectToExternalQueryEngine(conninfo);
+
+	if (connection == NULL)
+	{
+		*errorMessage = pstrdup("out of memory");
+		return NULL;
+	}
+
+	if (PQstatus(connection) != CONNECTION_OK)
+	{
+		*errorMessage = pstrdup(PQerrorMessage(connection));
+
+		DisconnectFromExternalQueryEngine(connection);
+
+		return NULL;
+	}
+
+	return TrackPGDuckConnection(connection, serverName, true);
+}
+
+
+/*
+ * TrackPGDuckConnection adds a new connection to the hash, so that it is
+ * closed when the (sub)transaction that opened it ends.
+ */
+static PGDuckConnection *
+TrackPGDuckConnection(PGconn *connection, const char *serverName,
+					  bool releaseExternalFD)
+{
 	int			connectionId = ConnectionId++;
 	bool		found = false;
 	PgDuckServerConnectionHashEntry *entry =
@@ -238,9 +292,13 @@ TryGetPGDuckConnection(char **errorMessage)
 	if (!found)
 	{
 		entry->subTransactionId = GetCurrentSubTransactionId();
+		entry->releaseExternalFD = releaseExternalFD;
 
 		entry->pgDuckConnection.conn = connection;
 		entry->pgDuckConnection.connectionId = connectionId;
+		entry->pgDuckConnection.serverName =
+			serverName != NULL ?
+			MemoryContextStrdup(PgDuckConnectionMemoryContext, serverName) : NULL;
 	}
 
 	return &entry->pgDuckConnection;
@@ -502,6 +560,8 @@ ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection)
 	}
 
 	PGconn	   *conn = entry->pgDuckConnection.conn;
+	char	   *serverName = entry->pgDuckConnection.serverName;
+	bool		releaseExternalFD = entry->releaseExternalFD;
 
 	/*
 	 * Clear the handle before removing the entry: HASH_REMOVE returns a
@@ -509,10 +569,17 @@ ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection)
 	 * with it the caller's PGDuckConnection, can be marked as released.
 	 */
 	entry->pgDuckConnection.conn = NULL;
+	entry->pgDuckConnection.serverName = NULL;
 
 	hash_search(PgDuckConnectionHash, &connectionId, HASH_REMOVE, NULL);
 
-	PQfinish(conn);
+	if (serverName != NULL)
+		pfree(serverName);
+
+	if (releaseExternalFD)
+		DisconnectFromExternalQueryEngine(conn);
+	else
+		PQfinish(conn);
 }
 
 
@@ -917,7 +984,10 @@ ThrowIfPGDuckResultHasError(PGDuckConnection * pgDuckConnection, PGresult *resul
 					errmsg("%s", message),
 					messageDetail ? errdetail("%s", messageDetail) : 0,
 					messageHint ? errhint("%s", messageHint) : 0,
-					messageContext ? errcontext("%s", messageContext) : 0));
+					messageContext ? errcontext("%s", messageContext) : 0,
+					pgDuckConnection->serverName != NULL ?
+					errcontext("remote query on server \"%s\"",
+							   pgDuckConnection->serverName) : 0));
 }
 
 
@@ -1080,20 +1150,35 @@ CancelQuery(PGconn *conn)
 	endtime = TimestampTzPlusMilliseconds(GetCurrentTimestamp(),
 										  CONNECTION_CLEANUP_TIMEOUT);
 
-	if (!StartCancelQuery(conn))
+	if (!StartCancelQuery(conn, endtime))
 		return false;
 	return FinishCancelQuery(conn, endtime, false);
 }
 
 
 /*
- * StartCancelQuery sends a cancellation over the given connection.
+ * StartCancelQuery sends a cancellation over the given connection. From
+ * PostgreSQL 17 on, it waits for the server at most until endtime, so that an
+ * external query engine that never answers cannot hang the backend.
  *
- * Copied ad verbatim from pgfdw_cancel_query_begin.
+ * Copied from pgfdw_cancel_query_begin.
  */
 static bool
-StartCancelQuery(PGconn *conn)
+StartCancelQuery(PGconn *conn, TimestampTz endtime)
 {
+#if PG_VERSION_NUM >= 170000
+	const char *errorMessage = CancelQueryEngineCommand(conn, endtime);
+
+	if (errorMessage != NULL)
+	{
+		ereport(WARNING,
+				(errcode(ERRCODE_CONNECTION_FAILURE),
+				 errmsg("could not send cancel request: %s", errorMessage)));
+		return false;
+	}
+
+	return true;
+#else
 	PGcancel   *cancel;
 	char		errbuf[256];
 
@@ -1116,6 +1201,7 @@ StartCancelQuery(PGconn *conn)
 	}
 
 	return true;
+#endif
 }
 
 /*

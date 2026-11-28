@@ -229,6 +229,19 @@ GetExplainJson(QueryEngine queryEngine, char *query, int numParams,
 		int			rowCount = PQntuples(result);
 		int			columnCount = PQnfields(result);
 
+		/* DuckDB returns the plan in the second of two columns */
+		if (!QueryEnginesEqual(queryEngine, PGDUCK_QUERY_ENGINE) &&
+			(columnCount < 2 || rowCount < 1))
+			ereport(ERROR,
+					(errcode(ERRCODE_FDW_ERROR),
+					 errmsg("server \"%s\" did not return a DuckDB query plan",
+							GetQueryEngineName(queryEngine)),
+					 errdetail("EXPLAIN shows the plan that the query engine "
+							   "returns for DuckDB's explain (format 'json'), "
+							   "which has a row with two columns. The engine "
+							   "returned %d rows with %d columns.",
+							   rowCount, columnCount)));
+
 		if (columnCount < 2)
 			ereport(ERROR, (errmsg("unexpected column count %d", columnCount)));
 

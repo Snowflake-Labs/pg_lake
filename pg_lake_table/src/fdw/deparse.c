@@ -2477,42 +2477,22 @@ deparseColumnRef(StringInfo buf, int varno, int varattno, RangeTblEntry *rte,
 }
 
 /*
- * Append remote name of specified foreign table to buf.
- * Use value of table_name FDW option (if any) instead of relation's name.
- * Similarly, schema_name FDW option overrides schema name.
+ * Append name of specified foreign table to buf.
+ *
+ * Unlike postgres_fdw, we parse the deparsed query again and only then
+ * replace the table with the call that reads it, so we use the name of the
+ * local relation, not the table_name and schema_name options that a
+ * pg_lake_remote table uses to name the table on its query engine.
  */
 static void
 deparseRelation(StringInfo buf, Relation rel)
 {
-	ForeignTable *table;
-	const char *nspname = NULL;
-	const char *relname = NULL;
-	ListCell   *lc;
-
-	/* obtain additional catalog information. */
-	table = GetForeignTable(RelationGetRelid(rel));
-
-	/*
-	 * Use value of FDW options if any, instead of the name of object itself.
-	 */
-	foreach(lc, table->options)
-	{
-		DefElem    *def = (DefElem *) lfirst(lc);
-
-		if (strcmp(def->defname, "schema_name") == 0)
-			nspname = defGetString(def);
-		else if (strcmp(def->defname, "table_name") == 0)
-			relname = defGetString(def);
-	}
-
 	/*
 	 * Note: we could skip printing the schema name if it's pg_catalog, but
 	 * that doesn't seem worth the trouble.
 	 */
-	if (nspname == NULL)
-		nspname = get_namespace_name(RelationGetNamespace(rel));
-	if (relname == NULL)
-		relname = RelationGetRelationName(rel);
+	const char *nspname = get_namespace_name(RelationGetNamespace(rel));
+	const char *relname = RelationGetRelationName(rel);
 
 	appendStringInfo(buf, "%s.%s",
 					 duckdb_quote_identifier(nspname),

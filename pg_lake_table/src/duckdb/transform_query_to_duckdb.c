@@ -54,6 +54,11 @@
 #include "pg_lake/fdw/equality_delete.h"
 #include "pg_lake/pgduck/duckdb_identifier.h"
 #include "pg_lake/pgduck/keywords.h"
+#include "pg_lake/pgduck/map.h"
+#include "pg_lake/pgduck/numeric.h"
+#include "pg_lake/pgduck/query_engine.h"
+#include "pg_lake/pgduck/type.h"
+#include "pg_lake/util/numeric.h"
 #include "pg_lake/fdw/writable_table.h"
 #include "pg_lake/fdw/schema_operations/register_field_ids.h"
 #include "pg_extension_base/pg_compat.h"
@@ -66,6 +71,8 @@
 static char *BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan,
 												  bool skipFullMatchFiles,
 												  TupleDesc projection);
+static char *BuildExternalEngineTableQuery(Oid relationId);
+static const char *GetExternalEngineColumnCastType(Oid typeId, int32 typeMod);
 static void EnsureServerType(Oid relationId);
 static void AppendEqualityReadGroups(StringInfo command, List *groups,
 									 int start, int count, List *positionDeletePaths,
@@ -80,6 +87,8 @@ static char *FileScanConstantsArgument(List *fileScans);
  *
  * If EXPLAIN_REQUEST flag is set, it replaces the read_table function call with
  * the relation name. That's only for the explain output, even for analyze.
+ * Tables of an external query engine are replaced with the query on the remote
+ * table in both cases.
  *
  * If SKIP_FULL_MATCH_FILES flag is set, we skip fullyIncluded file scans.
  */
@@ -104,7 +113,9 @@ ReplaceReadTableFunctionCalls(char *query,
 
 		char	   *readFunctionForServer = NULL;
 
-		if (explainRequested)
+		if (IsExternalEngineTable(relationId))
+			readFunctionForServer = BuildExternalEngineTableQuery(relationId);
+		else if (explainRequested)
 			readFunctionForServer = qualifiedRelationName;
 		else
 			readFunctionForServer = BuildReadDataSourceQueryForTableScan(tableScan,
@@ -321,6 +332,124 @@ BuildReadDataSourceQueryForTableScan(PgLakeTableScan * tableScan, bool skipFullM
 
 
 /*
+ * BuildExternalEngineTableQuery returns a query fragment that reads a table
+ * served by an external query engine.
+ *
+ * The deparsed query gives the read_table() call a column alias list, which
+ * renames the columns by position, so we select the columns by name in the
+ * order of the foreign table. The engine may order them differently.
+ */
+static char *
+BuildExternalEngineTableQuery(Oid relationId)
+{
+	ForeignTable *foreignTable = GetForeignTable(relationId);
+	char	   *schemaName = GetStringOption(foreignTable->options, "schema_name", false);
+	char	   *tableName = GetStringOption(foreignTable->options, "table_name", true);
+
+	StringInfoData query;
+
+	initStringInfo(&query);
+	appendStringInfoString(&query, "(SELECT ");
+
+	Relation	rel = relation_open(relationId, AccessShareLock);
+	TupleDesc	tupleDesc = RelationGetDescr(rel);
+	bool		hasColumns = false;
+
+	for (int attnum = 1; attnum <= tupleDesc->natts; attnum++)
+	{
+		Form_pg_attribute column = TupleDescAttr(tupleDesc, attnum - 1);
+
+		if (column->attisdropped)
+			continue;
+
+		const char *columnName = duckdb_quote_identifier(NameStr(column->attname));
+		const char *castType = GetExternalEngineColumnCastType(column->atttypid,
+															   column->atttypmod);
+
+		if (hasColumns)
+			appendStringInfoString(&query, ", ");
+
+		if (castType != NULL)
+			appendStringInfo(&query, "CAST(%s AS %s) AS %s", columnName, castType,
+							 columnName);
+		else
+			appendStringInfoString(&query, columnName);
+
+		hasColumns = true;
+	}
+
+	relation_close(rel, NoLock);
+
+	if (!hasColumns)
+		appendStringInfoString(&query, "*");
+
+	appendStringInfoString(&query, " FROM ");
+
+	if (schemaName != NULL)
+		appendStringInfo(&query, "%s.", duckdb_quote_identifier(schemaName));
+
+	appendStringInfo(&query, "%s)", duckdb_quote_identifier(tableName));
+
+	return query.data;
+}
+
+
+/*
+ * GetExternalEngineColumnCastType returns the DuckDB type that we cast a
+ * column of an external engine table with the given declared type to, or
+ * NULL if we do not cast it.
+ *
+ * The cast makes the engine compute with the declared type even if its
+ * column has another type, instead of, say, comparing integers where the
+ * foreign table declares text. DuckDB drops a cast to the type a column
+ * already has, so filters on a column of the declared type still reach the
+ * engine's scan.
+ *
+ * We only cast scalar types that have an exact DuckDB type. Not numeric
+ * without a precision, or wider than DuckDB's DECIMAL, which we would round,
+ * not geometry, whose DuckDB type needs the spatial extension, and not
+ * arrays, composite types and maps, which DuckDB casts unlike how PostgreSQL
+ * reads their text (lists of any depth, struct fields matched by name). The
+ * engine has to return those in the declared type.
+ */
+static const char *
+GetExternalEngineColumnCastType(Oid typeId, int32 typeMod)
+{
+	typeId = ResolveDomainBaseTypeAndTypmod(typeId, &typeMod);
+
+	PGType		pgType = MakePGType(typeId, typeMod);
+
+	switch (GetDuckDBTypeForPGType(pgType))
+	{
+		case DUCKDB_TYPE_INVALID:
+		case DUCKDB_TYPE_LIST:
+		case DUCKDB_TYPE_STRUCT:
+		case DUCKDB_TYPE_MAP:
+		case DUCKDB_TYPE_GEOMETRY:
+			return NULL;
+
+		case DUCKDB_TYPE_DECIMAL:
+			{
+				if (IsUnboundedNumeric(typeId, typeMod))
+					return NULL;
+
+				int			precision = numeric_typmod_precision(typeMod);
+				int			scale = numeric_typmod_scale(typeMod);
+
+				if (precision > DUCKDB_MAX_NUMERIC_PRECISION || scale < 0 ||
+					scale > precision)
+					return NULL;
+
+				return psprintf("DECIMAL(%d,%d)", precision, scale);
+			}
+
+		default:
+			return GetFullDuckDBTypeNameForPGType(pgType, DATA_FORMAT_INVALID);
+	}
+}
+
+
+/*
  * Balance the UNION tree so parser depth grows logarithmically with groups.
  * Each data file appears once, and NOT EXISTS preserves the multiplicity of
  * surviving rows even when delete keys themselves are duplicated.
@@ -429,16 +558,17 @@ FileScanConstantsArgument(List *fileScans)
  * EnsureServerType checks that the server type for a given relation is supported.
  *
  * This function checks if the foreign server name associated with the relation
- * matches the expected server type "pg_lake" or "pg_lake_iceberg".
+ * matches the expected server type "pg_lake" or "pg_lake_iceberg", or if the
+ * server is a pg_lake_remote server.
  */
 static void
 EnsureServerType(Oid relationId)
 {
-	if (!IsAnyLakeForeignTableById(relationId))
+	if (!IsAnyLakeForeignTableById(relationId) && !IsExternalEngineTable(relationId))
 		ereport(ERROR,
 				(errcode(ERRCODE_FDW_INVALID_OPTION_NAME),
 				 errmsg("unsupported server type for relation %s",
 						GetQualifiedRelationName(relationId)),
-				 errhint("Only pg_lake or pg_lake_iceberg "
+				 errhint("Only pg_lake, pg_lake_iceberg or pg_lake_remote "
 						 "server type is supported.")));
 }

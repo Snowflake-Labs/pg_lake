@@ -3200,7 +3200,11 @@ postgresExplainForeignScan(ForeignScanState *node, ExplainState *es)
 
 	ExplainPropertyText("Engine", "DuckDB", es);
 
-	if (es->verbose)
+	if (!QueryEnginesEqual(fsstate->queryEngine, PGDUCK_QUERY_ENGINE))
+		ExplainPropertyText("Server", GetQueryEngineName(fsstate->queryEngine), es);
+
+	/* an external query engine reads no files that we know of */
+	if (es->verbose && QueryEnginesEqual(fsstate->queryEngine, PGDUCK_QUERY_ENGINE))
 	{
 		int			dataFileScans = 0;
 		int			deleteFileScans = 0;
@@ -4721,6 +4725,13 @@ postgresExecForeignTruncate(List *relations,
 	{
 		Relation	relation = lfirst(relationCell);
 		Oid			relationId = RelationGetRelid(relation);
+
+		if (IsExternalEngineTable(relationId))
+			ereport(ERROR,
+					(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					 errmsg("cannot truncate foreign table \"%s\"",
+							RelationGetRelationName(relation)),
+					 errdetail("Tables of an external query engine are read-only.")));
 
 		ErrorIfReadOnlyIcebergTable(relationId);
 
