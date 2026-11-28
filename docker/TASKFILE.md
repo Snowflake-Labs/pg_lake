@@ -103,6 +103,12 @@ task build:local
 # Build with specific PostgreSQL version
 task build:local PG_MAJOR=17
 
+# Build from a specific pg_lake release tag
+task build:local PG_LAKE_REF=v3.4.3
+
+# Alternatively, set the source ref through the environment
+PG_LAKE_REF=v3.4.3 task build:local
+
 # List all built images with architecture
 task images:list
 
@@ -241,6 +247,7 @@ You can customize builds using these variables:
 | `IMAGE_OWNER` | `${DOCKER_HUB_USERNAME}` | Registry username/org |
 | `VERSION` | `latest` | Image version tag |
 | `PG_MAJOR` | `18` | PostgreSQL major version (16, 17, 18, or 19) |
+| `PG_LAKE_REF` | `main` | pg_lake source branch or tag to build |
 | `PLATFORMS` | `linux/amd64,linux/arm64` | Target platforms for registry builds |
 | `BASE_IMAGE_OS` | `almalinux` | Base OS (almalinux or debian) |
 | `BASE_IMAGE_TAG` | `9` | Base OS version |
