@@ -118,7 +118,7 @@ AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition * partition
 	{
 		PartitionField *partitionField = &partition->fields[i];
 
-		const char *fieldName = partitionField->field_name;
+		const char *fieldName = MakeAvroCompatibleName(partitionField->field_name);
 
 		const char *fieldType = IcebergAvroTypeSchemaString(partitionField->value_type);
 
@@ -159,6 +159,36 @@ AdjustPartitionsInManifestJsonSchema(char *manifestSchema, Partition * partition
           }";
 
 	return PgLakeReplaceText(manifestSchema, templatePartitionSchema, newPartitionSchema);
+}
+
+
+/*
+ * MakeAvroCompatibleName returns the given name as a valid Avro name. Avro
+ * names may only contain ASCII letters, digits and underscores and cannot
+ * start with a digit, so a leading digit is prefixed with an underscore and
+ * any other byte that is not allowed is written as _x followed by its hex
+ * value. Valid names are returned unchanged.
+ */
+char *
+MakeAvroCompatibleName(const char *name)
+{
+	StringInfo	compatibleName = makeStringInfo();
+
+	for (const char *c = name; *c != '\0'; c++)
+	{
+		unsigned char ch = (unsigned char) *c;
+		bool		isLetter = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || ch == '_';
+		bool		isDigit = ch >= '0' && ch <= '9';
+
+		if (isLetter || (isDigit && c != name))
+			appendStringInfoChar(compatibleName, ch);
+		else if (isDigit)
+			appendStringInfo(compatibleName, "_%c", ch);
+		else
+			appendStringInfo(compatibleName, "_x%X", ch);
+	}
+
+	return compatibleName->data;
 }
 
 
@@ -282,7 +312,7 @@ WritePartitionToAvro(Partition * partition, avro_value_t * record)
 
 		bool		isSet = field->value != NULL;
 
-		char	   *fieldName = field->field_name;
+		char	   *fieldName = MakeAvroCompatibleName(field->field_name);
 
 		if (field->value_type.physical_type == ICEBERG_AVRO_PHYSICAL_TYPE_INT32)
 		{
