@@ -987,8 +987,9 @@ PartitionFieldBoundConstraint(PartitionField * partitionField, IcebergPartitionT
 * IdentityPartitionFieldBoundConstraint creates a constraint for the
 * partition field based on the identity transform. The constraint is
 * created as column IS NULL or as column = partitionField->value AND
-* column IS NOT NULL. The explicit null test allows IS NULL filters to
-* refute the constraint for a non-null partition.
+* column IS NOT NULL. If no equality operator is available, only the
+* IS NOT NULL constraint is used. The explicit null test allows IS NULL
+* filters to refute the constraint for a non-null partition.
 */
 static Expr *
 IdentityPartitionFieldBoundConstraint(PartitionField * partitionField,
@@ -1011,6 +1012,9 @@ IdentityPartitionFieldBoundConstraint(PartitionField * partitionField,
 		NullTest   *isNotNull = copyObject(entry->isNullExpression);
 
 		isNotNull->nulltesttype = IS_NOT_NULL;
+
+		if (equalityConstraint == NULL)
+			return (Expr *) isNotNull;
 
 		return (Expr *) makeBoolExpr(AND_EXPR, list_make2(equalityConstraint, isNotNull), -1);
 	}
