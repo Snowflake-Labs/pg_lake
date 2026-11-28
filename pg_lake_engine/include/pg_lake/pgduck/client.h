@@ -49,6 +49,8 @@ extern PGDLLEXPORT PGDuckConnection * TryGetPGDuckConnection(char **errorMessage
 extern PGDLLEXPORT PGDuckConnection * TryGetPGDuckConnectionWithConninfo(const char *conninfo,
 																		 const char *serverName,
 																		 char **errorMessage);
+extern PGDLLEXPORT void SetQueryEngineTimeZone(PGDuckConnection * pgDuckConnection,
+											   Oid serverId);
 extern PGDLLEXPORT void ReleasePGDuckConnection(PGDuckConnection * pgDuckConnection);
 extern PGDLLEXPORT PGconn *ConnectToExternalQueryEngine(const char *conninfo);
 extern PGDLLEXPORT void DisconnectFromExternalQueryEngine(PGconn *connection);

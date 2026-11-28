@@ -294,8 +294,24 @@ GetQueryEngineConnection(QueryEngine queryEngine, bool setSessionTimeZone)
 	}
 
 	Oid			userId = OidIsValid(queryEngine.userId) ? queryEngine.userId : GetUserId();
+	PGDuckConnection *connection = GetExternalEngineConnection(queryEngine.serverId,
+															   userId);
 
-	return GetExternalEngineConnection(queryEngine.serverId, userId);
+	if (setSessionTimeZone)
+	{
+		PG_TRY();
+		{
+			SetQueryEngineTimeZone(connection, queryEngine.serverId);
+		}
+		PG_CATCH();
+		{
+			ReleasePGDuckConnection(connection);
+			PG_RE_THROW();
+		}
+		PG_END_TRY();
+	}
+
+	return connection;
 }
 
 
